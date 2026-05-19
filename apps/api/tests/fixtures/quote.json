@@ -1,0 +1,30 @@
+{
+  "supplier_name": "江苏华润管业",
+  "quote_date": "2026-04-26",
+  "items": [
+    {
+      "material": "DN100 闸阀",
+      "spec": "Z45X-16Q",
+      "brand": "良工",
+      "unit": "个",
+      "qty": 12,
+      "unit_price": 720,
+      "unit_price_excl_tax": 637.17,
+      "total_price": 8640,
+      "tax_rate": 0.13,
+      "remark": "保修 5 年"
+    },
+    {
+      "material": "桥架 300×200",
+      "spec": "热镀锌 1.2mm",
+      "brand": "江苏华威",
+      "unit": "米",
+      "qty": 200,
+      "unit_price": 78,
+      "unit_price_excl_tax": 69.03,
+      "total_price": 15600,
+      "tax_rate": 0.13,
+      "remark": "30 天交货"
+    }
+  ]
+}

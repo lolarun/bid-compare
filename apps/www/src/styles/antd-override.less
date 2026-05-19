@@ -1,0 +1,33 @@
+@import './variables.less';
+
+// ─── SiderMenu antd overrides ─────────────────────────────────────────────
+// Scoped CSS cannot pierce a-menu's internal DOM, so these live here globally.
+// All selectors are anchored to .sider-menu to prevent unintended leakage.
+
+.sider-menu .ant-menu-item-group-title {
+  font-size: 11px;
+  color: @sider-group-title-color;
+  padding: 12px 24px 6px;
+  letter-spacing: 0.5px;
+}
+
+.sider-menu .ant-menu-light .ant-menu-item {
+  color: @sider-item-color;
+  margin: 4px 12px;
+  border-radius: 6px;
+  width: calc(100% - 24px);
+
+  &:hover {
+    background: @sider-item-hover-bg !important;
+  }
+}
+
+.sider-menu .ant-menu-light .ant-menu-item-selected {
+  background: @sider-item-active-bg !important;
+  color: @sider-item-active-color !important;
+  font-weight: 500;
+}
+
+.sider-menu.ant-layout-sider-collapsed .ant-menu-item-group-title {
+  display: none;
+}

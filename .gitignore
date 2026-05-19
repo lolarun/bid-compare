@@ -1,0 +1,41 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Database
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Uploaded files (handled at runtime; not source-controlled)
+data/uploads/
+
+# Environment files (contain secrets)
+.env
+apps/api/.env
+apps/www/.env
+*.env.local
+
+# Node
+web/node_modules/
+web/dist/
+apps/www/node_modules/
+apps/www/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+docs/antdv-pro/

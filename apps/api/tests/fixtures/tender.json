@@ -1,0 +1,32 @@
+{
+  "project_name": "测试招标项目 X 给排水材料采购",
+  "project_code": "BD-TEST-001",
+  "tender_date": "2026-04-25",
+  "deadline": "2026-05-25",
+  "items": [
+    {
+      "name": "DN100 闸阀",
+      "category": "阀门",
+      "spec": "Z45X-16Q",
+      "unit": "个",
+      "quantity": 12,
+      "remark": "1.6MPa 压力等级"
+    },
+    {
+      "name": "桥架 300×200",
+      "category": "桥架",
+      "spec": "热镀锌",
+      "unit": "米",
+      "quantity": 200,
+      "remark": "走廊主干路由"
+    },
+    {
+      "name": "PPR 给水管 De32",
+      "category": "不锈钢管",
+      "spec": "3.6mm 壁厚",
+      "unit": "米",
+      "quantity": 500,
+      "remark": ""
+    }
+  ]
+}

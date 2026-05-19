@@ -1,0 +1,82 @@
+@import './variables.less';
+
+// ─── Reset ────────────────────────────────────────────────────────────────
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC',
+    sans-serif;
+  font-size: 14px;
+  color: @text-color;
+  background: @layout-body-bg;
+}
+
+#app {
+  height: 100vh;
+  overflow-x: hidden;
+}
+
+// ─── CSS variables (供非 less 文件使用) ──────────────────────────────────
+:root {
+  --primary-color: @primary-color;
+  --header-height: @header-height;
+  --sider-width: @sider-width;
+  --sider-collapsed-width: @sider-collapsed-width;
+  --layout-body-bg: @layout-body-bg;
+  --alert-normal: @alert-normal-color;
+  --alert-yellow: @alert-yellow-color;
+  --alert-red: @alert-red-color;
+}
+
+// ─── NProgress ────────────────────────────────────────────────────────────
+#nprogress .bar {
+  background: @primary-color;
+  height: 2px;
+}
+#nprogress .peg {
+  box-shadow: 0 0 10px @primary-color, 0 0 5px @primary-color;
+}
+#nprogress .spinner-icon {
+  border-top-color: @primary-color;
+  border-left-color: @primary-color;
+}
+
+// ─── Page transition ──────────────────────────────────────────────────────
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.25s ease, transform 0.3s ease;
+}
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(12px);
+}
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-12px);
+}
+
+// ─── Utility ──────────────────────────────────────────────────────────────
+.mb-8 { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-24 { margin-bottom: 24px; }
+.mt-8 { margin-top: 8px; }
+.mt-16 { margin-top: 16px; }
+.flex { display: flex; }
+.flex-1 { flex: 1; }
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+
+// ─── 报价偏差色标 ─────────────────────────────────────────────────────────
+.alert-normal { color: @alert-normal-color; }
+.alert-yellow { color: @alert-yellow-color; }
+.alert-red    { color: @alert-red-color; }
+.alert-bg-normal { background: fade(@alert-normal-color, 12%); color: @alert-normal-color; }
+.alert-bg-yellow { background: fade(@alert-yellow-color, 12%); color: @alert-yellow-color; }
+.alert-bg-red    { background: fade(@alert-red-color, 12%);    color: @alert-red-color; }
