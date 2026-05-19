@@ -15,6 +15,7 @@ import type {
   TenderExtractionItem,
   SupplierRecommendation,
 } from '@/api/client'
+import { asTenderShape } from '@/utils/extraction'
 
 /**
  * Invite (邀标建议) page — full real-data flow:
@@ -49,25 +50,14 @@ const canSave = computed(() => savedTenderId.value === null && selectedSupplierI
 // ─── Step 1: ingestion result ────────────────────────────────────────────
 function onExtracted(job: ExtractionJob) {
   sourceJob.value = job
-  const result = job.result as {
-    project_name?: string
-    project_code?: string
-    tender_date?: string
-    deadline?: string
-    items?: TenderExtractionItem[]
-  } | null
-  tenderMeta.project_name = result?.project_name || ''
-  tenderMeta.project_code = result?.project_code || ''
-  tenderMeta.tender_date = result?.tender_date || ''
-  tenderMeta.deadline = result?.deadline || ''
-  tenderItems.value = (result?.items ?? []).map((it) => ({
-    name: it.name || '',
-    category: it.category || '',
-    spec: it.spec || '',
-    unit: it.unit || '',
-    quantity: it.quantity ?? null,
-    remark: it.remark || '',
-  }))
+  // AUDIT-FIX M9: validated coercion via runtime guard, not a raw cast.
+  // Contract drift now produces a console.warn rather than silent undefined.
+  const shape = asTenderShape(job.result)
+  tenderMeta.project_name = shape.project_name
+  tenderMeta.project_code = shape.project_code
+  tenderMeta.tender_date = shape.tender_date
+  tenderMeta.deadline = shape.deadline
+  tenderItems.value = shape.items
   // Reset downstream state
   recommendations.value = []
   selectedSupplierIds.value = []
@@ -261,7 +251,13 @@ function toggleSupplier(id: number) {
                 :key="r.supplier_id"
                 class="reco-card"
                 :class="{ 'reco-card--selected': selectedSupplierIds.includes(r.supplier_id) }"
+                role="button"
+                tabindex="0"
+                :aria-pressed="selectedSupplierIds.includes(r.supplier_id)"
+                :aria-label="`推荐供应商 ${r.supplier_name}，评分 ${r.score}，排名第 ${r.rank}`"
                 @click="toggleSupplier(r.supplier_id)"
+                @keydown.enter.prevent="toggleSupplier(r.supplier_id)"
+                @keydown.space.prevent="toggleSupplier(r.supplier_id)"
               >
                 <div class="reco-card__head">
                   <div class="reco-card__rank">#{{ r.rank }}</div>

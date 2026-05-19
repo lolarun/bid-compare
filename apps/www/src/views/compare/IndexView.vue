@@ -15,6 +15,7 @@ import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
 import BrandTierModal from '@/components/BrandTierModal.vue'
 import BidMatrix from './components/BidMatrix.vue'
+import { asQuoteShape } from '@/utils/extraction'
 
 const CATEGORIES = [
   '桥架', '母线槽', '配电箱',
@@ -174,7 +175,8 @@ function goBack() {
 
 // ─── Step 2: per-supplier upload handlers ────────────────────────────────
 function onExtracted(supplierId: number, job: ExtractionJob) {
-  const items = ((job.result as { items?: QuoteExtractionItem[] })?.items ?? []) as QuoteExtractionItem[]
+  // AUDIT-FIX M9: runtime guard instead of unchecked cast
+  const items = asQuoteShape(job.result).items
   supplierUploads[supplierId] = {
     ...(supplierUploads[supplierId] || { items: [], confirmed: false, unknown_brands: [] }),
     job,

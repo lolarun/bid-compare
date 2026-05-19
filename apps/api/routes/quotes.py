@@ -287,9 +287,14 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 db.flush()
 
     # ── Resolve project ────────────────────────────────────────────────────
+    # AUDIT-FIX M2: when a project_id comes through (body or job context),
+    # missing-target should be a 400, NOT silently null. Otherwise the user
+    # uploads with a specific project and the quote lands unattached.
     project: Project | None = None
     if body.project_id:
         project = db.get(Project, body.project_id)
+        if not project:
+            raise HTTPException(404, f"Project {body.project_id} not found")
     elif body.project_name.strip():
         name = body.project_name.strip()
         project = db.query(Project).filter_by(name=name).first()
@@ -298,7 +303,14 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             db.add(project)
             db.flush()
     elif (job.context or {}).get("project_id"):
-        project = db.get(Project, job.context["project_id"])
+        ctx_pid = job.context["project_id"]
+        project = db.get(Project, ctx_pid)
+        if not project:
+            raise HTTPException(
+                400,
+                f"Project {ctx_pid} from job context no longer exists; "
+                "specify project_name or project_id to proceed.",
+            )
 
     # ── Determine category ─────────────────────────────────────────────────
     category = (

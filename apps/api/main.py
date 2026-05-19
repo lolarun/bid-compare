@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,6 +22,11 @@ from apps.api.routes import all_routers
 from apps.api.services.document_ingestion import DocumentIngestionService
 
 log = logging.getLogger("mempas")
+
+# AUDIT-FIX C3: periodic stuck-job recovery beyond the startup pass.
+# Background task runs every STUCK_JOB_SWEEP_S and flips any RUNNING job
+# whose updated_at is older than the recovery threshold to FAILED.
+STUCK_JOB_SWEEP_S = 60
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "www" / "dist"
 
@@ -54,6 +60,34 @@ def _build_pipeline() -> ExtractionPipeline:
     return ExtractionPipeline(MockProvider())
 
 
+async def _periodic_stuck_job_sweep(stop_event: asyncio.Event) -> None:
+    """Run recover_stuck_jobs every STUCK_JOB_SWEEP_S until stop_event set.
+
+    Late-binds SessionLocal so tests that monkeypatch the database module
+    see the substituted session factory.
+    """
+    while not stop_event.is_set():
+        # Late module attribute lookup so monkeypatched STUCK_JOB_SWEEP_S
+        # (used in tests with a tiny interval) takes effect each iteration.
+        import apps.api.main as main_mod
+        from apps.api.core import database as db_mod
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=main_mod.STUCK_JOB_SWEEP_S)
+            return  # event set → exit
+        except asyncio.TimeoutError:
+            pass
+        db = db_mod.SessionLocal()
+        try:
+            n = DocumentIngestionService.recover_stuck_jobs(db)
+            if n:
+                log.warning("Periodic sweep: recovered %d stuck jobs", n)
+        except Exception:
+            log.exception("Periodic stuck-job sweep failed")
+        finally:
+            db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -61,7 +95,7 @@ async def lifespan(app: FastAPI):
     app.state.extraction_pipeline = pipeline
     set_runtime_pipeline(pipeline)
 
-    # Recover stuck jobs
+    # Recover stuck jobs (startup pass)
     db = SessionLocal()
     try:
         recovered = DocumentIngestionService.recover_stuck_jobs(db)
@@ -70,11 +104,21 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    yield
+    # Start periodic sweep (AUDIT-FIX C3)
+    stop_event = asyncio.Event()
+    sweep_task = asyncio.create_task(_periodic_stuck_job_sweep(stop_event))
 
-    # Teardown
-    set_runtime_pipeline(None)
-    app.state.extraction_pipeline = None
+    try:
+        yield
+    finally:
+        # Teardown
+        stop_event.set()
+        try:
+            await asyncio.wait_for(sweep_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            sweep_task.cancel()
+        set_runtime_pipeline(None)
+        app.state.extraction_pipeline = None
 
 
 app = FastAPI(

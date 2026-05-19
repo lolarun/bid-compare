@@ -272,6 +272,26 @@ def recommend_suppliers(
     return primary
 
 
+def _per_category_breakdown(
+    db: Session, supplier_id: int, categories: list[str]
+) -> dict[str, int]:
+    """Return {category: quote_count} for this supplier. Used in summary."""
+    if not categories:
+        return {}
+    rows = (
+        db.query(Material.category, func.count(Quote.id))
+        .join(Quote, Quote.material_id == Material.id)
+        .filter(
+            Quote.supplier_id == supplier_id,
+            Material.category.in_(categories),
+            Quote.unit_price > 0,
+        )
+        .group_by(Material.category)
+        .all()
+    )
+    return {cat: int(cnt) for cat, cnt in rows}
+
+
 def _score_one(
     db: Session,
     sup: Supplier,
@@ -318,11 +338,18 @@ def _score_one(
         + 0.20 * brand_score
     )
 
+    # AUDIT-FIX L1: instead of "在 N 个品类成交 K 次" (misleading when most
+    # of K is in one category), show per-category counts when we have them.
     summary_parts: list[str] = []
     if categories:
-        summary_parts.append(
-            f"在 {len(categories)} 个品类成交 {history_count} 次"
-        )
+        breakdown = _per_category_breakdown(db, sup.id, categories)
+        if breakdown:
+            # Sort by count descending, show top 3 to keep summary short
+            top_cats = sorted(breakdown.items(), key=lambda x: -x[1])[:3]
+            cats_str = " · ".join(f"{cat} {cnt}" for cat, cnt in top_cats)
+            summary_parts.append(f"成交 {history_count} 次（{cats_str}）")
+        else:
+            summary_parts.append(f"在 {len(categories)} 个品类成交 {history_count} 次")
     else:
         summary_parts.append(f"历史成交 {history_count} 次")
     if avg_dev is not None:

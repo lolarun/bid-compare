@@ -369,6 +369,123 @@ class TestJsonParseTrailingComma:
         assert out == {"x": [1, 2]}
 
 
+# ─── Backend audit-fix M2: orphan project_id detection ────────────────────
+class TestOrphanProjectGuard:
+    """If a job's context references a project_id that no longer exists,
+    batch-confirm must NOT silently null it; it should 400."""
+
+    @pytest.fixture
+    def client(self, temp_db, monkeypatch, tmp_path):
+        monkeypatch.setenv("LLM_PROVIDER", "mock")
+        monkeypatch.setattr(
+            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        )
+        canned = {
+            "supplier_name": "X",
+            "items": [{"material": "桥架 A", "qty": 1, "unit_price": 100}],
+        }
+        monkeypatch.setattr(
+            "apps.api.main._build_pipeline",
+            lambda: ExtractionPipeline(MockProvider(canned=canned)),
+        )
+        from apps.api.main import app
+        with TestClient(app) as c:
+            yield c
+
+    def test_explicit_project_id_404_fails_loudly(self, client):
+        r = client.post(
+            "/api/intake/upload",
+            data={"type": "quote", "category": "桥架"},
+            files={"file": ("q.png", _png(), "image/png")},
+        )
+        job_id = r.json()["id"]
+
+        r2 = client.post(
+            "/api/quotes/batch-confirm",
+            json={
+                "job_id": job_id,
+                "supplier_name": "S",
+                "project_id": 99999,  # non-existent
+                "category": "桥架",
+            },
+        )
+        # Must be 404, not silent null project
+        assert r2.status_code == 404, r2.text
+        assert "Project" in r2.json()["detail"]
+
+    def test_context_project_id_404_fails_loudly(self, client, temp_db):
+        """When the job context says project_id=X but X is gone."""
+        r = client.post(
+            "/api/intake/upload",
+            data={"type": "quote", "category": "桥架", "project_id": 12345},
+            files={"file": ("q.png", _png(seed=42), "image/png")},
+        )
+        job_id = r.json()["id"]
+        # The job's context has project_id=12345 but no project with that id
+
+        r2 = client.post(
+            "/api/quotes/batch-confirm",
+            json={"job_id": job_id, "supplier_name": "S", "category": "桥架"},
+        )
+        assert r2.status_code == 400
+        assert "context" in r2.json()["detail"]
+
+
+# ─── Backend audit-fix C3: periodic stuck-job sweep ────────────────────────
+class TestPeriodicStuckJobSweep:
+    """The lifespan starts a background coroutine that calls
+    recover_stuck_jobs every STUCK_JOB_SWEEP_S. We test the coroutine
+    directly (TestClient + asyncio sleep is too flaky to time reliably)."""
+
+    @pytest.mark.asyncio
+    async def test_sweep_coroutine_recovers_stuck_jobs(
+        self, temp_db, monkeypatch, tmp_path
+    ):
+        import asyncio
+        from datetime import datetime, timedelta, timezone
+
+        from apps.api.main import _periodic_stuck_job_sweep
+        from apps.api.models import ExtractionJob
+        from apps.api.services.document_ingestion import JobStatus
+
+        monkeypatch.setattr("apps.api.main.STUCK_JOB_SWEEP_S", 0.05)
+
+        _, SessionLocal = temp_db
+        db = SessionLocal()
+        try:
+            db.add(
+                ExtractionJob(
+                    id="stuck-test-2",
+                    type="tender",
+                    status=JobStatus.RUNNING.value,
+                    file_path="/dev/null",
+                    updated_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        # Run the coroutine for one full cycle, then stop it
+        stop = asyncio.Event()
+        sweep_task = asyncio.create_task(_periodic_stuck_job_sweep(stop))
+        await asyncio.sleep(0.15)  # enough for 2-3 iterations
+        stop.set()
+        await asyncio.wait_for(sweep_task, timeout=1.0)
+
+        # Verify the stuck job was recovered
+        db = SessionLocal()
+        try:
+            job = db.get(ExtractionJob, "stuck-test-2")
+            assert job is not None
+            assert job.status == JobStatus.FAILED.value, (
+                f"Periodic sweep failed to recover stuck job (status={job.status})"
+            )
+            assert "Stuck" in (job.error or "")
+        finally:
+            db.close()
+
+
 # ─── Intelligence audit-fix H6: known-bad memoization ──────────────────────
 class TestQwenVLBadModelMemo:
     def test_known_bad_skipped_on_subsequent_call(self, monkeypatch):
