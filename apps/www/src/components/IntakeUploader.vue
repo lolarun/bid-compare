@@ -38,6 +38,10 @@ const fileName = ref<string>('')
 const isUploading = ref(false)
 const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const previewUrl = ref<string | null>(null)
+// AUDIT-FIX L1: abort after consecutive poll failures so a stale job ID
+// doesn't loop forever every 2s. Counter resets on a successful poll.
+const pollFailureCount = ref(0)
+const MAX_POLL_FAILURES = 5
 
 const status = computed(() => currentJob.value?.status ?? 'idle')
 const isProcessing = computed(
@@ -117,11 +121,17 @@ async function handleFile(file: File) {
 
 function startPolling(jobId: string) {
   stopPolling()
+  pollFailureCount.value = 0
   pollTimer.value = setInterval(async () => {
     try {
       const { data } = await intakeApi.getJob(jobId)
+      pollFailureCount.value = 0
+      // AUDIT-FIX M7: only emit `progress` on status transition
+      const prevStatus = currentJob.value?.status
       currentJob.value = data
-      emit('progress', data)
+      if (data.status !== prevStatus) {
+        emit('progress', data)
+      }
       if (data.status === 'done') {
         stopPolling()
         emit('extracted', data)
@@ -130,8 +140,13 @@ function startPolling(jobId: string) {
         emit('failed', data.error || 'extraction failed')
       }
     } catch (e) {
-      // Network blip — keep polling unless we've been at it for too long
-      console.warn('poll failed', e)
+      pollFailureCount.value += 1
+      console.warn(`poll failed (${pollFailureCount.value}/${MAX_POLL_FAILURES})`, e)
+      if (pollFailureCount.value >= MAX_POLL_FAILURES) {
+        stopPolling()
+        const msg = `轮询失败 ${MAX_POLL_FAILURES} 次，已停止；请检查后端服务`
+        emit('failed', msg)
+      }
     }
   }, props.pollIntervalMs)
 }
@@ -144,8 +159,15 @@ function stopPolling() {
 }
 
 function retry() {
+  // AUDIT-FIX H4: full reset including blob URL + polling state
+  stopPolling()
+  if (previewUrl.value) {
+    URL.revokeObjectURL(previewUrl.value)
+    previewUrl.value = null
+  }
   currentJob.value = null
   fileName.value = ''
+  pollFailureCount.value = 0
 }
 
 watch(() => props.type, () => retry())

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   SaveOutlined,
@@ -84,6 +84,10 @@ function clearAll() {
 }
 
 // ─── Step 2: generate recommendations ────────────────────────────────────
+// AUDIT-FIX H6 + H7: cap default selection at top 3; clear saved-state on
+// any subsequent edit so users can't accidentally save stale snapshots.
+const DEFAULT_PRESELECT = 3
+
 async function generateRecommendations() {
   if (!hasItems.value) {
     message.warning('请先上传招标文件并核对清单')
@@ -97,8 +101,15 @@ async function generateRecommendations() {
     })
     recommendations.value = data.recommendations
     categories.value = data.categories
-    selectedSupplierIds.value = data.recommendations.map((r) => r.supplier_id)
-    message.success(`已生成 ${data.recommendations.length} 家推荐供应商`)
+    // Pre-select only the top 3 (or fewer if top_n is small).
+    // Defaulting ALL on with top_n=20 caused accidental mass-invite.
+    selectedSupplierIds.value = data.recommendations
+      .slice(0, Math.min(DEFAULT_PRESELECT, data.recommendations.length))
+      .map((r) => r.supplier_id)
+    savedTenderId.value = null  // re-generating = need to save again
+    message.success(
+      `已生成 ${data.recommendations.length} 家推荐供应商；默认勾选前 ${selectedSupplierIds.value.length} 家`
+    )
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? '推荐失败'
@@ -107,6 +118,18 @@ async function generateRecommendations() {
     recommending.value = false
   }
 }
+
+// AUDIT-FIX H7: when the user edits tender items AFTER saving, the saved
+// snapshot is now stale. Clear savedTenderId so the user can save again
+// with the new state (this re-enables the Save button).
+watch(tenderItems, () => {
+  if (savedTenderId.value !== null) {
+    savedTenderId.value = null
+    if (recommendations.value.length > 0) {
+      message.info('招标清单已修改，请重新生成推荐并保存')
+    }
+  }
+}, { deep: true })
 
 // ─── Step 3: save invitations ────────────────────────────────────────────
 async function saveInvitations() {

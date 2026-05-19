@@ -1,11 +1,14 @@
 """Quote CRUD API endpoints."""
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
+
+log = logging.getLogger(__name__)
 
 from apps.api.core.config import PROFESSION_MAP
 from apps.api.core.database import get_db
@@ -311,22 +314,68 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         raise HTTPException(400, f"Unknown category: {category}")
     profession = PROFESSION_MAP[category]
 
-    # ── Resolve item list ──────────────────────────────────────────────────
-    items: list[dict[str, Any]] = (
+    # ── Resolve item list (validate shape) ─────────────────────────────────
+    raw_items: Any = (
         body.overrides
         if body.overrides is not None
-        else (job.result or {}).get("items") or []
+        else (job.result or {}).get("items")
     )
+    if raw_items is None:
+        raw_items = []
+    if not isinstance(raw_items, list):
+        raise HTTPException(
+            422, detail=f"Expected items to be a list, got {type(raw_items).__name__}"
+        )
+    items: list[dict[str, Any]] = []
+    shape_errors: list[dict] = []
+    for idx, item in enumerate(raw_items):
+        if isinstance(item, dict):
+            items.append(item)
+        else:
+            shape_errors.append({
+                "row": idx + 1,
+                "reason": f"row is not an object: {type(item).__name__}",
+            })
+
+    # ── Idempotency: batch_id derived from (job_id, supplier_id) so a
+    # double-click on Confirm cannot create duplicate Quote rows. ────────────
+    batch_id = f"OCR-{job.id[:8]}-{supplier.id if supplier else 'nos'}"
+    prior = (
+        db.query(Quote)
+        .filter(Quote.batch_id == batch_id)
+        .order_by(Quote.id.asc())
+        .all()
+    )
+    if prior:
+        log.info(
+            "batch_confirm: idempotent hit, returning %d prior quotes for batch %s",
+            len(prior),
+            batch_id,
+        )
+        return {
+            "status": "ok",
+            "created": 0,
+            "skipped": len(items),
+            "errors": shape_errors,
+            "unknown_brands": [],
+            "quote_ids": [q.id for q in prior],
+            "supplier_id": supplier.id if supplier else None,
+            "project_id": project.id if project else None,
+            "batch_id": batch_id,
+            "idempotent": True,
+        }
+
     if not items:
         return {
             "status": "ok",
             "created": 0,
             "skipped": 0,
-            "errors": [],
+            "errors": shape_errors,
             "unknown_brands": [],
             "quote_ids": [],
             "supplier_id": supplier.id if supplier else None,
             "project_id": project.id if project else None,
+            "batch_id": batch_id,
         }
 
     # ── Iterate & create ───────────────────────────────────────────────────
@@ -335,10 +384,9 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     thresholds = get_category_thresholds(db, category)
     created = 0
     skipped = 0
-    errors: list[dict] = []
+    errors: list[dict] = list(shape_errors)
     unknown_brands: set[str] = set()
     quote_ids: list[int] = []
-    batch_id = f"OCR-{job.id[:8]}"
 
     for idx, item in enumerate(items):
         try:

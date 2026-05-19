@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CheckCircleOutlined, LineChartOutlined } from '@ant-design/icons-vue'
+import { CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined } from '@ant-design/icons-vue'
 import { projectApi, supplierApi, analysisApi, quoteApi } from '@/api'
 import type {
   Project,
@@ -59,14 +59,18 @@ const brandsToTier = ref<string[]>([])
 const canProceedFromConfig = computed(
   () => !!taskConfig.category && taskConfig.supplierIds.length >= 2
 )
+// AUDIT-FIX C1: require explicit confirmation OR "skip with history" for every supplier.
+// Previously `items.length > 0` allowed the user to advance after upload without
+// calling batch-confirm — bid-matrix silently fell back to historical data.
 const canProceedFromUpload = computed(
-  () => taskConfig.supplierIds.every(
-    (sid) => supplierUploads[sid]?.confirmed || (supplierUploads[sid]?.items?.length ?? 0) > 0
-  )
+  () => taskConfig.supplierIds.every((sid) => supplierUploads[sid]?.confirmed === true)
 )
 
 const selectedSuppliers = computed(() =>
   allSuppliers.value.filter((s) => taskConfig.supplierIds.includes(s.id))
+)
+const selectedProjectName = computed(() =>
+  projects.value.find((p) => p.id === taskConfig.projectId)?.name || ''
 )
 
 const matrixRows = computed(() => matrixResult.value?.rows ?? [])
@@ -121,13 +125,21 @@ onMounted(() => {
   fetchSuppliers()
 })
 
-// Initialize a slot whenever a new supplier is selected
-watch(() => taskConfig.supplierIds, (ids) => {
+// Initialise + clean up upload slots when supplier selection changes.
+// AUDIT-FIX M1: previously we only ADDED entries — unchecking and re-checking
+// a supplier kept the prior confirmed=true state, making bid-matrix include
+// stale uploads.
+watch(() => taskConfig.supplierIds, (ids, prev) => {
   for (const sid of ids) {
     if (!supplierUploads[sid]) {
       supplierUploads[sid] = {
         job: null, items: [], confirmed: false, unknown_brands: [],
       }
+    }
+  }
+  for (const sid of (prev ?? [])) {
+    if (!ids.includes(sid)) {
+      delete supplierUploads[sid]
     }
   }
 }, { immediate: true })
@@ -142,7 +154,7 @@ function goNext() {
     currentStep.value = 1
   } else if (currentStep.value === 1) {
     if (!canProceedFromUpload.value) {
-      message.warning('请为每家供应商上传报价单或确认其已有数据')
+      message.warning('请为每家供应商点击「确认入库」或「使用历史数据」')
       return
     }
     currentStep.value = 2
@@ -151,7 +163,13 @@ function goNext() {
 }
 
 function goBack() {
-  if (currentStep.value > 0) currentStep.value -= 1
+  if (currentStep.value > 0) {
+    // AUDIT-FIX M3: clear stale matrix when stepping back from results
+    if (currentStep.value === 2) {
+      matrixResult.value = null
+    }
+    currentStep.value -= 1
+  }
 }
 
 // ─── Step 2: per-supplier upload handlers ────────────────────────────────
@@ -357,6 +375,9 @@ async function runMatrix() {
       </template>
       <template #extra>
         <a-space v-if="matrixSummary">
+          <!-- AUDIT-FIX M4: anchor the result to category + project so the user knows the context -->
+          <a-tag color="default">{{ taskConfig.category }}</a-tag>
+          <a-tag v-if="selectedProjectName" color="default">{{ selectedProjectName }}</a-tag>
           <a-tag color="blue">{{ matrixSummary.total_materials }} 物料</a-tag>
           <a-tag color="purple">{{ matrixSummary.total_suppliers }} 供应商</a-tag>
           <a-tag v-if="matrixSummary.recommended_supplier" color="green">
@@ -379,10 +400,14 @@ async function runMatrix() {
 
     <!-- Footer nav -->
     <div class="compare-page__footer">
-      <a-button v-if="currentStep > 0" @click="goBack">上一步</a-button>
+      <a-button v-if="currentStep > 0" @click="goBack">
+        <template #icon><LeftOutlined /></template>
+        上一步
+      </a-button>
+      <!-- AUDIT-FIX M2: use ArrowRight, not CheckCircle, for "next" -->
       <a-button v-if="currentStep < 2" type="primary" @click="goNext">
         下一步
-        <template #icon><CheckCircleOutlined /></template>
+        <template #icon><RightOutlined /></template>
       </a-button>
       <a-button v-if="currentStep === 2" type="primary" @click="runMatrix">
         <template #icon><LineChartOutlined /></template>

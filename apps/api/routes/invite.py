@@ -70,6 +70,24 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         db.add(tender)
         db.flush()
 
+    # Pre-validate supplier IDs so an all-invalid request fails cleanly
+    # (rather than leaving an orphan tender + empty invitations behind).
+    valid_suppliers = (
+        db.query(Supplier)
+        .filter(Supplier.id.in_(req.supplier_ids))
+        .all()
+    )
+    valid_id_map = {s.id: s for s in valid_suppliers}
+    if not valid_id_map:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "None of the supplied supplier_ids exist. "
+                "Save aborted — no tender was persisted."
+            ),
+        )
+
     # Resolve recommendation context so saved rows carry rank/score
     rec_lookup: dict[int, dict] = {}
     if req.items:
@@ -77,11 +95,13 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         rec_lookup = {r["supplier_id"]: r for r in recs}
 
     saved: list[SavedInvitation] = []
+    skipped_ids: list[int] = []
     for sid in req.supplier_ids:
-        sup = db.get(Supplier, sid)
+        sup = valid_id_map.get(sid)
         if not sup:
+            skipped_ids.append(sid)
             continue
-        # Skip duplicates within same tender
+        # Skip duplicates within same tender (uq_tender_supplier backstop)
         existing = db.query(BidInvitation).filter_by(
             tender_id=tender.id, supplier_id=sid
         ).first()
@@ -113,7 +133,10 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         tender.status = "invited"
 
     db.commit()
-    return SaveInvitationsResponse(tender_id=tender.id, invitations=saved)
+    resp = SaveInvitationsResponse(tender_id=tender.id, invitations=saved)
+    # Attach skipped_ids as a non-model field via response.model_dump augmentation?
+    # Keep API stable: skipped ids are inferred by len(supplier_ids) - len(invitations)
+    return resp
 
 
 @router.get("/tenders", response_model=list[dict])

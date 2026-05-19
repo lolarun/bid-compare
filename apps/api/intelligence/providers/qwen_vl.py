@@ -32,6 +32,9 @@ class QwenVLProvider(LLMProvider):
     name = "qwen_vl"
     DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     DEFAULT_MODELS = ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"]
+    # Dynamic timeout floor + per-page allowance
+    BASE_TIMEOUT_S = 30
+    PER_PAGE_TIMEOUT_S = 20
 
     def __init__(
         self,
@@ -54,6 +57,10 @@ class QwenVLProvider(LLMProvider):
         # Don't probe at init time; on first call we'll try the head and fall
         # back per-call if needed. Probing on init blocks app startup.
         self.model = candidates[0]
+        # Remember which candidate models are persistently unavailable so we
+        # don't keep paying the round-trip cost retrying them every call.
+        # Populated by BadRequestError (e.g. "model not found / unauthorized").
+        self._known_bad: set[str] = set()
 
     @staticmethod
     def _build_candidates(model: str | None, models: list[str] | None) -> list[str]:
@@ -78,10 +85,17 @@ class QwenVLProvider(LLMProvider):
         images: list[bytes],
         schema: dict[str, Any],
         prompt: str,
-        timeout: int = 90,
+        timeout: int | None = None,
     ) -> ExtractionResponse:
         if not images:
             raise ProviderError("extract() requires at least one image")
+        # Dynamic timeout: floor + per-page allowance. A 10-page PDF gets
+        # 30 + 20*10 = 230s instead of a fixed 90s that's far too tight.
+        effective_timeout = (
+            timeout
+            if timeout is not None
+            else self.BASE_TIMEOUT_S + self.PER_PAGE_TIMEOUT_S * len(images)
+        )
         full_prompt = self._build_prompt(prompt, schema)
         content: list[dict[str, Any]] = []
         for img in images:
@@ -93,13 +107,22 @@ class QwenVLProvider(LLMProvider):
         content.append({"type": "text", "text": full_prompt})
 
         last_err: Exception | None = None
-        for candidate in self.candidates:
+        # Skip candidates we've previously confirmed as unavailable
+        viable = [c for c in self.candidates if c not in self._known_bad]
+        if not viable:
+            # All previously known-bad — reset and try again from scratch
+            # in case the upstream service has restored access.
+            log.warning("All candidates were marked bad; resetting and retrying")
+            self._known_bad.clear()
+            viable = list(self.candidates)
+
+        for candidate in viable:
             t0 = time.time()
             try:
                 resp = self.client.chat.completions.create(
                     model=candidate,
                     messages=[{"role": "user", "content": content}],
-                    timeout=timeout,
+                    timeout=effective_timeout,
                 )
                 raw = (resp.choices[0].message.content or "").strip()
                 data = self._parse_json_strict(raw)
@@ -115,16 +138,19 @@ class QwenVLProvider(LLMProvider):
                     duration_ms=int((time.time() - t0) * 1000),
                 )
             except BadRequestError as e:
-                # Likely "model not found / not authorized"; try next candidate
-                log.warning("QwenVL model %s rejected: %s", candidate, e)
+                # Persistent: model unavailable / unauthorized. Memoize.
+                log.warning("QwenVL model %s rejected (persistent): %s", candidate, e)
+                self._known_bad.add(candidate)
                 last_err = e
                 continue
             except APIError as e:
-                # Transient — log and try next
+                # Transient — log and try next (do NOT memoize)
                 log.warning("QwenVL APIError on %s: %s", candidate, e)
                 last_err = e
                 continue
             except (ValueError, json.JSONDecodeError) as e:
+                # Parse failure — try next candidate (different model may
+                # produce cleaner JSON), but don't permanently disqualify
                 log.error("QwenVL JSON parse failed on %s: %s", candidate, e)
                 last_err = e
                 continue
@@ -143,24 +169,34 @@ class QwenVLProvider(LLMProvider):
 
     @staticmethod
     def _parse_json_strict(text: str) -> dict[str, Any]:
-        """Tolerant JSON parser: strips ```json fences, extracts {...} substring."""
+        """Tolerant JSON parser.
+
+        Robustness layers (in order):
+        1. Strip leading/trailing whitespace + markdown ``` / ```json fences
+        2. Slice to first outermost {...} block
+        3. Strip trailing commas before } and ] (Qwen occasionally emits them)
+        4. json.loads
+        """
+        import re
+
         if not text:
             raise ValueError("empty LLM response")
         s = text.strip()
-        # Strip markdown code fences
+        # Strip markdown code fences (any language tag)
         if s.startswith("```"):
-            # remove first line (``` or ```json) and last fence
             lines = s.split("\n")
             if lines[0].startswith("```"):
                 lines = lines[1:]
             if lines and lines[-1].strip().startswith("```"):
                 lines = lines[:-1]
             s = "\n".join(lines).strip()
-        # Extract first {…} block
+        # Extract first outermost {…} block
         start = s.find("{")
         end = s.rfind("}")
         if start >= 0 and end > start:
             s = s[start : end + 1]
+        # Strip trailing commas (",}", ",]") — common LLM artifact
+        s = re.sub(r",(\s*[}\]])", r"\1", s)
         data = json.loads(s)
         if not isinstance(data, dict):
             raise ValueError(f"expected JSON object, got {type(data).__name__}")
