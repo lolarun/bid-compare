@@ -1,15 +1,39 @@
 """Quote CRUD API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File, Form
+from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from apps.api.core.config import PROFESSION_MAP
 from apps.api.core.database import get_db
-from apps.api.models import Quote, Material
+from apps.api.models import (
+    BrandTier,
+    ExtractionJob,
+    Material,
+    Project,
+    Quote,
+    Supplier,
+)
 from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
 from apps.api.services.import_service import import_csv_data
+from apps.api.services.standardize import standardize_name
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
+
+
+class BatchConfirmRequest(BaseModel):
+    """Materialise a DONE extraction job's items into Quote records."""
+
+    job_id: str
+    supplier_id: int | None = None
+    supplier_name: str = ""  # used to create a new supplier if no id provided
+    project_id: int | None = None
+    project_name: str = ""
+    category: str = ""  # required if items don't carry their own
+    overrides: list[dict[str, Any]] | None = None  # user-edited items, if any
 
 
 @router.get("", response_model=dict)
@@ -209,3 +233,206 @@ async def import_file(
     if result["status"] == "error" and result["imported"] == 0:
         raise HTTPException(422, detail=result)
     return result
+
+
+# ─── Batch confirm: convert ExtractionJob.result → Quote rows ──────────────
+@router.post("/batch-confirm", response_model=dict)
+def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(get_db)):
+    """Materialise an extracted quote job into Material + Quote DB records.
+
+    Flow:
+    - Look up job; must be DONE and type=quote.
+    - Resolve supplier (by id, or by name → get-or-create).
+    - Resolve project (by id, or by name → get-or-create).
+    - For each item (either job.result.items or `overrides` if provided):
+        - Standardise material name
+        - Get or create Material (by category, standard_name, spec)
+        - Compute deviation + alert_level vs ref_price_reasonable_low/median
+        - Create Quote linked to material+supplier+project
+        - Collect unknown brands (no entry in brand_tiers table)
+    - Returns {created, skipped, errors, unknown_brands, quote_ids}
+    """
+    job = db.get(ExtractionJob, body.job_id)
+    if not job:
+        raise HTTPException(404, f"Job {body.job_id} not found")
+    if job.type != "quote":
+        raise HTTPException(400, f"Job type is {job.type}; must be 'quote'")
+    if job.status != "done":
+        raise HTTPException(400, f"Job status is {job.status}; must be 'done'")
+
+    # ── Resolve supplier ────────────────────────────────────────────────────
+    supplier: Supplier | None = None
+    if body.supplier_id:
+        supplier = db.get(Supplier, body.supplier_id)
+        if not supplier:
+            raise HTTPException(404, f"Supplier {body.supplier_id} not found")
+    elif body.supplier_name.strip():
+        name = body.supplier_name.strip()
+        supplier = db.query(Supplier).filter_by(name=name).first()
+        if not supplier:
+            supplier = Supplier(name=name)
+            db.add(supplier)
+            db.flush()
+    else:
+        # Try from job result or context
+        sname = (job.result or {}).get("supplier_name") or (job.context or {}).get("supplier_name")
+        if sname:
+            supplier = db.query(Supplier).filter_by(name=sname).first()
+            if not supplier:
+                supplier = Supplier(name=sname)
+                db.add(supplier)
+                db.flush()
+
+    # ── Resolve project ────────────────────────────────────────────────────
+    project: Project | None = None
+    if body.project_id:
+        project = db.get(Project, body.project_id)
+    elif body.project_name.strip():
+        name = body.project_name.strip()
+        project = db.query(Project).filter_by(name=name).first()
+        if not project:
+            project = Project(name=name)
+            db.add(project)
+            db.flush()
+    elif (job.context or {}).get("project_id"):
+        project = db.get(Project, job.context["project_id"])
+
+    # ── Determine category ─────────────────────────────────────────────────
+    category = (
+        body.category.strip()
+        or (job.context or {}).get("category", "")
+        or ""
+    )
+    if not category:
+        raise HTTPException(
+            400, "Category required (provide `category` or set in job.context)"
+        )
+    if category not in PROFESSION_MAP:
+        raise HTTPException(400, f"Unknown category: {category}")
+    profession = PROFESSION_MAP[category]
+
+    # ── Resolve item list ──────────────────────────────────────────────────
+    items: list[dict[str, Any]] = (
+        body.overrides
+        if body.overrides is not None
+        else (job.result or {}).get("items") or []
+    )
+    if not items:
+        return {
+            "status": "ok",
+            "created": 0,
+            "skipped": 0,
+            "errors": [],
+            "unknown_brands": [],
+            "quote_ids": [],
+            "supplier_id": supplier.id if supplier else None,
+            "project_id": project.id if project else None,
+        }
+
+    # ── Iterate & create ───────────────────────────────────────────────────
+    from apps.api.services.comparison import get_category_thresholds, determine_alert
+
+    thresholds = get_category_thresholds(db, category)
+    created = 0
+    skipped = 0
+    errors: list[dict] = []
+    unknown_brands: set[str] = set()
+    quote_ids: list[int] = []
+    batch_id = f"OCR-{job.id[:8]}"
+
+    for idx, item in enumerate(items):
+        try:
+            raw_name = str(item.get("material") or "").strip()
+            if not raw_name:
+                skipped += 1
+                continue
+            std_result = standardize_name(raw_name, category)
+            standard_name = std_result["standardized"]
+            spec = str(item.get("spec") or "").strip()
+
+            mat = (
+                db.query(Material)
+                .filter_by(category=category, standard_name=standard_name, spec=spec)
+                .first()
+            )
+            if not mat:
+                mat = Material(
+                    standard_name=standard_name,
+                    profession=profession,
+                    category=category,
+                    sub_category="",
+                    spec=spec,
+                    material_type="",
+                    unit=str(item.get("unit") or ""),
+                    brand=str(item.get("brand") or ""),
+                )
+                db.add(mat)
+                db.flush()
+
+            # Brand-tier lookup (track unknowns)
+            brand = str(item.get("brand") or "").strip()
+            brand_tier = ""
+            if brand:
+                bt = (
+                    db.query(BrandTier)
+                    .filter(BrandTier.brand_name == brand)
+                    .first()
+                )
+                if bt:
+                    brand_tier = bt.tier
+                else:
+                    unknown_brands.add(brand)
+
+            price = item.get("unit_price")
+            price = float(price) if price is not None else None
+            qty = item.get("qty")
+            qty = float(qty) if qty is not None else None
+            total = item.get("total_price")
+            if total is None and price is not None and qty is not None:
+                total = round(price * qty, 4)
+
+            # Deviation + alert
+            ref = mat.ref_price_reasonable_low or mat.ref_price_median
+            deviation = None
+            alert = ""
+            if price and ref and ref > 0:
+                deviation = round((price - ref) / ref, 4)
+                alert = determine_alert(deviation, thresholds)
+
+            q = Quote(
+                material_id=mat.id,
+                supplier_id=supplier.id if supplier else None,
+                project_id=project.id if project else None,
+                unit_price=price,
+                unit_price_excl_tax=item.get("unit_price_excl_tax"),
+                quantity=qty,
+                total_price=total,
+                tax_rate=item.get("tax_rate"),
+                brand=brand,
+                brand_tier=brand_tier,
+                remark=str(item.get("remark") or "")[:500],
+                quote_date=str(item.get("quote_date") or ""),
+                batch_id=batch_id,
+                deviation_pct=deviation,
+                alert_level=alert,
+            )
+            db.add(q)
+            db.flush()
+            quote_ids.append(q.id)
+            created += 1
+        except Exception as e:  # pragma: no cover — per-row resilience
+            errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
+            skipped += 1
+
+    db.commit()
+    return {
+        "status": "ok",
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "unknown_brands": sorted(unknown_brands),
+        "quote_ids": quote_ids,
+        "supplier_id": supplier.id if supplier else None,
+        "project_id": project.id if project else None,
+        "batch_id": batch_id,
+    }

@@ -264,6 +264,99 @@ export interface BidMatrixResult {
   totals: MatrixTotal[]
 }
 
+// ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
+
+export type IngestionType = 'tender' | 'quote'
+export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
+
+export interface ExtractionJob {
+  id: string
+  type: IngestionType
+  status: JobStatus
+  filename: string
+  file_size: number
+  context: Record<string, unknown>
+  result: Record<string, unknown> | null
+  error: string
+  confidence: number | null
+  provider: string
+  tokens_used: number
+  duration_ms: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface TenderExtractionItem {
+  name: string
+  category: string
+  spec: string
+  unit: string
+  quantity: number | null
+  remark: string
+}
+
+export interface QuoteExtractionItem {
+  material: string
+  spec: string
+  brand: string
+  unit: string
+  qty: number | null
+  unit_price: number | null
+  unit_price_excl_tax: number | null
+  total_price: number | null
+  tax_rate: number | null
+  remark: string
+}
+
+export interface RecommendReason {
+  history_count: number
+  history_score: number
+  avg_deviation_pct: number | null
+  price_score: number
+  overall_score: number
+  brand_score: number
+  summary: string
+}
+
+export interface SupplierRecommendation {
+  supplier_id: number
+  supplier_name: string
+  score: number
+  rank: number
+  reason: RecommendReason
+}
+
+export interface RecommendResponse {
+  categories: string[]
+  recommendations: SupplierRecommendation[]
+}
+
+export interface BatchConfirmResult {
+  status: string
+  created: number
+  skipped: number
+  errors: Array<{ row: number; reason: string }>
+  unknown_brands: string[]
+  quote_ids: number[]
+  supplier_id: number | null
+  project_id: number | null
+  batch_id: string
+}
+
+export interface SavedInvitation {
+  id: number
+  supplier_id: number
+  supplier_name: string
+  rank: number | null
+  score: number | null
+  status: string
+}
+
+export interface SaveInvitationsResponse {
+  tender_id: number
+  invitations: SavedInvitation[]
+}
+
 // ─── BrandTier ───────────────────────────────────────────────────────────────
 
 export interface BrandTier {

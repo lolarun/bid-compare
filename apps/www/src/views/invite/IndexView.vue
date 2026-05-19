@@ -1,316 +1,292 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue'
+import { message } from 'ant-design-vue'
 import {
-  HistoryOutlined,
   SaveOutlined,
-  ExportOutlined,
   ThunderboltOutlined,
-  CheckCircleOutlined,
-  PlusOutlined,
-  DeleteOutlined,
-  RobotOutlined,
+  TrophyOutlined,
+  TeamOutlined,
 } from '@ant-design/icons-vue'
+import IntakeUploader from '@/components/IntakeUploader.vue'
+import ExtractionEditor from '@/components/ExtractionEditor.vue'
+import { inviteApi } from '@/api'
+import type {
+  ExtractionJob,
+  TenderExtractionItem,
+  SupplierRecommendation,
+} from '@/api/client'
 
-// ─── 招标信息表单 ────────────────────────────────────────────────────────
-interface SpecRow {
-  key: string
-  name: string
-  qty: number | undefined
-  unit: string
-}
+/**
+ * Invite (邀标建议) page — full real-data flow:
+ *
+ *   IntakeUploader(tender) → ExtractionEditor(tender items)
+ *   → POST /api/invite/recommend → SupplierRecommendation cards
+ *   → multi-select + POST /api/invite/save
+ */
 
-const form = reactive({
-  project_name: '项目 Y · 数据中心电缆桥架采购',
-  category: '桥架类 / 托盘式桥架',
-  bid_qty: 1300,
-  unit: '米',
-  budget_max: 160000,
+const sourceJob = ref<ExtractionJob | null>(null)
+const tenderItems = ref<TenderExtractionItem[]>([])
+const tenderMeta = reactive({
+  project_name: '',
+  project_code: '',
+  tender_date: '',
+  deadline: '',
 })
 
-const specs = ref<SpecRow[]>([
-  { key: 'a', name: '托盘式桥架直通 300×150', qty: 800, unit: '米' },
-  { key: 'b', name: '托盘式桥架直通 600×200', qty: 320, unit: '米' },
-  { key: 'c', name: '托盘式防火桥架 400×150', qty: 180, unit: '米' },
-])
+const recommending = ref(false)
+const recommendations = ref<SupplierRecommendation[]>([])
+const categories = ref<string[]>([])
+const selectedSupplierIds = ref<number[]>([])
+const topN = ref(5)
 
-function addSpec() {
-  specs.value.push({ key: `r${Date.now()}`, name: '', qty: undefined, unit: '米' })
+const saving = ref(false)
+const savedTenderId = ref<number | null>(null)
+
+const hasItems = computed(() => tenderItems.value.length > 0)
+const canRecommend = computed(() => hasItems.value && !recommending.value)
+const canSave = computed(() => savedTenderId.value === null && selectedSupplierIds.value.length > 0)
+
+// ─── Step 1: ingestion result ────────────────────────────────────────────
+function onExtracted(job: ExtractionJob) {
+  sourceJob.value = job
+  const result = job.result as {
+    project_name?: string
+    project_code?: string
+    tender_date?: string
+    deadline?: string
+    items?: TenderExtractionItem[]
+  } | null
+  tenderMeta.project_name = result?.project_name || ''
+  tenderMeta.project_code = result?.project_code || ''
+  tenderMeta.tender_date = result?.tender_date || ''
+  tenderMeta.deadline = result?.deadline || ''
+  tenderItems.value = (result?.items ?? []).map((it) => ({
+    name: it.name || '',
+    category: it.category || '',
+    spec: it.spec || '',
+    unit: it.unit || '',
+    quantity: it.quantity ?? null,
+    remark: it.remark || '',
+  }))
+  // Reset downstream state
+  recommendations.value = []
+  selectedSupplierIds.value = []
+  savedTenderId.value = null
 }
 
-function removeSpec(k: string) {
-  specs.value = specs.value.filter((s) => s.key !== k)
+function clearAll() {
+  sourceJob.value = null
+  tenderItems.value = []
+  Object.assign(tenderMeta, { project_name: '', project_code: '', tender_date: '', deadline: '' })
+  recommendations.value = []
+  selectedSupplierIds.value = []
+  savedTenderId.value = null
 }
 
-// ─── AI 推荐结果（mock）───────────────────────────────────────────────────
-interface RecommendedSupplier {
-  id: number
-  letter: string
-  name: string
-  ai_score: number
-  ai_reason: string
-  price_advantage: number  // 0.052
-  win_count: number
-  delivery_score: number
-  tags: { label: string; color: string }[]
-  added: boolean
+// ─── Step 2: generate recommendations ────────────────────────────────────
+async function generateRecommendations() {
+  if (!hasItems.value) {
+    message.warning('请先上传招标文件并核对清单')
+    return
+  }
+  recommending.value = true
+  try {
+    const { data } = await inviteApi.recommend({
+      tender_items: tenderItems.value as unknown as Array<Record<string, unknown>>,
+      top_n: topN.value,
+    })
+    recommendations.value = data.recommendations
+    categories.value = data.categories
+    selectedSupplierIds.value = data.recommendations.map((r) => r.supplier_id)
+    message.success(`已生成 ${data.recommendations.length} 家推荐供应商`)
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '推荐失败'
+    message.error(detail)
+  } finally {
+    recommending.value = false
+  }
 }
 
-const recommended = ref<RecommendedSupplier[]>([
-  {
-    id: 1, letter: '江', name: '江苏华润管业', ai_score: 92,
-    ai_reason: '该公司供应商类匹配优秀且良品价格优势，近 3 年 8 次合作均按时交付，建议作为本次招标主选供应商之一。',
-    price_advantage: -0.052, win_count: 8, delivery_score: 0.95,
-    tags: [{ label: '价格优势', color: 'green' }, { label: '稳定合作', color: 'blue' }],
-    added: true,
-  },
-  {
-    id: 2, letter: '上', name: '上海管业贸易', ai_score: 88,
-    ai_reason: '近一年报价稳健，报价低稳价 7.5%，价格优势明显，但 3 次少量交付，质量稳定一次进过，建议作为价格补充供应。',
-    price_advantage: -0.075, win_count: 3, delivery_score: 0.90,
-    tags: [{ label: '价格优势', color: 'green' }, { label: '新合作', color: 'purple' }],
-    added: true,
-  },
-  {
-    id: 3, letter: '天', name: '天源华威桥架', ai_score: 86,
-    ai_reason: '专业桥架制造商，报价稳定且质量过硬，火桥架资源丰富，履约率全场最高（98%），适合关键节点项目。',
-    price_advantage: 0.018, win_count: 6, delivery_score: 0.98,
-    tags: [{ label: '质量优秀', color: 'cyan' }, { label: '稳定供应', color: 'blue' }],
-    added: true,
-  },
-  {
-    id: 4, letter: '广', name: '广东联墅供应', ai_score: 81,
-    ai_reason: '管材类长期合作（4 次）历史比价中等，可作为补充报价候选，可补充作为采购流入价的桥架以加大议价空间。',
-    price_advantage: -0.036, win_count: 4, delivery_score: 0.88,
-    tags: [{ label: '补充候选', color: 'default' }],
-    added: false,
-  },
-  {
-    id: 5, letter: '江', name: '江苏华润电气', ai_score: 78,
-    ai_reason: '防火桥架资质完整，履约成功偏低（85%），建议作为防火桥架专项采购备选清单，主选不推荐。',
-    price_advantage: 0.024, win_count: 5, delivery_score: 0.85,
-    tags: [{ label: '防火专项', color: 'orange' }],
-    added: false,
-  },
-])
-
-const generating = ref(false)
-async function generate() {
-  generating.value = true
-  // 实际接入：POST /api/invite/recommend
-  setTimeout(() => { generating.value = false }, 800)
+// ─── Step 3: save invitations ────────────────────────────────────────────
+async function saveInvitations() {
+  if (selectedSupplierIds.value.length === 0) {
+    message.warning('请至少勾选 1 家供应商')
+    return
+  }
+  saving.value = true
+  try {
+    const { data } = await inviteApi.save({
+      job_id: sourceJob.value?.id,
+      project_name: tenderMeta.project_name || '未命名招标',
+      project_code: tenderMeta.project_code,
+      tender_date: tenderMeta.tender_date,
+      deadline: tenderMeta.deadline,
+      items: tenderItems.value as unknown as Array<Record<string, unknown>>,
+      supplier_ids: selectedSupplierIds.value,
+    })
+    savedTenderId.value = data.tender_id
+    message.success(`已保存招标记录 #${data.tender_id}，邀请 ${data.invitations.length} 家供应商`)
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '保存失败'
+    message.error(detail)
+  } finally {
+    saving.value = false
+  }
 }
 
-const selectedCount = computed(() => recommended.value.filter((s) => s.added).length)
-const totalCount = computed(() => recommended.value.length)
-
-function toggleAdd(s: RecommendedSupplier) {
-  s.added = !s.added
-}
-
-function scoreColor(score: number) {
-  if (score >= 85) return '#52c41a'
-  if (score >= 75) return '#1677ff'
-  if (score >= 60) return '#faad14'
-  return '#ff4d4f'
-}
-
-function fmtPct(d: number) {
-  const pct = (d * 100).toFixed(1)
-  return d >= 0 ? `+${pct}%` : `${pct}%`
+function toggleSupplier(id: number) {
+  const i = selectedSupplierIds.value.indexOf(id)
+  if (i >= 0) selectedSupplierIds.value.splice(i, 1)
+  else selectedSupplierIds.value.push(id)
 }
 </script>
 
 <template>
   <div class="invite-page">
-    <!-- 标题区 -->
+    <!-- Page header -->
     <div class="invite-page__header">
       <div>
         <h1 class="invite-page__title">邀标建议</h1>
         <div class="invite-page__subtitle">
-          填写招标信息生成邀标 · 历史采购、供应商画像、AI 推荐多维加权建议
+          上传招标文件 → 自动识别材料清单 → AI 推荐优秀供应商 → 一键发起邀请
         </div>
       </div>
-      <a-button>
-        <template #icon><HistoryOutlined /></template>
-        历史邀标
-      </a-button>
     </div>
 
-    <a-row :gutter="16">
-      <!-- 左栏：招标信息 -->
-      <a-col :xs="24" :lg="8">
-        <a-card :body-style="{ padding: '16px 20px' }">
-          <template #title>
-            <span style="font-size:15px;font-weight:600">招标信息</span>
+    <a-row :gutter="20">
+      <a-col :xs="24" :lg="14">
+        <!-- Step 1: upload tender -->
+        <a-card title="① 上传招标文件" :body-style="{ padding: '16px 20px' }" style="margin-bottom:16px">
+          <template #extra>
+            <a-button v-if="sourceJob" size="small" @click="clearAll">重新上传</a-button>
           </template>
-          <a-form layout="vertical">
-            <a-form-item label="项目名称">
-              <a-input v-model:value="form.project_name" />
-            </a-form-item>
-            <a-form-item label="物料类别">
-              <a-cascader
-                :default-value="['桥架类','托盘式桥架']"
-                :options="[
-                  { value: '桥架类', label: '桥架类', children: [
-                    { value: '托盘式桥架', label: '托盘式桥架' },
-                    { value: '梯式桥架', label: '梯式桥架' },
-                    { value: '托盘式防火桥架', label: '托盘式防火桥架' },
-                  ]},
-                  { value: '管材类', label: '管材类' },
-                  { value: '电气类', label: '电气类' },
-                ]"
-              />
-            </a-form-item>
+          <IntakeUploader
+            v-if="!sourceJob"
+            :type="'tender'"
+            hint="支持招标文件 PDF / 扫描件图片；上传后自动识别项目信息与材料清单"
+            @extracted="onExtracted"
+          />
+          <div v-else>
+            <a-descriptions :column="2" size="small" bordered>
+              <a-descriptions-item label="项目名称">{{ tenderMeta.project_name || '—' }}</a-descriptions-item>
+              <a-descriptions-item label="招标编号">{{ tenderMeta.project_code || '—' }}</a-descriptions-item>
+              <a-descriptions-item label="招标日期">{{ tenderMeta.tender_date || '—' }}</a-descriptions-item>
+              <a-descriptions-item label="投标截止">{{ tenderMeta.deadline || '—' }}</a-descriptions-item>
+            </a-descriptions>
+          </div>
+        </a-card>
 
-            <div style="margin-bottom:6px;font-size:13px;color:rgba(0,0,0,0.65)">规格行</div>
-            <div class="spec-list">
-              <div v-for="s in specs" :key="s.key" class="spec-row">
-                <a-input v-model:value="s.name" placeholder="规格描述" />
-                <a-input-number v-model:value="s.qty" :min="0" placeholder="数量" style="width:90px" />
-                <a-input v-model:value="s.unit" style="width:60px" />
-                <a-button type="text" danger size="small" @click="removeSpec(s.key)">
-                  <DeleteOutlined />
-                </a-button>
-              </div>
-              <a-button type="dashed" block @click="addSpec">
-                <PlusOutlined />
-                添加规格
-              </a-button>
-            </div>
-
-            <a-row :gutter="12" style="margin-top:14px">
-              <a-col :span="12">
-                <a-form-item label="招标总量">
-                  <a-input-number
-                    v-model:value="form.bid_qty"
-                    :min="0"
-                    style="width:100%"
-                    :addon-after="form.unit"
-                  />
-                </a-form-item>
-              </a-col>
-              <a-col :span="12">
-                <a-form-item label="预算上限">
-                  <a-input-number
-                    v-model:value="form.budget_max"
-                    :min="0"
-                    style="width:100%"
-                    :formatter="(v: number | string | undefined) => v ? `¥${v}` : ''"
-                  />
-                </a-form-item>
-              </a-col>
-            </a-row>
-
-            <a-button
-              type="primary"
-              block
-              :loading="generating"
-              size="large"
-              @click="generate"
-            >
-              <template #icon><ThunderboltOutlined /></template>
-              生成邀标建议
-            </a-button>
-          </a-form>
+        <!-- Step 2: edit items -->
+        <a-card v-if="sourceJob" title="② 核对材料清单" :body-style="{ padding: '16px 20px' }" style="margin-bottom:16px">
+          <template #extra>
+            <span style="font-size:12px;color:rgba(0,0,0,0.45)">
+              共 {{ tenderItems.length }} 项
+            </span>
+          </template>
+          <a-empty v-if="tenderItems.length === 0" description="未识别到材料行；可手动添加" />
+          <ExtractionEditor
+            v-else
+            schema="tender"
+            :model-value="tenderItems as unknown[] as any"
+            :show-actions="false"
+            @update:model-value="(v: any) => tenderItems = v"
+          />
         </a-card>
       </a-col>
 
-      <!-- 右栏：供应商卡片列表 -->
-      <a-col :xs="24" :lg="16">
-        <a-card :body-style="{ padding: '16px 20px' }">
-          <template #title>
-            <div style="display:flex;align-items:center;gap:8px">
-              <RobotOutlined style="color:#1677ff" />
-              <span style="font-size:15px;font-weight:600">已从供应商库中分析 28 家相似品类</span>
-              <span style="font-size:12px;color:rgba(0,0,0,0.45)">
-                · 加 <strong style="color:#52c41a">价格优势 60%</strong> +
-                <strong style="color:#1677ff">履约评分 40%</strong> 综合评估
-              </span>
-            </div>
-          </template>
+      <a-col :xs="24" :lg="10">
+        <!-- Step 3: generate recommendations -->
+        <a-card title="③ 推荐供应商" :body-style="{ padding: '16px 20px' }" style="margin-bottom:16px">
           <template #extra>
-            <a-button type="link">
-              <template #icon><HistoryOutlined /></template>
-              历史邀标
-            </a-button>
+            <a-space>
+              <span style="font-size:12px">推荐数</span>
+              <a-input-number v-model:value="topN" :min="1" :max="20" size="small" style="width:70px" />
+            </a-space>
           </template>
 
-          <div class="supplier-card-list">
-            <div
-              v-for="s in recommended"
-              :key="s.id"
-              class="supplier-card"
-              :class="{ 'supplier-card--added': s.added }"
+          <div v-if="recommendations.length === 0">
+            <a-alert
+              v-if="!hasItems"
+              type="info"
+              message="请先在左侧上传并核对招标清单"
+              show-icon
+              style="margin-bottom:12px"
+            />
+            <a-button
+              type="primary"
+              :loading="recommending"
+              :disabled="!canRecommend"
+              block
+              @click="generateRecommendations"
             >
-              <div class="supplier-card__letter" :style="{ background: scoreColor(s.ai_score) }">
-                {{ s.letter }}
-              </div>
-              <div class="supplier-card__body">
-                <div class="supplier-card__top">
-                  <div>
-                    <div class="supplier-card__name">{{ s.name }}</div>
-                    <div class="supplier-card__score">
-                      <span class="value" :style="{ color: scoreColor(s.ai_score) }">{{ s.ai_score }}</span>
-                      <span class="label">AI 综合评分</span>
-                    </div>
-                  </div>
-                  <div class="supplier-card__actions">
-                    <a-tag v-if="s.added" color="green">
-                      <CheckCircleOutlined />
-                      已加入名单
-                    </a-tag>
-                    <a-button v-else type="primary" size="small" @click="toggleAdd(s)">
-                      <PlusOutlined />
-                      加入名单
-                    </a-button>
-                    <a-button v-if="s.added" size="small" @click="toggleAdd(s)">
-                      <DeleteOutlined />
-                      移除
-                    </a-button>
-                    <a-button type="link" size="small">查看画像</a-button>
-                  </div>
-                </div>
-                <div class="supplier-card__reason">
-                  <RobotOutlined /> AI 推荐理由（DeepSeek）：{{ s.ai_reason }}
-                </div>
-                <div class="supplier-card__metrics">
-                  <span class="metric" :style="{ color: s.price_advantage <= 0 ? '#52c41a' : '#faad14' }">
-                    {{ fmtPct(s.price_advantage) }}
-                  </span>
-                  <span class="metric-label">价格优势</span>
-                  <span class="metric">{{ s.win_count }} 次</span>
-                  <span class="metric-label">合作次数</span>
-                  <span class="metric">{{ Math.round(s.delivery_score * 100) }}%</span>
-                  <span class="metric-label">履约评分</span>
-                  <a-tag
-                    v-for="t in s.tags"
-                    :key="t.label"
-                    :color="t.color"
-                  >{{ t.label }}</a-tag>
-                </div>
-              </div>
-            </div>
+              <template #icon><ThunderboltOutlined /></template>
+              生成推荐
+            </a-button>
           </div>
 
-          <!-- 底部操作栏 -->
-          <div class="invite-page__footer">
-            <span class="invite-page__count">
-              已选供应商：<strong>{{ selectedCount }}</strong> / {{ totalCount }}
-            </span>
-            <a-space>
-              <a-button>
+          <div v-else>
+            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:8px">
+              针对品类：
+              <a-tag v-for="c in categories" :key="c" color="blue">{{ c }}</a-tag>
+            </div>
+
+            <div class="reco-list">
+              <div
+                v-for="r in recommendations"
+                :key="r.supplier_id"
+                class="reco-card"
+                :class="{ 'reco-card--selected': selectedSupplierIds.includes(r.supplier_id) }"
+                @click="toggleSupplier(r.supplier_id)"
+              >
+                <div class="reco-card__head">
+                  <div class="reco-card__rank">#{{ r.rank }}</div>
+                  <div class="reco-card__name">{{ r.supplier_name }}</div>
+                  <div class="reco-card__score">
+                    <TrophyOutlined />
+                    {{ r.score.toFixed(1) }}
+                  </div>
+                  <a-checkbox
+                    :checked="selectedSupplierIds.includes(r.supplier_id)"
+                    @click.stop
+                    @change="toggleSupplier(r.supplier_id)"
+                  />
+                </div>
+                <div class="reco-card__summary">{{ r.reason.summary }}</div>
+                <div class="reco-card__metrics">
+                  <a-tag color="blue">
+                    <TeamOutlined /> 成交 {{ r.reason.history_count }}
+                  </a-tag>
+                  <a-tag v-if="r.reason.avg_deviation_pct !== null" :color="r.reason.avg_deviation_pct <= 0 ? 'green' : 'orange'">
+                    偏差 {{ (r.reason.avg_deviation_pct * 100).toFixed(1) }}%
+                  </a-tag>
+                  <a-tag>综合 {{ r.reason.overall_score.toFixed(0) }}</a-tag>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;margin-top:12px">
+              <a-button @click="generateRecommendations">重新生成</a-button>
+              <a-button
+                type="primary"
+                :loading="saving"
+                :disabled="!canSave"
+                @click="saveInvitations"
+              >
                 <template #icon><SaveOutlined /></template>
-                保存为草稿
+                保存邀请名单（{{ selectedSupplierIds.length }}）
               </a-button>
-              <a-button>
-                <template #icon><ExportOutlined /></template>
-                生成邀标清单 PDF
-              </a-button>
-              <a-button type="primary">
-                <template #icon><ThunderboltOutlined /></template>
-                一键发起询价
-              </a-button>
-            </a-space>
+            </div>
+
+            <a-alert
+              v-if="savedTenderId !== null"
+              type="success"
+              show-icon
+              :message="`已保存为招标记录 #${savedTenderId}`"
+              description="可在「邀标历史」中查看与跟踪状态"
+              style="margin-top:12px"
+            />
           </div>
         </a-card>
       </a-col>
@@ -322,150 +298,80 @@ function fmtPct(d: number) {
 @import '@/styles/variables.less';
 
 .invite-page {
-  &__header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
+  &__header { margin-bottom: 16px; }
   &__title {
     margin: 0;
     font-size: 18px;
     font-weight: 600;
     color: @heading-color;
   }
-
   &__subtitle {
     font-size: 12px;
     color: @text-color-secondary;
     margin-top: 4px;
   }
-
-  &__footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 16px;
-    padding-top: 12px;
-    border-top: 1px solid @border-color-split;
-  }
-
-  &__count {
-    font-size: 13px;
-    color: @text-color;
-  }
 }
 
-.spec-list {
+.reco-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 540px;
+  overflow-y: auto;
 }
 
-.spec-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.supplier-card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.supplier-card {
-  display: flex;
-  gap: 14px;
-  padding: 14px 16px;
+.reco-card {
+  padding: 10px 12px;
   border: 1px solid @border-color-base;
-  border-radius: @border-radius-lg;
-  background: #fff;
+  border-radius: @border-radius-base;
+  cursor: pointer;
   transition: all 0.2s;
+  background: #fff;
 
-  &--added {
-    background: rgba(82, 196, 26, 0.04);
-    border-color: rgba(82, 196, 26, 0.4);
+  &:hover { border-color: @primary-color; }
+  &--selected {
+    border-color: @primary-color;
+    background: @primary-1;
   }
 
-  &__letter {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
-    color: #fff;
-    font-size: 18px;
-    font-weight: 700;
+  &__head {
     display: flex;
     align-items: center;
-    justify-content: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  &__rank {
+    background: @primary-color;
+    color: #fff;
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
     flex-shrink: 0;
   }
-
-  &__body {
-    flex: 1;
-    min-width: 0;
-  }
-
-  &__top {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: flex-start;
-  }
-
   &__name {
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
     color: @heading-color;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-
   &__score {
-    margin-top: 2px;
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-
-    .value {
-      font-size: 20px;
-      font-weight: 700;
-    }
-    .label {
-      font-size: 11px;
-      color: @text-color-tertiary;
-    }
+    font-size: 13px;
+    color: @primary-color;
+    font-weight: 500;
   }
-
-  &__actions {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-shrink: 0;
-  }
-
-  &__reason {
-    margin-top: 8px;
+  &__summary {
     font-size: 12px;
     color: @text-color-secondary;
-    line-height: 1.6;
+    margin-bottom: 6px;
+    line-height: 1.5;
   }
-
   &__metrics {
-    margin-top: 8px;
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 4px 12px;
-    font-size: 12px;
-
-    .metric {
-      font-weight: 600;
-      color: @heading-color;
-    }
-    .metric-label {
-      color: @text-color-tertiary;
-      margin-right: 4px;
-    }
+    gap: 4px;
   }
 }
 </style>

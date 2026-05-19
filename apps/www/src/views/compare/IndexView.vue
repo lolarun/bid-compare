@@ -1,332 +1,400 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import {
-  PlusOutlined,
-  HistoryOutlined,
-  ExportOutlined,
-  ImportOutlined,
-  EditOutlined,
-  TableOutlined,
-  LineChartOutlined,
-  AppstoreOutlined,
-} from '@ant-design/icons-vue'
+import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { message } from 'ant-design-vue'
+import { CheckCircleOutlined, LineChartOutlined } from '@ant-design/icons-vue'
+import { projectApi, supplierApi, analysisApi, quoteApi } from '@/api'
+import type {
+  Project,
+  Supplier,
+  BidMatrixResult,
+  ExtractionJob,
+  QuoteExtractionItem,
+  BatchConfirmResult,
+} from '@/api/client'
+import IntakeUploader from '@/components/IntakeUploader.vue'
+import ExtractionEditor from '@/components/ExtractionEditor.vue'
+import BrandTierModal from '@/components/BrandTierModal.vue'
 import BidMatrix from './components/BidMatrix.vue'
 
-const mode = ref<'matrix' | 'multi' | 'single'>('matrix')
+const CATEGORIES = [
+  '桥架', '母线槽', '配电箱',
+  '阀门', '不锈钢管', '水箱', '潜水泵',
+  '风口风阀', '风机盘管', '空调泵',
+] as const
 
-// ─── 当前项目（mock）─────────────────────────────────────────────────────
-const currentProject = ref({
-  id: 5,
-  name: '项目 X 给排水材料采购',
-  code: 'BD-2026-0425',
-  budget: 260000,
-  status: '草稿态',
-  bid_date: '2026-04-25',
-  material_count: 5,
-  invited_suppliers: 4,
+// ─── State ───────────────────────────────────────────────────────────────
+const currentStep = ref(0)
+
+const taskConfig = reactive<{
+  projectId: number | undefined
+  category: string
+  supplierIds: number[]
+}>({
+  projectId: undefined,
+  category: '',
+  supplierIds: [],
 })
 
-// ─── 供应商及录入进度（mock）─────────────────────────────────────────────
-const suppliers = ref([
-  { id: 1, letter: 'A', name: '江苏华润', short: '江苏华润管业', filled: 5, total: 5 },
-  { id: 2, letter: 'B', name: '浙江中铁', short: '浙江中铁建材', filled: 3, total: 5 },
-  { id: 3, letter: 'C', name: '上海管业', short: '上海管业贸易', filled: 4, total: 5 },
-  { id: 4, letter: 'D', name: '广东联墅', short: '广东联墅供应', filled: 2, total: 5 },
-])
+const projects = ref<Project[]>([])
+const allSuppliers = ref<Supplier[]>([])
 
-const activeSupplier = ref(1)
+// Per-supplier upload state for Step 2
+const supplierUploads = reactive<Record<number, {
+  job: ExtractionJob | null
+  items: QuoteExtractionItem[]
+  confirmed: boolean
+  batch_id?: string
+  unknown_brands: string[]
+}>>({})
 
-// 当前供应商的报价单
-const supplierQuotes = computed(() => [
-  { seq: 1, material: 'DN100 无缝钢管', spec: 'Q235', brand: '鞍钢', unit: '米', price: 78.0, qty: 200, status: '已报' },
-  { seq: 2, material: '蝶阀 D71X', spec: 'DN150', brand: '良工', unit: '个', price: 720.0, qty: 12, status: '已报' },
-  { seq: 3, material: 'PPR 给水管 De32', spec: '3.6mm壁厚', brand: '伟星新材', unit: '米', price: 13.20, qty: 500, status: '已报' },
-  { seq: 4, material: '不锈钢水箱', spec: '5m³', brand: '海德隆', unit: '座', price: 8500, qty: 2, status: '已报' },
-  { seq: 5, material: 'PE 给水管 De63', spec: 'PN1.6', brand: '联塑', unit: '米', price: 38.0, qty: 280, status: '已报' },
-])
-
-const supplierColumns = [
-  { title: '序号', dataIndex: 'seq', width: 60 },
-  { title: '材料名称', dataIndex: 'material' },
-  { title: '规格', dataIndex: 'spec', width: 130 },
-  { title: '品牌', dataIndex: 'brand', width: 120 },
-  { title: '单位', dataIndex: 'unit', width: 60 },
-  { title: '单价', dataIndex: 'price', width: 90, align: 'right' as const, customRender: ({ text }: { text: number }) => text.toFixed(2) },
-  { title: '数量', dataIndex: 'qty', width: 80, align: 'right' as const },
-  { title: '状态', dataIndex: 'status', width: 70 },
-]
-
-// ─── 横向对比矩阵（mock）─────────────────────────────────────────────────
-const matrixRows = ref([
-  {
-    material_id: 101,
-    material_name: 'DN100 无缝钢管',
-    spec: 'Q235 · 200 米',
-    historical_avg: { price: 72.0, period: '2023-01~2024-12', projects: 5 },
-    reasonable_low: { price: 65.0, date: '2024-03', project: '华泾镇 D5B' },
-    suppliers: [
-      { supplier_id: 1, price: 78.0, total: 15600, deviation_pct: 0.20, alert_level: 'red', is_lowest: false },
-      { supplier_id: 2, price: 75.0, total: 15000, deviation_pct: 0.154, alert_level: 'red', is_lowest: false },
-      { supplier_id: 3, price: 70.0, total: 14000, deviation_pct: 0.077, alert_level: 'yellow', is_lowest: true },
-      { supplier_id: 4, price: null, total: null, deviation_pct: null, alert_level: 'normal', is_lowest: false },
-    ],
-    min_deviation: 0.077,
-    recommended: 'C',
-  },
-  {
-    material_id: 102,
-    material_name: '蝶阀 D71X',
-    spec: 'DN150 · 12 个',
-    historical_avg: { price: 760, period: '2023-08~2025-02', projects: 4 },
-    reasonable_low: { price: 695, date: '2024-11', project: '前滩 C32' },
-    suppliers: [
-      { supplier_id: 1, price: 720, total: 8640, deviation_pct: 0.036, alert_level: 'normal', is_lowest: false },
-      { supplier_id: 2, price: 705, total: 8460, deviation_pct: 0.014, alert_level: 'normal', is_lowest: true },
-      { supplier_id: 3, price: 740, total: 8880, deviation_pct: 0.065, alert_level: 'yellow', is_lowest: false },
-      { supplier_id: 4, price: 780, total: 9360, deviation_pct: 0.122, alert_level: 'red', is_lowest: false },
-    ],
-    min_deviation: 0.014,
-    recommended: 'B',
-  },
-  {
-    material_id: 103,
-    material_name: 'PPR 给水管 De32',
-    spec: '3.6mm壁厚 · 500 米',
-    historical_avg: { price: 13.5, period: '2024-01~2025-03', projects: 7 },
-    reasonable_low: { price: 12.5, date: '2024-09', project: '虹桥商务区' },
-    suppliers: [
-      { supplier_id: 1, price: 13.20, total: 6600, deviation_pct: 0.056, alert_level: 'yellow', is_lowest: false },
-      { supplier_id: 2, price: 12.80, total: 6400, deviation_pct: 0.024, alert_level: 'normal', is_lowest: true },
-      { supplier_id: 3, price: 12.90, total: 6450, deviation_pct: 0.032, alert_level: 'normal', is_lowest: false },
-      { supplier_id: 4, price: 13.50, total: 6750, deviation_pct: 0.080, alert_level: 'yellow', is_lowest: false },
-    ],
-    min_deviation: 0.024,
-    recommended: 'B',
-  },
-  {
-    material_id: 104,
-    material_name: '不锈钢水箱',
-    spec: '5m³ · 2 座',
-    historical_avg: { price: 8200, period: '2023-06~2024-10', projects: 3 },
-    reasonable_low: { price: 7900, date: '2024-05', project: '前滩 C32' },
-    suppliers: [
-      { supplier_id: 1, price: 8500, total: 17000, deviation_pct: 0.076, alert_level: 'yellow', is_lowest: true },
-      { supplier_id: 2, price: 8800, total: 17600, deviation_pct: 0.114, alert_level: 'red', is_lowest: false },
-      { supplier_id: 3, price: null, total: null, deviation_pct: null, alert_level: 'normal', is_lowest: false },
-      { supplier_id: 4, price: 9200, total: 18400, deviation_pct: 0.165, alert_level: 'red', is_lowest: false },
-    ],
-    min_deviation: 0.076,
-    recommended: 'A',
-  },
-  {
-    material_id: 105,
-    material_name: 'PE 给水管 De63',
-    spec: 'PN1.6 · 280 米',
-    historical_avg: { price: 40.5, period: '2024-02~2025-04', projects: 6 },
-    reasonable_low: { price: 36, date: '2024-08', project: '华润城' },
-    suppliers: [
-      { supplier_id: 1, price: 38.0, total: 10640, deviation_pct: 0.056, alert_level: 'yellow', is_lowest: true },
-      { supplier_id: 2, price: null, total: null, deviation_pct: null, alert_level: 'normal', is_lowest: false },
-      { supplier_id: 3, price: 39.0, total: 10920, deviation_pct: 0.083, alert_level: 'yellow', is_lowest: false },
-      { supplier_id: 4, price: 41.0, total: 11480, deviation_pct: 0.139, alert_level: 'red', is_lowest: false },
-    ],
-    min_deviation: 0.056,
-    recommended: 'A',
-  },
-])
-
-const matrixTotals = ref([
-  { supplier_id: 1, total: 58480, avg_deviation: 0.085 },
-  { supplier_id: 2, total: 47460, avg_deviation: 0.077 },
-  { supplier_id: 3, total: 40250, avg_deviation: 0.064 },
-  { supplier_id: 4, total: 46000, avg_deviation: 0.142 },
-])
-
-const matrixSummary = computed(() => ({
-  total_materials: matrixRows.value.length,
-  total_suppliers: suppliers.value.length,
-  recommended_supplier: { id: 3, name: '上海管业' },
-  optimal_total: 53900,
-  anomaly_count: matrixRows.value.reduce(
-    (s, r) =>
-      s +
-      r.suppliers.filter(
-        (c) => c.alert_level === 'red',
-      ).length,
-    0,
-  ),
-}))
-
+// Bid matrix result for Step 3
+const matrixResult = ref<BidMatrixResult | null>(null)
 const analyzing = ref(false)
-async function startAnalysis() {
-  analyzing.value = true
-  setTimeout(() => {
-    analyzing.value = false
-    mode.value = 'matrix'
-  }, 600)
+
+// Brand-tier modal
+const brandModalVisible = ref(false)
+const brandsToTier = ref<string[]>([])
+
+// ─── Computed ────────────────────────────────────────────────────────────
+const canProceedFromConfig = computed(
+  () => !!taskConfig.category && taskConfig.supplierIds.length >= 2
+)
+const canProceedFromUpload = computed(
+  () => taskConfig.supplierIds.every(
+    (sid) => supplierUploads[sid]?.confirmed || (supplierUploads[sid]?.items?.length ?? 0) > 0
+  )
+)
+
+const selectedSuppliers = computed(() =>
+  allSuppliers.value.filter((s) => taskConfig.supplierIds.includes(s.id))
+)
+
+const matrixRows = computed(() => matrixResult.value?.rows ?? [])
+const matrixTotals = computed(() => matrixResult.value?.totals ?? [])
+const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
+const matrixSummary = computed(() => {
+  if (!matrixResult.value) return null
+  const rows = matrixResult.value.rows
+  const totals = matrixResult.value.totals
+  const suppliers = matrixResult.value.suppliers
+  const best = totals.length
+    ? totals.reduce((a, b) => (a.avg_deviation < b.avg_deviation ? a : b))
+    : null
+  const bestSupplier = best ? suppliers.find((s) => s.id === best.supplier_id) : null
+  // Optimal total: sum of min prices per row
+  const optimalTotal = rows.reduce((sum, row) => {
+    const tots = row.suppliers.filter((c) => c.total !== null).map((c) => c.total as number)
+    return sum + (tots.length ? Math.min(...tots) : 0)
+  }, 0)
+  const anomalyCount = rows.reduce(
+    (n, r) => n + r.suppliers.filter((c) => c.alert_level === 'red').length, 0,
+  )
+  return {
+    total_materials: rows.length,
+    total_suppliers: suppliers.length,
+    recommended_supplier: bestSupplier,
+    optimal_total: Math.round(optimalTotal),
+    anomaly_count: anomalyCount,
+  }
+})
+
+// ─── Data fetching ───────────────────────────────────────────────────────
+async function fetchProjects() {
+  try {
+    const { data } = await projectApi.list({ page: 1, page_size: 200 })
+    projects.value = data.items
+  } catch {
+    projects.value = []
+  }
+}
+async function fetchSuppliers() {
+  try {
+    const { data } = await supplierApi.list({ page: 1, page_size: 300 })
+    allSuppliers.value = data.items
+  } catch {
+    allSuppliers.value = []
+  }
 }
 
 onMounted(() => {
-  // 实际接入：调用 POST /api/analysis/bid-matrix
+  fetchProjects()
+  fetchSuppliers()
 })
+
+// Initialize a slot whenever a new supplier is selected
+watch(() => taskConfig.supplierIds, (ids) => {
+  for (const sid of ids) {
+    if (!supplierUploads[sid]) {
+      supplierUploads[sid] = {
+        job: null, items: [], confirmed: false, unknown_brands: [],
+      }
+    }
+  }
+}, { immediate: true })
+
+// ─── Step navigation ─────────────────────────────────────────────────────
+function goNext() {
+  if (currentStep.value === 0) {
+    if (!canProceedFromConfig.value) {
+      message.warning('请选择品类并至少 2 家供应商')
+      return
+    }
+    currentStep.value = 1
+  } else if (currentStep.value === 1) {
+    if (!canProceedFromUpload.value) {
+      message.warning('请为每家供应商上传报价单或确认其已有数据')
+      return
+    }
+    currentStep.value = 2
+    runMatrix()
+  }
+}
+
+function goBack() {
+  if (currentStep.value > 0) currentStep.value -= 1
+}
+
+// ─── Step 2: per-supplier upload handlers ────────────────────────────────
+function onExtracted(supplierId: number, job: ExtractionJob) {
+  const items = ((job.result as { items?: QuoteExtractionItem[] })?.items ?? []) as QuoteExtractionItem[]
+  supplierUploads[supplierId] = {
+    ...(supplierUploads[supplierId] || { items: [], confirmed: false, unknown_brands: [] }),
+    job,
+    items,
+    confirmed: false,
+  }
+}
+
+async function confirmSupplier(supplierId: number) {
+  const slot = supplierUploads[supplierId]
+  if (!slot || !slot.job) {
+    message.warning('请先上传该供应商的报价单')
+    return
+  }
+  try {
+    const { data } = await quoteApi.batchConfirm({
+      job_id: slot.job.id,
+      supplier_id: supplierId,
+      project_id: taskConfig.projectId,
+      category: taskConfig.category,
+      overrides: slot.items as unknown as Array<Record<string, unknown>>,
+    })
+    const result = data as BatchConfirmResult
+    slot.confirmed = true
+    slot.batch_id = result.batch_id
+    slot.unknown_brands = result.unknown_brands || []
+    message.success(`已入库 ${result.created} 条报价`)
+    if (slot.unknown_brands.length > 0) {
+      brandsToTier.value = slot.unknown_brands
+      brandModalVisible.value = true
+    }
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '入库失败'
+    message.error(detail)
+  }
+}
+
+// Skip upload for a supplier (use existing historical data)
+function skipSupplier(supplierId: number) {
+  supplierUploads[supplierId] = {
+    job: null,
+    items: [],
+    confirmed: true,
+    unknown_brands: [],
+  }
+  message.info('已跳过该供应商上传，将使用历史数据')
+}
+
+// ─── Step 3: run bid-matrix ──────────────────────────────────────────────
+async function runMatrix() {
+  if (taskConfig.supplierIds.length < 2) return
+  analyzing.value = true
+  matrixResult.value = null
+  try {
+    const { data } = await analysisApi.bidMatrix({
+      project_id: taskConfig.projectId,
+      supplier_ids: taskConfig.supplierIds,
+    })
+    matrixResult.value = data
+    if ((data.rows ?? []).length === 0) {
+      message.warning('当前条件下未找到可比的报价数据')
+    }
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '比价分析失败'
+    message.error(detail)
+  } finally {
+    analyzing.value = false
+  }
+}
 </script>
 
 <template>
   <div class="compare-page">
-    <!-- 标题区 -->
+    <!-- Page header -->
     <div class="compare-page__header">
-      <a-button type="primary">
-        <template #icon><PlusOutlined /></template>
-        新建比价项目
-      </a-button>
-      <div class="flex gap-8" style="margin-left:auto">
-        <a-button>
-          <template #icon><HistoryOutlined /></template>
-          历史分析
-        </a-button>
-        <a-button>
-          <template #icon><ExportOutlined /></template>
-          导出比价报告（含矩阵）
-        </a-button>
+      <div>
+        <h1 class="compare-page__title">招标比价分析</h1>
+        <div class="compare-page__subtitle">
+          按"配置→录入报价→比价结果"分步完成；支持 PDF/扫描件自动识别
+        </div>
       </div>
     </div>
 
-    <!-- 模式切换 -->
-    <div class="compare-page__modes">
-      <a-segmented v-model:value="mode" :options="[
-        { label: '横向对比矩阵', value: 'matrix' },
-        { label: '多供应商对比', value: 'multi' },
-        { label: '单项价格比对', value: 'single' },
-      ]">
-        <template #label="{ value, label }">
-          <div class="flex gap-8" style="align-items:center">
-            <TableOutlined v-if="value === 'matrix'" />
-            <AppstoreOutlined v-else-if="value === 'multi'" />
-            <LineChartOutlined v-else />
-            <span>{{ label }}</span>
-          </div>
-        </template>
-      </a-segmented>
-      <span style="margin-left:12px;color:rgba(0,0,0,0.45);font-size:12px">
-        默认模式 · 适合一次提交多家投标场景
-      </span>
-    </div>
+    <!-- Steps indicator -->
+    <a-steps :current="currentStep" style="margin-bottom:20px">
+      <a-step title="配置任务" description="项目 + 品类 + 供应商" />
+      <a-step title="录入报价" description="按供应商上传或使用历史数据" />
+      <a-step title="比价结果" description="横向矩阵 + 推荐供应商" />
+    </a-steps>
 
-    <!-- 项目卡片 -->
-    <a-card :body-style="{ padding: '16px 20px' }" class="mb-16">
-      <div class="compare-page__project">
-        <div>
-          <div class="compare-page__project-name">
-            {{ currentProject.name }}
-            <a-tag style="margin-left:8px">{{ currentProject.status }}</a-tag>
+    <!-- Step 0: Configure -->
+    <a-card v-if="currentStep === 0" :body-style="{ padding: '20px' }">
+      <a-form layout="vertical">
+        <a-form-item label="项目（可选；不选则跨项目比价）">
+          <a-select
+            v-model:value="taskConfig.projectId"
+            placeholder="选择项目"
+            allow-clear
+            show-search
+            :filter-option="(input: string, opt: { label?: unknown }) => String(opt.label ?? '').includes(input)"
+          >
+            <a-select-option
+              v-for="p in projects"
+              :key="p.id"
+              :value="p.id"
+              :label="p.name"
+            >
+              {{ p.name }}
+              <span v-if="p.code" style="color:rgba(0,0,0,0.45);margin-left:6px">{{ p.code }}</span>
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+
+        <a-form-item label="品类（必选）" required>
+          <a-select v-model:value="taskConfig.category" placeholder="选择品类" style="width:280px">
+            <a-select-option v-for="c in CATEGORIES" :key="c" :value="c">{{ c }}</a-select-option>
+          </a-select>
+        </a-form-item>
+
+        <a-form-item label="参与供应商（≥2 家）" required>
+          <a-select
+            v-model:value="taskConfig.supplierIds"
+            mode="multiple"
+            placeholder="选择 2-N 家参与比价的供应商"
+            show-search
+            :filter-option="(input: string, opt: { label?: unknown }) => String(opt.label ?? '').includes(input)"
+            style="width:100%"
+          >
+            <a-select-option
+              v-for="s in allSuppliers"
+              :key="s.id"
+              :value="s.id"
+              :label="s.name"
+            >
+              {{ s.name }}
+            </a-select-option>
+          </a-select>
+          <div style="margin-top:6px;font-size:12px;color:rgba(0,0,0,0.45)">
+            已选 {{ taskConfig.supplierIds.length }} 家
           </div>
-          <div class="compare-page__project-meta">
-            招标编号 {{ currentProject.code }} · 预算 ¥{{ currentProject.budget.toLocaleString() }}
-          </div>
-        </div>
-        <div class="compare-page__project-stats">
-          <div><span class="label">招标日期</span><span class="value">{{ currentProject.bid_date }}</span></div>
-          <div><span class="label">材料数量</span><span class="value">{{ currentProject.material_count }} 项</span></div>
-          <div><span class="label">邀请供应商</span><span class="value">{{ currentProject.invited_suppliers }} 家</span></div>
-        </div>
-        <a-space>
-          <a-button>
-            <template #icon><EditOutlined /></template>
-            编辑
-          </a-button>
-          <a-button>
-            <template #icon><ImportOutlined /></template>
-            批量导入 Excel
-          </a-button>
-        </a-space>
-      </div>
+        </a-form-item>
+      </a-form>
     </a-card>
 
-    <!-- 供应商进度 -->
-    <a-card :body-style="{ padding: '16px 20px' }" class="mb-16">
-      <div class="compare-page__suppliers">
-        <div
-          v-for="s in suppliers"
+    <!-- Step 1: Upload per supplier -->
+    <a-card v-else-if="currentStep === 1" :body-style="{ padding: '20px' }">
+      <a-tabs :tab-position="'left'">
+        <a-tab-pane
+          v-for="s in selectedSuppliers"
           :key="s.id"
-          class="supplier-chip"
-          :class="{ 'supplier-chip--active': s.id === activeSupplier }"
-          @click="activeSupplier = s.id"
+          :tab="`${s.name}${supplierUploads[s.id]?.confirmed ? ' ✓' : ''}`"
         >
-          <div class="supplier-chip__letter">{{ s.letter }}</div>
-          <div class="supplier-chip__body">
-            <div class="supplier-chip__name">{{ s.short }}</div>
-            <div class="supplier-chip__progress">已录入 {{ s.filled }}/{{ s.total }} 项</div>
+          <div class="upload-pane">
+            <div class="upload-pane__title">
+              {{ s.name }} 报价单上传
+              <a-tag v-if="supplierUploads[s.id]?.confirmed" color="green">已确认</a-tag>
+            </div>
+
+            <IntakeUploader
+              v-if="!supplierUploads[s.id]?.confirmed"
+              :type="'quote'"
+              :context="{ supplier_id: s.id, project_id: taskConfig.projectId, category: taskConfig.category }"
+              @extracted="(job) => onExtracted(s.id, job)"
+            />
+
+            <div v-if="(supplierUploads[s.id]?.items?.length ?? 0) > 0" style="margin-top:14px">
+              <a-alert
+                type="info"
+                show-icon
+                message="识别完成，请核对后点击「确认入库」"
+                style="margin-bottom:10px"
+              />
+              <ExtractionEditor
+                schema="quote"
+                :model-value="supplierUploads[s.id]?.items as unknown[] as any"
+                :confirm-label="'确认入库'"
+                @confirm="() => confirmSupplier(s.id)"
+                @update:model-value="(v: any) => supplierUploads[s.id].items = v"
+              />
+            </div>
+
+            <div v-else style="margin-top:14px;text-align:center">
+              <a-button @click="skipSupplier(s.id)">
+                使用历史数据，跳过上传
+              </a-button>
+            </div>
           </div>
-        </div>
-        <a-button class="supplier-chip supplier-chip--add">
-          <PlusOutlined />
-          <span style="margin-left:6px">添加供应商</span>
-        </a-button>
-      </div>
+        </a-tab-pane>
+      </a-tabs>
     </a-card>
 
-    <!-- 模式切换内容 -->
-    <template v-if="mode === 'matrix'">
-      <a-card :body-style="{ padding: '16px 20px' }" class="mb-16">
-        <template #title>
-          <span style="font-size:15px;font-weight:600">{{ currentProject.name }} · 横向对比矩阵</span>
-        </template>
-        <template #extra>
-          <a-space>
-            <a-tag color="blue">{{ matrixSummary.total_materials }} 物料</a-tag>
-            <a-tag color="purple">{{ matrixSummary.total_suppliers }} 供应商</a-tag>
-            <a-tag color="green">推荐 {{ matrixSummary.recommended_supplier.name }}</a-tag>
-            <a-tag color="orange">最优总价 ¥{{ matrixSummary.optimal_total.toLocaleString() }}</a-tag>
-            <a-tag color="red">异常 {{ matrixSummary.anomaly_count }} 项</a-tag>
-          </a-space>
-        </template>
-        <BidMatrix
-          :suppliers="suppliers.map(s => ({ id: s.id, letter: s.letter, name: s.short }))"
-          :rows="matrixRows"
-          :totals="matrixTotals"
-        />
-      </a-card>
-    </template>
+    <!-- Step 2: Results -->
+    <a-card v-else-if="currentStep === 2" :body-style="{ padding: '20px' }">
+      <template #title>
+        <span style="font-size:15px;font-weight:600">横向对比矩阵</span>
+      </template>
+      <template #extra>
+        <a-space v-if="matrixSummary">
+          <a-tag color="blue">{{ matrixSummary.total_materials }} 物料</a-tag>
+          <a-tag color="purple">{{ matrixSummary.total_suppliers }} 供应商</a-tag>
+          <a-tag v-if="matrixSummary.recommended_supplier" color="green">
+            推荐 {{ matrixSummary.recommended_supplier.name }}
+          </a-tag>
+          <a-tag color="orange">最优总价 ¥{{ matrixSummary.optimal_total.toLocaleString() }}</a-tag>
+          <a-tag color="red">异常 {{ matrixSummary.anomaly_count }} 项</a-tag>
+        </a-space>
+      </template>
 
-    <template v-else>
-      <a-card :body-style="{ padding: '16px 20px' }" class="mb-16">
-        <template #title>
-          <span style="font-size:15px;font-weight:600">
-            {{ suppliers.find(x => x.id === activeSupplier)?.short }} 报价单
-          </span>
-          <span style="margin-left:12px;font-size:12px;color:rgba(0,0,0,0.45)">
-            标签：长期合作 · 报价完整度
-          </span>
-        </template>
-        <template #extra>
-          <a-space>
-            <a-button size="small">
-              <template #icon><ImportOutlined /></template>
-              上传报价单
-            </a-button>
-            <a-button size="small">
-              <template #icon><HistoryOutlined /></template>
-              从历史复制
-            </a-button>
-          </a-space>
-        </template>
-        <a-table
-          :columns="supplierColumns"
-          :data-source="supplierQuotes"
-          :pagination="false"
-          row-key="seq"
-          size="middle"
-        />
-      </a-card>
-      <a-empty v-if="mode === 'single'" description="单项比对模块（接入 /api/analysis/compare）" />
-    </template>
+      <a-empty v-if="!analyzing && matrixRows.length === 0" description="当前条件下无可比数据" />
+      <BidMatrix
+        v-else
+        :suppliers="matrixSuppliers"
+        :rows="matrixRows"
+        :totals="matrixTotals"
+        :loading="analyzing"
+      />
+    </a-card>
 
-    <!-- 底部 CTA -->
+    <!-- Footer nav -->
     <div class="compare-page__footer">
-      <a-button type="primary" size="large" :loading="analyzing" @click="startAnalysis">
-        开始比价分析
+      <a-button v-if="currentStep > 0" @click="goBack">上一步</a-button>
+      <a-button v-if="currentStep < 2" type="primary" @click="goNext">
+        下一步
+        <template #icon><CheckCircleOutlined /></template>
+      </a-button>
+      <a-button v-if="currentStep === 2" type="primary" @click="runMatrix">
+        <template #icon><LineChartOutlined /></template>
+        重新比价
       </a-button>
     </div>
+
+    <BrandTierModal
+      v-model:visible="brandModalVisible"
+      :brands="brandsToTier"
+      :category="taskConfig.category"
+    />
   </div>
 </template>
 
@@ -334,119 +402,32 @@ onMounted(() => {
 @import '@/styles/variables.less';
 
 .compare-page {
-  &__header {
-    display: flex;
-    align-items: center;
-    margin-bottom: 16px;
-  }
-
-  &__modes {
-    display: flex;
-    align-items: center;
-    margin-bottom: 16px;
-  }
-
-  &__project {
-    display: flex;
-    align-items: center;
-    gap: 24px;
-  }
-
-  &__project-name {
-    font-size: 15px;
+  &__header { margin-bottom: 16px; }
+  &__title {
+    margin: 0;
+    font-size: 18px;
     font-weight: 600;
     color: @heading-color;
   }
-
-  &__project-meta {
+  &__subtitle {
     font-size: 12px;
-    color: @text-color-tertiary;
+    color: @text-color-secondary;
     margin-top: 4px;
   }
-
-  &__project-stats {
-    display: flex;
-    gap: 28px;
-    margin-left: auto;
-    margin-right: 16px;
-
-    .label {
-      display: block;
-      font-size: 11px;
-      color: @text-color-tertiary;
-      margin-bottom: 2px;
-    }
-    .value {
-      font-size: 14px;
-      font-weight: 600;
-      color: @heading-color;
-    }
-  }
-
-  &__suppliers {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
   &__footer {
+    margin-top: 20px;
     display: flex;
-    justify-content: center;
-    margin: 24px 0;
+    justify-content: flex-end;
+    gap: 8px;
   }
 }
 
-.supplier-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px 8px 8px;
-  border: 1px solid @border-color-base;
-  border-radius: 24px;
-  cursor: pointer;
-  transition: all 0.2s;
-  background: #fff;
-  min-width: 180px;
-
-  &:hover { border-color: @primary-color; }
-
-  &--active {
-    border-color: @primary-color;
-    background: @primary-1;
-  }
-
-  &--add {
-    color: @primary-color;
-    border-style: dashed;
-    background: transparent;
-  }
-
-  &__letter {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    background: @primary-color;
-    color: #fff;
-    text-align: center;
-    line-height: 24px;
-    font-size: 12px;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-
-  &__body {
-    line-height: 1.3;
-  }
-
-  &__name {
-    font-size: 13px;
+.upload-pane {
+  &__title {
+    font-size: 14px;
     font-weight: 500;
+    margin-bottom: 12px;
     color: @heading-color;
-  }
-
-  &__progress {
-    font-size: 11px;
-    color: @text-color-tertiary;
   }
 }
 </style>

@@ -6,6 +6,8 @@ import type {
   QuoteStats, CategoryDetailStats, MultiCompareResult,
   BidMatrixResult, BrandTier, User, LogEntry,
   InviteResult, OcrResult,
+  ExtractionJob, RecommendResponse, BatchConfirmResult,
+  SaveInvitationsResponse,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -78,6 +80,29 @@ export const quoteApi = {
     api.post<ImportResult>('/quotes/import', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+  batchConfirm: (data: {
+    job_id: string
+    supplier_id?: number
+    supplier_name?: string
+    project_id?: number
+    project_name?: string
+    category: string
+    overrides?: Array<Record<string, unknown>>
+  }) => api.post<BatchConfirmResult>('/quotes/batch-confirm', data),
+}
+
+// ─── Intake (document upload + extraction polling) ──────────────────────────
+
+export const intakeApi = {
+  upload: (form: FormData) =>
+    api.post<ExtractionJob>('/intake/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
+    }),
+  getJob: (jobId: string) =>
+    api.get<ExtractionJob>(`/intake/jobs/${jobId}`),
+  listJobs: (params?: Record<string, unknown>) =>
+    api.get<{ items: ExtractionJob[]; total: number }>('/intake/jobs', { params }),
 }
 
 // ─── Analysis ───────────────────────────────────────────────────────────────
@@ -147,10 +172,33 @@ export const logApi = {
     api.get('/logs/export', { params, responseType: 'blob' }),
 }
 
-// ─── Invite ──────────────────────────────────────────────────────────────────
+// ─── Invite (tender recommendation + persistence) ──────────────────────────
 
 export const inviteApi = {
   recommend: (data: {
+    tender_items: Array<Record<string, unknown>>
+    top_n?: number
+    project_id?: number
+  }) =>
+    api.post<RecommendResponse>('/invite/recommend', data),
+  save: (data: {
+    tender_id?: number
+    job_id?: string
+    project_id?: number
+    project_name?: string
+    project_code?: string
+    tender_date?: string
+    deadline?: string
+    items: Array<Record<string, unknown>>
+    supplier_ids: number[]
+  }) =>
+    api.post<SaveInvitationsResponse>('/invite/save', data),
+  listTenders: (params?: Record<string, unknown>) =>
+    api.get<Array<Record<string, unknown>>>('/invite/tenders', { params }),
+  getTender: (id: number) =>
+    api.get<Record<string, unknown>>(`/invite/tenders/${id}`),
+  // Legacy v1 interface — kept for compatibility, no backend implementation.
+  recommendLegacy: (data: {
     project_name: string
     project_id?: number
     specs: { category: string; sub_category: string; quantity?: number; budget?: number }[]
