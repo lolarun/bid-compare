@@ -9,6 +9,7 @@ from apps.api.routes.config import router as config_router
 from apps.api.routes.brand_tiers import router as brand_tiers_router
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.intake import router as intake_router
+from apps.api.routes.invite import router as invite_router
 
 all_routers = [
     auth_router,
@@ -20,11 +21,12 @@ all_routers = [
     config_router,
     brand_tiers_router,
     intake_router,
+    invite_router,
 ]
 
 __all__ = [
     "materials_router", "suppliers_router", "projects_router",
     "quotes_router", "analysis_router", "config_router",
-    "brand_tiers_router", "auth_router", "intake_router",
+    "brand_tiers_router", "auth_router", "intake_router", "invite_router",
     "all_routers",
 ]
