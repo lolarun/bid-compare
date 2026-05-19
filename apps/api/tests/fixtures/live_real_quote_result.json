@@ -1,0 +1,54 @@
+{
+  "supplier_name": "测试阀门供应商",
+  "quote_date": "2025-12-10",
+  "items": [
+    {
+      "material": "LHS745X型低阻力倒流防止器阀组1.6MPaDN100",
+      "spec": "DN100 LHS743X-16Q",
+      "brand": "正丰",
+      "unit": "个",
+      "qty": 1,
+      "unit_price": 2795.62,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    },
+    {
+      "material": "LHS745X型低阻力倒流防止器阀组1.6MPaDN50",
+      "spec": "DN50 LHS743X-16Q",
+      "brand": "正丰",
+      "unit": "个",
+      "qty": 1,
+      "unit_price": 1690.48,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    },
+    {
+      "material": "H142X液压水位控制阀1.6MPaDN100",
+      "spec": "DN100 100X-16Q",
+      "brand": "正丰",
+      "unit": "个",
+      "qty": 2,
+      "unit_price": 1631.72,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    },
+    {
+      "material": "自动排气阀1.0MPaDN20",
+      "spec": "DN20 AVAX-16T",
+      "brand": "正丰",
+      "unit": "个",
+      "qty": 2,
+      "unit_price": 21.47,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    }
+  ]
+}

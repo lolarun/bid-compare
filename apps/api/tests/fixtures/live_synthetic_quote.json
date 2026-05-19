@@ -1,0 +1,42 @@
+{
+  "supplier_name": "江苏华润管业",
+  "quote_date": "2026-05-20",
+  "items": [
+    {
+      "material": "DN100 阀阀",
+      "spec": "Z45X-16Q",
+      "brand": "良工",
+      "unit": "个",
+      "qty": 12,
+      "unit_price": 720.0,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    },
+    {
+      "material": "桥架",
+      "spec": "300×200 热镀锌1.2mm",
+      "brand": "华威",
+      "unit": "米",
+      "qty": 200,
+      "unit_price": 78.0,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    },
+    {
+      "material": "PPR给水管",
+      "spec": "De32 3.6mm壁厚",
+      "brand": "伟星",
+      "unit": "米",
+      "qty": 500,
+      "unit_price": 12.8,
+      "unit_price_excl_tax": null,
+      "total_price": null,
+      "tax_rate": null,
+      "remark": ""
+    }
+  ]
+}

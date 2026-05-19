@@ -1,0 +1,48 @@
+{
+  "project_name": "测试机电材料采购招标 — 桥架部分",
+  "project_code": "TEST-BID-2026-001",
+  "tender_date": "2026-05-20",
+  "deadline": "2026-06-15",
+  "items": [
+    {
+      "name": "",
+      "category": "桥架",
+      "spec": "300*200",
+      "unit": "m",
+      "quantity": 20,
+      "remark": "热浸镀锌钢板"
+    },
+    {
+      "name": "",
+      "category": "桥架",
+      "spec": "300*150",
+      "unit": "m",
+      "quantity": 84,
+      "remark": "热浸镀锌钢板"
+    },
+    {
+      "name": "",
+      "category": "桥架",
+      "spec": "200x100",
+      "unit": "m",
+      "quantity": 80,
+      "remark": "热浸镀锌钢板"
+    },
+    {
+      "name": "",
+      "category": "桥架",
+      "spec": "1200*200",
+      "unit": "m",
+      "quantity": 46,
+      "remark": "热浸镀锌钢板"
+    },
+    {
+      "name": "",
+      "category": "桥架",
+      "spec": "1000*200",
+      "unit": "m",
+      "quantity": 10,
+      "remark": "热浸镀锌钢板"
+    }
+  ]
+}
