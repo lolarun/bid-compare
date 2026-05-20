@@ -2,9 +2,53 @@
 
 Normalizes spec formats, synonyms, and common variations found in
 construction MEP (mechanical/electrical/plumbing) bidding documents.
+
+AUDIT-FIX M4: output is now Unicode-stable. The same conceptual material
+written in different forms (full-width vs half-width digits, mixed case,
+extra whitespace, NFC vs NFKC composition) is normalized to a SINGLE
+canonical string before further rules run. This is what makes
+(category, standard_name, spec) a reliable dedup key in Material rows.
 """
 
 import re
+import unicodedata
+
+
+# ─── Stable canonical form (run first, before all other rules) ────────────
+
+
+def _canonicalize(text: str) -> tuple[str, list[str]]:
+    """Make `text` byte-stable across input encodings.
+
+    Order matters here — whitespace conversion runs BEFORE the control/
+    format-character strip, because `\\t` and `\\n` are `Cc` (control) and
+    would otherwise be deleted instead of normalized to a space.
+
+    Steps:
+    1. NFKC normalization (full-width ＤＮ/１００ → half-width DN/100).
+    2. Convert ALL whitespace characters (including \\t, \\n, \\r, \\u3000
+       full-width space) to a single ASCII space.
+    3. Strip remaining Cc/Cf chars (zero-width, formatting, leftover
+       controls) — they're not whitespace by this point.
+    4. Uppercase ASCII letters (DN50 == dn50 == Dn50 conceptually); CJK
+       is case-less so unaffected.
+    5. Collapse multi-space runs to single, trim ends.
+    """
+    changes: list[str] = []
+    original = text
+    # 1. NFKC
+    text = unicodedata.normalize("NFKC", text)
+    # 2. Any whitespace → single ASCII space (BEFORE Cc strip so \t/\n survive)
+    text = re.sub(r"\s", " ", text)
+    # 3. strip remaining zero-width / format / control chars (NOT spaces)
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Cc"))
+    # 4. ASCII letters → uppercase
+    text = "".join(c.upper() if "a" <= c <= "z" else c for c in text)
+    # 5. collapse whitespace runs + trim
+    text = re.sub(r" +", " ", text).strip()
+    if text != original:
+        changes.append("Unicode 规范化")
+    return text, changes
 
 # ─── Spec format normalization ───────────────────────────────────────────────
 
@@ -125,6 +169,13 @@ def _normalize_whitespace(text: str) -> tuple[str, list[str]]:
 def standardize_name(text: str, category: str | None = None) -> dict:
     """Standardize a material name/spec string.
 
+    Order matters:
+    1. canonicalize (Unicode NFKC + case + whitespace) — most stable layer
+    2. dimensions (300*150 → 300×150) — uses ASCII characters after step 1
+    3. DN normalization (Φ108 → DN100, 4寸 → DN100) — depends on uppercase
+       letters from step 1
+    4. synonyms (热镀锌 → 热浸镀锌) — runs on already-canonical text
+
     Returns: {"original": ..., "standardized": ..., "changes": [...]}
     """
     if not text or not text.strip():
@@ -133,7 +184,8 @@ def standardize_name(text: str, category: str | None = None) -> dict:
     original = text
     all_changes: list[str] = []
 
-    text, changes = _normalize_whitespace(text)
+    # 1. Canonical form (was: only basic whitespace normalization)
+    text, changes = _canonicalize(text)
     all_changes.extend(changes)
 
     text, changes = _normalize_dimensions(text)
@@ -150,3 +202,9 @@ def standardize_name(text: str, category: str | None = None) -> dict:
         "standardized": text,
         "changes": all_changes,
     }
+
+
+def standard_key(text: str, category: str | None = None) -> str:
+    """Convenience: return just the canonical string suitable for use as a
+    dedup key. Two inputs that "mean the same thing" produce the same key."""
+    return standardize_name(text, category)["standardized"]

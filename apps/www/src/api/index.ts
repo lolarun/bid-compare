@@ -78,7 +78,8 @@ export const quoteApi = {
     api.get<QuoteStats>('/quotes/stats', { params }),
   import: (formData: FormData) =>
     api.post<ImportResult>('/quotes/import', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      // Don't set Content-Type explicitly — axios will add the
+      // required boundary when sending FormData if we leave it alone.
     }),
   batchConfirm: (data: {
     job_id: string
@@ -96,7 +97,8 @@ export const quoteApi = {
 export const intakeApi = {
   upload: (form: FormData) =>
     api.post<ExtractionJob>('/intake/upload', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      // Don't set Content-Type explicitly — axios will add the
+      // required boundary when sending FormData if we leave it alone.
       timeout: 60000,
     }),
   getJob: (jobId: string) =>
@@ -211,7 +213,8 @@ export const inviteApi = {
 export const ocrApi = {
   parse: (formData: FormData) =>
     api.post<OcrResult>('/quotes/ocr', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      // Don't set Content-Type explicitly — axios will add the
+      // required boundary when sending FormData if we leave it alone.
     }),
   confirm: (data: { items: OcrResult['items']; batch_id?: string }) =>
     api.post('/quotes/ocr/confirm', data),

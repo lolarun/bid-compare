@@ -115,12 +115,13 @@ describe('quoteApi', () => {
   })
 
   it('import calls POST /quotes/import', async () => {
+    // Audit-fix: we no longer set Content-Type explicitly — axios attaches
+    // the proper "multipart/form-data; boundary=..." when given FormData,
+    // and explicit override stripped the boundary on some servers.
     const formData = new FormData()
     mockApi.post.mockResolvedValue({ data: { status: 'ok', imported: 5 } })
     await quoteApi.import(formData)
-    expect(mockApi.post).toHaveBeenCalledWith('/quotes/import', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
+    expect(mockApi.post).toHaveBeenCalledWith('/quotes/import', formData, {})
   })
 })
 

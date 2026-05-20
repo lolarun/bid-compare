@@ -1,10 +1,11 @@
 """Supplier CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
-from apps.api.models import Supplier
+from apps.api.models import BidInvitation, Quote, Supplier
 from apps.api.schemas import SupplierCreate, SupplierUpdate, SupplierOut
 
 router = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
@@ -71,8 +72,42 @@ def update_supplier(supplier_id: int, body: SupplierUpdate, db: Session = Depend
 
 @router.delete("/{supplier_id}", status_code=204)
 def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
+    """Soft-delete via referential-integrity guard.
+
+    Policy (业务决策, 2026-05-20): suppliers are NEVER physically deleted
+    once they carry historical data — quotes/invitations would either
+    cascade away or become orphans, both unacceptable for audit trails.
+
+    To "remove" a supplier from active use, edit it (set status / rename),
+    don't delete. We return 409 Conflict with the reference counts so the
+    UI can show a sensible error.
+    """
     sup = db.get(Supplier, supplier_id)
     if not sup:
         raise HTTPException(404, "Supplier not found")
+
+    quote_count = db.query(func.count(Quote.id)).filter(
+        Quote.supplier_id == supplier_id
+    ).scalar() or 0
+    invitation_count = db.query(func.count(BidInvitation.id)).filter(
+        BidInvitation.supplier_id == supplier_id
+    ).scalar() or 0
+
+    if quote_count > 0 or invitation_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"Supplier '{sup.name}' cannot be deleted: it is "
+                    f"referenced by {quote_count} quote(s) and "
+                    f"{invitation_count} invitation(s). "
+                    "Delete or reassign these records first, OR edit the "
+                    "supplier instead of deleting it."
+                ),
+                "quote_count": quote_count,
+                "invitation_count": invitation_count,
+            },
+        )
+
     db.delete(sup)
     db.commit()

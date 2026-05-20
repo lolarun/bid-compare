@@ -22,6 +22,7 @@ from apps.api.services.document_ingestion import (
     IngestionType,
     _hash_context,
 )
+from apps.api.services.standardize import standardize_name, standard_key
 from apps.api.services.supplier_recommend import (
     infer_categories,
     _is_category_token_match,
@@ -484,6 +485,134 @@ class TestPeriodicStuckJobSweep:
             assert "Stuck" in (job.error or "")
         finally:
             db.close()
+
+
+# ─── Audit-fix M1: supplier deletion guard ────────────────────────────────
+class TestSupplierDeletionGuard:
+    """Policy: suppliers referenced by quotes/invitations cannot be deleted."""
+
+    @pytest.fixture
+    def client(self, temp_db):
+        from apps.api.main import app
+        with TestClient(app) as c:
+            yield c
+
+    def test_delete_unreferenced_supplier_succeeds(self, client):
+        r = client.post("/api/suppliers", json={"name": "可以删除"})
+        assert r.status_code == 201
+        sid = r.json()["id"]
+        r2 = client.delete(f"/api/suppliers/{sid}")
+        assert r2.status_code == 204
+
+    def test_delete_supplier_with_quotes_rejected(self, client, temp_db):
+        # Create supplier + material + quote
+        r = client.post("/api/suppliers", json={"name": "有报价"})
+        sid = r.json()["id"]
+
+        _, SessionLocal = temp_db
+        from apps.api.models import Material, Quote
+        db = SessionLocal()
+        try:
+            mat = Material(
+                material_code="TEST-001",
+                standard_name="测试材料",
+                profession="电气",
+                category="桥架",
+                sub_category="",
+                spec="",
+            )
+            db.add(mat)
+            db.flush()
+            db.add(Quote(material_id=mat.id, supplier_id=sid, unit_price=100))
+            db.commit()
+        finally:
+            db.close()
+
+        r = client.delete(f"/api/suppliers/{sid}")
+        assert r.status_code == 409
+        body = r.json()["detail"]
+        assert body["quote_count"] == 1
+        assert "cannot be deleted" in body["message"]
+
+    def test_delete_supplier_with_invitations_rejected(self, client, temp_db):
+        r = client.post("/api/suppliers", json={"name": "有邀请"})
+        sid = r.json()["id"]
+
+        _, SessionLocal = temp_db
+        from apps.api.models import TenderDocument, BidInvitation
+        db = SessionLocal()
+        try:
+            tender = TenderDocument(project_name="P", items=[])
+            db.add(tender)
+            db.flush()
+            db.add(BidInvitation(tender_id=tender.id, supplier_id=sid))
+            db.commit()
+        finally:
+            db.close()
+
+        r = client.delete(f"/api/suppliers/{sid}")
+        assert r.status_code == 409
+        assert r.json()["detail"]["invitation_count"] == 1
+
+    def test_delete_unknown_supplier_404(self, client):
+        r = client.delete("/api/suppliers/99999")
+        assert r.status_code == 404
+
+
+# ─── Audit-fix M4: standardize_name output stability ───────────────────────
+class TestStandardizeStability:
+    """The audit warned: 'two OCR runs produce slightly different output →
+    two Material rows for same material'. After refactor, equivalent
+    inputs MUST produce the same canonical form."""
+
+    def test_fullwidth_to_halfwidth(self):
+        # Full-width "ＤＮ５０" should normalize to half-width "DN50"
+        assert standard_key("ＤＮ５０ 阀门") == standard_key("DN50 阀门")
+        assert standard_key("PPR ３２") == standard_key("PPR 32")
+
+    def test_case_insensitive_ascii(self):
+        assert standard_key("dn50 阀门") == standard_key("DN50 阀门")
+        assert standard_key("Dn50 阀门") == standard_key("DN50 阀门")
+        # Chinese is unaffected
+        assert "阀门" in standard_key("dn50 阀门")
+
+    def test_whitespace_stability(self):
+        # Multiple spaces / full-width spaces / leading-trailing whitespace
+        assert standard_key("  DN50   阀门  ") == standard_key("DN50 阀门")
+        assert standard_key("DN50　阀门") == standard_key("DN50 阀门")  # 全角空格
+        assert standard_key("DN50\t阀门") == standard_key("DN50 阀门")
+        assert standard_key("DN50\n阀门") == standard_key("DN50 阀门")
+
+    def test_zero_width_chars_stripped(self):
+        # Zero-width space (U+200B) sometimes sneaks in from copy-paste
+        zwsp = "DN50​ 阀门"
+        assert standard_key(zwsp) == standard_key("DN50 阀门")
+
+    def test_idempotent(self):
+        # standardize(standardize(x)) == standardize(x)
+        once = standard_key("ＤＮ50 蝶型阀")
+        twice = standard_key(once)
+        assert once == twice
+
+    def test_synonyms_after_canonicalize(self):
+        # "蝶型阀" → "蝶阀" should still work after canonicalization
+        result = standardize_name("ＤＮ100 蝶型阀")
+        assert "蝶阀" in result["standardized"]
+        assert "DN100" in result["standardized"]
+
+    def test_empty_input_unchanged(self):
+        assert standardize_name("")["standardized"] == ""
+        assert standardize_name("   ")["standardized"] == "   "  # whitespace-only short-circuits
+
+    def test_dn_normalization_still_works(self):
+        # Φ108 → DN100 must still trigger after canonicalization
+        result = standardize_name("Φ108 不锈钢管")
+        assert "DN100" in result["standardized"]
+
+    def test_dimension_normalization_still_works(self):
+        # 300*150 → 300×150 must still trigger
+        result = standardize_name("桥架 300*150")
+        assert "300×150" in result["standardized"]
 
 
 # ─── Intelligence audit-fix H6: known-bad memoization ──────────────────────
