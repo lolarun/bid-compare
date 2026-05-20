@@ -9,8 +9,13 @@ Endpoints:
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
 
 from apps.api.core.database import get_db
 from apps.api.models import BidInvitation, Supplier, TenderDocument
@@ -101,7 +106,11 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         if not sup:
             skipped_ids.append(sid)
             continue
-        # Skip duplicates within same tender (uq_tender_supplier backstop)
+        # AUDIT-FIX L3: IntegrityError-safe insert.
+        # Two concurrent requests for the same (tender_id, supplier_id)
+        # both pass the existence check, both add, second commit raises
+        # IntegrityError → was 500. Now we catch + re-fetch and treat the
+        # row as if we lost the race (re-using the winner's invitation).
         existing = db.query(BidInvitation).filter_by(
             tender_id=tender.id, supplier_id=sid
         ).first()
@@ -118,7 +127,24 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
                 status="pending",
             )
             db.add(inv)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError:
+                # Concurrent peer wrote the row first; abandon our copy
+                # and adopt theirs.
+                db.rollback()
+                log.info(
+                    "invite/save: concurrent IntegrityError on tender=%s "
+                    "supplier=%s; reusing peer's row", tender.id, sid
+                )
+                inv = db.query(BidInvitation).filter_by(
+                    tender_id=tender.id, supplier_id=sid
+                ).first()
+                if not inv:
+                    # Lost the race AND the peer's row vanished — surface
+                    # rather than silently skip so the user can retry.
+                    log.warning("invite/save: lost race and peer row missing")
+                    continue
         saved.append(SavedInvitation(
             id=inv.id,
             supplier_id=sid,

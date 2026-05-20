@@ -13,7 +13,11 @@ from fastapi.staticfiles import StaticFiles
 
 from apps.api.core.config import get_settings
 from apps.api.core.database import init_db, SessionLocal
-from apps.api.core.runtime import set_runtime_pipeline
+from apps.api.core.runtime import (
+    get_pool_stats,
+    set_runtime_pipeline,
+    shutdown_runtime,
+)
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.providers.qwen_vl import QwenVLProvider
@@ -117,7 +121,8 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(sweep_task, timeout=2.0)
         except asyncio.TimeoutError:
             sweep_task.cancel()
-        set_runtime_pipeline(None)
+        # Shuts down ThreadPoolExecutor + clears pipeline singleton
+        shutdown_runtime()
         app.state.extraction_pipeline = None
 
 
@@ -149,6 +154,23 @@ def health():
         getattr(pipeline.provider, "name", "unknown") if pipeline else "uninitialised"
     )
     return {"status": "ok", "service": "mempas", "llm_provider": provider_name}
+
+
+@app.get("/api/health/queue")
+def health_queue():
+    """Extraction thread-pool depth — used to decide when to scale to arq.
+
+    Returns:
+      - active_threads: total threads in the pool (busy + idle)
+      - queue_depth:    tasks waiting for a free thread (the key signal)
+      - max_workers:    configured ceiling
+
+    Operational thresholds (recommend in deployment README):
+      - queue_depth > 0 sustained for ~minutes → consider doubling threads
+      - queue_depth > max_workers → upgrade to arq + Redis
+      - active_threads = max_workers AND queue_depth > 0 sustained → same
+    """
+    return get_pool_stats()
 
 
 # Serve Vue SPA static files (production build)

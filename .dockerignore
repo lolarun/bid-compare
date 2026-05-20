@@ -1,0 +1,37 @@
+# Build artefacts + local junk
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.coverage
+htmlcov
+
+# Frontend
+apps/www/node_modules
+apps/www/dist
+apps/www/.vite
+
+# Local data — must NOT enter the image
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/uploads
+
+# Secrets — refuse to bake into the image
+**/.env
+**/.env.local
+
+# Test fixtures live image is too big otherwise (~50 MB of PNGs/JSON)
+apps/api/tests/fixtures
+
+# Plans, docs, IDE
+.claude
+.idea
+.vscode
+docs/antdv-pro
+*.md
+!apps/api/.env.example
+!docs/DEPLOY.md

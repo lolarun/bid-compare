@@ -1,0 +1,61 @@
+# MEMPAS — single-host deployment for Aliyun ECS
+#
+# Two containers, one shared volume for the SQLite DB + uploads:
+#   - backend:  Python/FastAPI on :8000, persists to /app/data
+#   - frontend: nginx on :80 (reverse-proxies /api to backend)
+#
+# Bring up:        docker compose up -d --build
+# Update code:     docker compose up -d --build  (idempotent)
+# Logs:            docker compose logs -f backend
+# Backup the DB:   cp data/mempas.db data/mempas-$(date +%F).db.bak
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: mempas-api
+    restart: unless-stopped
+    env_file:
+      # Holds DASHSCOPE_API_KEY etc. — see apps/api/.env.example
+      - apps/api/.env
+    environment:
+      # Override the in-image defaults if needed. The compose env_file above
+      # takes precedence over these.
+      UPLOAD_DIR: /app/data/uploads
+      EXTRACTION_MODE: thread
+      EXTRACTION_THREAD_POOL_SIZE: "8"
+    volumes:
+      - ./data:/app/data
+    # Don't expose 8000 to the host — only the frontend (via the internal
+    # network) can talk to it. Defence-in-depth in case the firewall is
+    # misconfigured.
+    expose:
+      - "8000"
+    deploy:
+      resources:
+        limits:
+          # ECS sized 4 vCPU / 8 GB: leave headroom for OS + nginx
+          cpus: "3.0"
+          memory: 5G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/www/Dockerfile
+    container_name: mempas-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      # Uncomment after attaching a TLS cert (e.g. via Aliyun CDN/SLB)
+      # - "443:443"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M

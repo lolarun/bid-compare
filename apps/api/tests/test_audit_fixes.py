@@ -615,6 +615,211 @@ class TestStandardizeStability:
         assert "300×150" in result["standardized"]
 
 
+# ─── Audit-fix L3: concurrent invite/save IntegrityError safety ───────────
+class TestConcurrentInviteSave:
+    """Two concurrent POST /api/invite/save for the same (tender, supplier)
+    must not crash with 500. The losing thread re-fetches the peer's row."""
+
+    @pytest.fixture
+    def setup_db_with_supplier(self, temp_db):
+        _, SessionLocal = temp_db
+        from apps.api.models import Supplier
+        db = SessionLocal()
+        try:
+            sup = Supplier(name="Acme Concurrent")
+            db.add(sup)
+            db.commit()
+            sid = sup.id
+        finally:
+            db.close()
+        return sid
+
+    def test_concurrent_save_no_500(self, temp_db, monkeypatch, setup_db_with_supplier):
+        """SQLite serializes file-level writes so a "true" race in a unit
+        test is impossible. We simulate it by:
+        1. Pre-creating a BidInvitation (the "peer's winner row")
+        2. Patching the route's existence-check to LIE — return None — so
+           the route believes no row exists and tries to add a duplicate
+        3. The duplicate add hits the uq_tender_supplier constraint
+        4. Our IntegrityError handler must catch, rollback, re-fetch, and
+           return the peer's row — NOT raise 500.
+        """
+        from apps.api.models import BidInvitation, TenderDocument
+        from apps.api.main import app
+
+        _, SessionLocal = temp_db
+        sid = setup_db_with_supplier
+
+        # Step 1: pre-insert the "winner" row that the route will collide with.
+        db = SessionLocal()
+        try:
+            tender = TenderDocument(project_name="Race Test", items=[])
+            db.add(tender)
+            db.flush()
+            tender_id = tender.id
+            db.add(BidInvitation(
+                tender_id=tender_id,
+                supplier_id=sid,
+                score=999.0,
+                rank=99,
+                reason={"summary": "peer winner"},
+                status="pending",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        # Step 2: patch BidInvitation queries to return None ONLY for the
+        # exact existence-check call in the route. We do this by replacing
+        # Query.filter_by's first() on a per-call basis via a sentinel.
+        import apps.api.routes.invite as invite_mod
+        original_recommend = invite_mod.recommend_suppliers
+        # Don't actually recompute recommendations — keep test fast
+        monkeypatch.setattr(invite_mod, "recommend_suppliers", lambda *a, **kw: [])
+
+        # Patch the existence check inside the loop. We monkeypatch
+        # `Session.query` to inject a wrapper that returns None for
+        # BidInvitation existence checks.
+        from sqlalchemy.orm import Session
+        original_query = Session.query
+        lie_count = {"n": 0}
+
+        class LyingFirst:
+            def __init__(self, real_query):
+                self._q = real_query
+
+            def filter_by(self, **kw):
+                self._kw = kw
+                return self
+
+            def first(self):
+                # Lie ONCE for the BidInvitation existence check
+                if (
+                    "tender_id" in self._kw
+                    and "supplier_id" in self._kw
+                    and lie_count["n"] == 0
+                ):
+                    lie_count["n"] += 1
+                    return None
+                return self._q.filter_by(**self._kw).first()
+
+        def patched_query(self, *entities, **kw):
+            real = original_query(self, *entities, **kw)
+            # Only intercept queries that look up BidInvitation
+            if entities and entities[0] is BidInvitation:
+                return LyingFirst(real)
+            return real
+
+        monkeypatch.setattr(Session, "query", patched_query)
+
+        # Step 3: call the route — it will try to add a duplicate, hit
+        # IntegrityError, recover, and return the pre-existing row.
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/invite/save",
+                json={
+                    "tender_id": tender_id,
+                    "items": [],
+                    "supplier_ids": [sid],
+                },
+            )
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["invitations"]) == 1
+        inv = body["invitations"][0]
+        # We adopted the peer's row (rank=99, score=999.0) rather than crashing
+        assert inv["rank"] == 99
+        assert inv["score"] == 999.0
+        # And the lie was triggered (i.e. the IntegrityError path actually ran)
+        assert lie_count["n"] == 1
+
+
+# ─── Audit-fix L4-α: ThreadPoolExecutor extraction ────────────────────────
+class TestThreadPoolExtraction:
+    """Thread-pool path is the production code path; tests assert pool
+    initialisation, queue-depth endpoint, and submit semantics."""
+
+    def test_get_pool_stats_unitialised(self):
+        from apps.api.core import runtime as rt
+        # Reset to clean state (other tests may have created a pool)
+        if rt._executor is not None:
+            rt._shutdown_executor()
+        stats = rt.get_pool_stats()
+        assert stats["active_threads"] == 0
+        assert stats["queue_depth"] == 0
+        assert stats["max_workers"] > 0  # default 8
+
+    def test_pool_size_via_env(self, monkeypatch):
+        monkeypatch.setenv("EXTRACTION_THREAD_POOL_SIZE", "3")
+        from apps.api.core import runtime as rt
+        if rt._executor is not None:
+            rt._shutdown_executor()
+        # Trigger creation via stats call
+        stats = rt.get_pool_stats()
+        # When uninitialised, falls back to env value
+        assert stats["max_workers"] == 3
+
+    def test_health_queue_endpoint(self, temp_db, monkeypatch, tmp_path):
+        monkeypatch.setenv("LLM_PROVIDER", "mock")
+        monkeypatch.setattr(
+            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        )
+        monkeypatch.setattr(
+            "apps.api.main._build_pipeline",
+            lambda: ExtractionPipeline(MockProvider()),
+        )
+        from apps.api.main import app
+        with TestClient(app) as client:
+            r = client.get("/api/health/queue")
+            assert r.status_code == 200
+            body = r.json()
+            assert "active_threads" in body
+            assert "queue_depth" in body
+            assert "max_workers" in body
+            assert body["max_workers"] >= 1
+
+    def test_inline_mode_runs_synchronously(self, temp_db, monkeypatch, tmp_path):
+        """EXTRACTION_MODE=inline → submit_extraction blocks until done."""
+        monkeypatch.setenv("EXTRACTION_MODE", "inline")
+        monkeypatch.setenv("LLM_PROVIDER", "mock")
+        monkeypatch.setattr(
+            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        )
+
+        from apps.api.core import runtime as rt
+        from apps.api.intelligence.pipeline import ExtractionPipeline
+        from apps.api.intelligence.providers.mock import MockProvider
+        from apps.api.models import ExtractionJob
+        from apps.api.services.document_ingestion import (
+            DocumentIngestionService, IngestionType,
+        )
+
+        canned = {"supplier_name": "X", "items": [{"material": "Y"}]}
+        rt.set_runtime_pipeline(ExtractionPipeline(MockProvider(canned=canned)))
+
+        _, SessionLocal = temp_db
+        db = SessionLocal()
+        try:
+            svc = DocumentIngestionService(db, rt.get_runtime_pipeline())
+            job = svc.create_job(_png(), "x.png", IngestionType.QUOTE, {})
+        finally:
+            db.close()
+
+        # In inline mode this call BLOCKS until done
+        rt.submit_extraction(job.id)
+
+        db = SessionLocal()
+        try:
+            job = db.get(ExtractionJob, job.id)
+            assert job.status == "done", job.status
+            # Pipeline post-processes the canned data so result != canned
+            # exactly. Verify the items survived normalisation.
+            assert job.result["items"][0]["material"] == "Y"
+        finally:
+            db.close()
+
+
 # ─── Intelligence audit-fix H6: known-bad memoization ──────────────────────
 class TestQwenVLBadModelMemo:
     def test_known_bad_skipped_on_subsequent_call(self, monkeypatch):

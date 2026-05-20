@@ -13,7 +13,6 @@ from typing import Optional
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -24,6 +23,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.runtime import submit_extraction
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.schemas.intake import JobListResponse, JobResponse
 from apps.api.services.document_ingestion import (
@@ -47,7 +47,6 @@ def get_pipeline(request: Request) -> ExtractionPipeline:
 
 @router.post("/upload", response_model=JobResponse)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     type: str = Form(...),
     project_id: Optional[int] = Form(None),
@@ -57,9 +56,14 @@ async def upload_document(
     db: Session = Depends(get_db),
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> JobResponse:
-    """Create an extraction job and schedule background execution.
+    """Create an extraction job and queue it on the thread pool.
 
-    Returns immediately; poll GET /jobs/{id} for status.
+    HTTP returns immediately (<100 ms typical). Caller polls
+    GET /api/intake/jobs/{id} for status (pending → running → done/failed).
+
+    AUDIT-FIX L4: previously used FastAPI BackgroundTasks which runs after
+    response on the same event loop, blocking the worker. Now uses a
+    dedicated ThreadPoolExecutor — see core/runtime.py.
     """
     if type not in {t.value for t in IngestionType}:
         raise HTTPException(status_code=400, detail=f"Invalid type: {type}")
@@ -90,10 +94,10 @@ async def upload_document(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Only schedule background work if the job is brand new (pending).
-    # Idempotent hits returning a DONE/RUNNING job should NOT re-run.
+    # Only queue if the job is brand new — idempotent hits returning a
+    # DONE/RUNNING job should NOT re-run.
     if job.status == "pending":
-        background_tasks.add_task(_run_job_in_background, job.id)
+        submit_extraction(job.id)
 
     return JobResponse.model_validate(job)
 
@@ -127,36 +131,5 @@ def list_jobs(
     )
 
 
-# ─── background task wrapper ──────────────────────────────────────────────
-def _run_job_in_background(job_id: str) -> None:
-    """Free-function so BackgroundTasks pickles it cleanly.
-
-    Creates its own DB session and pipeline reference inside the task —
-    do NOT capture the request's `db` or `pipeline` (they go out of scope).
-    """
-    from apps.api.core.database import SessionLocal
-    from apps.api.core.runtime import get_runtime_pipeline
-
-    pipeline = get_runtime_pipeline()
-    if pipeline is None:
-        # No pipeline available — write failure to job
-        db = SessionLocal()
-        try:
-            from apps.api.models import ExtractionJob
-            from apps.api.services.document_ingestion import JobStatus
-
-            job = db.get(ExtractionJob, job_id)
-            if job:
-                job.status = JobStatus.FAILED.value
-                job.error = "Extraction pipeline not available at task time"
-                db.commit()
-        finally:
-            db.close()
-        return
-
-    db = SessionLocal()
-    try:
-        service = DocumentIngestionService(db, pipeline)
-        service.run_job(job_id)
-    finally:
-        db.close()
+# Extraction is now dispatched via core/runtime.submit_extraction(), which
+# uses a ThreadPoolExecutor sized for IO-bound LLM calls. See runtime.py.

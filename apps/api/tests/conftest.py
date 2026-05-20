@@ -2,15 +2,26 @@
 
 Each test runs against an isolated SQLite DB under tmp_path so the production
 mempas.db is never touched.
+
+Extraction jobs run INLINE during tests (EXTRACTION_MODE=inline auto-set
+below) so TestClient responses include completed job state. Production uses
+the thread-pool path.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+
+# Force inline extraction for the whole test session so legacy tests that
+# expect BackgroundTasks-style synchronous completion still work without
+# adding polling everywhere.
+os.environ.setdefault("EXTRACTION_MODE", "inline")
 
 
 # Marker for end-to-end tests that need a real DASHSCOPE_API_KEY.
