@@ -57,7 +57,7 @@ def update_config(key: str, body: ConfigUpdate, db: Session = Depends(get_db)):
 
 def _init_defaults(db: Session):
     defaults = [
-        ("scoring_weights", DEFAULT_SCORING_WEIGHTS, "供应商评分权重：price/history/completeness/brand/commercial"),
+        ("scoring_weights", DEFAULT_SCORING_WEIGHTS, "供应商评分权重：price_competitiveness/history_cooperation/quote_completeness/brand_compliance/commercial_terms"),
         ("thresholds", DEFAULT_THRESHOLDS, "各品类价格偏差阈值：{yellow, red}"),
         ("extended_attr_schemas", EXTENDED_ATTR_SCHEMAS, "各品类扩展属性 Schema"),
     ]

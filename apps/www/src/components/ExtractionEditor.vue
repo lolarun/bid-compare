@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons-vue'
 
@@ -130,7 +130,7 @@ function onConfirm() {
     .map((r) => {
       const copy: Record<string, unknown> = { ...r }
       delete copy._rid
-      return copy as Row
+      return copy as unknown as Row
     })
   if (cleaned.length === 0) {
     message.warning('至少需要 1 行有效数据（材料名称必填）')
@@ -207,7 +207,7 @@ const columns = computed(() => {
             :step="column.dataIndex === 'tax_rate' ? 0.01 : 0.1"
             style="width:100%"
             size="small"
-            @update:value="(v) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
+            @update:value="(v: number | null) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
           />
         </template>
 
@@ -217,7 +217,7 @@ const columns = computed(() => {
             :value="(record as Record<string, string>)[column.dataIndex as string]"
             size="small"
             :placeholder="String(column.title)"
-            @update:value="(v) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
+            @update:value="(v: string) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
           />
         </template>
       </template>

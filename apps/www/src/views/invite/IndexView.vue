@@ -62,6 +62,10 @@ function onExtracted(job: ExtractionJob) {
   recommendations.value = []
   selectedSupplierIds.value = []
   savedTenderId.value = null
+  // Auto-trigger recommendation immediately after extraction
+  if (shape.items.length > 0) {
+    generateRecommendations()
+  }
 }
 
 function clearAll() {

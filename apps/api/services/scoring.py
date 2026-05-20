@@ -12,13 +12,19 @@ def get_scoring_weights(db: Session) -> dict:
     return cfg.value if cfg else DEFAULT_SCORING_WEIGHTS
 
 
-def score_supplier(db: Session, supplier_id: int, category: str | None = None) -> dict:
-    """Score a supplier based on the 5-dimension model (v2)."""
+def score_supplier(
+    db: Session, supplier_id: int, category: str | None = None,
+    weights: dict[str, float] | None = None,
+) -> dict:
+    """Score a supplier based on the 5-dimension model (v2).
+
+    If *weights* is provided it overrides the stored configuration weights.
+    """
     supplier = db.get(Supplier, supplier_id)
     if not supplier:
         raise ValueError(f"Supplier {supplier_id} not found")
 
-    weights = get_scoring_weights(db)
+    weights = weights or get_scoring_weights(db)
 
     # ── 1. Price competitiveness (使用合理史低而非中位价) ─────────────────
     q = db.query(Quote).filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0)
@@ -76,12 +82,15 @@ def score_supplier(db: Session, supplier_id: int, category: str | None = None) -
     # ── 5. Commercial terms ───────────────────────────────────────────────
     commercial_score = float(supplier.cooperation_score) if supplier.cooperation_score > 0 else 60.0
 
+    # Keys must match DEFAULT_SCORING_WEIGHTS / SettingsView.vue (long names).
+    # Bug-fix 2026-05-21: previously used short keys ("price", "history", ...)
+    # which never matched the stored config → user weight changes had zero effect.
     total = (
-        price_score * weights.get("price", 0.40)
-        + history_score * weights.get("history", 0.20)
-        + completeness_score * weights.get("completeness", 0.15)
-        + brand_score * weights.get("brand", 0.15)
-        + commercial_score * weights.get("commercial", 0.10)
+        price_score * weights.get("price_competitiveness", 0.40)
+        + history_score * weights.get("history_cooperation", 0.20)
+        + completeness_score * weights.get("quote_completeness", 0.15)
+        + brand_score * weights.get("brand_compliance", 0.15)
+        + commercial_score * weights.get("commercial_terms", 0.10)
     )
 
     return {
@@ -121,6 +130,7 @@ def _compute_brand_score(db: Session, supplier_id: int, category: str | None) ->
 def compare_multiple_suppliers(
     db: Session, supplier_ids: list[int], category: str,
     project_id: int | None = None,
+    weights: dict[str, float] | None = None,
 ) -> dict:
     """Compare multiple suppliers for the same category."""
     results = []
@@ -145,7 +155,7 @@ def compare_multiple_suppliers(
         ).scalar() or 0
         completeness = valid_q / total_q if total_q > 0 else 0.0
 
-        score = score_supplier(db, sid, category)
+        score = score_supplier(db, sid, category, weights=weights)
 
         results.append({
             "supplier_id": sid,

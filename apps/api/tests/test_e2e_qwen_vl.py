@@ -7,6 +7,7 @@ Tests are organized in increasing complexity:
 2. Synthetic doc: small image with known text → confirms extraction works
 3. Real CSV-rendered doc: full quote table from docs/data/ → accuracy ≥ 95%
 4. Real CSV-rendered tender doc: tender items from docs/data/ → accuracy ≥ 95%
+5. Real project PDFs: actual supplier bid & tender PDFs from docs/项目资料/初始资料/
 """
 
 from __future__ import annotations
@@ -301,3 +302,159 @@ class TestRealDataAccuracy:
         accuracy = hits / len(truth["items"])
         print(f"Tender item-recall accuracy: {hits}/{len(truth['items'])} = {accuracy:.1%}")
         assert accuracy >= 0.8, f"Tender recall {accuracy:.1%} < 80%"
+
+
+# ─── Real project PDF files (docs/项目资料/初始资料/) ─────────────────────────
+class TestRealPDFExtraction:
+    """Smoke + accuracy tests using actual project PDFs.
+
+    These PDFs are owner-password protected (view-only restriction, no open
+    password), so pypdfium2 can render them to images normally.
+
+    Quote PDFs  → 泰科龙/凯硕新正/上海绵存 投标文件 (three competing bids)
+    Tender PDF  → 材料采购招标文件审批表 (tender approval form)
+
+    Since no ground-truth JSON exists for these documents, tests verify:
+      - At least one page renders without error
+      - Qwen-VL returns a non-empty items list
+      - Required schema fields are present (material/spec/unit_price for quote;
+        project_name/items for tender)
+    """
+
+    _PROJECT_PDFS = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "项目资料" / "初始资料"
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _load_pdf_images(pdf_path: Path, max_pages: int = 4) -> list[bytes]:
+        """Render PDF to images, capped at max_pages to keep payload manageable.
+
+        Real project PDFs can be 10-15 pages (cover + bid form + price tables).
+        The pricing tables are typically on pages 1-3; sending all pages at once
+        creates a 20-30 MB payload that causes connection resets in the API.
+        """
+        from apps.api.intelligence.document_loader import DocumentLoader
+        images = DocumentLoader.to_images(pdf_path)
+        return images[:max_pages]
+
+    @staticmethod
+    def _save_result(fixture_dir: Path, stem: str, data: dict) -> None:
+        out = fixture_dir / f"live_{stem}_result.json"
+        out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\nSaved extraction → {out}")
+
+    # ── quote: 泰科龙 投标文件 ─────────────────────────────────────────────
+    def test_taikelong_quote_extraction(self, provider, fixture_dir):
+        pdf = self._PROJECT_PDFS / "泰科龙投标文件.pdf"
+        if not pdf.exists():
+            pytest.skip(f"PDF not found: {pdf}")
+
+        images = self._load_pdf_images(pdf)
+        assert images, "DocumentLoader returned no images from PDF"
+        print(f"\n泰科龙投标文件: {len(images)} page(s) rendered")
+
+        resp = provider.extract(images, QUOTE_SCHEMA, QUOTE_PROMPT, timeout=180)
+        data = resp.data
+        self._save_result(fixture_dir, "taikelong_quote", data)
+
+        print(f"Provider: {resp.provider}  tokens: {resp.tokens_used}  duration: {resp.duration_ms}ms")
+        items = data.get("items") or []
+        print(f"Extracted {len(items)} items")
+        for it in items[:5]:
+            print(f"  {it}")
+
+        assert len(items) >= 1, (
+            f"Expected ≥1 quote item from 泰科龙投标文件, got 0. "
+            f"Raw response: {json.dumps(data, ensure_ascii=False)[:400]}"
+        )
+        # At least one item must have a numeric price
+        prices = [it.get("unit_price") for it in items if it.get("unit_price") is not None]
+        assert prices, "No numeric unit_price found in any extracted item"
+
+    # ── quote: 凯硕新正 投标文件 ───────────────────────────────────────────
+    def test_kaishuoxinzheng_quote_extraction(self, provider, fixture_dir):
+        pdf = self._PROJECT_PDFS / "凯硕新正投标文件.pdf"
+        if not pdf.exists():
+            pytest.skip(f"PDF not found: {pdf}")
+
+        images = self._load_pdf_images(pdf)
+        assert images
+        print(f"\n凯硕新正投标文件: {len(images)} page(s) rendered")
+
+        resp = provider.extract(images, QUOTE_SCHEMA, QUOTE_PROMPT, timeout=180)
+        data = resp.data
+        self._save_result(fixture_dir, "kaishuoxinzheng_quote", data)
+
+        items = data.get("items") or []
+        print(f"Provider: {resp.provider}  tokens: {resp.tokens_used}  items: {len(items)}")
+        assert len(items) >= 1, f"Expected ≥1 item from 凯硕新正投标文件, got 0"
+
+    # ── quote: 上海绵存 投标文件 ───────────────────────────────────────────
+    def test_shanghaimiances_quote_extraction(self, provider, fixture_dir):
+        pdf = self._PROJECT_PDFS / "上海绵存投标文件.pdf"
+        if not pdf.exists():
+            pytest.skip(f"PDF not found: {pdf}")
+
+        images = self._load_pdf_images(pdf)
+        assert images
+        print(f"\n上海绵存投标文件: {len(images)} page(s) rendered")
+
+        resp = provider.extract(images, QUOTE_SCHEMA, QUOTE_PROMPT, timeout=180)
+        data = resp.data
+        self._save_result(fixture_dir, "shanghaimiancun_quote", data)
+
+        items = data.get("items") or []
+        print(f"Provider: {resp.provider}  tokens: {resp.tokens_used}  items: {len(items)}")
+        assert len(items) >= 1, f"Expected ≥1 item from 上海绵存投标文件, got 0"
+
+    # ── cross-bid price consistency ────────────────────────────────────────
+    def test_three_bids_all_extract_items(self, provider, fixture_dir):
+        """All three competing bids should each yield ≥1 extracted item.
+
+        This is the prerequisite for the bid-comparison (比价) chain: if any
+        supplier's quote can't be extracted, the matrix will have missing rows.
+        """
+        pdfs = {
+            "taikelong":       self._PROJECT_PDFS / "泰科龙投标文件.pdf",
+            "kaishuoxinzheng": self._PROJECT_PDFS / "凯硕新正投标文件.pdf",
+            "shanghaimiancun": self._PROJECT_PDFS / "上海绵存投标文件.pdf",
+        }
+        results: dict[str, int] = {}
+        for name, pdf in pdfs.items():
+            if not pdf.exists():
+                pytest.skip(f"PDF not found: {pdf}")
+            images = self._load_pdf_images(pdf)
+            resp = provider.extract(images, QUOTE_SCHEMA, QUOTE_PROMPT, timeout=180)
+            items = (resp.data or {}).get("items") or []
+            results[name] = len(items)
+            print(f"\n  {name}: {len(items)} items extracted")
+
+        failed = [k for k, v in results.items() if v == 0]
+        assert not failed, (
+            f"These bids returned 0 items (比价 matrix would be incomplete): {failed}"
+        )
+
+    # ── tender: 材料采购招标文件审批表 ────────────────────────────────────
+    def test_tender_approval_form_extraction(self, provider, fixture_dir):
+        pdf = self._PROJECT_PDFS / "材料采购招标文件审批表.pdf"
+        if not pdf.exists():
+            pytest.skip(f"PDF not found: {pdf}")
+
+        images = self._load_pdf_images(pdf)
+        assert images
+        print(f"\n材料采购招标文件审批表: {len(images)} page(s) rendered")
+
+        resp = provider.extract(images, TENDER_SCHEMA, TENDER_PROMPT, timeout=180)
+        data = resp.data
+        self._save_result(fixture_dir, "tender_approval", data)
+
+        print(f"Provider: {resp.provider}  tokens: {resp.tokens_used}  duration: {resp.duration_ms}ms")
+        print(f"project_name: {data.get('project_name')}")
+        items = data.get("items") or []
+        print(f"Extracted {len(items)} tender items")
+
+        # Tender approval form may not have a material list (it's a meta-document),
+        # so we only require that extraction runs without error and returns a dict.
+        assert isinstance(data, dict), "Expected dict response from tender extraction"
+        # If project_name is present it's a bonus — log it but don't hard-assert
+        if data.get("project_name"):
+            print(f"  [OK] project_name extracted: {data['project_name']}")

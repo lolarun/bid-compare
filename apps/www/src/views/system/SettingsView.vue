@@ -13,18 +13,18 @@ const activeTab = ref<'weights' | 'thresholds' | 'brand_tiers'>('weights')
 
 // ─── 评分权重 ────────────────────────────────────────────────────────────
 const weights = reactive({
-  price: 0.40,
-  history: 0.20,
-  completeness: 0.15,
-  brand: 0.15,
-  commercial: 0.10,
+  price_competitiveness: 0.40,
+  history_cooperation: 0.20,
+  quote_completeness: 0.15,
+  brand_compliance: 0.15,
+  commercial_terms: 0.10,
 })
 const weightLabels: Record<string, string> = {
-  price: '价格竞争力',
-  history: '历史合作',
-  completeness: '报价完整度',
-  brand: '品牌合规',
-  commercial: '商务条款',
+  price_competitiveness: '价格竞争力',
+  history_cooperation: '历史合作',
+  quote_completeness: '报价完整度',
+  brand_compliance: '品牌合规',
+  commercial_terms: '商务条款',
 }
 const weightsLoading = ref(false)
 

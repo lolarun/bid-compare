@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi, quoteApi } from '@/api'
+import {
+  CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined,
+  CloudUploadOutlined, LoadingOutlined, CheckOutlined, CloseCircleOutlined,
+} from '@ant-design/icons-vue'
+import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
 import type {
   Project,
   Supplier,
@@ -39,7 +42,7 @@ const taskConfig = reactive<{
 const projects = ref<Project[]>([])
 const allSuppliers = ref<Supplier[]>([])
 
-// Per-supplier upload state for Step 2
+// Per-supplier upload state for Step 2 (legacy slot mode)
 const supplierUploads = reactive<Record<number, {
   job: ExtractionJob | null
   items: QuoteExtractionItem[]
@@ -47,6 +50,23 @@ const supplierUploads = reactive<Record<number, {
   batch_id?: string
   unknown_brands: string[]
 }>>({})
+
+// ─── Batch upload state (new flow) ─────────────────────────────────────
+interface BatchFileEntry {
+  id: string           // unique key
+  filename: string
+  status: 'uploading' | 'processing' | 'done' | 'failed'
+  jobId: string | null
+  detectedSupplierName: string
+  matchedSupplierId: number | null  // auto-matched
+  items: QuoteExtractionItem[]
+  confirmedSupplierId: number | null
+  confirmed: boolean
+  error: string
+  pollTimer: ReturnType<typeof setInterval> | null
+}
+const batchFiles = ref<BatchFileEntry[]>([])
+const useBatchMode = computed(() => taskConfig.supplierIds.length === 0)
 
 // Bid matrix result for Step 3
 const matrixResult = ref<BidMatrixResult | null>(null)
@@ -58,14 +78,16 @@ const brandsToTier = ref<string[]>([])
 
 // ─── Computed ────────────────────────────────────────────────────────────
 const canProceedFromConfig = computed(
-  () => !!taskConfig.category && taskConfig.supplierIds.length >= 2
+  () => !!taskConfig.category && (taskConfig.supplierIds.length >= 2 || taskConfig.supplierIds.length === 0)
 )
 // AUDIT-FIX C1: require explicit confirmation OR "skip with history" for every supplier.
-// Previously `items.length > 0` allowed the user to advance after upload without
-// calling batch-confirm — bid-matrix silently fell back to historical data.
-const canProceedFromUpload = computed(
-  () => taskConfig.supplierIds.every((sid) => supplierUploads[sid]?.confirmed === true)
-)
+const canProceedFromUpload = computed(() => {
+  if (useBatchMode.value) {
+    // Batch mode: need ≥ 2 confirmed files
+    return batchFiles.value.filter((f) => f.confirmed).length >= 2
+  }
+  return taskConfig.supplierIds.every((sid) => supplierUploads[sid]?.confirmed === true)
+})
 
 const selectedSuppliers = computed(() =>
   allSuppliers.value.filter((s) => taskConfig.supplierIds.includes(s.id))
@@ -106,7 +128,7 @@ const matrixSummary = computed(() => {
 // ─── Data fetching ───────────────────────────────────────────────────────
 async function fetchProjects() {
   try {
-    const { data } = await projectApi.list({ page: 1, page_size: 200 })
+    const { data } = await projectApi.list({ page: 1, page_size: 100 })
     projects.value = data.items
   } catch {
     projects.value = []
@@ -114,7 +136,7 @@ async function fetchProjects() {
 }
 async function fetchSuppliers() {
   try {
-    const { data } = await supplierApi.list({ page: 1, page_size: 300 })
+    const { data } = await supplierApi.list({ page: 1, page_size: 100 })
     allSuppliers.value = data.items
   } catch {
     allSuppliers.value = []
@@ -226,15 +248,158 @@ function skipSupplier(supplierId: number) {
   message.info('已跳过该供应商上传，将使用历史数据')
 }
 
+// ─── Batch upload handlers ──────────────────────────────────────────────
+function handleBatchFiles(fileList: File[]) {
+  for (const file of fileList) {
+    const entry: BatchFileEntry = {
+      id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      filename: file.name,
+      status: 'uploading',
+      jobId: null,
+      detectedSupplierName: '',
+      matchedSupplierId: null,
+      items: [],
+      confirmedSupplierId: null,
+      confirmed: false,
+      error: '',
+      pollTimer: null,
+    }
+    batchFiles.value.push(entry)
+    uploadBatchFile(entry, file)
+  }
+}
+
+async function uploadBatchFile(entry: BatchFileEntry, file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('type', 'quote')
+  if (taskConfig.projectId) form.append('project_id', String(taskConfig.projectId))
+  if (taskConfig.category) form.append('category', taskConfig.category)
+  try {
+    const { data } = await intakeApi.upload(form)
+    entry.jobId = data.id
+    if (data.status === 'done') {
+      onBatchJobDone(entry, data)
+    } else if (data.status === 'failed') {
+      entry.status = 'failed'
+      entry.error = data.error || '识别失败'
+    } else {
+      entry.status = 'processing'
+      startBatchPolling(entry)
+    }
+  } catch (e) {
+    entry.status = 'failed'
+    entry.error = (e as Error).message || '上传失败'
+  }
+}
+
+function startBatchPolling(entry: BatchFileEntry) {
+  if (entry.pollTimer) clearInterval(entry.pollTimer)
+  let failures = 0
+  entry.pollTimer = setInterval(async () => {
+    if (!entry.jobId) return
+    try {
+      const { data } = await intakeApi.getJob(entry.jobId)
+      failures = 0
+      if (data.status === 'done') {
+        if (entry.pollTimer) clearInterval(entry.pollTimer)
+        entry.pollTimer = null
+        onBatchJobDone(entry, data)
+      } else if (data.status === 'failed') {
+        if (entry.pollTimer) clearInterval(entry.pollTimer)
+        entry.pollTimer = null
+        entry.status = 'failed'
+        entry.error = data.error || '识别失败'
+      }
+    } catch {
+      failures++
+      if (failures >= 5) {
+        if (entry.pollTimer) clearInterval(entry.pollTimer)
+        entry.pollTimer = null
+        entry.status = 'failed'
+        entry.error = '轮询超时'
+      }
+    }
+  }, 2000)
+}
+
+function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
+  entry.status = 'done'
+  const shape = asQuoteShape(job.result)
+  entry.items = shape.items
+  entry.detectedSupplierName = shape.supplier_name || ''
+  // Auto-match against known suppliers
+  if (entry.detectedSupplierName) {
+    const name = entry.detectedSupplierName.replace(/\s/g, '').toLowerCase()
+    const match = allSuppliers.value.find(
+      (s) => s.name.replace(/\s/g, '').toLowerCase() === name
+        || s.name.includes(entry.detectedSupplierName)
+        || entry.detectedSupplierName.includes(s.name)
+    )
+    if (match) {
+      entry.matchedSupplierId = match.id
+    }
+  }
+}
+
+async function confirmBatchEntry(entry: BatchFileEntry) {
+  if (!entry.jobId) return
+  const supplierName = entry.matchedSupplierId
+    ? allSuppliers.value.find((s) => s.id === entry.matchedSupplierId)?.name || entry.detectedSupplierName
+    : entry.detectedSupplierName
+  if (!supplierName) {
+    message.warning('请输入或选择供应商名称')
+    return
+  }
+  try {
+    const { data } = await quoteApi.batchConfirm({
+      job_id: entry.jobId,
+      supplier_id: entry.matchedSupplierId ?? undefined,
+      supplier_name: supplierName,
+      project_id: taskConfig.projectId,
+      category: taskConfig.category,
+      overrides: entry.items as unknown as Array<Record<string, unknown>>,
+    })
+    entry.confirmed = true
+    entry.confirmedSupplierId = data.supplier_id ?? null
+    message.success(`${supplierName}：已入库 ${data.created} 条报价`)
+    if (data.unknown_brands?.length) {
+      brandsToTier.value = data.unknown_brands
+      brandModalVisible.value = true
+    }
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '入库失败'
+    message.error(detail)
+  }
+}
+
+function removeBatchEntry(entry: BatchFileEntry) {
+  if (entry.pollTimer) clearInterval(entry.pollTimer)
+  batchFiles.value = batchFiles.value.filter((f) => f.id !== entry.id)
+}
+
+onBeforeUnmount(() => {
+  for (const f of batchFiles.value) {
+    if (f.pollTimer) clearInterval(f.pollTimer)
+  }
+})
+
 // ─── Step 3: run bid-matrix ──────────────────────────────────────────────
 async function runMatrix() {
-  if (taskConfig.supplierIds.length < 2) return
+  // Gather supplier IDs: from pre-selected OR from batch confirmed entries
+  const sids = useBatchMode.value
+    ? [...new Set(batchFiles.value.filter((f) => f.confirmed && f.confirmedSupplierId).map((f) => f.confirmedSupplierId!))]
+    : taskConfig.supplierIds
+  if (sids.length < 2) {
+    message.warning('至少需要 2 家供应商的报价才能比价')
+    return
+  }
   analyzing.value = true
   matrixResult.value = null
   try {
     const { data } = await analysisApi.bidMatrix({
       project_id: taskConfig.projectId,
-      supplier_ids: taskConfig.supplierIds,
+      supplier_ids: sids,
     })
     matrixResult.value = data
     if ((data.rows ?? []).length === 0) {
@@ -298,11 +463,11 @@ async function runMatrix() {
           </a-select>
         </a-form-item>
 
-        <a-form-item label="参与供应商（≥2 家）" required>
+        <a-form-item label="参与供应商（可选）">
           <a-select
             v-model:value="taskConfig.supplierIds"
             mode="multiple"
-            placeholder="选择 2-N 家参与比价的供应商"
+            placeholder="预选供应商，或留空 → 下一步批量上传自动识别"
             show-search
             :filter-option="(input: string, opt: { label?: unknown }) => String(opt.label ?? '').includes(input)"
             style="width:100%"
@@ -317,57 +482,122 @@ async function runMatrix() {
             </a-select-option>
           </a-select>
           <div style="margin-top:6px;font-size:12px;color:rgba(0,0,0,0.45)">
-            已选 {{ taskConfig.supplierIds.length }} 家
+            {{ taskConfig.supplierIds.length > 0
+              ? `已选 ${taskConfig.supplierIds.length} 家`
+              : '不选也行 — 下一步上传报价 PDF 后系统自动识别供应商'
+            }}
           </div>
         </a-form-item>
       </a-form>
     </a-card>
 
-    <!-- Step 1: Upload per supplier -->
+    <!-- Step 1: Upload (batch mode OR per-supplier mode) -->
     <a-card v-else-if="currentStep === 1" :body-style="{ padding: '20px' }">
-      <a-tabs :tab-position="'left'">
-        <a-tab-pane
-          v-for="s in selectedSuppliers"
-          :key="s.id"
-          :tab="`${s.name}${supplierUploads[s.id]?.confirmed ? ' ✓' : ''}`"
+
+      <!-- Batch mode: no suppliers pre-selected -->
+      <template v-if="useBatchMode">
+        <a-upload-dragger
+          :multiple="true"
+          accept=".pdf,.png,.jpg,.jpeg"
+          :show-upload-list="false"
+          :before-upload="(_: File, fileList: File[]) => { handleBatchFiles(fileList); return false; }"
         >
-          <div class="upload-pane">
-            <div class="upload-pane__title">
-              {{ s.name }} 报价单上传
-              <a-tag v-if="supplierUploads[s.id]?.confirmed" color="green">已确认</a-tag>
+          <p class="ant-upload-drag-icon"><CloudUploadOutlined /></p>
+          <p class="ant-upload-text">拖入所有供应商的报价 PDF</p>
+          <p class="ant-upload-hint">支持多文件同时上传 · 系统自动识别每份报价的供应商</p>
+        </a-upload-dragger>
+
+        <div v-if="batchFiles.length > 0" class="batch-list">
+          <div v-for="f in batchFiles" :key="f.id" class="batch-card" :class="{ 'batch-card--done': f.confirmed }">
+            <div class="batch-card__head">
+              <LoadingOutlined v-if="f.status === 'uploading' || f.status === 'processing'" spin style="color:#1890ff" />
+              <CheckOutlined v-else-if="f.confirmed" style="color:#52c41a" />
+              <CloseCircleOutlined v-else-if="f.status === 'failed'" style="color:#ff4d4f" />
+              <CheckCircleOutlined v-else style="color:#1890ff" />
+              <span class="batch-card__filename">{{ f.filename }}</span>
+              <a-tag v-if="f.status === 'uploading'" color="blue">上传中</a-tag>
+              <a-tag v-else-if="f.status === 'processing'" color="blue">识别中</a-tag>
+              <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
+              <a-tag v-else-if="f.confirmed" color="green">已入库</a-tag>
+              <a-tag v-else color="cyan">{{ f.items.length }} 项</a-tag>
+              <a-button v-if="!f.confirmed" size="small" type="text" danger @click="removeBatchEntry(f)">移除</a-button>
             </div>
 
-            <IntakeUploader
-              v-if="!supplierUploads[s.id]?.confirmed"
-              :type="'quote'"
-              :context="{ supplier_id: s.id, project_id: taskConfig.projectId, category: taskConfig.category }"
-              @extracted="(job) => onExtracted(s.id, job)"
-            />
+            <div v-if="f.error" style="color:#ff4d4f;font-size:12px;margin-top:4px">{{ f.error }}</div>
 
-            <div v-if="(supplierUploads[s.id]?.items?.length ?? 0) > 0" style="margin-top:14px">
-              <a-alert
-                type="info"
-                show-icon
-                message="识别完成，请核对后点击「确认入库」"
-                style="margin-bottom:10px"
-              />
-              <ExtractionEditor
-                schema="quote"
-                :model-value="supplierUploads[s.id]?.items as unknown[] as any"
-                :confirm-label="'确认入库'"
-                @confirm="() => confirmSupplier(s.id)"
-                @update:model-value="(v: any) => supplierUploads[s.id].items = v"
-              />
-            </div>
-
-            <div v-else style="margin-top:14px;text-align:center">
-              <a-button @click="skipSupplier(s.id)">
-                使用历史数据，跳过上传
-              </a-button>
+            <div v-if="f.status === 'done' && !f.confirmed" class="batch-card__body">
+              <div class="batch-card__supplier-row">
+                <span style="font-size:12px;color:rgba(0,0,0,0.55)">识别供应商：</span>
+                <a-select
+                  v-if="f.matchedSupplierId"
+                  v-model:value="f.matchedSupplierId"
+                  style="width:200px"
+                  size="small"
+                  show-search
+                  :filter-option="(input: string, opt: { label?: unknown }) => String(opt.label ?? '').includes(input)"
+                >
+                  <a-select-option v-for="s in allSuppliers" :key="s.id" :value="s.id" :label="s.name">{{ s.name }}</a-select-option>
+                </a-select>
+                <a-input
+                  v-else
+                  v-model:value="f.detectedSupplierName"
+                  size="small"
+                  style="width:200px"
+                  placeholder="供应商名称"
+                />
+                <a-button type="primary" size="small" @click="confirmBatchEntry(f)">确认入库</a-button>
+              </div>
             </div>
           </div>
-        </a-tab-pane>
-      </a-tabs>
+        </div>
+      </template>
+
+      <!-- Legacy mode: per-supplier tabs -->
+      <template v-else>
+        <a-tabs :tab-position="'left'">
+          <a-tab-pane
+            v-for="s in selectedSuppliers"
+            :key="s.id"
+            :tab="`${s.name}${supplierUploads[s.id]?.confirmed ? ' ✓' : ''}`"
+          >
+            <div class="upload-pane">
+              <div class="upload-pane__title">
+                {{ s.name }} 报价单上传
+                <a-tag v-if="supplierUploads[s.id]?.confirmed" color="green">已确认</a-tag>
+              </div>
+
+              <IntakeUploader
+                v-if="!supplierUploads[s.id]?.confirmed"
+                :type="'quote'"
+                :context="{ supplier_id: s.id, project_id: taskConfig.projectId, category: taskConfig.category }"
+                @extracted="(job) => onExtracted(s.id, job)"
+              />
+
+              <div v-if="(supplierUploads[s.id]?.items?.length ?? 0) > 0" style="margin-top:14px">
+                <a-alert
+                  type="info"
+                  show-icon
+                  message="识别完成，请核对后点击「确认入库」"
+                  style="margin-bottom:10px"
+                />
+                <ExtractionEditor
+                  schema="quote"
+                  :model-value="supplierUploads[s.id]?.items as unknown[] as any"
+                  :confirm-label="'确认入库'"
+                  @confirm="() => confirmSupplier(s.id)"
+                  @update:model-value="(v: any) => supplierUploads[s.id].items = v"
+                />
+              </div>
+
+              <div v-else style="margin-top:14px;text-align:center">
+                <a-button @click="skipSupplier(s.id)">
+                  使用历史数据，跳过上传
+                </a-button>
+              </div>
+            </div>
+          </a-tab-pane>
+        </a-tabs>
+      </template>
     </a-card>
 
     <!-- Step 2: Results -->
@@ -455,6 +685,50 @@ async function runMatrix() {
     font-weight: 500;
     margin-bottom: 12px;
     color: @heading-color;
+  }
+}
+
+.batch-list {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-card {
+  border: 1px solid @border-color-base;
+  border-radius: @border-radius-base;
+  padding: 12px 14px;
+  background: #fff;
+  transition: border-color 0.2s;
+
+  &--done {
+    border-color: #b7eb8f;
+    background: #f6ffed;
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__filename {
+    font-size: 13px;
+    font-weight: 500;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__body { margin-top: 8px; }
+
+  &__supplier-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 }
 </style>

@@ -249,7 +249,7 @@ defineExpose({ retry, currentJob })
 
   &__status-body { flex: 1; }
   &__status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-  &__error { font-size: 12px; color: @error-color; margin-top: 4px; }
+  &__error { font-size: 12px; color: #ff4d4f; margin-top: 4px; }
   &__meta { font-size: 12px; color: @text-color-secondary; margin-top: 4px; }
   &__preview {
     margin-top: 12px;

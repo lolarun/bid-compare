@@ -40,7 +40,7 @@ def price_compare(body: PriceCompareRequest, db: Session = Depends(get_db)):
 @router.post("/supplier-score", response_model=SupplierScoreResult)
 def supplier_score(body: SupplierScoreRequest, db: Session = Depends(get_db)):
     try:
-        result = score_supplier(db, body.supplier_id, body.category)
+        result = score_supplier(db, body.supplier_id, body.category, weights=body.weights)
     except ValueError as e:
         raise HTTPException(404, str(e))
     return result
@@ -53,6 +53,7 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
         supplier_ids=body.supplier_ids,
         category=body.category,
         project_id=body.project_id,
+        weights=body.weights,
     )
     return result
 

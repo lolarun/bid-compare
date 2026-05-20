@@ -23,7 +23,9 @@ from typing import Any
 
 from openai import OpenAI, APIError, BadRequestError
 
-from apps.api.intelligence.base import LLMProvider, ExtractionResponse, ProviderError
+from apps.api.intelligence.base import (
+    LLMProvider, ExtractionResponse, ProviderError, ContentModerationError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +140,18 @@ class QwenVLProvider(LLMProvider):
                     duration_ms=int((time.time() - t0) * 1000),
                 )
             except BadRequestError as e:
+                err_str = str(e)
+                if "data_inspection_failed" in err_str or "inappropriate content" in err_str:
+                    # Content moderation: the image itself is blocked, not the model.
+                    # Do NOT mark model as bad — raise immediately so the pipeline
+                    # can skip this batch and continue with others.
+                    log.warning(
+                        "QwenVL content moderation blocked batch on %s: %s",
+                        candidate, e,
+                    )
+                    raise ContentModerationError(
+                        f"Content moderation blocked batch (model={candidate}): {e}"
+                    ) from e
                 # Persistent: model unavailable / unauthorized. Memoize.
                 log.warning("QwenVL model %s rejected (persistent): %s", candidate, e)
                 self._known_bad.add(candidate)

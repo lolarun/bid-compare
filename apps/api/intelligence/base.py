@@ -15,6 +15,14 @@ class ProviderError(Exception):
     """Raised when a provider fails to produce a usable extraction."""
 
 
+class ContentModerationError(ProviderError):
+    """Raised when the upstream API rejects image content (data_inspection_failed).
+
+    This is a content issue, NOT a model availability issue — the model should
+    NOT be blacklisted; the batch should be skipped by the pipeline.
+    """
+
+
 @dataclass
 class ExtractionResponse:
     """Provider output. `data` is the parsed JSON dict matching the requested schema."""

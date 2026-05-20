@@ -29,6 +29,7 @@ class SupplierScoreRequest(BaseModel):
     supplier_id: int
     project_id: int | None = None
     category: str | None = None
+    weights: dict[str, float] | None = None
 
 
 class SupplierScoreResult(BaseModel):
@@ -66,6 +67,7 @@ class MultiCompareRequest(BaseModel):
     supplier_ids: list[int]
     category: str
     project_id: int | None = None
+    weights: dict[str, float] | None = None
 
 
 class SupplierCompareItem(BaseModel):

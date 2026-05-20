@@ -75,11 +75,12 @@ ALL_CATEGORIES = list(PROFESSION_MAP.keys())
 # ─── Default scoring weights (A层 5维模型) ──────────────────────────────────
 
 DEFAULT_SCORING_WEIGHTS = {
-    "price":        0.40,
-    "history":      0.20,
-    "completeness": 0.15,
-    "brand":        0.15,
-    "commercial":   0.10,
+    # Keys must match SettingsView.vue (long names) — scoring.py reads with same.
+    "price_competitiveness": 0.40,
+    "history_cooperation":   0.20,
+    "quote_completeness":    0.15,
+    "brand_compliance":      0.15,
+    "commercial_terms":      0.10,
 }
 
 # ─── Default alert thresholds (B层 各品类) ──────────────────────────────────
