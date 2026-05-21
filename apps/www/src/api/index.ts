@@ -208,6 +208,23 @@ export const inviteApi = {
     api.post<InviteResult>('/invite/recommend', data),
 }
 
+// ─── Export (Excel downloads) ────────────────────────────────────────────────
+
+export const exportApi = {
+  dashboard: () =>
+    api.get('/export/dashboard', { responseType: 'blob' }),
+  suppliers: () =>
+    api.get('/export/suppliers', { responseType: 'blob' }),
+  materials: (params?: { category?: string }) =>
+    api.get('/export/materials', { params, responseType: 'blob' }),
+  quotes: (params?: { category?: string; supplier_id?: number; project_id?: number; alert_level?: string }) =>
+    api.get('/export/quotes', { params, responseType: 'blob' }),
+  bidMatrix: (params: { supplier_ids: string; project_id?: number; category?: string }) =>
+    api.get('/export/bid-matrix', { params, responseType: 'blob' }),
+  logs: (params?: Record<string, unknown>) =>
+    api.get('/export/logs', { params, responseType: 'blob' }),
+}
+
 // ─── OCR ─────────────────────────────────────────────────────────────────────
 
 export const ocrApi = {

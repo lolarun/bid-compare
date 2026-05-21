@@ -2,8 +2,9 @@
 import { ref, reactive, computed, onMounted, h } from 'vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, ExportOutlined, SwapOutlined, FolderOutlined } from '@ant-design/icons-vue'
-import { materialApi } from '@/api'
+import { materialApi, exportApi } from '@/api'
 import type { Material, StandardizeResult, ExtendedAttrSchema } from '@/api/client'
+import { doExport } from '@/utils/download'
 import type { DataNode } from 'ant-design-vue/es/tree'
 
 const data = ref<Material[]>([])
@@ -254,7 +255,7 @@ onMounted(() => {
           <template #icon><SwapOutlined /></template>
           名称标准化
         </a-button>
-        <a-button>
+        <a-button @click="doExport(() => exportApi.materials({ category: query.category }), 'MEMPAS_物料主数据.xlsx')">
           <template #icon><ExportOutlined /></template>
           导出
         </a-button>

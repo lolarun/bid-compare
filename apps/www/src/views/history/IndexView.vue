@@ -3,9 +3,10 @@ import { ref, reactive, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { ExportOutlined, SearchOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
-import { quoteApi, supplierApi } from '@/api'
+import { quoteApi, supplierApi, exportApi } from '@/api'
 import type { Quote, Supplier } from '@/api/client'
 import { normalizeAlert, alertColors, formatDeviation } from '@/utils/alert'
+import { doExport } from '@/utils/download'
 
 interface QuoteRow extends Quote {
   material_name?: string
@@ -119,7 +120,7 @@ onMounted(() => {
         </div>
       </div>
       <div class="flex gap-8">
-        <a-button>
+        <a-button @click="doExport(() => exportApi.quotes({ category: query.profession, supplier_id: query.supplier_id }), 'MEMPAS_采购数据.xlsx')">
           <template #icon><ExportOutlined /></template>
           导出
         </a-button>

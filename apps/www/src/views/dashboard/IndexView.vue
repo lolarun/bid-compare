@@ -16,9 +16,10 @@ import StatCard from '@/components/StatCard.vue'
 import PriceTrend from './components/PriceTrend.vue'
 import TreeHeatmap from './components/TreeHeatmap.vue'
 import BubbleChart from './components/BubbleChart.vue'
-import { analysisApi, quoteApi } from '@/api'
+import { analysisApi, quoteApi, exportApi } from '@/api'
 import type { DashboardSummary, Quote } from '@/api/client'
 import { normalizeAlert, alertColors, alertLabels, formatDeviation } from '@/utils/alert'
+import { doExport } from '@/utils/download'
 import dayjs from 'dayjs'
 
 const router = useRouter()
@@ -123,7 +124,7 @@ const visTab = ref<'tree' | 'bubble'>('tree')
       </div>
       <div class="dashboard__actions">
         <a-month-picker v-model:value="monthPickerValue" placeholder="本月" />
-        <a-button>
+        <a-button @click="doExport(() => exportApi.dashboard(), 'MEMPAS_仪表盘报表.xlsx')">
           <template #icon><ExportOutlined /></template>
           导出报表
         </a-button>

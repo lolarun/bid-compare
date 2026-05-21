@@ -2,6 +2,8 @@
 import { ref, reactive } from 'vue'
 import { SearchOutlined, ExportOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
+import { exportApi } from '@/api'
+import { doExport } from '@/utils/download'
 
 interface LogRow {
   id: number
@@ -52,7 +54,7 @@ const columns = [
         <h1 class="logs-page__title">操作日志</h1>
         <div class="logs-page__subtitle">系统全量审计日志 · 用户操作、模块、对象与结果可溯</div>
       </div>
-      <a-button>
+      <a-button @click="doExport(() => exportApi.logs(), 'MEMPAS_操作日志.xlsx')">
         <template #icon><ExportOutlined /></template>
         导出日志
       </a-button>

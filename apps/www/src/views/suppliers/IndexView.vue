@@ -9,8 +9,9 @@ import {
   FireOutlined,
 } from '@ant-design/icons-vue'
 import StatCard from '@/components/StatCard.vue'
-import { supplierApi, analysisApi } from '@/api'
+import { supplierApi, analysisApi, exportApi } from '@/api'
 import type { Supplier, SupplierScore } from '@/api/client'
+import { doExport } from '@/utils/download'
 
 interface SupplierRow extends Supplier {
   ai_score?: number
@@ -178,7 +179,7 @@ onMounted(fetchData)
           <template #icon><ImportOutlined /></template>
           批量导入
         </a-button>
-        <a-button>
+        <a-button @click="doExport(() => exportApi.suppliers(), 'MEMPAS_供应商名单.xlsx')">
           <template #icon><ExportOutlined /></template>
           导出名单
         </a-button>
