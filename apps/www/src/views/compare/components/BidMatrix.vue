@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { DownloadOutlined, FilterOutlined } from '@ant-design/icons-vue'
+import { DownloadOutlined } from '@ant-design/icons-vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { normalizeAlert, alertColors, formatDeviation } from '@/utils/alert'
+import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { exportApi } from '@/api'
 import type { MatrixRow, MatrixTotal } from '@/api/client'
 
