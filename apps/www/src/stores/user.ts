@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { api } from '@/api/client'
 
 const TOKEN_KEY = 'mempas_token'
 const USER_KEY = 'mempas_user'
@@ -34,20 +35,15 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  /**
-   * Simple login — MEMPAS v1 uses a local admin account.
-   * Replace with real API call when backend auth is ready.
-   */
   async function login(username: string, password: string) {
-    // TODO(auth-integration): replace with POST /api/auth/login when backend is ready
-    if (import.meta.env.DEV && username === 'admin' && password === 'admin123') {
-      const fakeToken = `mempas-${Date.now()}`
-      setToken(fakeToken)
-      setUser({ username, nickname: '管理员', role: 'admin' })
-      return true
-    }
-    // Production: delegate to backend (not yet implemented)
-    throw new Error('用户名或密码错误')
+    const { data } = await api.post<{
+      access_token: string
+      username: string
+      role: string
+    }>('/auth/login', { username, password })
+    setToken(data.access_token)
+    setUser({ username: data.username, nickname: data.role, role: data.role })
+    return true
   }
 
   function logout() {
