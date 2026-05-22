@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import {
   CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined,
   CloudUploadOutlined, LoadingOutlined, CheckOutlined, CloseCircleOutlined,
+  PlusOutlined,
 } from '@ant-design/icons-vue'
 import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
 import type {
@@ -75,6 +76,43 @@ const analyzing = ref(false)
 // Brand-tier modal
 const brandModalVisible = ref(false)
 const brandsToTier = ref<string[]>([])
+
+// New-project modal
+const newProjectVisible = ref(false)
+const newProjectSaving = ref(false)
+const newProjectForm = reactive({
+  name: '',
+  code: '',
+  location: '',
+  remark: '',
+})
+function openNewProjectModal() {
+  Object.assign(newProjectForm, { name: '', code: '', location: '', remark: '' })
+  newProjectVisible.value = true
+}
+async function handleCreateProject() {
+  if (!newProjectForm.name.trim()) {
+    message.warning('请输入项目名称')
+    return
+  }
+  newProjectSaving.value = true
+  try {
+    const { data } = await projectApi.create({
+      name: newProjectForm.name.trim(),
+      code: newProjectForm.code.trim(),
+      location: newProjectForm.location.trim(),
+      remark: newProjectForm.remark.trim(),
+    })
+    message.success('项目创建成功')
+    await fetchProjects()
+    taskConfig.projectId = data.id
+    newProjectVisible.value = false
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '创建失败')
+  } finally {
+    newProjectSaving.value = false
+  }
+}
 
 // ─── Computed ────────────────────────────────────────────────────────────
 const canProceedFromConfig = computed(
@@ -454,6 +492,13 @@ async function runMatrix() {
               {{ p.name }}
               <span v-if="p.code" style="color:rgba(0,0,0,0.45);margin-left:6px">{{ p.code }}</span>
             </a-select-option>
+            <template #dropdownRender="{ menuNode }">
+              <component :is="menuNode" />
+              <a-divider style="margin:4px 0" />
+              <div style="padding:4px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:#1677ff" @mousedown.prevent @click="openNewProjectModal">
+                <PlusOutlined /> 新建项目
+              </div>
+            </template>
           </a-select>
         </a-form-item>
 
@@ -652,6 +697,32 @@ async function runMatrix() {
       :brands="brandsToTier"
       :category="taskConfig.category"
     />
+
+    <!-- New Project Modal -->
+    <a-modal
+      v-model:open="newProjectVisible"
+      title="新建项目"
+      :confirm-loading="newProjectSaving"
+      ok-text="创建"
+      cancel-text="取消"
+      @ok="handleCreateProject"
+      :width="520"
+    >
+      <a-form layout="vertical" style="margin-top:16px">
+        <a-form-item label="项目名称" required>
+          <a-input v-model:value="newProjectForm.name" placeholder="例：XX 项目二期" :maxlength="100" />
+        </a-form-item>
+        <a-form-item label="项目编号">
+          <a-input v-model:value="newProjectForm.code" placeholder="例：PRJ-2026-001（可留空）" :maxlength="50" />
+        </a-form-item>
+        <a-form-item label="项目地址">
+          <a-input v-model:value="newProjectForm.location" placeholder="例：上海市浦东新区 XX 路" :maxlength="200" />
+        </a-form-item>
+        <a-form-item label="备注">
+          <a-textarea v-model:value="newProjectForm.remark" placeholder="可选备注信息" :rows="2" :maxlength="500" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 

@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MEMPAS 功能演示</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  background: #f7f8fa; color: #1d2129; line-height: 1.8;
+}
+.container { max-width: 1100px; margin: 0 auto; padding: 40px 32px; }
+h1 { font-size: 32px; font-weight: 700; margin-bottom: 8px; color: #1677ff; }
+h1 small { font-size: 14px; color: #86909c; font-weight: 400; display: block; margin-top: 4px; }
+h2 { font-size: 22px; font-weight: 600; margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 2px solid #1677ff; color: #1d2129; }
+h3 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; color: #4e5969; }
+h4 { font-size: 15px; font-weight: 600; margin: 16px 0 8px; color: #4e5969; }
+p, li { font-size: 14px; color: #4e5969; margin-bottom: 8px; }
+ul, ol { padding-left: 24px; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+.badge-blue { background: #e8f4ff; color: #1677ff; }
+.badge-green { background: #f6ffed; color: #52c41a; }
+.path { font-size: 13px; color: #86909c; margin-bottom: 12px; }
+.path::before { content: "📍 "; }
+img {
+  width: 100%; border-radius: 8px; margin: 16px 0 24px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08); border: 1px solid #e5e6eb;
+}
+table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 13px; }
+th { background: #1677ff; color: #fff; padding: 10px 12px; text-align: left; font-weight: 500; }
+td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+tr:hover td { background: #fafbfc; }
+.card { background: #fff; border-radius: 8px; padding: 24px; margin: 16px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+pre { background: #1d2129; color: #e8e8e8; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; margin: 12px 0; }
+code { font-family: "SF Mono", "Fira Code", Consolas, monospace; }
+.highlight { color: #1677ff; font-weight: 600; }
+.meta { text-align: center; font-size: 13px; color: #86909c; margin-bottom: 32px; }
+.section-intro { font-size: 15px; color: #1d2129; margin-bottom: 16px; font-weight: 500; }
+.alert-demo { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 4px; font-size: 12px; margin-right: 8px; }
+.alert-green { background: #f6ffed; color: #52c41a; }
+.alert-yellow { background: #fffbe6; color: #fa8c16; }
+.alert-red { background: #fff2f0; color: #ff4d4f; }
+.toc { background: #fff; border-radius: 8px; padding: 20px 24px; margin: 24px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+.toc h3 { margin-top: 0; }
+.toc ol { padding-left: 20px; }
+.toc li { margin-bottom: 4px; }
+.toc a { color: #1677ff; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.arch-box { background: #1d2129; color: #e8e8e8; padding: 24px; border-radius: 8px; font-family: "SF Mono", Consolas, monospace; font-size: 14px; white-space: pre; line-height: 1.6; overflow-x: auto; }
+.kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0 20px; }
+.kpi-card { background: #fff; border-radius: 8px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.06); border-top: 3px solid #1677ff; }
+.kpi-card .num { font-size: 28px; font-weight: 700; color: #1677ff; }
+.kpi-card .label { font-size: 12px; color: #86909c; margin-top: 4px; }
+.footer { text-align: center; padding: 40px 0 20px; font-size: 12px; color: #c9cdd4; }
+@media print {
+  body { background: #fff; }
+  .container { padding: 20px; }
+  img { box-shadow: none; break-inside: avoid; }
+  h2 { break-after: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>MEMPAS 机电材料查询比价分析系统
+  <small>功能演示文档 &nbsp;|&nbsp; v1.0 &nbsp;|&nbsp; 2026-05-22</small>
+</h1>
+
+<div class="meta">适用场景：客户演示 / 产品介绍 / 内部评审</div>
+
+<!-- TOC -->
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#overview">系统概述</a></li>
+  <li><a href="#login">系统入口</a></li>
+  <li><a href="#dashboard">仪表盘 — 全局概览</a></li>
+  <li><a href="#materials">物料主数据 — 标准化底座</a></li>
+  <li><a href="#suppliers">供应商管理 — 五维评分体系</a></li>
+  <li><a href="#compare">招标比价分析 — 核心功能</a></li>
+  <li><a href="#invite">邀标建议 — AI 智能推荐</a></li>
+  <li><a href="#history">采购数据分析 — 历史追溯</a></li>
+  <li><a href="#settings">系统设置 — 灵活可配</a></li>
+  <li><a href="#export">数据导出能力</a></li>
+  <li><a href="#arch">技术架构</a></li>
+</ol>
+</div>
+
+<!-- ===== 系统概述 ===== -->
+<h2 id="overview">系统概述</h2>
+<div class="card">
+<p>MEMPAS（Mechanical &amp; Electrical Material Procurement Analysis System）是面向建工集团机电采购场景的<strong>智能比价分析平台</strong>。系统覆盖 <span class="highlight">物料标准化 → 供应商管理 → 智能邀标 → 横向比价 → 历史追溯</span> 全链条，通过 AI 抽取 + 多维权重评分，将传统 Excel 比价的效率提升一个量级。</p>
+</div>
+<div class="kpi">
+  <div class="kpi-card"><div class="num">11,983</div><div class="label">物料标准库</div></div>
+  <div class="kpi-card"><div class="num">57</div><div class="label">供应商档案</div></div>
+  <div class="kpi-card"><div class="num">11,983</div><div class="label">历史报价数据</div></div>
+  <div class="kpi-card"><div class="num">3</div><div class="label">覆盖专业</div></div>
+  <div class="kpi-card"><div class="num">10+</div><div class="label">覆盖品类</div></div>
+</div>
+
+<!-- ===== 1. 登录 ===== -->
+<h2 id="login">1. 系统入口</h2>
+<img src="./demo-screenshots/01-login.jpg" alt="登录页">
+<ul>
+  <li>系统名称 <strong>MEMPAS</strong> + 副标题"机电材料查询比价分析系统"</li>
+  <li>账号 / 密码登录，支持"记住密码"</li>
+  <li>底部版权标识：上海建工一建</li>
+</ul>
+
+<!-- ===== 2. 仪表盘 ===== -->
+<h2 id="dashboard">2. 仪表盘 — 全局概览</h2>
+<p class="path">工作台 / 仪表盘</p>
+<img src="./demo-screenshots/02-dashboard-top.jpg" alt="仪表盘">
+
+<h3>四大核心指标卡</h3>
+<table>
+  <tr><th>卡片</th><th>说明</th></tr>
+  <tr><td>累计入库材料 <strong>11,983</strong> 条</td><td>标准化物料总量</td></tr>
+  <tr><td>本月比价次数 <strong>11,983</strong> 次</td><td>当月比价活跃度</td></tr>
+  <tr><td>偏差预警 <strong>3</strong> 项</td><td>需关注的异常报价</td></tr>
+  <tr><td>数据库覆盖品类 <strong>3</strong> 专业 / <strong>342</strong> 类</td><td>数据完整度</td></tr>
+</table>
+
+<h3>最近比价活动 &amp; 价格趋势</h3>
+<ul>
+  <li>左侧表格展示近 7 天提交的比价记录，含物料名称、报价、偏差百分比、状态标签</li>
+  <li>右侧折线图追踪高频材料近 6 个月均价走势</li>
+</ul>
+
+<h3>项目/品类全景 — 树状热力图</h3>
+<img src="./demo-screenshots/03-dashboard-heatmap.jpg" alt="热力图">
+<ul>
+  <li>矩形面积 = 品类数据量，颜色区分专业</li>
+  <li>一眼看出：<strong>桥架</strong>和<strong>配电箱</strong>是数据最厚的品类</li>
+  <li>支持切换"气泡图"视图</li>
+  <li>底部 4 个快捷入口：新建比价分析 / 上传扫描图件 / 查询历史数据 / 维护标准库</li>
+</ul>
+
+<!-- ===== 3. 物料主数据 ===== -->
+<h2 id="materials">3. 物料主数据 — 标准化底座</h2>
+<p class="path">数据管理 / 物料主数据</p>
+<img src="./demo-screenshots/04-materials.jpg" alt="物料主数据">
+
+<h3>左侧：专业分类树</h3>
+<pre><code>全部物料 (11983)
+├── 电气 (6620)
+│   ├── 桥架 (2049)
+│   ├── 母线槽 (138)
+│   └── 配电箱 (4433)
+├── 给排水 (2125)
+│   ├── 不锈钢管 (580)
+│   ├── 水箱 (14)
+│   ├── 潜水泵 (617)
+│   └── 阀门 (914)
+└── 暖通 (3238)
+    ├── 空调泵 (46)
+    ├── 风口风阀 (3100)
+    └── 风机盘管 (92)</code></pre>
+
+<h3>右侧：物料明细表</h3>
+<ul>
+  <li><strong>物料编码</strong>（如 EL-BRG-02049）</li>
+  <li><strong>标准名称</strong>（如"镀锌槽式桥架"）</li>
+  <li><strong>专业 / 品类 / 子类</strong> 三级分类</li>
+  <li><strong>规格</strong>（如 300*100）、<strong>材质</strong>（如 热镀锌）</li>
+  <li><strong>推荐品牌</strong>（如 江苏华润）</li>
+  <li><strong>参考价格区间</strong>（如 ¥120 ~ ¥120）</li>
+</ul>
+
+<h3>操作功能</h3>
+<ul>
+  <li><strong>名称标准化</strong>：AI 辅助合并同义物料名</li>
+  <li><strong>导出</strong>：一键导出当前品类 Excel</li>
+  <li><strong>新增标准</strong>：手动录入新物料条目</li>
+  <li><strong>编辑 / 属性 / 停用</strong>：单条维护</li>
+</ul>
+
+<!-- ===== 4. 供应商管理 ===== -->
+<h2 id="suppliers">4. 供应商管理 — 五维评分体系</h2>
+<p class="path">数据管理 / 供应商管理</p>
+<img src="./demo-screenshots/05-suppliers.jpg" alt="供应商管理">
+
+<h3>概览卡片</h3>
+<div class="kpi">
+  <div class="kpi-card"><div class="num">57</div><div class="label">供应商总数</div></div>
+  <div class="kpi-card"><div class="num">0</div><div class="label">优质供应商 (AI≥85)</div></div>
+  <div class="kpi-card"><div class="num">0</div><div class="label">本年新增</div></div>
+  <div class="kpi-card"><div class="num">17</div><div class="label">高频合作 (≥5次)</div></div>
+</div>
+
+<h3>供应商列表</h3>
+<ul>
+  <li><strong>供应商名称</strong>（可点击查看画像）</li>
+  <li><strong>主营物料类别</strong></li>
+  <li><strong>合作次数</strong>（如靖江启达 499 次、申宝 130 次）</li>
+  <li><strong>历史均价偏差</strong> / <strong>履约评分</strong> / <strong>AI 综合评分</strong></li>
+  <li><strong>标签</strong>（如"高频"、"新供应商"）</li>
+</ul>
+
+<h3>供应商画像抽屉</h3>
+<p>点击"画像"可查看 AI 五维评分雷达图（价格竞争力 / 历史合作 / 报价完整度 / 品牌合规 / 商务条款）、历史合作时间线、供应品类分布。</p>
+
+<!-- ===== 5. 招标比价 ===== -->
+<h2 id="compare">5. 招标比价分析 — 核心功能</h2>
+<p class="path">业务功能 / 招标比价分析</p>
+<p class="section-intro">三步引导式工作流：<span class="highlight">配置任务 → 录入报价 → 比价结果</span></p>
+
+<h3>Step 1：配置任务</h3>
+<img src="./demo-screenshots/06-compare-config.jpg" alt="比价配置">
+<ul>
+  <li><strong>项目</strong>（可选，不选则跨项目比价）</li>
+  <li><strong>品类</strong>（必选，如桥架、母线槽、配电箱等）</li>
+  <li><strong>参与供应商</strong>（可选多家，也可跳过让系统自动识别）</li>
+</ul>
+
+<h3>Step 2：录入报价</h3>
+<ul>
+  <li><strong>上传 PDF / 图片</strong>：AI 自动 OCR 识别报价单内容</li>
+  <li><strong>使用历史数据，跳过上传</strong>：直接复用数据库中的历史报价</li>
+</ul>
+
+<h3>Step 3：横向比价矩阵 (BidMatrix)</h3>
+<img src="./demo-screenshots/07-bid-matrix.jpg" alt="比价矩阵">
+<div class="card">
+<p><strong>⭐ 这是系统的核心价值展示页面。</strong></p>
+</div>
+
+<h4>矩阵结构</h4>
+<table>
+  <tr><th>列</th><th>说明</th></tr>
+  <tr><td>材料</td><td>物料名称 + 规格</td></tr>
+  <tr><td>历史均价</td><td>该物料所有历史报价的均值</td></tr>
+  <tr><td>合理史低</td><td>剔除异常后的历史最低价</td></tr>
+  <tr><td>A/B/C 供应商</td><td>各供应商本次报价 + 偏差率 + 告警标签</td></tr>
+  <tr><td>最低偏差</td><td>最优供应商的偏差百分比</td></tr>
+  <tr><td>推荐</td><td>AI 综合推荐的供应商代号</td></tr>
+</table>
+
+<h4>色标告警系统</h4>
+<div style="margin: 12px 0 20px;">
+  <span class="alert-demo alert-green">● 正常 — 偏差 ≤ 黄色阈值</span>
+  <span class="alert-demo alert-yellow">● 需关注 — 黄色 &lt; 偏差 ≤ 红色阈值</span>
+  <span class="alert-demo alert-red">● 异常 — 偏差 &gt; 红色阈值</span>
+</div>
+
+<h4>汇总信息栏</h4>
+<ul>
+  <li><strong>品类标签</strong>：母线槽</li>
+  <li><strong>物料数</strong>：556 物料</li>
+  <li><strong>供应商数</strong>：3 供应商</li>
+  <li><strong>推荐供应商</strong>：靖江启达</li>
+  <li><strong>最优总价</strong>：¥4,113,882</li>
+  <li><strong>异常项数</strong>：536 项</li>
+</ul>
+
+<h4>技术亮点</h4>
+<ul>
+  <li><strong>虚拟滚动</strong>：500+ 行数据流畅滚动，DOM 节点减少 97%</li>
+  <li><strong>一键导出 Excel</strong>：带色标、带汇总行，直接发给领导审批</li>
+</ul>
+
+<!-- ===== 6. 邀标建议 ===== -->
+<h2 id="invite">6. 邀标建议 — AI 智能推荐</h2>
+<p class="path">业务功能 / 邀标建议</p>
+<img src="./demo-screenshots/08-invite.jpg" alt="邀标建议">
+
+<div class="card">
+<p style="text-align:center; font-size:15px;">
+  上传招标文件 → 自动识别材料清单 → AI 推荐优秀供应商 → 一键发起邀请
+</p>
+</div>
+
+<h3>左侧：上传招标文件</h3>
+<ul>
+  <li>支持 <strong>PDF / 扫描件图片</strong></li>
+  <li>上传后自动 <strong>OCR + AI 抽取</strong>：识别项目信息与材料清单</li>
+  <li>抽取引擎：3 级 fallback（结构化 → 表格 → 全文）</li>
+</ul>
+
+<h3>右侧：推荐供应商</h3>
+<ul>
+  <li><strong>推荐数</strong>：可配置（默认 5 家）</li>
+  <li>推荐依据（四维评分）：历史中标记录 / 品类匹配度 / 价格竞争力 / 合作信用</li>
+  <li>每个推荐项附带 <strong>AI 推荐理由</strong></li>
+  <li>勾选后一键保存邀标名单</li>
+</ul>
+
+<!-- ===== 7. 采购数据分析 ===== -->
+<h2 id="history">7. 采购数据分析 — 历史追溯</h2>
+<p class="path">数据管理 / 采购数据分析</p>
+<img src="./demo-screenshots/09-history.jpg" alt="采购数据分析">
+
+<h3>多维筛选</h3>
+<table>
+  <tr><th>筛选条件</th><th>说明</th></tr>
+  <tr><td>专业类别</td><td>电气 / 给排水 / 暖通</td></tr>
+  <tr><td>关键词</td><td>材料名称或编码模糊搜索</td></tr>
+  <tr><td>供应商</td><td>57 家可选</td></tr>
+  <tr><td>日期范围</td><td>开始 ~ 结束日期</td></tr>
+  <tr><td>价格范围</td><td>最低 ~ 最高单价</td></tr>
+</table>
+
+<h3>数据表</h3>
+<ul>
+  <li>共 <strong>11,983</strong> 条历史报价记录</li>
+  <li>每条包含：编号、材料名称、规格、品牌、供应商、单位、单价、偏差%、招标时间</li>
+  <li>支持 <strong>导出</strong> 筛选结果为 Excel</li>
+</ul>
+
+<!-- ===== 8. 系统设置 ===== -->
+<h2 id="settings">8. 系统设置 — 灵活可配</h2>
+<p class="path">系统管理 / 系统设置</p>
+
+<h3>Tab 1：评分权重</h3>
+<img src="./demo-screenshots/10-settings-weights.jpg" alt="评分权重">
+<p>五维评分权重（合计必须 = 100%）：</p>
+<table>
+  <tr><th>维度</th><th>默认权重</th><th>说明</th></tr>
+  <tr><td>价格竞争力</td><td>40%</td><td>报价与历史均价的偏差</td></tr>
+  <tr><td>历史合作</td><td>20%</td><td>中标次数、合作年限</td></tr>
+  <tr><td>报价完整度</td><td>15%</td><td>报价单信息的完整程度</td></tr>
+  <tr><td>品牌合规</td><td>15%</td><td>品牌是否在一/二/三线档位中</td></tr>
+  <tr><td>商务条款</td><td>10%</td><td>付款条件、交期等</td></tr>
+</table>
+<p>权重调整后<strong>即时生效</strong>，影响下一轮供应商画像计算与比价推荐排序。</p>
+
+<h3>Tab 2：偏差阈值（分品类）</h3>
+<img src="./demo-screenshots/11-settings-thresholds.jpg" alt="偏差阈值">
+<table>
+  <tr><th>品类</th><th>黄色预警（需关注）</th><th>红色预警（异常）</th></tr>
+  <tr><td>默认</td><td>5%</td><td>10%</td></tr>
+  <tr><td>桥架</td><td>8%</td><td>15%</td></tr>
+  <tr><td>阀门</td><td>6%</td><td>12%</td></tr>
+  <tr><td>配电箱</td><td>5%</td><td>10%</td></tr>
+  <tr><td>母线槽</td><td>6%</td><td>12%</td></tr>
+  <tr><td>不锈钢管</td><td>5%</td><td>10%</td></tr>
+  <tr><td>水箱</td><td>8%</td><td>15%</td></tr>
+  <tr><td>潜水泵</td><td>6%</td><td>12%</td></tr>
+  <tr><td>风口风阀</td><td>7%</td><td>13%</td></tr>
+  <tr><td>风机盘管</td><td>7%</td><td>13%</td></tr>
+  <tr><td>空调泵</td><td>6%</td><td>12%</td></tr>
+</table>
+
+<h3>Tab 3：品牌档位映射</h3>
+<p>按品类维护品牌分档（一线 / 二线 / 三线），影响品牌合规维度评分。</p>
+
+<!-- ===== 9. 导出 ===== -->
+<h2 id="export">9. 数据导出能力</h2>
+<p>系统所有核心视图均支持 <strong>一键导出 Excel</strong>：</p>
+<table>
+  <tr><th>模块</th><th>导出内容</th><th>文件示例</th></tr>
+  <tr><td>仪表盘</td><td>采购概览 + 品类统计（双 Sheet）</td><td>MEMPAS_仪表盘报表_20260522.xlsx</td></tr>
+  <tr><td>供应商</td><td>全量供应商名单含评分</td><td>MEMPAS_供应商名单_20260522.xlsx</td></tr>
+  <tr><td>物料</td><td>物料标准库（支持按品类筛选）</td><td>MEMPAS_物料主数据_桥架_20260522.xlsx</td></tr>
+  <tr><td>采购历史</td><td>历史报价含告警色标</td><td>MEMPAS_采购数据_20260522.xlsx</td></tr>
+  <tr><td>比价矩阵</td><td>横向对比 + 偏差率 + 推荐 + 汇总行</td><td>MEMPAS_比价矩阵_母线槽_20260522.xlsx</td></tr>
+  <tr><td>操作日志</td><td>审计日志记录</td><td>MEMPAS_操作日志_20260522.xlsx</td></tr>
+</table>
+<p>Excel 特性：蓝色表头 + 白色字体、告警色标自动着色、列宽自适应、支持中文文件名。</p>
+
+<!-- ===== 10. 技术架构 ===== -->
+<h2 id="arch">10. 技术架构</h2>
+<div class="arch-box">┌─────────────────────────────────────────────┐
+│              前端 (Port 3000)                │
+│  Vue 3 + Vite + Ant Design Vue + ECharts    │
+│  虚拟滚动 (@tanstack/vue-virtual)           │
+├─────────────────────────────────────────────┤
+│              后端 (Port 8002)                │
+│  FastAPI + SQLAlchemy + SQLite              │
+│  AI 引擎: Qwen-VL (OCR) + 3级 Fallback     │
+│  Excel: openpyxl                            │
+├─────────────────────────────────────────────┤
+│              数据层                          │
+│  SQLite (11,983 物料 / 57 供应商 / 58 项目)  │
+└─────────────────────────────────────────────┘</div>
+
+<div class="footer">
+  MEMPAS &copy; 2026 上海建工一建集团有限公司 &nbsp;|&nbsp; 本文档由系统自动生成
+</div>
+
+</div>
+</body>
+</html>
