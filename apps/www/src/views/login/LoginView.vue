@@ -67,7 +67,7 @@ async function handleSubmit() {
             <a-input
               v-model:value="form.username"
               size="large"
-              placeholder="用户名: admin"
+              placeholder="用户名"
               @press-enter="handleSubmit"
             >
               <template #prefix>
