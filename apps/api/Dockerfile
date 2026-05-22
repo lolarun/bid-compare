@@ -1,18 +1,19 @@
 # MEMPAS backend — production image
 # Multi-stage build: 1) install deps with uv into a virtualenv,
 #                    2) copy minimal runtime + venv into a slim final image.
+# All package sources use Chinese mirrors (Aliyun) for mainland ECS.
 
 # ─── Stage 1: dependency installer ────────────────────────────────────────
 FROM python:3.11-slim AS deps
 
-# uv: fastest pip-compatible installer (pip install avoids ghcr.io which is
-# blocked in mainland China)
-RUN pip install --no-cache-dir uv
+# Install uv via pip using Aliyun PyPI mirror
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com uv
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
-    UV_PROJECT_ENVIRONMENT=/opt/venv
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 WORKDIR /app
 
@@ -27,9 +28,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ─── Stage 2: runtime image ───────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        # pypdfium2 needs no system deps (statically linked), but tini
-        # gives us proper PID-1 signal handling for graceful shutdowns.
+# Use Aliyun Debian mirror for apt
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
