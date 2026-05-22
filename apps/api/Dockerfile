@@ -13,7 +13,8 @@ ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    UV_HTTP_TIMEOUT=300
 
 WORKDIR /app
 

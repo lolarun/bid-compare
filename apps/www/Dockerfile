@@ -8,7 +8,8 @@ WORKDIR /app
 
 # Cache dependency install separately from source changes
 COPY apps/www/package.json apps/www/package-lock.json* ./
-RUN npm ci --prefer-offline --no-audit --no-fund
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm ci --prefer-offline --no-audit --no-fund
 
 COPY apps/www/ ./
 RUN npm run build
