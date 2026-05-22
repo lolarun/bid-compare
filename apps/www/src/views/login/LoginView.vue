@@ -55,14 +55,14 @@ async function handleSubmit() {
         <a-alert
           v-if="loginError"
           type="error"
-          message="用户名或密码错误（admin / admin123）"
+          message="用户名或密码错误"
           show-icon
           closable
           style="margin-bottom: 24px"
           @close="loginError = false"
         />
 
-        <a-form layout="vertical" @finish="handleSubmit">
+        <a-form layout="vertical" @submit.prevent="handleSubmit">
           <a-form-item>
             <a-input
               v-model:value="form.username"
@@ -80,7 +80,7 @@ async function handleSubmit() {
             <a-input-password
               v-model:value="form.password"
               size="large"
-              placeholder="密码: admin123"
+              placeholder="密码"
               @press-enter="handleSubmit"
             >
               <template #prefix>
