@@ -10,6 +10,7 @@ from apps.api.schemas import (
     MultiCompareRequest, MultiCompareResult,
     CategoryDetailStats,
     BidMatrixRequest, BidMatrixResult,
+    BidInsightRequest, BidInsightResult,
     DashboardHeatmapData, DashboardBubbleData,
 )
 from apps.api.services.comparison import compare_price
@@ -22,6 +23,8 @@ from apps.api.services.statistics import (
     get_dashboard_bubble,
 )
 from apps.api.services.bid_matrix import build_bid_matrix
+from apps.api.services.bid_insight import generate_bid_insight
+from apps.api.core.config import get_settings
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -58,8 +61,8 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
     return result
 
 
-@router.post("/bid-matrix", response_model=BidMatrixResult)
-def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)):
+@router.post("/bid-matrix")
+def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatrixResult:
     """横向对比矩阵 — F6.1 核心接口。"""
     result = build_bid_matrix(
         db,
@@ -68,7 +71,7 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)):
         material_ids=body.material_ids,
         category=body.category,
     )
-    return result
+    return BidMatrixResult.model_validate(result)
 
 
 @router.get("/category-stats/{category}", response_model=CategoryDetailStats)
@@ -104,3 +107,20 @@ def dashboard_bubble(db: Session = Depends(get_db)):
 def refresh_baselines(category: str | None = None, db: Session = Depends(get_db)):
     refresh_material_baselines(db, category)
     return {"status": "ok", "message": f"Baselines refreshed for {category or 'all categories'}"}
+
+
+@router.post("/bid-insight", response_model=BidInsightResult)
+def bid_insight(body: BidInsightRequest):
+    """AI 综合分析建议 — 调用 Qwen 文本模型分析比价矩阵。"""
+    from openai import OpenAI
+
+    _settings = get_settings()
+    api_key = _settings.DASHSCOPE_API_KEY
+    base_url = _settings.DASHSCOPE_BASE_URL
+    if not api_key:
+        return BidInsightResult(error="LLM API key not configured")
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    matrix_data = body.model_dump()
+    result = generate_bid_insight(matrix_data, client, model="qwen-plus")
+    return result

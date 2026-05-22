@@ -176,14 +176,21 @@ def build_bid_matrix(
         })
 
     # ── 4. 汇总 totals ────────────────────────────────────────────────────
-    supplier_totals: dict[int, dict] = {sid: {"total": 0.0, "devs": []} for sid in supplier_ids}
+    supplier_totals: dict[int, dict] = {
+        sid: {"total": 0.0, "devs": [], "quoted": 0, "anomalies": 0}
+        for sid in supplier_ids
+    }
     for row in rows:
         for cell in row["suppliers"]:
             sid = cell["supplier_id"]
+            if cell["price"] is not None:
+                supplier_totals[sid]["quoted"] += 1
             if cell["total"] is not None:
                 supplier_totals[sid]["total"] += cell["total"]
             if cell["deviation_pct"] is not None:
                 supplier_totals[sid]["devs"].append(cell["deviation_pct"])
+            if cell["alert_level"] == "red":
+                supplier_totals[sid]["anomalies"] += 1
 
     totals = []
     for sid in supplier_ids:
@@ -193,6 +200,8 @@ def build_bid_matrix(
             "supplier_id": sid,
             "total": round(data["total"], 2),
             "avg_deviation": round(avg_dev, 4),
+            "quoted_count": data["quoted"],
+            "anomaly_count": data["anomalies"],
         })
 
     return {

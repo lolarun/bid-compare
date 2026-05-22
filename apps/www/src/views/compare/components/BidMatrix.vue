@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { message } from 'ant-design-vue'
+import { DownloadOutlined, FilterOutlined } from '@ant-design/icons-vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import { normalizeAlert, alertColors, formatDeviation } from '@/utils/alert'
+import { exportApi } from '@/api'
 import type { MatrixRow, MatrixTotal } from '@/api/client'
 
 interface SupplierInfo {
@@ -15,6 +18,9 @@ const props = defineProps<{
   rows: MatrixRow[]
   totals: MatrixTotal[]
   loading?: boolean
+  category?: string
+  projectId?: number
+  supplierIds?: number[]
 }>()
 
 const totalsBySupplier = computed(() => {
@@ -23,16 +29,34 @@ const totalsBySupplier = computed(() => {
   return map
 })
 
+// Completeness: computed from row data (no backend dependency)
+const completeness = computed(() => {
+  const total = props.rows.length
+  const map = new Map<number, { quoted: number; total: number }>()
+  for (const s of props.suppliers) {
+    map.set(s.id, { quoted: 0, total })
+  }
+  for (const row of props.rows) {
+    for (const cell of row.suppliers) {
+      if (cell.price !== null) {
+        const entry = map.get(cell.supplier_id)
+        if (entry) entry.quoted++
+      }
+    }
+  }
+  return map
+})
+
 /* ---------- virtual scroll ---------- */
 const scrollRef = ref<HTMLElement | null>(null)
-const ROW_HEIGHT = 68 // estimated average row height
+const ROW_HEIGHT = 68
 
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: props.rows.length,
     getScrollElement: () => scrollRef.value,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 10, // render 10 extra rows above/below viewport for smooth scrolling
+    overscan: 10,
   })),
 )
 
@@ -48,37 +72,82 @@ const paddingBottom = computed(() =>
     : 0,
 )
 
-/* ---------- row count summary ---------- */
 const rowCountText = computed(() => {
   const n = props.rows.length
   return n > 0 ? `共 ${n} 条材料` : ''
 })
+
+/* ---------- export ---------- */
+const exporting = ref(false)
+async function handleExport() {
+  if (!props.supplierIds?.length) {
+    message.warning('无供应商数据可导出')
+    return
+  }
+  exporting.value = true
+  try {
+    const { data } = await exportApi.bidMatrix({
+      supplier_ids: props.supplierIds.join(','),
+      project_id: props.projectId,
+      category: props.category,
+    })
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `比价矩阵_${props.category || ''}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+    message.success('导出成功')
+  } catch {
+    message.error('导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 
 <template>
   <a-spin :spinning="!!loading">
+    <!-- Toolbar -->
     <div class="bid-matrix__toolbar" v-if="rows.length > 0">
-      <span class="bid-matrix__count">{{ rowCountText }}</span>
+      <div>
+        <span class="bid-matrix__count">{{ rowCountText }}</span>
+        <span class="bid-matrix__legend">
+          绿色为该项最低价，灰底为未报价，偏差对比历史均价
+        </span>
+      </div>
+      <a-space>
+        <a-button size="small" :loading="exporting" @click="handleExport">
+          <template #icon><DownloadOutlined /></template>
+          导出矩阵
+        </a-button>
+      </a-space>
     </div>
+
+    <!-- Matrix table -->
     <div ref="scrollRef" class="bid-matrix">
       <table class="bid-matrix__table">
         <thead>
           <tr>
-            <th class="bid-matrix__col-material">材料</th>
-            <th class="bid-matrix__col-history">历史均价</th>
-            <th class="bid-matrix__col-low">合理史低</th>
-            <th v-for="s in suppliers" :key="s.id" class="bid-matrix__col-supplier">
-              <div class="bid-matrix__supplier-tag">{{ s.letter }}</div>
-              <div class="bid-matrix__supplier-name">{{ s.name }}</div>
+            <th class="bid-matrix__col-material" rowspan="2">材料</th>
+            <th class="bid-matrix__col-history" rowspan="2">历史均价</th>
+            <th
+              v-for="s in suppliers"
+              :key="s.id"
+              class="bid-matrix__col-supplier-header"
+              colspan="1"
+            >
+              <span class="bid-matrix__supplier-tag">{{ s.letter }}</span>
+              <span class="bid-matrix__supplier-name">{{ s.name }}</span>
             </th>
-            <th class="bid-matrix__col-min">最低偏差</th>
-            <th class="bid-matrix__col-rec">推荐</th>
+            <th class="bid-matrix__col-min" rowspan="2">最低偏差</th>
+            <th class="bid-matrix__col-rec" rowspan="2">推荐</th>
           </tr>
         </thead>
         <tbody>
-          <!-- top spacer row to maintain scroll position -->
+          <!-- top spacer -->
           <tr v-if="paddingTop > 0" :style="{ height: paddingTop + 'px' }" aria-hidden="true">
-            <td :colspan="3 + suppliers.length + 2" style="padding:0;border:none" />
+            <td :colspan="2 + suppliers.length + 2" style="padding:0;border:none" />
           </tr>
 
           <tr
@@ -87,28 +156,24 @@ const rowCountText = computed(() => {
             :data-index="vRow.index"
             :ref="(el) => virtualizer.measureElement(el as HTMLElement)"
           >
+            <!-- Material -->
             <td class="bid-matrix__cell-material">
               <div style="font-weight:500">{{ rows[vRow.index].material_name }}</div>
               <div style="font-size:12px;color:rgba(0,0,0,0.45)">{{ rows[vRow.index].spec }}</div>
             </td>
-            <td>
-              <div v-if="rows[vRow.index].historical_avg">
-                <div style="font-weight:500">¥{{ rows[vRow.index].historical_avg!.price.toFixed(2) }}</div>
+
+            <!-- Historical avg -->
+            <td class="bid-matrix__cell-history">
+              <template v-if="rows[vRow.index].historical_avg">
+                <div class="bid-matrix__hist-price">¥{{ rows[vRow.index].historical_avg!.price.toFixed(2) }}</div>
                 <div style="font-size:11px;color:rgba(0,0,0,0.45)">
-                  {{ rows[vRow.index].historical_avg!.period }} · {{ rows[vRow.index].historical_avg!.projects }} 项目
+                  {{ rows[vRow.index].historical_avg!.period }}
                 </div>
-              </div>
-              <span v-else style="color:rgba(0,0,0,0.45)">—</span>
+              </template>
+              <span v-else style="color:rgba(0,0,0,0.35)">—</span>
             </td>
-            <td>
-              <div v-if="rows[vRow.index].reasonable_low">
-                <div style="font-weight:600;color:#52c41a">¥{{ rows[vRow.index].reasonable_low!.price.toFixed(2) }}</div>
-                <div style="font-size:11px;color:rgba(0,0,0,0.45)">
-                  {{ rows[vRow.index].reasonable_low!.date }} · {{ rows[vRow.index].reasonable_low!.project }}
-                </div>
-              </div>
-              <span v-else style="color:rgba(0,0,0,0.45)">—</span>
-            </td>
+
+            <!-- Supplier cells -->
             <td
               v-for="cell in rows[vRow.index].suppliers"
               :key="cell.supplier_id"
@@ -118,60 +183,89 @@ const rowCountText = computed(() => {
               }"
             >
               <template v-if="cell.price !== null">
-                <div class="flex flex-between" style="align-items:flex-start">
-                  <div style="font-weight:500">¥{{ cell.price.toFixed(2) }}</div>
-                  <a-tag v-if="cell.is_lowest" color="green" style="margin:0;line-height:18px;font-size:10px">最低</a-tag>
+                <div class="bid-matrix__price-row">
+                  <span class="bid-matrix__price">¥{{ cell.price.toFixed(2) }}</span>
+                  <span v-if="cell.is_lowest" class="bid-matrix__lowest-badge">★ 最低</span>
                 </div>
-                <div :style="{ fontSize: '11px', color: alertColors[normalizeAlert(cell.alert_level)] }">
+                <span
+                  class="bid-matrix__deviation-pill"
+                  :class="`bid-matrix__deviation-pill--${normalizeAlert(cell.alert_level)}`"
+                >
                   {{ formatDeviation(cell.deviation_pct) }}
-                </div>
-                <div v-if="cell.total !== null" style="font-size:11px;color:rgba(0,0,0,0.45)">
+                </span>
+                <div v-if="cell.total !== null" style="font-size:11px;color:rgba(0,0,0,0.45);margin-top:2px">
                   合计 ¥{{ cell.total.toLocaleString() }}
                 </div>
               </template>
-              <span v-else style="color:rgba(0,0,0,0.35)">未报价</span>
+              <span v-else class="bid-matrix__no-quote">未报价</span>
             </td>
+
+            <!-- Min deviation -->
             <td>
               <span
                 v-if="rows[vRow.index].min_deviation !== null"
-                :style="{ color: alertColors[normalizeAlert(rows[vRow.index].min_deviation! <= 0.05 ? 'normal' : rows[vRow.index].min_deviation! <= 0.1 ? 'yellow' : 'red')] }"
+                class="bid-matrix__deviation-pill"
+                :class="`bid-matrix__deviation-pill--${normalizeAlert(
+                  rows[vRow.index].min_deviation! <= 0.05 ? 'normal' : rows[vRow.index].min_deviation! <= 0.1 ? 'yellow' : 'red'
+                )}`"
               >
                 {{ formatDeviation(rows[vRow.index].min_deviation) }}
               </span>
               <span v-else style="color:rgba(0,0,0,0.45)">—</span>
             </td>
+
+            <!-- Recommended -->
             <td>
-              <a-tag v-if="rows[vRow.index].recommended" color="blue">{{ rows[vRow.index].recommended }}</a-tag>
+              <a-tag v-if="rows[vRow.index].recommended" color="blue" style="margin:0">{{ rows[vRow.index].recommended }}</a-tag>
               <span v-else style="color:rgba(0,0,0,0.45)">—</span>
             </td>
           </tr>
 
-          <!-- bottom spacer row to maintain scroll position -->
+          <!-- bottom spacer -->
           <tr v-if="paddingBottom > 0" :style="{ height: paddingBottom + 'px' }" aria-hidden="true">
-            <td :colspan="3 + suppliers.length + 2" style="padding:0;border:none" />
+            <td :colspan="2 + suppliers.length + 2" style="padding:0;border:none" />
           </tr>
         </tbody>
+
+        <!-- Footer: 3 rows -->
         <tfoot>
+          <!-- Row 1: Totals -->
           <tr>
-            <td colspan="3" class="bid-matrix__footer-label">汇总（已报材料合计）</td>
-            <td v-for="s in suppliers" :key="s.id">
-              <div style="font-weight:600">
-                ¥{{ totalsBySupplier.get(s.id)?.total.toLocaleString() ?? '—' }}
+            <td colspan="2" class="bid-matrix__footer-label">合计（已报材料合计）</td>
+            <td v-for="s in suppliers" :key="'total-' + s.id">
+              <div style="font-weight:600;font-size:14px">
+                ¥{{ totalsBySupplier.get(s.id)?.total?.toLocaleString() ?? '—' }}
               </div>
-              <div style="font-size:11px;color:rgba(0,0,0,0.45)">
-                平均偏差
-                <span :style="{
-                  color: alertColors[normalizeAlert(
-                    Math.abs(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) <= 0.05
-                      ? 'normal'
-                      : Math.abs(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) <= 0.1
-                      ? 'yellow'
-                      : 'red'
-                  )]
-                }">
-                  {{ formatDeviation(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) }}
-                </span>
-              </div>
+            </td>
+            <td colspan="2"></td>
+          </tr>
+          <!-- Row 2: Avg deviation -->
+          <tr>
+            <td colspan="2" class="bid-matrix__footer-label">平均偏差</td>
+            <td v-for="s in suppliers" :key="'dev-' + s.id">
+              <span
+                class="bid-matrix__deviation-pill"
+                :class="`bid-matrix__deviation-pill--${normalizeAlert(
+                  Math.abs(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) <= 0.05
+                    ? 'normal'
+                    : Math.abs(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) <= 0.1
+                    ? 'yellow'
+                    : 'red'
+                )}`"
+              >
+                {{ formatDeviation(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) }}
+              </span>
+            </td>
+            <td colspan="2"></td>
+          </tr>
+          <!-- Row 3: Completeness -->
+          <tr>
+            <td colspan="2" class="bid-matrix__footer-label">报价完整度</td>
+            <td v-for="s in suppliers" :key="'comp-' + s.id">
+              <span :style="{ color: completeness.get(s.id)?.quoted === completeness.get(s.id)?.total ? '#52c41a' : 'rgba(0,0,0,0.65)' }">
+                {{ completeness.get(s.id)?.quoted ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
+                <span v-if="completeness.get(s.id)?.quoted === completeness.get(s.id)?.total"> ✓</span>
+              </span>
             </td>
             <td colspan="2"></td>
           </tr>
@@ -187,7 +281,7 @@ const rowCountText = computed(() => {
 .bid-matrix {
   overflow-x: auto;
   overflow-y: auto;
-  height: 70vh;
+  height: 60vh;
   contain: layout paint;
   will-change: transform;
 
@@ -195,17 +289,23 @@ const rowCountText = computed(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 12px;
+    padding: 10px 14px;
     background: #fafafa;
     border: 1px solid @border-color-split;
     border-bottom: none;
     border-radius: 6px 6px 0 0;
-    font-size: 13px;
-    color: @text-color-secondary;
   }
 
   &__count {
+    font-size: 13px;
     font-weight: 500;
+    color: @text-color;
+    margin-right: 12px;
+  }
+
+  &__legend {
+    font-size: 12px;
+    color: @text-color-tertiary;
   }
 
   &__table {
@@ -233,9 +333,8 @@ const rowCountText = computed(() => {
   }
 
   &__col-material { min-width: 160px; }
-  &__col-history,
-  &__col-low { min-width: 130px; }
-  &__col-supplier { min-width: 130px; }
+  &__col-history { min-width: 110px; }
+  &__col-supplier-header { min-width: 140px; text-align: center; }
   &__col-min,
   &__col-rec { min-width: 80px; }
 
@@ -243,17 +342,17 @@ const rowCountText = computed(() => {
     display: inline-block;
     background: @primary-color;
     color: #fff;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     font-size: 11px;
     text-align: center;
-    line-height: 18px;
-    margin-right: 4px;
+    line-height: 20px;
+    margin-right: 6px;
+    font-weight: 600;
   }
 
   &__supplier-name {
-    display: inline-block;
     font-size: 12px;
     color: @text-color;
   }
@@ -265,12 +364,71 @@ const rowCountText = computed(() => {
     z-index: 1;
   }
 
+  &__cell-history {
+    // slight emphasis
+  }
+
+  &__hist-price {
+    font-weight: 500;
+    color: @primary-color;
+  }
+
   &__cell-lowest {
     background: rgba(82, 196, 26, 0.06);
   }
+
   &__cell-empty {
     background: #fafafa;
-    color: rgba(0, 0, 0, 0.35);
+  }
+
+  &__price-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  &__price {
+    font-weight: 500;
+  }
+
+  &__lowest-badge {
+    display: inline-block;
+    background: #f6ffed;
+    color: #52c41a;
+    border: 1px solid #b7eb8f;
+    border-radius: 4px;
+    font-size: 10px;
+    padding: 0 4px;
+    line-height: 18px;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  &__deviation-pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    line-height: 18px;
+    font-weight: 500;
+
+    &--normal {
+      color: #52c41a;
+      background: rgba(82, 196, 26, 0.08);
+    }
+    &--yellow {
+      color: #faad14;
+      background: rgba(250, 173, 20, 0.08);
+    }
+    &--red {
+      color: #ff4d4f;
+      background: rgba(255, 77, 79, 0.08);
+    }
+  }
+
+  &__no-quote {
+    color: rgba(0, 0, 0, 0.25);
+    font-size: 12px;
   }
 
   &__footer-label {
@@ -278,6 +436,7 @@ const rowCountText = computed(() => {
     font-weight: 600;
     background: #fafafa;
     color: @text-color;
+    font-size: 13px;
   }
 
   tfoot td {
@@ -285,6 +444,7 @@ const rowCountText = computed(() => {
     position: sticky;
     bottom: 0;
     z-index: 2;
+    border-top: 1px solid @border-color-base;
   }
 }
 </style>

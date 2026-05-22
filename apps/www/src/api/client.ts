@@ -255,6 +255,17 @@ export interface MatrixTotal {
   supplier_id: number
   total: number
   avg_deviation: number
+  quoted_count?: number
+  anomaly_count?: number
+}
+
+export interface BidInsight {
+  overall: string
+  recommendations: string[]
+  risks: string[]
+  tokens_used?: number
+  duration_ms?: number
+  error?: string
 }
 
 export interface BidMatrixResult {

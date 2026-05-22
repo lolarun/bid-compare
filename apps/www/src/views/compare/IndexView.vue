@@ -5,12 +5,15 @@ import {
   CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined,
   CloudUploadOutlined, LoadingOutlined, CheckOutlined, CloseCircleOutlined,
   PlusOutlined,
+  AppstoreOutlined, TeamOutlined, TrophyOutlined, DollarOutlined,
+  WarningOutlined, BulbOutlined, RobotOutlined,
 } from '@ant-design/icons-vue'
 import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
 import type {
   Project,
   Supplier,
   BidMatrixResult,
+  BidInsight,
   ExtractionJob,
   QuoteExtractionItem,
   BatchConfirmResult,
@@ -18,7 +21,9 @@ import type {
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
 import BrandTierModal from '@/components/BrandTierModal.vue'
+import StatCard from '@/components/StatCard.vue'
 import BidMatrix from './components/BidMatrix.vue'
+import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { asQuoteShape } from '@/utils/extraction'
 
 const CATEGORIES = [
@@ -161,6 +166,56 @@ const matrixSummary = computed(() => {
     optimal_total: Math.round(optimalTotal),
     anomaly_count: anomalyCount,
   }
+})
+
+// ─── AI Insight ─────────────────────────────────────────────────────────
+const insightResult = ref<BidInsight | null>(null)
+const insightLoading = ref(false)
+
+async function fetchInsight() {
+  if (!matrixResult.value || matrixResult.value.rows.length === 0) return
+  insightLoading.value = true
+  insightResult.value = null
+  try {
+    // Truncate rows to keep request body small — backend prompt also limits to 30 rows
+    const trimmed: BidMatrixResult = {
+      ...matrixResult.value,
+      rows: matrixResult.value.rows.slice(0, 50),
+    }
+    const { data } = await analysisApi.bidInsight(trimmed)
+    insightResult.value = data
+  } catch {
+    // Silently fail — AI insight is non-critical
+    insightResult.value = { overall: '', recommendations: [], risks: [], error: '分析请求失败' }
+  } finally {
+    insightLoading.value = false
+  }
+}
+
+// Auto-fetch insight when matrix result arrives
+watch(matrixResult, (val) => {
+  if (val && val.rows.length > 0) {
+    fetchInsight()
+  }
+})
+
+// Savings percentage for bottom bar
+const savingsPercent = computed(() => {
+  if (!matrixSummary.value || !matrixResult.value) return null
+  const totals = matrixResult.value.totals
+  if (totals.length < 2) return null
+  const avgTotal = totals.reduce((s, t) => s + t.total, 0) / totals.length
+  if (avgTotal <= 0) return null
+  const ratio = 1 - matrixSummary.value.optimal_total / avgTotal
+  return ratio > 0 ? (ratio * 100).toFixed(1) : null
+})
+
+// Effective supplier IDs for BidMatrix export
+const effectiveSupplierIds = computed(() => {
+  if (useBatchMode.value) {
+    return [...new Set(batchFiles.value.filter(f => f.confirmed && f.confirmedSupplierId).map(f => f.confirmedSupplierId!))]
+  }
+  return taskConfig.supplierIds
 })
 
 // ─── Data fetching ───────────────────────────────────────────────────────
@@ -438,6 +493,7 @@ async function runMatrix() {
     const { data } = await analysisApi.bidMatrix({
       project_id: taskConfig.projectId,
       supplier_ids: sids,
+      category: taskConfig.category || undefined,
     })
     matrixResult.value = data
     if ((data.rows ?? []).length === 0) {
@@ -646,49 +702,212 @@ async function runMatrix() {
     </a-card>
 
     <!-- Step 2: Results -->
-    <a-card v-else-if="currentStep === 2" :body-style="{ padding: '20px' }">
-      <template #title>
-        <span style="font-size:15px;font-weight:600">横向对比矩阵</span>
-      </template>
-      <template #extra>
-        <a-space v-if="matrixSummary">
-          <!-- AUDIT-FIX M4: anchor the result to category + project so the user knows the context -->
-          <a-tag color="default">{{ taskConfig.category }}</a-tag>
-          <a-tag v-if="selectedProjectName" color="default">{{ selectedProjectName }}</a-tag>
-          <a-tag color="blue">{{ matrixSummary.total_materials }} 物料</a-tag>
-          <a-tag color="purple">{{ matrixSummary.total_suppliers }} 供应商</a-tag>
-          <a-tag v-if="matrixSummary.recommended_supplier" color="green">
-            推荐 {{ matrixSummary.recommended_supplier.name }}
-          </a-tag>
-          <a-tag color="orange">最优总价 ¥{{ matrixSummary.optimal_total.toLocaleString() }}</a-tag>
-          <a-tag color="red">异常 {{ matrixSummary.anomaly_count }} 项</a-tag>
+    <template v-else-if="currentStep === 2">
+      <!-- Context tags -->
+      <div v-if="matrixSummary" class="result-context">
+        <a-tag color="default">{{ taskConfig.category }}</a-tag>
+        <a-tag v-if="selectedProjectName" color="default">{{ selectedProjectName }}</a-tag>
+      </div>
+
+      <!-- ① Summary stat cards -->
+      <div v-if="matrixSummary" class="result-stats">
+        <StatCard
+          :icon="AppstoreOutlined"
+          icon-bg="rgba(22,119,255,0.1)"
+          label="比价材料"
+          :value="matrixSummary.total_materials"
+          unit="项"
+        />
+        <StatCard
+          :icon="TeamOutlined"
+          icon-bg="rgba(114,46,209,0.1)"
+          label="参与供应商"
+          :value="matrixSummary.total_suppliers"
+          unit="家"
+        />
+        <StatCard
+          :icon="TrophyOutlined"
+          icon-bg="rgba(82,196,26,0.1)"
+          label="推荐主供"
+          :value="matrixSummary.recommended_supplier?.name ?? '—'"
+        />
+        <StatCard
+          :icon="DollarOutlined"
+          icon-bg="rgba(250,140,22,0.1)"
+          label="最优组合总价"
+          :value="'¥' + matrixSummary.optimal_total.toLocaleString()"
+        />
+        <StatCard
+          :icon="WarningOutlined"
+          icon-bg="rgba(255,77,79,0.1)"
+          label="异常项"
+          :value="matrixSummary.anomaly_count"
+          unit="项"
+          :trend="matrixSummary.anomaly_count > 0 ? { value: '需关注', danger: true, label: '' } : undefined"
+        />
+      </div>
+
+      <!-- ② Matrix table -->
+      <a-card :body-style="{ padding: '0' }" style="margin-top:16px">
+        <a-empty v-if="!analyzing && matrixRows.length === 0" description="当前条件下无可比数据" style="padding:40px 0" />
+        <BidMatrix
+          v-else
+          :suppliers="matrixSuppliers"
+          :rows="matrixRows"
+          :totals="matrixTotals"
+          :loading="analyzing"
+          :category="taskConfig.category"
+          :project-id="taskConfig.projectId"
+          :supplier-ids="effectiveSupplierIds"
+        />
+      </a-card>
+
+      <!-- ③ Supplier evaluation cards -->
+      <div v-if="matrixSummary && matrixResult" class="supplier-eval">
+        <h3 class="section-title">供应商综合评估</h3>
+        <a-row :gutter="[14, 14]">
+          <a-col
+            v-for="s in matrixSuppliers"
+            :key="s.id"
+            :xs="24" :sm="12" :lg="6"
+          >
+            <div
+              class="eval-card"
+              :class="{
+                'eval-card--recommended': matrixSummary.recommended_supplier?.id === s.id,
+              }"
+            >
+              <div class="eval-card__header">
+                <span class="eval-card__badge">{{ s.letter }}</span>
+                <div class="eval-card__name-block">
+                  <span class="eval-card__name">{{ s.name }}</span>
+                  <a-tag
+                    v-if="matrixSummary.recommended_supplier?.id === s.id"
+                    color="blue"
+                    style="margin-left:6px;font-size:10px"
+                  >★ 推荐</a-tag>
+                </div>
+              </div>
+              <div class="eval-card__metrics">
+                <div class="eval-card__metric">
+                  <span class="eval-card__metric-label">报价总额</span>
+                  <span class="eval-card__metric-value">
+                    ¥{{ (matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
+                  </span>
+                </div>
+                <div class="eval-card__metric">
+                  <span class="eval-card__metric-label">平均偏差</span>
+                  <span
+                    class="eval-card__metric-value"
+                    :style="{ color: normalizeAlert(
+                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                    ) === 'normal' ? '#52c41a' : normalizeAlert(
+                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                    ) === 'yellow' ? '#faad14' : '#ff4d4f' }"
+                  >
+                    {{ formatDeviation(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) }}
+                  </span>
+                </div>
+                <div class="eval-card__metric">
+                  <span class="eval-card__metric-label">报价完整度</span>
+                  <span class="eval-card__metric-value">
+                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0 }}/{{ matrixRows.length }}
+                  </span>
+                </div>
+                <div class="eval-card__metric">
+                  <span class="eval-card__metric-label">异常项</span>
+                  <span
+                    class="eval-card__metric-value"
+                    :style="{ color: (matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) > 0 ? '#ff4d4f' : '#52c41a' }"
+                  >
+                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0 }}
+                  </span>
+                </div>
+              </div>
+              <div class="eval-card__tags">
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) < 0" color="blue">价格优势</a-tag>
+              </div>
+            </div>
+          </a-col>
+        </a-row>
+      </div>
+
+      <!-- ④ AI insight -->
+      <a-card v-if="insightLoading || insightResult" class="insight-card" style="margin-top:16px">
+        <template #title>
+          <span style="display:flex;align-items:center;gap:8px">
+            <RobotOutlined style="color:#1677ff" />
+            <span style="font-size:15px;font-weight:600">AI 综合分析建议</span>
+          </span>
+        </template>
+        <a-spin :spinning="insightLoading" tip="正在分析比价数据...">
+          <template v-if="insightResult && !insightResult.error">
+            <div v-if="insightResult.overall" class="insight-section">
+              <h4 class="insight-section__title">
+                <BulbOutlined style="color:#faad14" /> 整体评估
+              </h4>
+              <p class="insight-section__text">{{ insightResult.overall }}</p>
+            </div>
+            <div v-if="insightResult.recommendations?.length" class="insight-section">
+              <h4 class="insight-section__title">
+                <CheckCircleOutlined style="color:#52c41a" /> 推荐方案
+              </h4>
+              <ul class="insight-section__list">
+                <li v-for="(rec, i) in insightResult.recommendations" :key="i">{{ rec }}</li>
+              </ul>
+            </div>
+            <div v-if="insightResult.risks?.length" class="insight-section">
+              <h4 class="insight-section__title">
+                <WarningOutlined style="color:#ff4d4f" /> 风险提示
+              </h4>
+              <ul class="insight-section__list insight-section__list--risk">
+                <li v-for="(risk, i) in insightResult.risks" :key="i">{{ risk }}</li>
+              </ul>
+            </div>
+          </template>
+          <a-empty v-else-if="insightResult?.error" :description="insightResult.error" />
+          <div v-else style="min-height:60px" />
+        </a-spin>
+      </a-card>
+
+      <!-- ⑤ Bottom action bar -->
+      <div class="result-bottom-bar">
+        <div class="result-bottom-bar__info">
+          <template v-if="matrixSummary">
+            <span class="result-bottom-bar__total">
+              推荐方案总价：<strong>¥{{ matrixSummary.optimal_total.toLocaleString() }}</strong>
+            </span>
+            <a-tag v-if="savingsPercent" color="green" style="margin-left:8px">
+              节省 {{ savingsPercent }}%
+            </a-tag>
+          </template>
+        </div>
+        <a-space>
+          <a-button @click="goBack">
+            <template #icon><LeftOutlined /></template>
+            返回修改
+          </a-button>
+          <a-button @click="runMatrix">
+            <template #icon><LineChartOutlined /></template>
+            重新比价
+          </a-button>
         </a-space>
-      </template>
+      </div>
+    </template>
 
-      <a-empty v-if="!analyzing && matrixRows.length === 0" description="当前条件下无可比数据" />
-      <BidMatrix
-        v-else
-        :suppliers="matrixSuppliers"
-        :rows="matrixRows"
-        :totals="matrixTotals"
-        :loading="analyzing"
-      />
-    </a-card>
-
-    <!-- Footer nav -->
-    <div class="compare-page__footer">
+    <!-- Footer nav (Steps 0-1 only) -->
+    <div v-if="currentStep < 2" class="compare-page__footer">
       <a-button v-if="currentStep > 0" @click="goBack">
         <template #icon><LeftOutlined /></template>
         上一步
       </a-button>
-      <!-- AUDIT-FIX M2: use ArrowRight, not CheckCircle, for "next" -->
-      <a-button v-if="currentStep < 2" type="primary" @click="goNext">
+      <a-button type="primary" @click="goNext">
         下一步
         <template #icon><RightOutlined /></template>
-      </a-button>
-      <a-button v-if="currentStep === 2" type="primary" @click="runMatrix">
-        <template #icon><LineChartOutlined /></template>
-        重新比价
       </a-button>
     </div>
 
@@ -800,6 +1019,195 @@ async function runMatrix() {
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+}
+
+/* ─── Result page sections ──────────────────────────────────────────── */
+
+.result-context {
+  margin-bottom: 12px;
+}
+
+.result-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+
+  > * {
+    flex: 1;
+    min-width: 160px;
+  }
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: @heading-color;
+  margin: 0 0 14px;
+}
+
+.supplier-eval {
+  margin-top: 20px;
+}
+
+.eval-card {
+  background: #fff;
+  border: 1px solid @border-color-split;
+  border-radius: @border-radius-lg;
+  padding: 16px;
+  transition: all 0.2s;
+
+  &:hover {
+    box-shadow: @shadow-1;
+  }
+
+  &--recommended {
+    border-color: #1677ff;
+    box-shadow: 0 0 0 1px rgba(22, 119, 255, 0.15);
+  }
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  &__badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: @primary-color;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  &__name-block {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  &__name {
+    font-size: 14px;
+    font-weight: 600;
+    color: @heading-color;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  &__metric {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  &__metric-label {
+    font-size: 12px;
+    color: @text-color-secondary;
+  }
+
+  &__metric-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: @heading-color;
+  }
+
+  &__tags {
+    margin-top: 12px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+}
+
+.insight-card {
+  :deep(.ant-card-head) {
+    border-bottom: 1px solid @border-color-split;
+  }
+}
+
+.insight-section {
+  &:not(:last-child) {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px dashed @border-color-split;
+  }
+
+  &__title {
+    font-size: 14px;
+    font-weight: 600;
+    color: @heading-color;
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  &__text {
+    font-size: 13px;
+    color: @text-color;
+    line-height: 1.7;
+    margin: 0;
+  }
+
+  &__list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    color: @text-color;
+    line-height: 1.8;
+
+    li::marker {
+      color: #52c41a;
+    }
+
+    &--risk li::marker {
+      color: #ff4d4f;
+    }
+  }
+}
+
+.result-bottom-bar {
+  margin-top: 20px;
+  padding: 14px 20px;
+  background: #fff;
+  border: 1px solid @border-color-split;
+  border-radius: @border-radius-lg;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+
+  &__info {
+    display: flex;
+    align-items: center;
+  }
+
+  &__total {
+    font-size: 15px;
+    color: @text-color;
+
+    strong {
+      font-size: 20px;
+      color: @primary-color;
+    }
   }
 }
 </style>

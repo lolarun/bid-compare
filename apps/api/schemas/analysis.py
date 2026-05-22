@@ -144,6 +144,8 @@ class MatrixTotal(BaseModel):
     supplier_id: int
     total: float
     avg_deviation: float
+    quoted_count: int
+    anomaly_count: int
 
 
 class BidMatrixRequest(BaseModel):
@@ -164,6 +166,25 @@ class BidMatrixResult(BaseModel):
     suppliers: list[SupplierLabel]
     rows: list[MatrixRow]
     totals: list[MatrixTotal]
+
+
+# ─── Bid Insight (AI Analysis) ────────────────────────────────────────────────
+
+class BidInsightRequest(BaseModel):
+    """Accepts the full bid-matrix result for AI analysis."""
+    project_id: int | None = None
+    suppliers: list[SupplierLabel]
+    rows: list[MatrixRow]
+    totals: list[MatrixTotal]
+
+
+class BidInsightResult(BaseModel):
+    overall: str = ""
+    recommendations: list[str] = []
+    risks: list[str] = []
+    tokens_used: int = 0
+    duration_ms: int = 0
+    error: str = ""
 
 
 # ─── BrandTier ────────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import type {
   DashboardSummary, PriceCompareResult, SupplierScore,
   StandardizeResult, ExtendedAttrSchema, ImportResult,
   QuoteStats, CategoryDetailStats, MultiCompareResult,
-  BidMatrixResult, BrandTier, User, LogEntry,
+  BidMatrixResult, BidInsight, BrandTier, User, LogEntry,
   InviteResult, OcrResult,
   ExtractionJob, RecommendResponse, BatchConfirmResult,
   SaveInvitationsResponse,
@@ -118,8 +118,10 @@ export const analysisApi = {
     api.post<SupplierScore>('/analysis/supplier-score', data),
   multiCompare: (data: { supplier_ids: number[]; category: string; project_id?: number }) =>
     api.post<MultiCompareResult>('/analysis/multi-compare', data),
-  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; material_ids?: number[] }) =>
+  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; material_ids?: number[]; category?: string }) =>
     api.post<BidMatrixResult>('/analysis/bid-matrix', data),
+  bidInsight: (data: BidMatrixResult) =>
+    api.post<BidInsight>('/analysis/bid-insight', data),
   categoryStats: (category: string) =>
     api.get<CategoryDetailStats>(`/analysis/category-stats/${category}`),
   refreshBaselines: (category?: string) =>
