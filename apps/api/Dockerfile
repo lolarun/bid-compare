@@ -61,16 +61,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health').read()" || exit 1
 
 # tini → uvicorn → app
-# - --workers 4: process-level parallelism for HTTP. Each worker has its
+# - --workers 2: 2 vCPU ECS, one worker per core. Each worker has its
 #   own ThreadPoolExecutor (EXTRACTION_THREAD_POOL_SIZE threads) → up to
-#   4×8 = 32 concurrent extractions.
+#   2×8 = 16 concurrent extractions.
 # - --proxy-headers: trust X-Forwarded-* from the nginx reverse proxy.
 # - --forwarded-allow-ips='*': accept the headers from any source (nginx
 #   runs in the adjacent container in our compose, no internet exposure).
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uvicorn", "apps.api.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "4", \
+     "--workers", "2", \
      "--proxy-headers", "--forwarded-allow-ips=*", \
      "--access-log", \
      "--log-level", "info"]
