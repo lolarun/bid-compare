@@ -1,29 +1,24 @@
 # MEMPAS backend — production image
-# Multi-stage build: 1) install deps with uv into a virtualenv,
+# Multi-stage build: 1) install deps with pip into a virtualenv,
 #                    2) copy minimal runtime + venv into a slim final image.
 # All package sources use Chinese mirrors (Aliyun) for mainland ECS.
 
 # ─── Stage 1: dependency installer ────────────────────────────────────────
 FROM python:3.11-slim AS deps
 
-# Install uv via pip using Aliyun PyPI mirror
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com uv
-
-ENV UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_DOWNLOADS=never \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    UV_HTTP_TIMEOUT=300
-
 WORKDIR /app
 
-# Copy only manifest + lockfile first to leverage Docker layer cache.
-# Code changes won't bust the dependency layer.
-COPY pyproject.toml uv.lock ./
+# Copy pre-exported requirements (from uv export --no-dev --frozen --no-hashes)
+COPY apps/api/requirements.txt ./
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+# Install all deps into a virtualenv using Aliyun PyPI mirror.
+# pip downloads wheels from the mirror server directly (unlike uv which
+# still hits files.pythonhosted.org even with UV_INDEX_URL set).
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir \
+        -i https://mirrors.aliyun.com/pypi/simple/ \
+        --trusted-host mirrors.aliyun.com \
+        -r requirements.txt
 
 
 # ─── Stage 2: runtime image ───────────────────────────────────────────────
