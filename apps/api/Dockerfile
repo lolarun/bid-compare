@@ -5,8 +5,9 @@
 # ─── Stage 1: dependency installer ────────────────────────────────────────
 FROM python:3.11-slim AS deps
 
-# uv: fastest pip-compatible installer, single static binary
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+# uv: fastest pip-compatible installer (pip install avoids ghcr.io which is
+# blocked in mainland China)
+RUN pip install --no-cache-dir uv
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
