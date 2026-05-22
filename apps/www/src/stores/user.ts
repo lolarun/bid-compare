@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/api/client'
+import api from '@/api/client'
 
 const TOKEN_KEY = 'mempas_token'
 const USER_KEY = 'mempas_user'
