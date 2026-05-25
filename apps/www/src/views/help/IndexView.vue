@@ -58,21 +58,25 @@ function scrollToSection(key: string) {
   activeSection.value = key
   document.getElementById(key)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
+
+function openInNewWindow(path: string) {
+  window.open(router.resolve(path).href, '_blank', 'noopener,noreferrer')
+}
 </script>
 
 <template>
   <div class="help-page">
     <header class="help-header">
-      <button class="help-brand" type="button" @click="router.push('/login')">
+      <button class="help-brand" type="button" @click="openInNewWindow('/login')">
         <img src="@/assets/logo.svg" alt="MEMPAS" />
         <span>MEMPAS 帮助中心</span>
       </button>
       <div class="help-header__actions">
-        <a-button @click="router.push('/login')">
+        <a-button @click="openInNewWindow('/login')">
           <template #icon><LoginOutlined /></template>
           登录系统
         </a-button>
-        <a-button type="primary" @click="router.push('/compare')">
+        <a-button type="primary" @click="openInNewWindow('/compare')">
           <template #icon><HomeOutlined /></template>
           开始比价
         </a-button>
@@ -236,11 +240,11 @@ function scrollToSection(key: string) {
           </a-collapse>
 
           <div class="footer-actions">
-            <a-button @click="router.push('/login')">
+            <a-button @click="openInNewWindow('/login')">
               <template #icon><TeamOutlined /></template>
               回到登录页
             </a-button>
-            <a-button type="primary" @click="router.push('/invite')">进入邀标推荐</a-button>
+            <a-button type="primary" @click="openInNewWindow('/invite')">进入邀标推荐</a-button>
           </div>
         </section>
       </div>
