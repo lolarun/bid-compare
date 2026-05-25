@@ -11,6 +11,7 @@ import {
   LogoutOutlined,
   SettingOutlined,
   SearchOutlined,
+  QuestionCircleOutlined,
 } from '@ant-design/icons-vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
@@ -80,6 +81,10 @@ function handleLogout() {
         <a-select-option value="buyer">比价员</a-select-option>
         <a-select-option value="viewer">查看者</a-select-option>
       </a-select>
+
+      <a-tooltip title="帮助中心">
+        <QuestionCircleOutlined class="header-view__icon" @click="router.push('/help')" />
+      </a-tooltip>
 
       <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏'">
         <component

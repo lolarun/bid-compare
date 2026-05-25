@@ -23,6 +23,7 @@ class Material(Base):
     unit = Column(String(10), default="")
     brand = Column(String(100), default="")
     exec_standard = Column(String(100), default="")
+    status = Column(String(16), default="active", nullable=False, index=True)
 
     # Layer 2 — 扩展属性 (JSON per category)
     extended_attrs = Column(JSON, default=dict)

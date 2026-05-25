@@ -1,7 +1,7 @@
 """Material CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -36,9 +36,12 @@ def list_materials(
     category: str | None = None,
     sub_category: str | None = None,
     keyword: str | None = None,
+    include_disabled: bool = False,
     db: Session = Depends(get_db),
 ):
     q = db.query(Material)
+    if not include_disabled:
+        q = q.filter(or_(Material.status.is_(None), Material.status != "disabled"))
     if profession:
         q = q.filter(Material.profession == profession)
     if category:
@@ -67,6 +70,8 @@ def list_categories(db: Session = Depends(get_db)):
     rows = db.query(
         Material.profession, Material.category,
         func.count(Material.id).label("count"),
+    ).filter(
+        or_(Material.status.is_(None), Material.status != "disabled")
     ).group_by(Material.profession, Material.category).all()
     return [
         {"profession": r.profession, "category": r.category, "count": r.count}
@@ -113,6 +118,7 @@ def create_material(body: MaterialCreate, db: Session = Depends(get_db)):
         unit=body.unit,
         brand=body.brand,
         exec_standard=body.exec_standard,
+        status=body.status or "active",
         extended_attrs=body.extended_attrs,
     )
     db.add(mat)
@@ -130,6 +136,18 @@ def update_material(material_id: int, body: MaterialUpdate, db: Session = Depend
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(mat, field, value)
 
+    db.commit()
+    db.refresh(mat)
+    return mat
+
+
+@router.post("/{material_id}/disable", response_model=MaterialOut)
+def disable_material(material_id: int, db: Session = Depends(get_db)):
+    mat = db.get(Material, material_id)
+    if not mat:
+        raise HTTPException(404, "Material not found")
+
+    mat.status = "disabled"
     db.commit()
     db.refresh(mat)
     return mat

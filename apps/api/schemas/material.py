@@ -14,6 +14,7 @@ class MaterialBase(BaseModel):
     unit: str = ""
     brand: str = ""
     exec_standard: str = ""
+    status: str = "active"
     extended_attrs: dict = Field(default_factory=dict)
 
 
@@ -28,6 +29,7 @@ class MaterialUpdate(BaseModel):
     unit: str | None = None
     brand: str | None = None
     exec_standard: str | None = None
+    status: str | None = None
     extended_attrs: dict | None = None
     sub_category: str | None = None
 

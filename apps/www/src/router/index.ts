@@ -77,6 +77,12 @@ const appRoutes: RouteRecordRaw[] = [
 
 const routes: RouteRecordRaw[] = [
   {
+    path: '/help',
+    name: 'Help',
+    component: () => import('@/views/help/IndexView.vue'),
+    meta: { title: '帮助中心', public: true },
+  },
+  {
     path: '/login',
     name: 'Login',
     component: () => import('@/views/login/LoginView.vue'),

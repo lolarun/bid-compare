@@ -60,6 +60,7 @@ export interface Material {
   unit: string
   brand: string
   exec_standard: string
+  status: string
   extended_attrs: Record<string, unknown>
   ref_price_low: number | null
   ref_price_avg: number | null

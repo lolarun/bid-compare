@@ -60,6 +60,12 @@ describe('materialApi', () => {
     expect(mockApi.delete).toHaveBeenCalledWith('/materials/1')
   })
 
+  it('disable calls POST /materials/:id/disable', async () => {
+    mockApi.post.mockResolvedValue({ data: { id: 1, status: 'disabled' } })
+    await materialApi.disable(1)
+    expect(mockApi.post).toHaveBeenCalledWith('/materials/1/disable')
+  })
+
   it('categories calls GET /materials/categories', async () => {
     mockApi.get.mockResolvedValue({ data: [] })
     await materialApi.categories()

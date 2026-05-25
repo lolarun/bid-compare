@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 
 DB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
@@ -42,3 +42,23 @@ def get_db():
 def init_db():
     """Create all tables."""
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_schema()
+
+
+def _ensure_sqlite_schema():
+    """Apply small additive schema fixes for existing SQLite databases."""
+    with engine.begin() as conn:
+        if engine.dialect.name != "sqlite":
+            return
+
+        columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(materials)")).fetchall()
+        }
+        if "status" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE materials "
+                    "ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'active'"
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_materials_status ON materials(status)"))

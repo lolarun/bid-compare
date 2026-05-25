@@ -105,6 +105,9 @@ async function handleSubmit() {
             </a-button>
           </a-form-item>
         </a-form>
+        <div class="login-help">
+          <a-button type="link" size="small" @click="router.push('/help')">查看使用帮助</a-button>
+        </div>
       </div>
 
       <!-- Footer -->
@@ -169,6 +172,12 @@ async function handleSubmit() {
   border-radius: 8px;
   padding: 32px 32px 8px;
   box-shadow: 0 2px 16px rgba(0, 0, 0, 0.06);
+}
+
+.login-help {
+  text-align: center;
+  margin-top: -4px;
+  margin-bottom: 12px;
 }
 
 /* ─── Footer ─────────────────────────────────────────────────────────── */

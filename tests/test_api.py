@@ -67,6 +67,22 @@ def test_update_material(client, sample_material):
     assert resp.json()["spec"] == "400×200"
 
 
+def test_disable_material_hides_from_default_list(client, sample_material):
+    resp = client.post(f"/api/materials/{sample_material.id}/disable")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "disabled"
+
+    resp2 = client.get("/api/materials")
+    assert resp2.status_code == 200
+    ids = [item["id"] for item in resp2.json()["items"]]
+    assert sample_material.id not in ids
+
+    resp3 = client.get("/api/materials", params={"include_disabled": True})
+    assert resp3.status_code == 200
+    ids = [item["id"] for item in resp3.json()["items"]]
+    assert sample_material.id in ids
+
+
 def test_delete_material(client, sample_material):
     resp = client.delete(f"/api/materials/{sample_material.id}")
     assert resp.status_code == 204

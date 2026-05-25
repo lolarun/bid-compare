@@ -182,13 +182,13 @@ async function handleSave() {
   }
 }
 
-async function handleDelete(id: number) {
+async function handleDisable(id: number) {
   try {
-    await materialApi.delete(id)
-    message.success('已删除')
+    await materialApi.disable(id)
+    message.success('已停用')
     fetchData()
   } catch {
-    message.error('删除失败')
+    message.error('停用失败')
   }
 }
 
@@ -317,7 +317,7 @@ onMounted(() => {
               <a-space>
                 <a @click="openEdit(record as Material)">编辑</a>
                 <a @click="showSchema((record as Material).category)">属性</a>
-                <a-popconfirm title="确认删除？" @confirm="handleDelete((record as Material).id)">
+                <a-popconfirm title="确认停用？" @confirm="handleDisable((record as Material).id)">
                   <a style="color:#ff4d4f">停用</a>
                 </a-popconfirm>
               </a-space>

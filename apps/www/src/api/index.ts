@@ -21,6 +21,8 @@ export const materialApi = {
     api.post<Material>('/materials', data),
   update: (id: number, data: Partial<Material>) =>
     api.put<Material>(`/materials/${id}`, data),
+  disable: (id: number) =>
+    api.post<Material>(`/materials/${id}/disable`),
   delete: (id: number) =>
     api.delete(`/materials/${id}`),
   categories: () =>
