@@ -34,6 +34,8 @@ class ExtractionJob(Base):
     result = Column(JSON, nullable=True)
     error = Column(Text, default="")
     confidence = Column(Float, nullable=True)
+    progress_stage = Column(String(100), default="")
+    progress_pct = Column(Integer, default=0)
 
     # Provider telemetry
     provider = Column(String(64), default="")

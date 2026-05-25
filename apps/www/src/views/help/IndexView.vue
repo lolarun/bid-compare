@@ -54,6 +54,12 @@ const ruleItems = [
   { title: '品牌档位', desc: '用于处理同一物料下不同品牌等级的价格差异。' },
 ]
 
+const brandTierTips = [
+  { title: '为什么会弹出', desc: '确认入库时，系统发现报价 PDF 中有新品牌未录入档位表。' },
+  { title: '该怎么处理', desc: '真实品牌选择一档、二档或三档后保存；测试时可以先点“稍后再说”。' },
+  { title: '需要注意', desc: '如果“球墨铸铁 EPDM”这类材质被识别成品牌，不建议直接保存为品牌档位，应在核对时修正。' },
+]
+
 function scrollToSection(key: string) {
   activeSection.value = key
   document.getElementById(key)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -131,6 +137,16 @@ function openInNewWindow(path: string) {
             <div>
               <ApartmentOutlined />
               推荐成交建议
+            </div>
+          </div>
+
+          <div class="brand-tier-help">
+            <h3>确认入库时出现“发现新品牌”怎么办</h3>
+            <div class="info-grid">
+              <article v-for="item in brandTierTips" :key="item.title" class="info-card">
+                <h3>{{ item.title }}</h3>
+                <p>{{ item.desc }}</p>
+              </article>
             </div>
           </div>
         </section>
@@ -224,7 +240,7 @@ function openInNewWindow(path: string) {
               <h2>常见的几个问题</h2>
             </div>
           </div>
-          <a-collapse :default-active-key="['1', '2', '3', '4']">
+          <a-collapse :default-active-key="['1', '2', '3', '4', '5']">
             <a-collapse-panel key="1" header="比价前需要先录入供应商吗？">
               不需要。上传供应商报价 PDF 后，系统会从文件内容中识别供应商；确认结果后会自动沉淀到供应商数据中。
             </a-collapse-panel>
@@ -236,6 +252,10 @@ function openInNewWindow(path: string) {
             </a-collapse-panel>
             <a-collapse-panel key="4" header="停用物料会删除历史数据吗？">
               不会。停用只是不再作为后续可选物料使用，历史报价和分析记录仍保留。
+            </a-collapse-panel>
+            <a-collapse-panel key="5" header="确认入库时提示“发现新品牌”是什么意思？">
+              这是系统发现报价中的品牌未配置档位。一档、二档、三档用于让不同品牌等级的报价更可比。
+              真实品牌建议补录档位；如果识别出来的是材质或密封形式，可以先点“稍后再说”，后续在识别结果中修正。
             </a-collapse-panel>
           </a-collapse>
 
@@ -454,6 +474,19 @@ function openInNewWindow(path: string) {
   background: #f7fafc;
   color: #1f2937;
   font-weight: 600;
+}
+
+.brand-tier-help {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #eef2f7;
+}
+
+.brand-tier-help > h3 {
+  margin: 0 0 12px;
+  color: #111827;
+  font-size: 17px;
+  font-weight: 700;
 }
 
 .info-grid {

@@ -62,3 +62,21 @@ def _ensure_sqlite_schema():
                 )
             )
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_materials_status ON materials(status)"))
+
+        job_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(extraction_jobs)")).fetchall()
+        }
+        if "progress_stage" not in job_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE extraction_jobs "
+                    "ADD COLUMN progress_stage VARCHAR(100) NOT NULL DEFAULT ''"
+                )
+            )
+        if "progress_pct" not in job_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE extraction_jobs "
+                    "ADD COLUMN progress_pct INTEGER NOT NULL DEFAULT 0"
+                )
+            )

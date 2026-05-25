@@ -15,6 +15,9 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`
   }
+  if (config.data instanceof FormData) {
+    delete config.headers['Content-Type']
+  }
   return config
 })
 
@@ -291,6 +294,8 @@ export interface ExtractionJob {
   result: Record<string, unknown> | null
   error: string
   confidence: number | null
+  progress_stage?: string
+  progress_pct?: number
   provider: string
   tokens_used: number
   duration_ms: number

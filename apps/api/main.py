@@ -31,6 +31,7 @@ log = logging.getLogger("mempas")
 # Background task runs every STUCK_JOB_SWEEP_S and flips any RUNNING job
 # whose updated_at is older than the recovery threshold to FAILED.
 STUCK_JOB_SWEEP_S = 60
+STUCK_JOB_MAX_AGE_MINUTES = 30
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "www" / "dist"
 
@@ -83,7 +84,10 @@ async def _periodic_stuck_job_sweep(stop_event: asyncio.Event) -> None:
             pass
         db = db_mod.SessionLocal()
         try:
-            n = DocumentIngestionService.recover_stuck_jobs(db)
+            n = DocumentIngestionService.recover_stuck_jobs(
+                db,
+                max_age_minutes=main_mod.STUCK_JOB_MAX_AGE_MINUTES,
+            )
             if n:
                 log.warning("Periodic sweep: recovered %d stuck jobs", n)
         except Exception:
@@ -102,7 +106,10 @@ async def lifespan(app: FastAPI):
     # Recover stuck jobs (startup pass)
     db = SessionLocal()
     try:
-        recovered = DocumentIngestionService.recover_stuck_jobs(db)
+        recovered = DocumentIngestionService.recover_stuck_jobs(
+            db,
+            max_age_minutes=STUCK_JOB_MAX_AGE_MINUTES,
+        )
         if recovered:
             log.info("Recovered %d stuck extraction jobs at startup", recovered)
     finally:

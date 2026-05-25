@@ -160,6 +160,8 @@ class DocumentIngestionService:
             file_path=str(save_path),
             mime_type=mimetypes.guess_type(filename)[0] or "",
             context=ctx,
+            progress_stage="已接收文件",
+            progress_pct=0,
         )
         self.db.add(job)
         self.db.commit()
@@ -184,7 +186,17 @@ class DocumentIngestionService:
                 log.error("run_job: job %s not found", job_id)
                 return
             job.status = JobStatus.RUNNING.value
+            job.progress_stage = "准备识别"
+            job.progress_pct = 5
             db.commit()
+
+            def update_progress(stage: str, pct: int) -> None:
+                current = db.get(ExtractionJob, job_id)
+                if not current or current.status != JobStatus.RUNNING.value:
+                    return
+                current.progress_stage = stage
+                current.progress_pct = max(current.progress_pct or 0, pct)
+                db.commit()
 
             try:
                 ext = Path(job.file_path).suffix.lower()
@@ -196,14 +208,21 @@ class DocumentIngestionService:
                         "note": "Excel/CSV ingestion uses import_service (Phase 3)",
                     }
                 elif job.type == IngestionType.TENDER.value:
-                    resp = self.pipeline.extract_tender(job.file_path)
+                    resp = self.pipeline.extract_tender(
+                        job.file_path,
+                        progress_cb=update_progress,
+                    )
                     result = resp.data
                     job.tokens_used = resp.tokens_used
                     job.duration_ms = resp.duration_ms
                     job.provider = resp.provider
                     job.confidence = resp.confidence
                 elif job.type == IngestionType.QUOTE.value:
-                    resp = self.pipeline.extract_quote(job.file_path, job.context or {})
+                    resp = self.pipeline.extract_quote(
+                        job.file_path,
+                        job.context or {},
+                        progress_cb=update_progress,
+                    )
                     result = resp.data
                     job.tokens_used = resp.tokens_used
                     job.duration_ms = resp.duration_ms
@@ -215,6 +234,8 @@ class DocumentIngestionService:
                 job.result = result
                 job.status = JobStatus.DONE.value
                 job.error = ""
+                job.progress_stage = "已识别"
+                job.progress_pct = 100
                 db.commit()
                 log.info("Job %s done (%d items)", job.id, len(result.get("items") or []))
             except Exception as e:
@@ -228,6 +249,7 @@ class DocumentIngestionService:
                     if job:
                         job.status = JobStatus.FAILED.value
                         job.error = f"{type(e).__name__}: {e}"[:1000]
+                        job.progress_stage = "识别失败"
                         db.commit()
                 except Exception:
                     log.exception("Failed to mark job %s as FAILED", job_id)
@@ -267,6 +289,7 @@ class DocumentIngestionService:
         for j in stuck:
             j.status = JobStatus.FAILED.value
             j.error = "Stuck in RUNNING beyond threshold; recovered at startup."
+            j.progress_stage = "识别超时"
         if stuck:
             db.commit()
         return len(stuck)

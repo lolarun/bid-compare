@@ -21,7 +21,7 @@ from apps.api.models import (
     Supplier,
 )
 from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
-from apps.api.services.import_service import import_csv_data
+from apps.api.services.import_service import import_csv_data, _gen_code
 from apps.api.services.standardize import standardize_name
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
@@ -417,6 +417,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             )
             if not mat:
                 mat = Material(
+                    material_code=_gen_code(db, profession, category),
                     standard_name=standard_name,
                     profession=profession,
                     category=category,

@@ -18,6 +18,8 @@ class JobResponse(BaseModel):
     result: dict[str, Any] | None = None
     error: str = ""
     confidence: float | None = None
+    progress_stage: str = ""
+    progress_pct: int = 0
     provider: str = ""
     tokens_used: int = 0
     duration_ms: int = 0

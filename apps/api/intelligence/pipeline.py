@@ -28,7 +28,7 @@ from __future__ import annotations
 import io
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -51,6 +51,7 @@ KNOWN_CATEGORIES = [
 
 BATCH_SIZE = 4          # pages per LLM call
 CONTEXT_PAGES = 1       # leading pages repeated on tail batches for header context
+ProgressCallback = Callable[[str, int], None]
 
 
 class ExtractionPipeline:
@@ -60,17 +61,28 @@ class ExtractionPipeline:
         self.provider = provider
 
     # ─── public API ───────────────────────────────────────────────────────
-    def extract_tender(self, file_path: str) -> ExtractionResponse:
+    def extract_tender(
+        self,
+        file_path: str,
+        progress_cb: ProgressCallback | None = None,
+    ) -> ExtractionResponse:
+        _notify(progress_cb, "渲染PDF", 10)
         images = DocumentLoader.to_images(file_path)
-        resp = self._run_batched(images, TENDER_SCHEMA, TENDER_PROMPT, "tender")
+        resp = self._run_batched(images, TENDER_SCHEMA, TENDER_PROMPT, "tender", progress_cb)
+        _notify(progress_cb, "整理结果", 95)
         resp.data = self._postprocess_tender(resp.data)
         return resp
 
     def extract_quote(
-        self, file_path: str, context: dict[str, Any] | None = None
+        self,
+        file_path: str,
+        context: dict[str, Any] | None = None,
+        progress_cb: ProgressCallback | None = None,
     ) -> ExtractionResponse:
+        _notify(progress_cb, "渲染PDF", 10)
         images = DocumentLoader.to_images(file_path)
-        resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote")
+        resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
+        _notify(progress_cb, "整理结果", 95)
         resp.data = self._postprocess_quote(resp.data, context or {})
         return resp
 
@@ -81,14 +93,19 @@ class ExtractionPipeline:
         schema: dict,
         prompt: str,
         doc_type: str,
+        progress_cb: ProgressCallback | None = None,
     ) -> ExtractionResponse:
         """Split pages into batches, call provider once per batch, then aggregate."""
+        _notify(progress_cb, "拆分页面", 15)
         batches = PageSplitter.split(images, batch_size=BATCH_SIZE, context_pages=CONTEXT_PAGES)
         n = len(batches)
 
         if n == 1:
             log.debug("Single batch (%d pages) — direct provider call", len(batches[0]))
-            return self.provider.extract(batches[0], schema, prompt)
+            _notify(progress_cb, "识别第 1/1 批", 25)
+            resp = self.provider.extract(batches[0], schema, prompt)
+            _notify(progress_cb, "识别完成", 90)
+            return resp
 
         log.info(
             "Multi-batch extraction: %d pages → %d batches (batch_size=%d)",
@@ -99,6 +116,9 @@ class ExtractionPipeline:
 
         for i, batch in enumerate(batches):
             log.debug("Batch %d/%d — %d pages", i + 1, n, len(batch))
+            start_pct = 20 + int((i / n) * 65)
+            done_pct = 20 + int(((i + 1) / n) * 65)
+            _notify(progress_cb, f"识别第 {i + 1}/{n} 批", start_pct)
             try:
                 partial = self.provider.extract(batch, schema, prompt)
             except ContentModerationError as e:
@@ -116,6 +136,7 @@ class ExtractionPipeline:
                 continue
 
             partials.append(partial)
+            _notify(progress_cb, f"已完成第 {i + 1}/{n} 批", done_pct)
             items_found = len((partial.data or {}).get("items") or [])
             log.debug(
                 "Batch %d/%d done — %d items, %d tokens",
@@ -128,6 +149,7 @@ class ExtractionPipeline:
                 "Consider reducing RENDER_SCALE or inspecting the PDF pages."
             )
 
+        _notify(progress_cb, "合并识别结果", 88)
         merged = ResultAggregator.merge(partials, doc_type)
         if skipped_batches:
             merged.metadata["skipped_batches"] = skipped_batches
@@ -319,3 +341,8 @@ def _infer_category(name: str) -> str:
         if cat in name:
             return cat
     return ""
+
+
+def _notify(progress_cb: ProgressCallback | None, stage: str, pct: int) -> None:
+    if progress_cb:
+        progress_cb(stage, max(0, min(100, pct)))

@@ -62,6 +62,8 @@ interface BatchFileEntry {
   id: string           // unique key
   filename: string
   status: 'uploading' | 'processing' | 'done' | 'failed'
+  stage: string
+  progressPct: number
   jobId: string | null
   detectedSupplierName: string
   matchedSupplierId: number | null  // auto-matched
@@ -342,12 +344,19 @@ function skipSupplier(supplierId: number) {
 }
 
 // ─── Batch upload handlers ──────────────────────────────────────────────
-function handleBatchFiles(fileList: File[]) {
-  for (const file of fileList) {
+function handleBatchFile(file: File) {
+  if (!file) return
+  const duplicatePending = batchFiles.value.some(
+    (entry) => entry.filename === file.name && !entry.confirmed,
+  )
+  if (duplicatePending) return
+
     const entry: BatchFileEntry = {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       filename: file.name,
       status: 'uploading',
+      stage: '上传中',
+      progressPct: 0,
       jobId: null,
       detectedSupplierName: '',
       matchedSupplierId: null,
@@ -359,7 +368,6 @@ function handleBatchFiles(fileList: File[]) {
     }
     batchFiles.value.push(entry)
     uploadBatchFile(entry, file)
-  }
 }
 
 async function uploadBatchFile(entry: BatchFileEntry, file: File) {
@@ -371,10 +379,12 @@ async function uploadBatchFile(entry: BatchFileEntry, file: File) {
   try {
     const { data } = await intakeApi.upload(form)
     entry.jobId = data.id
+    syncBatchProgress(entry, data)
     if (data.status === 'done') {
       onBatchJobDone(entry, data)
     } else if (data.status === 'failed') {
       entry.status = 'failed'
+      entry.stage = '失败'
       entry.error = data.error || '识别失败'
     } else {
       entry.status = 'processing'
@@ -382,7 +392,25 @@ async function uploadBatchFile(entry: BatchFileEntry, file: File) {
     }
   } catch (e) {
     entry.status = 'failed'
-    entry.error = (e as Error).message || '上传失败'
+    entry.stage = '失败'
+    entry.error = (e as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail
+      || (e as Error).message
+      || '上传失败'
+  }
+}
+
+function syncBatchProgress(entry: BatchFileEntry, job: ExtractionJob) {
+  if (job.status === 'pending') {
+    entry.stage = job.progress_stage || '排队中'
+    entry.progressPct = job.progress_pct || 0
+  } else if (job.status === 'running') {
+    entry.stage = job.progress_stage || '识别中'
+    entry.progressPct = job.progress_pct || 10
+  } else if (job.status === 'done') {
+    entry.stage = '已识别'
+    entry.progressPct = 100
+  } else if (job.status === 'failed') {
+    entry.stage = job.progress_stage || '失败'
   }
 }
 
@@ -394,6 +422,7 @@ function startBatchPolling(entry: BatchFileEntry) {
     try {
       const { data } = await intakeApi.getJob(entry.jobId)
       failures = 0
+      syncBatchProgress(entry, data)
       if (data.status === 'done') {
         if (entry.pollTimer) clearInterval(entry.pollTimer)
         entry.pollTimer = null
@@ -402,6 +431,7 @@ function startBatchPolling(entry: BatchFileEntry) {
         if (entry.pollTimer) clearInterval(entry.pollTimer)
         entry.pollTimer = null
         entry.status = 'failed'
+        entry.stage = '失败'
         entry.error = data.error || '识别失败'
       }
     } catch {
@@ -410,6 +440,7 @@ function startBatchPolling(entry: BatchFileEntry) {
         if (entry.pollTimer) clearInterval(entry.pollTimer)
         entry.pollTimer = null
         entry.status = 'failed'
+        entry.stage = '失败'
         entry.error = '轮询超时'
       }
     }
@@ -418,6 +449,8 @@ function startBatchPolling(entry: BatchFileEntry) {
 
 function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
   entry.status = 'done'
+  entry.stage = '已识别'
+  entry.progressPct = 100
   const shape = asQuoteShape(job.result)
   entry.items = shape.items
   entry.detectedSupplierName = shape.supplier_name || ''
@@ -601,7 +634,7 @@ async function runMatrix() {
           :multiple="true"
           accept=".pdf,.png,.jpg,.jpeg"
           :show-upload-list="false"
-          :before-upload="(_: File, fileList: File[]) => { handleBatchFiles(fileList); return false; }"
+          :before-upload="(file: File) => { handleBatchFile(file); return false; }"
         >
           <p class="ant-upload-drag-icon"><CloudUploadOutlined /></p>
           <p class="ant-upload-text">拖入所有供应商的报价 PDF</p>
@@ -616,13 +649,21 @@ async function runMatrix() {
               <CloseCircleOutlined v-else-if="f.status === 'failed'" style="color:#ff4d4f" />
               <CheckCircleOutlined v-else style="color:#1890ff" />
               <span class="batch-card__filename">{{ f.filename }}</span>
-              <a-tag v-if="f.status === 'uploading'" color="blue">上传中</a-tag>
-              <a-tag v-else-if="f.status === 'processing'" color="blue">识别中</a-tag>
+              <a-tag v-if="f.status === 'uploading'" color="blue">{{ f.stage }}</a-tag>
+              <a-tag v-else-if="f.status === 'processing'" color="blue">{{ f.stage }}</a-tag>
               <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
               <a-tag v-else-if="f.confirmed" color="green">已入库</a-tag>
-              <a-tag v-else color="cyan">{{ f.items.length }} 项</a-tag>
+              <a-tag v-else color="cyan">{{ f.stage }} · {{ f.items.length }} 项</a-tag>
               <a-button v-if="!f.confirmed" size="small" type="text" danger @click="removeBatchEntry(f)">移除</a-button>
             </div>
+
+            <a-progress
+              v-if="f.status === 'uploading' || f.status === 'processing'"
+              :percent="f.progressPct"
+              size="small"
+              :show-info="false"
+              style="margin-top:8px"
+            />
 
             <div v-if="f.error" style="color:#ff4d4f;font-size:12px;margin-top:4px">{{ f.error }}</div>
 
