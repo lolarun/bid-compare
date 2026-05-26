@@ -36,7 +36,7 @@ class QwenVLProvider(LLMProvider):
     DEFAULT_MODELS = ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"]
     # Dynamic timeout floor + per-page allowance
     BASE_TIMEOUT_S = 30
-    PER_PAGE_TIMEOUT_S = 20
+    PER_PAGE_TIMEOUT_S = 90
 
     def __init__(
         self,

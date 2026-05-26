@@ -1,4 +1,5 @@
 import api from './client'
+import type { AxiosRequestConfig } from 'axios'
 import type {
   PaginatedResponse, Material, Supplier, Project, Quote,
   DashboardSummary, PriceCompareResult, SupplierScore,
@@ -97,11 +98,12 @@ export const quoteApi = {
 // ─── Intake (document upload + extraction polling) ──────────────────────────
 
 export const intakeApi = {
-  upload: (form: FormData) =>
+  upload: (form: FormData, config?: AxiosRequestConfig) =>
     api.post<ExtractionJob>('/intake/upload', form, {
       // Don't set Content-Type explicitly — axios will add the
       // required boundary when sending FormData if we leave it alone.
       timeout: 60000,
+      ...config,
     }),
   getJob: (jobId: string) =>
     api.get<ExtractionJob>(`/intake/jobs/${jobId}`),
@@ -123,7 +125,7 @@ export const analysisApi = {
   bidMatrix: (data: { project_id?: number; supplier_ids: number[]; material_ids?: number[]; category?: string }) =>
     api.post<BidMatrixResult>('/analysis/bid-matrix', data),
   bidInsight: (data: BidMatrixResult) =>
-    api.post<BidInsight>('/analysis/bid-insight', data),
+    api.post<BidInsight>('/analysis/bid-insight', data, { timeout: 60000 }),
   categoryStats: (category: string) =>
     api.get<CategoryDetailStats>(`/analysis/category-stats/${category}`),
   refreshBaselines: (category?: string) =>

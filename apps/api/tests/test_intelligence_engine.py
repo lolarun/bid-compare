@@ -37,7 +37,7 @@ def _load_env_file() -> None:
 
 from apps.api.intelligence.aggregator import ResultAggregator
 from apps.api.intelligence.base import ExtractionResponse, LLMProvider
-from apps.api.intelligence.pipeline import ExtractionPipeline, BATCH_SIZE
+from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.splitter import PageSplitter
 
 
@@ -94,6 +94,27 @@ class MockProvider(LLMProvider):
         if not self._responses:
             raise RuntimeError("MockProvider ran out of responses")
         return self._responses.pop(0)
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    def pages_per_call(self) -> list[int]:
+        return [len(c) for c in self._calls]
+
+
+class PageAwareMockProvider(LLMProvider):
+    """Provider that returns the response mapped to the submitted page bytes."""
+
+    def __init__(self, responses_by_page: dict[bytes, ExtractionResponse]):
+        self._responses_by_page = responses_by_page
+        self._calls: list[list[bytes]] = []
+
+    def extract(self, images, schema, prompt, timeout=None) -> ExtractionResponse:
+        self._calls.append(images)
+        if len(images) != 1:
+            raise AssertionError("page-aware provider expects exactly one page")
+        return self._responses_by_page[images[0]]
 
     @property
     def call_count(self) -> int:
@@ -260,48 +281,48 @@ class TestExtractionPipeline:
 
     def _make_provider_for_pages(
         self, total_pages: int, doc_type: str = "quote"
-    ) -> MockProvider:
-        """Build a MockProvider with one response per expected batch."""
-        batches = PageSplitter.split(_pages(total_pages), batch_size=BATCH_SIZE)
-        responses = []
-        for i, batch in enumerate(batches):
+    ) -> PageAwareMockProvider:
+        """Build a MockProvider with one response per page."""
+        pages = _pages(total_pages)
+        responses = {}
+        for i, page in enumerate(pages):
             if doc_type == "quote":
-                items = [{"material": f"Item_batch{i}", "spec": f"spec{i}", "qty": i + 1}]
-                responses.append(_resp(
+                items = [{"material": f"Item_page{i}", "spec": f"spec{i}", "qty": i + 1}]
+                responses[page] = _resp(
                     items, doc_type="quote",
                     supplier_name="供应商A" if i == 0 else "",
                     tokens_used=100, duration_ms=300,
-                ))
+                )
             else:
-                items = [{"name": f"材料_batch{i}", "spec": f"spec{i}", "quantity": i + 1}]
-                responses.append(_resp(
+                items = [{"name": f"材料_page{i}", "spec": f"spec{i}", "quantity": i + 1}]
+                responses[page] = _resp(
                     items, doc_type="tender",
                     project_name="测试项目" if i == 0 else "",
                     tokens_used=100, duration_ms=300,
-                ))
-        return MockProvider(responses)
+                )
+        return PageAwareMockProvider(responses)
 
     def test_short_doc_single_api_call(self):
-        """Documents ≤ BATCH_SIZE pages must trigger exactly one provider call."""
+        """Each page is sent as its own provider call."""
         pages = _pages(3)
-        provider = MockProvider([_resp([{"material": "X", "spec": "", "qty": 1}])])
+        provider = self._make_provider_for_pages(3, "quote")
         pipeline = ExtractionPipeline(provider)
 
         result = pipeline._run_batched(pages, {}, "test prompt", "quote")
 
-        assert provider.call_count == 1
+        assert provider.call_count == 3
         assert result.data["items"]  # has items
 
     def test_12_page_doc_splits_into_3_calls(self, tmp_path):
-        """12-page document with batch_size=4 must trigger 3 provider calls."""
+        """12-page document triggers 12 page-level provider calls."""
         pages = _pages(12)
         provider = self._make_provider_for_pages(12, "quote")
         pipeline = ExtractionPipeline(provider)
 
         result = pipeline._run_batched(pages, {}, "prompt", "quote")
 
-        assert provider.call_count == 3
-        assert result.metadata["batches"] == 3
+        assert provider.call_count == 12
+        assert result.metadata["batches"] == 12
 
     def test_5_page_doc_splits_into_2_calls(self):
         pages = _pages(5)
@@ -310,16 +331,16 @@ class TestExtractionPipeline:
 
         result = pipeline._run_batched(pages, {}, "prompt", "quote")
 
-        assert provider.call_count == 2
+        assert provider.call_count == 5
 
     def test_items_aggregated_across_all_batches(self):
-        pages = _pages(12)   # 3 batches → 3 items (one per batch from MockProvider)
+        pages = _pages(12)   # 12 pages → 12 items (one per page from MockProvider)
         provider = self._make_provider_for_pages(12, "quote")
         pipeline = ExtractionPipeline(provider)
 
         result = pipeline._run_batched(pages, {}, "prompt", "quote")
 
-        assert len(result.data["items"]) == 3
+        assert len(result.data["items"]) == 12
 
     def test_supplier_name_from_first_batch(self):
         pages = _pages(8)
@@ -330,12 +351,12 @@ class TestExtractionPipeline:
         assert result.data["supplier_name"] == "供应商A"
 
     def test_total_tokens_summed(self):
-        pages = _pages(8)  # 2 batches, each 100 tokens
+        pages = _pages(8)  # 8 pages, each 100 tokens
         provider = self._make_provider_for_pages(8, "quote")
         pipeline = ExtractionPipeline(provider)
 
         result = pipeline._run_batched(pages, {}, "prompt", "quote")
-        assert result.tokens_used == 200  # 2 × 100
+        assert result.tokens_used == 800  # 8 × 100
 
     def test_postprocess_runs_after_aggregation(self):
         """Numeric coercion and blank-name filtering must apply to merged items."""
@@ -362,24 +383,17 @@ class TestExtractionPipeline:
 
         result = pipeline._run_batched(pages, {}, "prompt", "tender")
         assert result.data["project_name"] == "测试项目"
-        assert provider.call_count == 2
+        assert provider.call_count == 8
 
-    def test_context_pages_prepended_on_batch_2(self):
-        """Provider's second call must receive context page + new pages."""
+    def test_each_provider_call_receives_one_page(self):
+        """Page-level extraction never prepends context pages."""
         pages = _pages(5)
-        provider = MockProvider([
-            _resp([{"material": "A", "spec": "", "qty": 1}]),
-            _resp([{"material": "B", "spec": "", "qty": 2}]),
-        ])
+        provider = self._make_provider_for_pages(5, "quote")
         pipeline = ExtractionPipeline(provider)
         pipeline._run_batched(pages, {}, "prompt", "quote")
 
-        # First call: pages 0–3 (4 pages)
-        assert provider.pages_per_call()[0] == 4
-        # Second call: context(page 0) + page 4 = 2 pages
-        assert provider.pages_per_call()[1] == 2
-        # The context page bytes must equal the first page
-        assert provider._calls[1][0] == pages[0]
+        assert provider.pages_per_call() == [1, 1, 1, 1, 1]
+        assert sorted(c[0] for c in provider._calls) == sorted(pages)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -1,21 +1,16 @@
-"""ExtractionPipeline — orchestrates loader → splitter → provider → aggregator → post-processing.
+"""ExtractionPipeline — orchestrates loader → provider → aggregator → post-processing.
 
 Two public methods:
 - extract_tender(file_path) → ExtractionResponse (data matches TENDER_SCHEMA)
 - extract_quote(file_path, context) → ExtractionResponse (data matches QUOTE_SCHEMA)
 
-Multi-page flow (for PDFs > BATCH_SIZE pages):
+Multi-page flow:
   1. DocumentLoader renders each page to PNG bytes.
-  2. PageSplitter divides pages into batches (default 4 pages each).
-     Leading "context" pages are prepended to later batches so the model
-     still sees the document header on each call.
-  3. The provider is called once per batch (sequential — no concurrency needed
-     at this scale; Redis / Celery not required).
-  4. ResultAggregator merges partial results: concatenates items, takes first
+  2. Each page is sent to the provider as its own task.
+  3. Up to PAGE_CONCURRENCY pages are recognised concurrently.
+  4. ResultAggregator merges partial results in page order: concatenates items, takes first
      non-empty scalar metadata, sums token usage.
   5. Post-processing coerces numeric fields, infers missing categories, etc.
-
-Single-page or short docs (≤ BATCH_SIZE pages) skip batching — one API call.
 
 Post-processing:
 - coerces numeric fields (qty / unit_price / total_price)
@@ -28,6 +23,8 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from PIL import Image
@@ -39,7 +36,6 @@ from apps.api.intelligence.base import (
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.prompts import TENDER_PROMPT, QUOTE_PROMPT
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
-from apps.api.intelligence.splitter import PageSplitter
 
 log = logging.getLogger(__name__)
 
@@ -49,8 +45,8 @@ KNOWN_CATEGORIES = [
     "水箱", "潜水泵", "风口风阀", "风机盘管", "空调泵",
 ]
 
-BATCH_SIZE = 4          # pages per LLM call
-CONTEXT_PAGES = 1       # leading pages repeated on tail batches for header context
+BATCH_SIZE = 1          # legacy export; extraction now uses one page per call
+PAGE_CONCURRENCY = 10   # max concurrent page-level LLM calls
 ProgressCallback = Callable[[str, int], None]
 
 
@@ -95,124 +91,100 @@ class ExtractionPipeline:
         doc_type: str,
         progress_cb: ProgressCallback | None = None,
     ) -> ExtractionResponse:
-        """Split pages into batches, call provider once per batch, then aggregate."""
+        """Recognise pages concurrently, then aggregate partials in page order."""
         _notify(progress_cb, "拆分页面", 15)
-        batches = PageSplitter.split(images, batch_size=BATCH_SIZE, context_pages=CONTEXT_PAGES)
-        n = len(batches)
+        n = len(images)
+        if n == 0:
+            raise ProviderError("Document produced no pages for extraction")
 
         if n == 1:
-            log.debug("Single batch (%d pages) — direct provider call", len(batches[0]))
-            _notify(progress_cb, "识别第 1/1 批", 25)
-            resp = self.provider.extract(batches[0], schema, prompt)
+            log.debug("Single page — direct provider call")
+            _notify(progress_cb, "识别第 1/1 页", 25)
+            resp = self.provider.extract([images[0]], schema, prompt)
             _notify(progress_cb, "识别完成", 90)
             return resp
 
+        workers = min(PAGE_CONCURRENCY, n)
+        t0 = time.time()
         log.info(
-            "Multi-batch extraction: %d pages → %d batches (batch_size=%d)",
-            len(images), n, BATCH_SIZE,
+            "Page-level extraction: %d pages with concurrency=%d",
+            n, workers,
         )
+        _notify(progress_cb, f"并发识别 {n} 页（最多 {workers} 页同时）", 20)
+
+        partials_by_page: dict[int, list[ExtractionResponse]] = {}
+        skipped_pages: list[str] = []
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self._extract_page, idx, image, schema, prompt): idx
+                for idx, image in enumerate(images)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    page_partials, page_skips = future.result()
+                except Exception as e:
+                    log.warning("Page %d/%d failed: %s", idx + 1, n, e)
+                    skipped_pages.append(f"page{idx + 1}({type(e).__name__}: {e})")
+                    page_partials = []
+                    page_skips = []
+
+                if page_partials:
+                    partials_by_page[idx] = page_partials
+                skipped_pages.extend(page_skips)
+                completed += 1
+                done_pct = 20 + int((completed / n) * 65)
+                _notify(progress_cb, f"已完成第 {completed}/{n} 页", done_pct)
+                items_found = sum(len((p.data or {}).get("items") or []) for p in page_partials)
+                log.debug(
+                    "Page %d/%d done — %d items from %d partials",
+                    idx + 1, n, items_found, len(page_partials),
+                )
+
         partials: list[ExtractionResponse] = []
-        skipped_batches: list[int] = []          # 1-based indices of content-blocked batches
-
-        for i, batch in enumerate(batches):
-            log.debug("Batch %d/%d — %d pages", i + 1, n, len(batch))
-            start_pct = 20 + int((i / n) * 65)
-            done_pct = 20 + int(((i + 1) / n) * 65)
-            _notify(progress_cb, f"识别第 {i + 1}/{n} 批", start_pct)
-            try:
-                partial = self.provider.extract(batch, schema, prompt)
-            except ContentModerationError as e:
-                # Batch has at least one flagged page — fall back to page-by-page
-                # retry so we can salvage the OK pages and only skip the bad ones.
-                log.warning(
-                    "Batch %d/%d hit content moderation — retrying page-by-page: %s",
-                    i + 1, n, e,
-                )
-                page_partials = self._retry_pages_individually(
-                    batch, schema, prompt, batch_idx=i,
-                    skipped_batches=skipped_batches,
-                )
-                partials.extend(page_partials)
-                continue
-
-            partials.append(partial)
-            _notify(progress_cb, f"已完成第 {i + 1}/{n} 批", done_pct)
-            items_found = len((partial.data or {}).get("items") or [])
-            log.debug(
-                "Batch %d/%d done — %d items, %d tokens",
-                i + 1, n, items_found, partial.tokens_used or 0,
-            )
+        for idx in sorted(partials_by_page):
+            partials.extend(partials_by_page[idx])
 
         if not partials:
             raise ProviderError(
-                f"All {n} batches were blocked by content moderation. "
+                f"All {n} pages failed or were blocked by content moderation. "
                 "Consider reducing RENDER_SCALE or inspecting the PDF pages."
             )
 
         _notify(progress_cb, "合并识别结果", 88)
         merged = ResultAggregator.merge(partials, doc_type)
-        if skipped_batches:
-            merged.metadata["skipped_batches"] = skipped_batches
+        merged.duration_ms = int((time.time() - t0) * 1000)
+        if skipped_pages:
+            merged.metadata["skipped_pages"] = skipped_pages
             log.warning(
-                "Extraction completed with %d/%d batches skipped (content moderation): %s",
-                len(skipped_batches), n, skipped_batches,
+                "Extraction completed with %d/%d pages skipped/failed: %s",
+                len(skipped_pages), n, skipped_pages,
             )
         log.info(
-            "Aggregated %d/%d batches → %d total items, %d total tokens",
-            len(partials), n,
+            "Aggregated %d page partials from %d/%d pages → %d total items, %d total tokens",
+            len(partials), len(partials_by_page), n,
             len((merged.data or {}).get("items") or []),
             merged.tokens_used or 0,
         )
         return merged
 
-    # ─── per-page fallback ────────────────────────────────────────────────
-    def _retry_pages_individually(
+    def _extract_page(
         self,
-        batch: list[bytes],
+        page_idx: int,
+        page_bytes: bytes,
         schema: dict,
         prompt: str,
-        batch_idx: int,
-        skipped_batches: list[int],
-    ) -> list[ExtractionResponse]:
-        """Retry a content-moderation-blocked batch one page at a time.
-
-        Context pages (leading pages prepended for header context on tail batches)
-        are skipped — they were already extracted in batch 0 and don't contain
-        new item data.  Only the real content pages are retried individually.
-
-        Returns a list of per-page ExtractionResponse objects (may be empty if
-        every page in the batch is blocked).
-        """
-        # Tail batches (idx > 0) have CONTEXT_PAGES leading context pages
-        # that should not be re-extracted.
-        content_start = CONTEXT_PAGES if batch_idx > 0 else 0
-        content_pages = batch[content_start:]
-
-        page_partials: list[ExtractionResponse] = []
-        for j, page_bytes in enumerate(content_pages):
-            page_label = f"batch{batch_idx + 1}/page{content_start + j}"
-            try:
-                partial = self.provider.extract([page_bytes], schema, prompt)
-                page_partials.append(partial)
-                items_found = len((partial.data or {}).get("items") or [])
-                log.debug(
-                    "%s: OK — %d items, %d tokens",
-                    page_label, items_found, partial.tokens_used or 0,
-                )
-            except ContentModerationError:
-                log.warning(
-                    "%s: blocked — retrying as left/right halves", page_label
-                )
-                # Level 3: split the single page into left and right halves.
-                # Empirically, the content moderation triggers on the full-page
-                # combination (dense table + seal overlay) but each half passes
-                # individually. The data-bearing columns are in the left portion.
-                half_partials = self._retry_page_as_halves(
-                    page_bytes, schema, prompt, page_label, skipped_batches
-                )
-                page_partials.extend(half_partials)
-
-        return page_partials
+    ) -> tuple[list[ExtractionResponse], list[str]]:
+        """Extract a single page, with half-page fallback for moderation blocks."""
+        try:
+            return [self.provider.extract([page_bytes], schema, prompt)], []
+        except ContentModerationError:
+            page_label = f"page{page_idx + 1}"
+            log.warning("%s: blocked — retrying as left/right halves", page_label)
+            skipped: list[str] = []
+            return self._retry_page_as_halves(page_bytes, schema, prompt, page_label, skipped), skipped
 
     def _retry_page_as_halves(
         self,

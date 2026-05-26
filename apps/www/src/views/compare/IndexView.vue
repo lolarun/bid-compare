@@ -64,6 +64,7 @@ interface BatchFileEntry {
   status: 'uploading' | 'processing' | 'done' | 'failed'
   stage: string
   progressPct: number
+  uploadPct: number
   jobId: string | null
   detectedSupplierName: string
   matchedSupplierId: number | null  // auto-matched
@@ -75,6 +76,17 @@ interface BatchFileEntry {
 }
 const batchFiles = ref<BatchFileEntry[]>([])
 const useBatchMode = computed(() => taskConfig.supplierIds.length === 0)
+
+const BATCH_PROGRESS_STEPS = [
+  { key: 'upload', label: '上传', pct: 1 },
+  { key: 'received', label: '已接收', pct: 5 },
+  { key: 'render', label: '渲染 PDF', pct: 10 },
+  { key: 'split', label: '拆分页面', pct: 15 },
+  { key: 'recognize', label: '逐页识别', pct: 20 },
+  { key: 'merge', label: '合并结果', pct: 88 },
+  { key: 'cleanup', label: '整理结果', pct: 95 },
+  { key: 'done', label: '已识别', pct: 100 },
+] as const
 
 // Bid matrix result for Step 3
 const matrixResult = ref<BidMatrixResult | null>(null)
@@ -186,9 +198,10 @@ async function fetchInsight() {
     }
     const { data } = await analysisApi.bidInsight(trimmed)
     insightResult.value = data
-  } catch {
-    // Silently fail — AI insight is non-critical
-    insightResult.value = { overall: '', recommendations: [], risks: [], error: '分析请求失败' }
+  } catch (e: any) {
+    // AI insight is non-critical, but keep the real reason visible for testing.
+    const detail = e?.response?.data?.detail || e?.response?.data?.error || e?.message || '分析请求失败'
+    insightResult.value = { overall: '', recommendations: [], risks: [], error: detail }
   } finally {
     insightLoading.value = false
   }
@@ -355,8 +368,9 @@ function handleBatchFile(file: File) {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       filename: file.name,
       status: 'uploading',
-      stage: '上传中',
-      progressPct: 0,
+      stage: '准备上传',
+      progressPct: 1,
+      uploadPct: 1,
       jobId: null,
       detectedSupplierName: '',
       matchedSupplierId: null,
@@ -367,7 +381,8 @@ function handleBatchFile(file: File) {
       pollTimer: null,
     }
     batchFiles.value.push(entry)
-    uploadBatchFile(entry, file)
+    const reactiveEntry = batchFiles.value[batchFiles.value.length - 1]
+    uploadBatchFile(reactiveEntry, file)
 }
 
 async function uploadBatchFile(entry: BatchFileEntry, file: File) {
@@ -377,7 +392,15 @@ async function uploadBatchFile(entry: BatchFileEntry, file: File) {
   if (taskConfig.projectId) form.append('project_id', String(taskConfig.projectId))
   if (taskConfig.category) form.append('category', taskConfig.category)
   try {
-    const { data } = await intakeApi.upload(form)
+    const { data } = await intakeApi.upload(form, {
+      onUploadProgress: (evt) => {
+        if (!evt.total) return
+        const pct = Math.max(1, Math.min(99, Math.round((evt.loaded / evt.total) * 100)))
+        entry.uploadPct = pct
+        entry.progressPct = pct
+        entry.stage = `上传中 ${pct}%`
+      },
+    })
     entry.jobId = data.id
     syncBatchProgress(entry, data)
     if (data.status === 'done') {
@@ -401,17 +424,46 @@ async function uploadBatchFile(entry: BatchFileEntry, file: File) {
 
 function syncBatchProgress(entry: BatchFileEntry, job: ExtractionJob) {
   if (job.status === 'pending') {
+    entry.status = 'processing'
     entry.stage = job.progress_stage || '排队中'
     entry.progressPct = job.progress_pct || 0
   } else if (job.status === 'running') {
+    entry.status = 'processing'
     entry.stage = job.progress_stage || '识别中'
     entry.progressPct = job.progress_pct || 10
   } else if (job.status === 'done') {
+    entry.status = 'done'
     entry.stage = '已识别'
     entry.progressPct = 100
   } else if (job.status === 'failed') {
+    entry.status = 'failed'
     entry.stage = job.progress_stage || '失败'
   }
+}
+
+function currentBatchStepIndex(entry: BatchFileEntry) {
+  const stage = entry.stage || ''
+  if (entry.status === 'uploading') return 0
+  if (entry.status === 'done' || entry.confirmed) return BATCH_PROGRESS_STEPS.length - 1
+  if (stage.includes('已识别')) return 7
+  if (stage.includes('整理')) return 6
+  if (stage.includes('合并')) return 5
+  if (stage.includes('识别') || stage.includes('完成第') || stage.includes('并发')) return 4
+  if (stage.includes('拆分')) return 3
+  if (stage.includes('渲染') || stage.includes('准备')) return 2
+  if (stage.includes('接收') || stage.includes('排队')) return 1
+  for (let i = BATCH_PROGRESS_STEPS.length - 1; i >= 0; i--) {
+    if (entry.progressPct >= BATCH_PROGRESS_STEPS[i].pct) return i
+  }
+  return 0
+}
+
+function batchStepState(entry: BatchFileEntry, index: number) {
+  const current = currentBatchStepIndex(entry)
+  if (entry.status === 'failed' && index === current) return 'failed'
+  if (index < current) return 'completed'
+  if (index === current) return 'active'
+  return 'pending'
 }
 
 function startBatchPolling(entry: BatchFileEntry) {
@@ -649,8 +701,12 @@ async function runMatrix() {
               <CloseCircleOutlined v-else-if="f.status === 'failed'" style="color:#ff4d4f" />
               <CheckCircleOutlined v-else style="color:#1890ff" />
               <span class="batch-card__filename">{{ f.filename }}</span>
-              <a-tag v-if="f.status === 'uploading'" color="blue">{{ f.stage }}</a-tag>
-              <a-tag v-else-if="f.status === 'processing'" color="blue">{{ f.stage }}</a-tag>
+              <a-tag v-if="f.status === 'uploading'" color="blue">
+                {{ f.stage }} · {{ f.progressPct }}%
+              </a-tag>
+              <a-tag v-else-if="f.status === 'processing'" color="blue">
+                {{ f.stage }} · {{ f.progressPct }}%
+              </a-tag>
               <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
               <a-tag v-else-if="f.confirmed" color="green">已入库</a-tag>
               <a-tag v-else color="cyan">{{ f.stage }} · {{ f.items.length }} 项</a-tag>
@@ -661,9 +717,35 @@ async function runMatrix() {
               v-if="f.status === 'uploading' || f.status === 'processing'"
               :percent="f.progressPct"
               size="small"
-              :show-info="false"
+              :show-info="true"
               style="margin-top:8px"
             />
+            <div
+              v-if="f.status === 'uploading' || f.status === 'processing'"
+              class="batch-card__progress-detail"
+            >
+              当前：{{ f.stage }} · {{ f.progressPct }}%
+              <span v-if="f.jobId"> · 任务 {{ f.jobId.slice(0, 8) }}</span>
+            </div>
+            <div
+              v-if="f.status === 'uploading' || f.status === 'processing' || f.status === 'done'"
+              class="batch-card__steps"
+            >
+              <div
+                v-for="(step, index) in BATCH_PROGRESS_STEPS"
+                :key="step.key"
+                class="batch-card__step"
+                :class="`batch-card__step--${batchStepState(f, index)}`"
+              >
+                <span class="batch-card__step-dot">
+                  <CheckOutlined v-if="batchStepState(f, index) === 'completed'" />
+                  <CloseCircleOutlined v-else-if="batchStepState(f, index) === 'failed'" />
+                  <span v-else>{{ index + 1 }}</span>
+                </span>
+                <span class="batch-card__step-label">{{ step.label }}</span>
+                <span class="batch-card__step-pct">{{ step.pct }}%</span>
+              </div>
+            </div>
 
             <div v-if="f.error" style="color:#ff4d4f;font-size:12px;margin-top:4px">{{ f.error }}</div>
 
@@ -1054,6 +1136,87 @@ async function runMatrix() {
   }
 
   &__body { margin-top: 8px; }
+
+  &__progress-detail {
+    margin-top: 4px;
+    font-size: 12px;
+    color: @text-color-secondary;
+  }
+
+  &__steps {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(8, minmax(72px, 1fr));
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  &__step {
+    min-width: 72px;
+    border: 1px solid @border-color-split;
+    border-radius: 6px;
+    padding: 7px 6px;
+    background: #fafafa;
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    column-gap: 5px;
+    row-gap: 1px;
+    align-items: center;
+  }
+
+  &__step-dot {
+    grid-row: span 2;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #d9d9d9;
+    color: #fff;
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  &__step-label {
+    font-size: 12px;
+    color: @text-color;
+    white-space: nowrap;
+  }
+
+  &__step-pct {
+    font-size: 11px;
+    color: @text-color-secondary;
+  }
+
+  &__step--completed {
+    border-color: #b7eb8f;
+    background: #f6ffed;
+
+    .batch-card__step-dot { background: #52c41a; }
+    .batch-card__step-label { color: #237804; }
+  }
+
+  &__step--active {
+    border-color: #91caff;
+    background: #e6f4ff;
+    box-shadow: 0 0 0 1px rgba(22, 119, 255, 0.12);
+
+    .batch-card__step-dot { background: #1677ff; }
+    .batch-card__step-label {
+      color: #0958d9;
+      font-weight: 600;
+    }
+  }
+
+  &__step--failed {
+    border-color: #ffa39e;
+    background: #fff1f0;
+
+    .batch-card__step-dot { background: #ff4d4f; }
+    .batch-card__step-label { color: #a8071a; }
+  }
 
   &__supplier-row {
     display: flex;

@@ -49,9 +49,18 @@ const isProcessing = computed(
 )
 const isDone = computed(() => status.value === 'done')
 const isFailed = computed(() => status.value === 'failed')
+const progressStage = computed(() => currentJob.value?.progress_stage || '')
+const progressPct = computed(() => {
+  if (isUploading.value) return 3
+  if (isDone.value) return 100
+  if (isFailed.value) return currentJob.value?.progress_pct ?? 0
+  return currentJob.value?.progress_pct ?? 0
+})
+const shouldShowProgress = computed(() => isProcessing.value || (!isDone.value && progressPct.value > 0))
 
 const statusLabel = computed(() => {
   if (isUploading.value) return '上传中...'
+  if (progressStage.value) return progressStage.value
   switch (status.value) {
     case 'pending':
       return '排队中...'
@@ -126,10 +135,15 @@ function startPolling(jobId: string) {
     try {
       const { data } = await intakeApi.getJob(jobId)
       pollFailureCount.value = 0
-      // AUDIT-FIX M7: only emit `progress` on status transition
       const prevStatus = currentJob.value?.status
+      const prevStage = currentJob.value?.progress_stage
+      const prevPct = currentJob.value?.progress_pct
       currentJob.value = data
-      if (data.status !== prevStatus) {
+      if (
+        data.status !== prevStatus
+        || data.progress_stage !== prevStage
+        || data.progress_pct !== prevPct
+      ) {
         emit('progress', data)
       }
       if (data.status === 'done') {
@@ -216,6 +230,16 @@ defineExpose({ retry, currentJob })
         <div v-if="currentJob?.error" class="intake-uploader__error">
           {{ currentJob.error }}
         </div>
+        <div v-else-if="shouldShowProgress" class="intake-uploader__progress">
+          <a-progress
+            :percent="progressPct"
+            :status="isFailed ? 'exception' : isDone ? 'success' : 'active'"
+            size="small"
+          />
+          <div class="intake-uploader__progress-text">
+            {{ statusLabel }}
+          </div>
+        </div>
         <div v-else-if="isDone" class="intake-uploader__meta">
           模型：{{ currentJob?.provider }} · 耗时
           {{ currentJob?.duration_ms ?? 0 }} ms · 用 token
@@ -249,6 +273,12 @@ defineExpose({ retry, currentJob })
 
   &__status-body { flex: 1; }
   &__status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  &__progress { margin-top: 6px; }
+  &__progress-text {
+    margin-top: 2px;
+    font-size: 12px;
+    color: @text-color-secondary;
+  }
   &__error { font-size: 12px; color: #ff4d4f; margin-top: 4px; }
   &__meta { font-size: 12px; color: @text-color-secondary; margin-top: 4px; }
   &__preview {
