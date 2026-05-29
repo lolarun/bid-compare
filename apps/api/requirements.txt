@@ -21,6 +21,8 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   click
     #   tqdm
     #   uvicorn
+dashscope>=1.20.0
+    # via bid-compare (DashScope OCR provider)
 distro==1.9.0
     # via openai
 et-xmlfile==2.0.0
@@ -58,6 +60,8 @@ pandas==3.0.3
 pillow==12.2.0
     # via bid-compare
 pydantic==2.13.4
+pyjwt>=2.8.0
+    # via bid-compare (JWT auth)
     # via
     #   bid-compare
     #   fastapi
