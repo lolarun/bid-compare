@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, WarningOutlined, SwapOutlined } from '@ant-design/icons-vue'
 
 /**
  * Generic editable extraction-result table.
@@ -40,6 +40,7 @@ interface TenderRow extends RowBase {
   unit: string
   quantity: number | null
   remark: string
+  extended_attrs?: Record<string, unknown>
 }
 interface QuoteRow extends RowBase {
   material: string
@@ -96,7 +97,7 @@ function updateField(rid: number, field: string, value: unknown) {
 
 function addRow() {
   const blank: Row = props.schema === 'tender'
-    ? { _rid: nextRid++, name: '', category: '', spec: '', unit: '', quantity: null, remark: '' }
+    ? { _rid: nextRid++, name: '', category: '', spec: '', unit: '', quantity: null, remark: '', extended_attrs: {} }
     : {
       _rid: nextRid++, material: '', spec: '', brand: '', unit: '',
       qty: null, unit_price: null, unit_price_excl_tax: null,
@@ -150,6 +151,7 @@ const tenderColumns = [
   { title: '单位', dataIndex: 'unit', width: 70 },
   { title: '数量', dataIndex: 'quantity', width: 90, align: 'right' as const },
   { title: '备注', dataIndex: 'remark' },
+  { title: '技术参数', dataIndex: 'extended_attrs', width: 180 },
 ]
 
 const quoteColumns = [
@@ -169,10 +171,99 @@ const numericFields = new Set([
   'quantity', 'qty', 'unit_price', 'unit_price_excl_tax', 'total_price', 'tax_rate',
 ])
 
+function priceDeviation(row: Row): number | null {
+  if (props.schema !== 'quote') return null
+  const q = row as QuoteRow
+  if (q.unit_price == null || q.qty == null || q.total_price == null) return null
+  if (q.total_price === 0) return null
+  const expected = q.unit_price * q.qty
+  return Math.abs(expected - q.total_price) / q.total_price
+}
+
+/**
+ * Detect likely field mis-assignment and return a correction suggestion.
+ * Common OCR error: LLM puts total_price into unit_price field.
+ * E.g. qty=17, unit_price=1802, total_price=1802 → unit_price should be 106.
+ */
+interface CorrectionSuggestion {
+  type: 'swap_total_to_unit' | 'unit_is_total'
+  message: string
+  suggestedUnitPrice: number
+}
+
+function detectCorrection(row: Row): CorrectionSuggestion | null {
+  if (props.schema !== 'quote') return null
+  const q = row as QuoteRow
+  if (q.unit_price == null || q.qty == null || q.qty <= 1) return null
+
+  // Case 1: unit_price ≈ total_price and qty > 1 → unit_price is likely the total
+  if (q.total_price != null && q.total_price > 0) {
+    const ratio = q.unit_price / q.total_price
+    if (ratio > 0.95 && ratio < 1.05) {
+      const corrected = Math.round((q.total_price / q.qty) * 100) / 100
+      return {
+        type: 'unit_is_total',
+        message: `单价疑似为合价，建议修正为 ${corrected}`,
+        suggestedUnitPrice: corrected,
+      }
+    }
+  }
+
+  // Case 2: no total_price but unit_price * qty seems unreasonably high
+  // (unit_price looks like it might be a total — check if dividing by qty gives a round number)
+  if (q.total_price == null && q.unit_price > 0) {
+    const divided = q.unit_price / q.qty
+    // If dividing gives a clean result and original is much larger than divided
+    if (q.qty >= 2 && divided > 1 && Number.isFinite(divided)) {
+      const rounded = Math.round(divided * 100) / 100
+      // Only suggest if the ratio is significant (unit_price at least 2x what per-unit would be)
+      if (q.unit_price >= q.qty * 2 && rounded !== q.unit_price) {
+        // Heuristic: if unit_price ends in round multiples of qty, it's likely a total
+        const remainder = q.unit_price % q.qty
+        if (remainder === 0 || Math.abs(remainder / q.unit_price) < 0.01) {
+          return {
+            type: 'swap_total_to_unit',
+            message: `单价可能是合价，建议：单价=${rounded}，总价=${q.unit_price}`,
+            suggestedUnitPrice: rounded,
+          }
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function applyCorrection(rid: number) {
+  const row = rows.value.find((r) => r._rid === rid)
+  if (!row) return
+  const suggestion = detectCorrection(row)
+  if (!suggestion) return
+  const q = row as QuoteRow
+  const next = rows.value.map((r) => {
+    if (r._rid !== rid) return r
+    if (suggestion.type === 'unit_is_total') {
+      return { ...r, unit_price: suggestion.suggestedUnitPrice } as Row
+    }
+    if (suggestion.type === 'swap_total_to_unit') {
+      return { ...r, unit_price: suggestion.suggestedUnitPrice, total_price: q.unit_price } as Row
+    }
+    return r
+  })
+  emit('update:modelValue', next)
+  message.success('已自动修正单价')
+}
+
 const columns = computed(() => {
   const base = props.schema === 'tender' ? tenderColumns : quoteColumns
-  if (!props.showActions) return base
-  return [...base, { title: '操作', dataIndex: '_actions', width: 60, fixed: 'right' as const }]
+  const cols = [...base]
+  if (props.schema === 'quote') {
+    cols.push({ title: '', dataIndex: '_warn' as string, width: 36, align: 'center' as const })
+  }
+  if (props.showActions) {
+    cols.push({ title: '操作', dataIndex: '_actions', width: 60, fixed: 'right' as const })
+  }
+  return cols
 })
 </script>
 
@@ -188,7 +279,37 @@ const columns = computed(() => {
       :scroll="{ x: schema === 'quote' ? 1200 : undefined }"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === '_actions'">
+        <template v-if="column.dataIndex === '_warn'">
+          <!-- Correction suggestion (clickable auto-fix) -->
+          <a-tooltip
+            v-if="detectCorrection(record as Row)"
+            :title="detectCorrection(record as Row)!.message + '（点击修正）'"
+          >
+            <SwapOutlined
+              style="color:#ff4d4f;font-size:16px;cursor:pointer"
+              @click="applyCorrection((record as Row)._rid as number)"
+            />
+          </a-tooltip>
+          <!-- Simple deviation warning (no auto-fix available) -->
+          <a-tooltip
+            v-else-if="priceDeviation(record as Row) !== null && (priceDeviation(record as Row) as number) > 0.01"
+            :title="`单价×数量与总价偏差 ${((priceDeviation(record as Row) as number) * 100).toFixed(1)}%，请核对`"
+          >
+            <WarningOutlined style="color:#faad14;font-size:16px" />
+          </a-tooltip>
+        </template>
+        <template v-else-if="column.dataIndex === 'extended_attrs'">
+          <div v-if="(record as TenderRow).extended_attrs && Object.keys((record as TenderRow).extended_attrs!).length > 0" class="ext-attrs">
+            <a-tag
+              v-for="(val, key) in (record as TenderRow).extended_attrs"
+              :key="key"
+              color="blue"
+              size="small"
+            >{{ key }}={{ val }}</a-tag>
+          </div>
+          <span v-else style="color:rgba(0,0,0,0.25);font-size:12px">—</span>
+        </template>
+        <template v-else-if="column.dataIndex === '_actions'">
           <a-button
             type="link"
             danger
@@ -205,6 +326,7 @@ const columns = computed(() => {
           <a-input-number
             :value="(record as Record<string, number | null>)[column.dataIndex as string]"
             :step="column.dataIndex === 'tax_rate' ? 0.01 : 0.1"
+            :status="column.dataIndex === 'unit_price' && (record as Record<string, number | null>)[column.dataIndex as string] == null ? 'error' : undefined"
             style="width:100%"
             size="small"
             @update:value="(v: number | null) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
@@ -245,6 +367,17 @@ const columns = computed(() => {
     justify-content: space-between;
     margin-top: 12px;
     gap: 8px;
+  }
+}
+
+.ext-attrs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  :deep(.ant-tag) {
+    font-size: 11px;
+    line-height: 18px;
+    margin: 0;
   }
 }
 </style>

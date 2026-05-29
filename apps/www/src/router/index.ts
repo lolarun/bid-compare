@@ -16,18 +16,24 @@ const appRoutes: RouteRecordRaw[] = [
     component: () => import('@/views/dashboard/IndexView.vue'),
     meta: { title: '仪表盘', icon: 'DashboardOutlined', group: '工作台' },
   },
-  // ─── 业务功能 ──────────────────────────────────────────────────────────
   {
-    path: '/compare',
-    name: 'Compare',
-    component: () => import('@/views/compare/IndexView.vue'),
-    meta: { title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能' },
+    path: '/queue',
+    name: 'Queue',
+    component: () => import('@/views/queue/IndexView.vue'),
+    meta: { title: '数据流', icon: 'UnorderedListOutlined', group: '工作台' },
   },
+  // ─── 业务功能 ──────────────────────────────────────────────────────────
   {
     path: '/invite',
     name: 'Invite',
     component: () => import('@/views/invite/IndexView.vue'),
     meta: { title: '邀标建议', icon: 'SolutionOutlined', group: '业务功能' },
+  },
+  {
+    path: '/compare',
+    name: 'Compare',
+    component: () => import('@/views/compare/IndexView.vue'),
+    meta: { title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能' },
   },
   // ─── 数据管理 ──────────────────────────────────────────────────────────
   {
@@ -40,7 +46,13 @@ const appRoutes: RouteRecordRaw[] = [
     path: '/analysis',
     name: 'DataAnalysis',
     component: () => import('@/views/history/IndexView.vue'),
-    meta: { title: '采购数据分析', icon: 'FieldTimeOutlined', group: '数据管理' },
+    meta: { title: '历史价格查询', icon: 'FieldTimeOutlined', group: '数据管理' },
+  },
+  {
+    path: '/projects',
+    name: 'Projects',
+    component: () => import('@/views/projects/IndexView.vue'),
+    meta: { title: '项目管理', icon: 'ProjectOutlined', group: '数据管理' },
   },
   {
     path: '/suppliers',
@@ -53,6 +65,12 @@ const appRoutes: RouteRecordRaw[] = [
     name: 'Import',
     component: () => import('@/views/import/IndexView.vue'),
     meta: { title: '采购价格导入', icon: 'CloudUploadOutlined', group: '数据管理' },
+  },
+  {
+    path: '/batches',
+    name: 'Batches',
+    component: () => import('@/views/batches/IndexView.vue'),
+    meta: { title: '清单管理', icon: 'ContainerOutlined', group: '数据管理' },
   },
   // ─── 系统管理 ──────────────────────────────────────────────────────────
   {
@@ -96,7 +114,6 @@ const routes: RouteRecordRaw[] = [
     children: [
       ...appRoutes,
       // Legacy path redirects — inside layout so auth guard runs before redirect
-      { path: '/projects', redirect: '/compare' },
       { path: '/quotes', redirect: '/analysis' },
       { path: '/history', redirect: '/analysis' },
       { path: '/settings', redirect: '/system/settings' },

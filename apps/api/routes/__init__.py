@@ -11,6 +11,8 @@ from apps.api.routes.auth import router as auth_router
 from apps.api.routes.intake import router as intake_router
 from apps.api.routes.invite import router as invite_router
 from apps.api.routes.export import router as export_router
+from apps.api.routes.users import router as users_router
+from apps.api.routes.logs import router as logs_router
 
 all_routers = [
     auth_router,
@@ -24,11 +26,13 @@ all_routers = [
     intake_router,
     invite_router,
     export_router,
+    users_router,
+    logs_router,
 ]
 
 __all__ = [
     "materials_router", "suppliers_router", "projects_router",
     "quotes_router", "analysis_router", "config_router",
     "brand_tiers_router", "auth_router", "intake_router", "invite_router",
-    "export_router", "all_routers",
+    "export_router", "users_router", "logs_router", "all_routers",
 ]

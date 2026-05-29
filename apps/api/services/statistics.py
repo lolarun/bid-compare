@@ -181,7 +181,7 @@ def get_dashboard_heatmap(
         )
         .join(Quote, Quote.project_id == Project.id)
         .join(Material, Quote.material_id == Material.id)
-        .filter(Quote.unit_price > 0)
+        .filter(Quote.unit_price > 0, Quote.bid_status != "未中标")
     )
     if date_from:
         q = q.filter(Quote.quote_date >= date_from)
@@ -212,9 +212,25 @@ def get_dashboard_heatmap(
     return {"nodes": nodes}
 
 
-def get_dashboard_bubble(db: Session) -> dict:
+def get_dashboard_bubble(
+    db: Session,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
     """气泡图：品类 → 供应商 → 采购总金额。"""
     from apps.api.models import BrandTier
+
+    tier_map: dict[tuple[str, str | None], str] = {}
+    for bt in db.query(BrandTier).all():
+        tier_map[(bt.brand_name, bt.category)] = bt.tier
+        if bt.category is None:
+            tier_map[(bt.brand_name, None)] = bt.tier
+
+    base_filter = [Quote.unit_price > 0, Quote.bid_status != "未中标"]
+    if date_from:
+        base_filter.append(Quote.quote_date >= date_from)
+    if date_to:
+        base_filter.append(Quote.quote_date <= date_to)
 
     rows = (
         db.query(
@@ -224,10 +240,31 @@ def get_dashboard_bubble(db: Session) -> dict:
         )
         .join(Quote, Quote.material_id == Material.id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Quote.unit_price > 0)
+        .filter(*base_filter)
         .group_by(Material.category, Supplier.name)
         .all()
     )
+
+    brand_rows = (
+        db.query(
+            Material.category,
+            Supplier.name,
+            Quote.brand,
+            func.count(Quote.id).label("cnt"),
+        )
+        .join(Quote, Quote.material_id == Material.id)
+        .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(*base_filter, Quote.brand.isnot(None), Quote.brand != "")
+        .group_by(Material.category, Supplier.name, Quote.brand)
+        .all()
+    )
+    dominant_brand: dict[tuple[str, str], str] = {}
+    brand_counts: dict[tuple[str, str], int] = {}
+    for cat, sup_name, brand, cnt in brand_rows:
+        key = (cat, sup_name or "未知供应商")
+        if key not in brand_counts or cnt > brand_counts[key]:
+            brand_counts[key] = cnt
+            dominant_brand[key] = brand
 
     cat_map: dict[str, dict] = {}
     for cat, sup_name, total in rows:
@@ -241,9 +278,13 @@ def get_dashboard_bubble(db: Session) -> dict:
                 "children": [],
             }
         cat_map[cat]["total_amount"] += float(total)
+        sup = sup_name or "未知供应商"
+        brand = dominant_brand.get((cat, sup))
         tier = None
+        if brand:
+            tier = tier_map.get((brand, cat)) or tier_map.get((brand, None))
         cat_map[cat]["children"].append({
-            "name": sup_name or "未知供应商",
+            "name": sup,
             "amount": round(float(total), 2),
             "tier": tier,
         })

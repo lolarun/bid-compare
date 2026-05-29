@@ -16,6 +16,7 @@ class Supplier(Base):
     contact = Column(String(100), default="")
     phone = Column(String(30), default="")
     categories = Column(JSON, default=list)
+    supplier_type = Column(String(20), default="供应商")
     win_count = Column(Integer, default=0)
     cooperation_score = Column(Float, default=0.0)
     is_new = Column(Integer, default=1)

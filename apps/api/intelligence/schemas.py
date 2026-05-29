@@ -36,6 +36,11 @@ TENDER_SCHEMA: dict[str, Any] = {
                         "description": "数量；'若干'/'按图'等留 null",
                     },
                     "remark": {"type": "string", "description": "备注/技术要求"},
+                    "extended_attrs": {
+                        "type": "object",
+                        "description": "品类专属技术参数（桥架板厚、阀门压力等），无则留空对象 {}",
+                        "additionalProperties": True,
+                    },
                 },
             },
         },

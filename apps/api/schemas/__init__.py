@@ -15,6 +15,7 @@ from apps.api.schemas.project import (
 from apps.api.schemas.quote import (
     QuoteBase, QuoteCreate, QuoteUpdate, QuoteOut,
 )
+from apps.api.schemas.user import UserCreate, UserUpdate, UserOut
 from apps.api.schemas.analysis import (
     PriceCompareRequest, PriceCompareResult,
     SupplierScoreRequest, SupplierScoreResult,
@@ -29,6 +30,11 @@ from apps.api.schemas.analysis import (
     ConfigUpdate, ConfigOut,
     TreeChild, TreeNode, DashboardHeatmapData,
     BubbleChild, BubbleItem, DashboardBubbleData,
+    AlignmentSuggestRequest, AlignmentSuggestResult,
+    AlignmentRowInput, AlignmentGroup, AlignmentGroupItem,
+    AlignmentFieldFix,
+    AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
+    AlignmentApplyGroup, AlignmentApplyGroupItem, AlignmentApplyFieldFix,
 )
 
 __all__ = [
@@ -52,4 +58,5 @@ __all__ = [
     "ConfigUpdate", "ConfigOut",
     "TreeChild", "TreeNode", "DashboardHeatmapData",
     "BubbleChild", "BubbleItem", "DashboardBubbleData",
+    "UserCreate", "UserUpdate", "UserOut",
 ]

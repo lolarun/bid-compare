@@ -113,6 +113,7 @@ async function handleFile(file: File) {
     currentJob.value = data
     isUploading.value = false
     if (data.status === 'done') {
+      warnSkippedBatches(data)
       emit('extracted', data)
     } else if (data.status === 'failed') {
       emit('failed', data.error || '未知错误')
@@ -148,6 +149,7 @@ function startPolling(jobId: string) {
       }
       if (data.status === 'done') {
         stopPolling()
+        warnSkippedBatches(data)
         emit('extracted', data)
       } else if (data.status === 'failed') {
         stopPolling()
@@ -182,6 +184,14 @@ function retry() {
   currentJob.value = null
   fileName.value = ''
   pollFailureCount.value = 0
+}
+
+function warnSkippedBatches(job: ExtractionJob) {
+  const meta = (job.result as Record<string, unknown> | null)?.metadata as Record<string, unknown> | undefined
+  const skipped = meta?.skipped_batches as string[] | undefined
+  if (skipped && skipped.length > 0) {
+    message.warning(`有 ${skipped.length} 个页面因内容审核被跳过，请核对是否有数据缺失`, 6)
+  }
 }
 
 watch(() => props.type, () => retry())

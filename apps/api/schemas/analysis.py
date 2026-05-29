@@ -166,6 +166,7 @@ class BidMatrixResult(BaseModel):
     suppliers: list[SupplierLabel]
     rows: list[MatrixRow]
     totals: list[MatrixTotal]
+    brand_tier_filter: str | None = None
 
 
 # ─── Bid Insight (AI Analysis) ────────────────────────────────────────────────
@@ -185,6 +186,114 @@ class BidInsightResult(BaseModel):
     tokens_used: int = 0
     duration_ms: int = 0
     error: str = ""
+
+
+# ─── Bid Alignment (AI 对齐复核) ──────────────────────────────────────────────
+
+class AlignmentRowInput(BaseModel):
+    quote_id: int
+    supplier_id: int
+    supplier_name: str = ""
+    material_name: str = ""
+    spec: str = ""
+    unit: str = ""
+    quantity: float | None = None
+    unit_price: float | None = None
+    total_price: float | None = None
+
+
+class AlignmentSuggestRequest(BaseModel):
+    project_id: int | None = None
+    category: str = ""
+    supplier_ids: list[int] = []
+    rows: list[AlignmentRowInput] = []
+
+
+class AlignmentGroupItem(BaseModel):
+    quote_id: int
+    supplier_id: int
+    action: str = "align"
+    spec_note: str = ""
+    name_note: str = ""
+
+
+class AlignmentGroup(BaseModel):
+    suggested_name: str = ""
+    suggested_spec: str = ""
+    confidence: float = 0.0
+    reason: str = ""
+    items: list[AlignmentGroupItem] = []
+
+
+class AlignmentFieldFix(BaseModel):
+    quote_id: int
+    field: str = "unit_price"
+    current: float | None = None
+    suggested: float | None = None
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class AlignmentSuggestResult(BaseModel):
+    groups: list[AlignmentGroup] = []
+    field_fixes: list[AlignmentFieldFix] = []
+    tokens_used: int = 0
+    duration_ms: int = 0
+    error: str = ""
+
+
+class AlignmentApplyGroupItem(BaseModel):
+    quote_id: int
+    supplier_id: int
+    action: str = "align"
+    spec_note: str = ""
+    name_note: str = ""
+
+
+class AlignmentApplyGroup(BaseModel):
+    suggested_name: str
+    suggested_spec: str = ""
+    suggested_unit: str = ""
+    suggested_qty: float | None = None
+    confidence: float = 0.0
+    reason: str = ""
+    status: str = "confirmed"  # confirmed / rejected
+    items: list[AlignmentApplyGroupItem] = []
+
+
+class AlignmentApplyFieldFix(BaseModel):
+    quote_id: int
+    field: str = "unit_price"
+    new_value: float | None = None
+
+
+class AlignmentApplyRequest(BaseModel):
+    project_id: int | None = None
+    category: str = ""
+    groups: list[AlignmentApplyGroup] = []
+    field_fixes: list[AlignmentApplyFieldFix] = []
+
+
+class AlignmentApplyResult(BaseModel):
+    groups_saved: int = 0
+    items_saved: int = 0
+    fixes_applied: int = 0
+    error: str = ""
+
+
+class AlignmentGroupOut(BaseModel):
+    id: int
+    project_id: int | None
+    category: str
+    suggested_name: str
+    suggested_spec: str
+    suggested_unit: str
+    suggested_qty: float | None
+    confidence: float
+    reason: str
+    status: str
+    items: list[AlignmentGroupItem] = []
+    model_config = {"from_attributes": True}
 
 
 # ─── BrandTier ────────────────────────────────────────────────────────────────

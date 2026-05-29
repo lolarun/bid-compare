@@ -9,7 +9,7 @@ class BrandTier(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     brand_name = Column(String(100), nullable=False)
-    tier = Column(String(20), nullable=False)        # 一档/二档/三档
+    tier = Column(String(20), nullable=False)        # 国产/合资/三档
     category = Column(String(20), nullable=True)    # None = 通用
 
     created_at = Column(DateTime, default=_now)

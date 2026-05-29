@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,9 +20,10 @@ from apps.api.core.runtime import (
 )
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.intelligence.providers.qwen_vl import QwenVLProvider
+from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
 from apps.api.intelligence.base import ProviderError
 from apps.api.routes import all_routers
+from apps.api.routes.auth import router as auth_router, get_current_user
 from apps.api.services.document_ingestion import DocumentIngestionService
 
 log = logging.getLogger("mempas")
@@ -37,32 +38,34 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "www" / "dist"
 
 
 def _build_pipeline() -> ExtractionPipeline:
-    """Choose provider per LLM_PROVIDER setting; fall back gracefully."""
+    """Choose provider per LLM_PROVIDER setting; fall back gracefully.
+
+      dashscope_ocr (default) → DashScopeOCRProvider (two-stage: OCR + text LLM)
+      mock                    → MockProvider
+    """
     settings = get_settings()
-    requested = (settings.LLM_PROVIDER or "auto").lower()
+    requested = (settings.LLM_PROVIDER or "dashscope_ocr").lower()
 
     if requested == "mock":
         log.info("LLM_PROVIDER=mock → using MockProvider")
         return ExtractionPipeline(MockProvider())
 
-    if requested in {"auto", "qwen_vl"} and settings.DASHSCOPE_API_KEY:
-        try:
-            provider = QwenVLProvider(
-                api_key=settings.DASHSCOPE_API_KEY,
-                base_url=settings.DASHSCOPE_BASE_URL,
-                model=settings.LLM_VISION_MODEL,
-                models=[settings.LLM_VISION_MODEL_FALLBACK],
-            )
-            log.info(
-                "QwenVLProvider initialised (candidates=%s)", provider.candidates
-            )
-            return ExtractionPipeline(provider)
-        except ProviderError as e:
-            log.warning("QwenVLProvider unavailable (%s); falling back to MockProvider", e)
-            return ExtractionPipeline(MockProvider())
-
-    log.info("No API key / explicit mock; using MockProvider")
-    return ExtractionPipeline(MockProvider())
+    # Default: dashscope_ocr (two-stage OCR + LLM)
+    if not settings.DASHSCOPE_API_KEY:
+        log.warning("DASHSCOPE_API_KEY not set; using MockProvider")
+        return ExtractionPipeline(MockProvider())
+    try:
+        provider = DashScopeOCRProvider(
+            api_key=settings.DASHSCOPE_API_KEY,
+            base_url=settings.DASHSCOPE_BASE_URL,
+            ocr_model=settings.DASHSCOPE_OCR_MODEL,
+            llm_model=settings.DASHSCOPE_LLM_MODEL,
+        )
+        log.info("DashScopeOCRProvider initialised (model=%s)", provider.model)
+        return ExtractionPipeline(provider)
+    except ProviderError as e:
+        log.warning("DashScopeOCRProvider unavailable (%s); using MockProvider", e)
+        return ExtractionPipeline(MockProvider())
 
 
 async def _periodic_stuck_job_sweep(stop_event: asyncio.Event) -> None:
@@ -151,7 +154,10 @@ app.add_middleware(
 )
 
 for router in all_routers:
-    app.include_router(router)
+    if router is auth_router:
+        app.include_router(router)
+    else:
+        app.include_router(router, dependencies=[Depends(get_current_user)])
 
 
 @app.get("/api/health")

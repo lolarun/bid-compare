@@ -43,6 +43,7 @@ def recommend(req: RecommendRequest, db: Session = Depends(get_db)) -> Recommend
         req.tender_items,
         top_n=max(1, req.top_n),
         project_id=req.project_id,
+        brand_requirements=req.brand_requirements or None,
     )
     return RecommendResponse(
         categories=categories,

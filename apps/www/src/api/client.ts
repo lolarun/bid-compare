@@ -82,6 +82,7 @@ export interface Supplier {
   contact: string
   phone: string
   categories: string[]
+  supplier_type: string
   win_count: number
   cooperation_score: number
   remark: string
@@ -113,6 +114,7 @@ export interface Quote {
   brand: string
   remark: string
   quote_date: string
+  bid_status: string
   deviation_pct: number | null
   alert_level: string
   created_at: string | null
@@ -187,6 +189,7 @@ export interface ImportResult {
   imported: number
   skipped: number
   errors: Record<string, unknown>[]
+  supplier_ids: number[]
 }
 
 export interface QuoteStats {
@@ -277,6 +280,7 @@ export interface BidMatrixResult {
   suppliers: { id: number; letter: string; name: string }[]
   rows: MatrixRow[]
   totals: MatrixTotal[]
+  brand_tier_filter: string | null
 }
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
@@ -310,6 +314,7 @@ export interface TenderExtractionItem {
   unit: string
   quantity: number | null
   remark: string
+  extended_attrs?: Record<string, unknown>
 }
 
 export interface QuoteExtractionItem {
@@ -333,6 +338,7 @@ export interface RecommendReason {
   overall_score: number
   brand_score: number
   summary: string
+  brands: string[]
 }
 
 export interface SupplierRecommendation {
@@ -379,7 +385,7 @@ export interface SaveInvitationsResponse {
 export interface BrandTier {
   id: number
   brand_name: string
-  tier: '一档' | '二档' | '三档'
+  tier: '国产' | '合资' | '三档'
   category: string | null
 }
 
@@ -436,4 +442,123 @@ export interface OcrItem {
 export interface OcrResult {
   items: OcrItem[]
   batch_id: string | null
+}
+
+// ─── Bid Alignment ─────────────────────────────────────────────────────────
+
+export interface AlignmentRowInput {
+  quote_id: number
+  supplier_id: number
+  supplier_name: string
+  material_name: string
+  spec: string
+  unit: string
+  quantity: number | null
+  unit_price: number | null
+  total_price: number | null
+}
+
+export interface AlignmentGroupItem {
+  quote_id: number
+  supplier_id: number
+  action: string
+  spec_note?: string
+  name_note?: string
+}
+
+export interface AlignmentGroup {
+  suggested_name: string
+  suggested_spec: string
+  confidence: number
+  reason: string
+  items: AlignmentGroupItem[]
+}
+
+export interface AlignmentFieldFix {
+  quote_id: number
+  field: string
+  current: number | null
+  suggested: number | null
+  confidence: number
+  reason: string
+}
+
+export interface AlignmentSuggestResult {
+  groups: AlignmentGroup[]
+  field_fixes: AlignmentFieldFix[]
+  tokens_used: number
+  duration_ms: number
+  error: string
+}
+
+export interface AlignmentApplyGroup {
+  suggested_name: string
+  suggested_spec: string
+  suggested_unit?: string
+  suggested_qty?: number | null
+  confidence: number
+  reason: string
+  status: 'confirmed' | 'rejected'
+  items: AlignmentGroupItem[]
+}
+
+export interface AlignmentApplyFieldFix {
+  quote_id: number
+  field: string
+  new_value: number | null
+}
+
+export interface AlignmentApplyResult {
+  groups_saved: number
+  items_saved: number
+  fixes_applied: number
+  error: string
+}
+
+export interface AlignmentGroupOut {
+  id: number
+  project_id: number | null
+  category: string
+  suggested_name: string
+  suggested_spec: string
+  suggested_unit: string
+  suggested_qty: number | null
+  confidence: number
+  reason: string
+  status: string
+  items: AlignmentGroupItem[]
+}
+
+// ─── Dashboard visualisation ────────────────────────────────────────────────
+
+export interface TreeChild {
+  name: string
+  value: number
+}
+
+export interface TreeNode {
+  name: string
+  value: number
+  children: TreeChild[]
+}
+
+export interface DashboardHeatmapData {
+  nodes: TreeNode[]
+}
+
+export interface BubbleChild {
+  name: string
+  amount: number
+  tier: string | null
+}
+
+export interface DashboardBubbleItem {
+  name: string
+  profession: string
+  total_amount: number
+  children: BubbleChild[]
+}
+
+export interface DashboardBubbleData {
+  items: DashboardBubbleItem[]
 }

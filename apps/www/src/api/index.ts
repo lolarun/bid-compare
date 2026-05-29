@@ -9,6 +9,10 @@ import type {
   InviteResult, OcrResult,
   ExtractionJob, RecommendResponse, BatchConfirmResult,
   SaveInvitationsResponse,
+  DashboardHeatmapData, DashboardBubbleData,
+  AlignmentRowInput, AlignmentSuggestResult,
+  AlignmentApplyGroup, AlignmentApplyFieldFix, AlignmentApplyResult,
+  AlignmentGroupOut,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -79,6 +83,10 @@ export const quoteApi = {
     api.delete(`/quotes/${id}`),
   stats: (params?: Record<string, unknown>) =>
     api.get<QuoteStats>('/quotes/stats', { params }),
+  batches: () =>
+    api.get<{ items: Array<{ batch_id: string; count: number; created_at: string | null; supplier_id: number | null; supplier_name: string; project_id: number | null; project_name: string }>; total: number }>('/quotes/batches'),
+  deleteBatch: (batchId: string) =>
+    api.delete(`/quotes/batches/${encodeURIComponent(batchId)}`),
   import: (formData: FormData) =>
     api.post<ImportResult>('/quotes/import', formData, {
       // Don't set Content-Type explicitly — axios will add the
@@ -92,6 +100,7 @@ export const quoteApi = {
     project_name?: string
     category: string
     overrides?: Array<Record<string, unknown>>
+    bid_status?: string
   }) => api.post<BatchConfirmResult>('/quotes/batch-confirm', data),
 }
 
@@ -116,6 +125,10 @@ export const intakeApi = {
 export const analysisApi = {
   dashboard: () =>
     api.get<DashboardSummary>('/analysis/dashboard'),
+  heatmap: (params?: { date_from?: string; date_to?: string }) =>
+    api.get<DashboardHeatmapData>('/analysis/dashboard/heatmap', { params }),
+  bubble: (params?: { date_from?: string; date_to?: string }) =>
+    api.get<DashboardBubbleData>('/analysis/dashboard/bubble', { params }),
   compare: (data: { category: string; sub_category?: string; new_price?: number; baseline_type?: string }) =>
     api.post<PriceCompareResult>('/analysis/compare', data),
   supplierScore: (data: { supplier_id: number; category?: string }) =>
@@ -130,6 +143,25 @@ export const analysisApi = {
     api.get<CategoryDetailStats>(`/analysis/category-stats/${category}`),
   refreshBaselines: (category?: string) =>
     api.post('/analysis/refresh-baselines', null, { params: { category } }),
+  // ── Bid Alignment ──
+  alignmentSuggest: (data: {
+    project_id?: number
+    category: string
+    supplier_ids: number[]
+    rows: AlignmentRowInput[]
+  }) =>
+    api.post<AlignmentSuggestResult>('/analysis/bid-alignment/suggest', data, { timeout: 180_000 }),
+  alignmentApply: (data: {
+    project_id?: number
+    category: string
+    groups: AlignmentApplyGroup[]
+    field_fixes: AlignmentApplyFieldFix[]
+  }) =>
+    api.post<AlignmentApplyResult>('/analysis/bid-alignment/apply', data),
+  alignmentGroups: (params?: { project_id?: number; category?: string }) =>
+    api.get<AlignmentGroupOut[]>('/analysis/bid-alignment/groups', { params }),
+  alignmentDeleteGroup: (groupId: number) =>
+    api.delete(`/analysis/bid-alignment/groups/${groupId}`),
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -168,7 +200,7 @@ export const userApi = {
   delete: (id: number) =>
     api.delete(`/users/${id}`),
   toggleStatus: (id: number) =>
-    api.post(`/users/${id}/toggle-status`),
+    api.patch<User>(`/users/${id}/status`),
 }
 
 // ─── Logs ────────────────────────────────────────────────────────────────────
@@ -187,6 +219,7 @@ export const inviteApi = {
     tender_items: Array<Record<string, unknown>>
     top_n?: number
     project_id?: number
+    brand_requirements?: string[]
   }) =>
     api.post<RecommendResponse>('/invite/recommend', data),
   save: (data: {

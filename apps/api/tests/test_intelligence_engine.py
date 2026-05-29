@@ -423,8 +423,8 @@ class TestPipelineWithRealPDFs:
         _load_env_file()
         if not os.environ.get("DASHSCOPE_API_KEY"):
             pytest.skip("DASHSCOPE_API_KEY not set")
-        from apps.api.intelligence.providers.qwen_vl import QwenVLProvider
-        return ExtractionPipeline(QwenVLProvider())
+        from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
+        return ExtractionPipeline(DashScopeOCRProvider())
 
     def _quote_pdf(self, name: str) -> Path:
         p = PROJECT_PDFS / name
@@ -459,13 +459,13 @@ class TestPipelineWithRealPDFs:
             pytest.skip(f"PDF not found: {pdf}")
 
         from apps.api.intelligence.document_loader import DocumentLoader
-        from apps.api.intelligence.providers.qwen_vl import QwenVLProvider
+        from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
         from apps.api.intelligence.base import ContentModerationError
         from apps.api.intelligence.schemas import QUOTE_SCHEMA
         from apps.api.intelligence.prompts import QUOTE_PROMPT
 
         images = DocumentLoader.to_images(pdf)
-        provider = QwenVLProvider()
+        provider = DashScopeOCRProvider()
         blocked: list[int] = []
         ok: list[int] = []
 

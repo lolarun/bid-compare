@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, shallowRef, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, shallowRef, ref, watch, computed, nextTick } from 'vue'
 import echarts, { type EChartsType } from '@/utils/echarts'
 
 // 项目 → 品类 → 金额
@@ -42,6 +42,8 @@ const DEFAULT: Node[] = [
   },
 ]
 
+const isEmpty = computed(() => props.data !== undefined && props.data.length === 0)
+
 function makeOption() {
   const data = props.data && props.data.length ? props.data : DEFAULT
   return {
@@ -55,6 +57,22 @@ function makeOption() {
         roam: false,
         nodeClick: false,
         breadcrumb: { show: true, bottom: 4, itemStyle: { color: '#fff', textStyle: { color: '#666' } } },
+        label: {
+          show: true,
+          formatter: (p: { name: string; value: number }) => {
+            const v = p.value
+            if (v >= 10000) return `${p.name}\n¥${(v / 10000).toFixed(1)}万`
+            return `${p.name}\n¥${v.toLocaleString()}`
+          },
+          fontSize: 12,
+          color: '#fff',
+        },
+        upperLabel: {
+          show: true,
+          height: 20,
+          color: '#fff',
+          fontSize: 12,
+        },
         levels: [
           {
             itemStyle: { borderColor: '#fff', borderWidth: 4, gapWidth: 4 },
@@ -65,7 +83,6 @@ function makeOption() {
           },
         ],
         visualDimension: 0,
-        // 越大越红，越小越蓝
         visualMin: 0,
         colorMappingBy: 'value',
         color: ['#1677ff', '#69c0ff', '#bae0ff', '#ffe7ba', '#ffa940', '#ff4d4f'],
@@ -78,7 +95,7 @@ function makeOption() {
 function ensure() {
   if (!chartEl.value) return
   if (!chart.value) chart.value = echarts.init(chartEl.value)
-  chart.value.setOption(makeOption(), false)
+  chart.value.setOption(makeOption(), true)
 }
 
 function onResize() { chart.value?.resize() }
@@ -89,15 +106,19 @@ onBeforeUnmount(() => {
   chart.value?.dispose()
   chart.value = null
 })
-watch(() => props.data?.length, ensure)
+watch(() => [props.data?.length], () => nextTick(ensure))
 </script>
 
 <template>
   <a-spin :spinning="!!loading">
-    <div ref="chartEl" class="tree-heatmap"></div>
+    <div v-if="isEmpty" class="tree-heatmap tree-heatmap--empty">
+      <a-empty description="暂无热力图数据" />
+    </div>
+    <div v-show="!isEmpty" ref="chartEl" class="tree-heatmap"></div>
   </a-spin>
 </template>
 
 <style scoped>
 .tree-heatmap { width: 100%; height: 360px; }
+.tree-heatmap--empty { display: flex; align-items: center; justify-content: center; }
 </style>

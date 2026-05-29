@@ -91,34 +91,34 @@ const thresholdColumns = [
 interface BrandTier {
   id: number
   brand_name: string
-  tier: '一档' | '二档' | '三档'
+  tier: '国产' | '合资' | '三档'
   category: string | null
 }
 
 const brandTiers = ref<BrandTier[]>([
-  { id: 1, brand_name: '鞍钢', tier: '一档', category: '钢管' },
-  { id: 2, brand_name: '宝钢', tier: '一档', category: '钢管' },
-  { id: 3, brand_name: '伟星新材', tier: '一档', category: 'PPR 管' },
-  { id: 4, brand_name: '联塑', tier: '一档', category: 'PPR 管' },
-  { id: 5, brand_name: '良工', tier: '一档', category: '阀门' },
-  { id: 6, brand_name: '苏阀', tier: '二档', category: '阀门' },
-  { id: 7, brand_name: '正泰电器', tier: '一档', category: '配电箱' },
-  { id: 8, brand_name: '德力西', tier: '一档', category: '配电箱' },
-  { id: 9, brand_name: '上海二工', tier: '二档', category: '配电箱' },
-  { id: 10, brand_name: '海德隆', tier: '二档', category: '水箱' },
-  { id: 11, brand_name: '江苏华润', tier: '一档', category: '桥架' },
+  { id: 1, brand_name: '鞍钢', tier: '国产', category: '钢管' },
+  { id: 2, brand_name: '宝钢', tier: '国产', category: '钢管' },
+  { id: 3, brand_name: '伟星新材', tier: '国产', category: 'PPR 管' },
+  { id: 4, brand_name: '联塑', tier: '国产', category: 'PPR 管' },
+  { id: 5, brand_name: '良工', tier: '国产', category: '阀门' },
+  { id: 6, brand_name: '苏阀', tier: '合资', category: '阀门' },
+  { id: 7, brand_name: '正泰电器', tier: '国产', category: '配电箱' },
+  { id: 8, brand_name: '德力西', tier: '国产', category: '配电箱' },
+  { id: 9, brand_name: '上海二工', tier: '合资', category: '配电箱' },
+  { id: 10, brand_name: '海德隆', tier: '合资', category: '水箱' },
+  { id: 11, brand_name: '江苏华润', tier: '国产', category: '桥架' },
 ])
 
 const brandModalVisible = ref(false)
 const brandForm = reactive({
   id: null as number | null,
   brand_name: '',
-  tier: '一档' as BrandTier['tier'],
+  tier: '国产' as BrandTier['tier'],
   category: '',
 })
 
 function openBrandCreate() {
-  Object.assign(brandForm, { id: null, brand_name: '', tier: '一档', category: '' })
+  Object.assign(brandForm, { id: null, brand_name: '', tier: '国产', category: '' })
   brandModalVisible.value = true
 }
 
@@ -170,7 +170,7 @@ const brandColumns = [
 ]
 
 function tierColor(t: BrandTier['tier']) {
-  return t === '一档' ? 'gold' : t === '二档' ? 'blue' : 'default'
+  return t === '国产' ? 'gold' : t === '合资' ? 'blue' : 'default'
 }
 
 onMounted(async () => {
@@ -294,7 +294,7 @@ onMounted(async () => {
               <a-alert
                 type="info"
                 show-icon
-                message="品牌作为比价匹配项，按一档/二档/三档区分；新品牌可在「采购价格导入」首次出现时弹窗写入。"
+                message="品牌作为比价匹配项，按国产/合资/三档区分；新品牌可在「采购价格导入」首次出现时弹窗写入。"
                 style="flex:1;margin-right:12px"
               />
               <a-button type="primary" @click="openBrandCreate">
@@ -341,8 +341,8 @@ onMounted(async () => {
         </a-form-item>
         <a-form-item label="档位">
           <a-radio-group v-model:value="brandForm.tier">
-            <a-radio-button value="一档">一档</a-radio-button>
-            <a-radio-button value="二档">二档</a-radio-button>
+            <a-radio-button value="国产">国产</a-radio-button>
+            <a-radio-button value="合资">合资</a-radio-button>
             <a-radio-button value="三档">三档</a-radio-button>
           </a-radio-group>
         </a-form-item>

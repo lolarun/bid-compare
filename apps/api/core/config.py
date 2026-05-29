@@ -16,12 +16,14 @@ class Settings(BaseSettings):
     See `apps/api/.env.example` for the template.
     """
 
-    # LLM / Intelligence
+    # LLM / Intelligence — DashScope (Alibaba Cloud)
     DASHSCOPE_API_KEY: str = ""
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    LLM_VISION_MODEL: str = "qwen3-vl-plus"
-    LLM_VISION_MODEL_FALLBACK: str = "qwen-vl-max"
-    LLM_PROVIDER: str = "auto"  # 'auto' | 'qwen_vl' | 'mock'
+    LLM_PROVIDER: str = "dashscope_ocr"  # 'dashscope_ocr' | 'mock'
+
+    # Two-stage OCR + LLM pipeline models
+    DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
+    DASHSCOPE_LLM_MODEL: str = "qwen3.6-flash"
 
     # File storage
     UPLOAD_DIR: str = "data/uploads"
@@ -159,4 +161,23 @@ EXTENDED_ATTR_SCHEMAS: dict[str, list[dict]] = {
         {"key": "power", "label": "功率(kW)", "source": "报价单", "role": "差异"},
         {"key": "pump_type", "label": "泵型", "source": "报价单/投标", "role": "匹配"},
     ],
+}
+
+# ─── Material naming standards per category ───────────────────────────────
+# Used by standardize service for validation and structured decomposition.
+# Source: 用户反馈 2026-05-27 naming reference tables.
+
+NAMING_STANDARDS: dict[str, dict[str, list[str]]] = {
+    "桥架": {
+        "结构形式": ["槽式", "托盘式", "梯式", "网格式", "模压增强型", "波纹型"],
+        "材质": ["钢质", "不锈钢", "铝合金", "玻璃钢", "高分子", "冷轧钢"],
+        "表面处理": ["热浸镀锌", "热镀锌", "彩钢", "涂塑", "喷塑", "锌铝镁"],
+        "特殊要求": ["防水", "防火", "带分隔板", "屏蔽"],
+    },
+    "风口风阀": {
+        "名称": ["风口", "风阀", "防火阀", "静压箱", "消声器"],
+        "材质": ["镀锌钢", "不锈钢", "铝合金"],
+        "板材厚度": ["1.6mm", "1.8mm", "2.0mm"],
+        "特殊要求": ["带门铰", "带防虫网", "带风箱", "带驱动", "带执行机构"],
+    },
 }

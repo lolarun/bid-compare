@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   PlusOutlined,
@@ -7,40 +7,30 @@ import {
   DeleteOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue'
-import dayjs from 'dayjs'
+import { userApi } from '@/api'
+import type { User } from '@/api/client'
 
-interface User {
-  id: number
-  username: string
-  nickname: string
-  role: '管理员' | '比价员' | '查看者'
-  email: string
-  phone: string
-  status: '启用' | '停用'
-  last_login: string
-}
-
-const data = ref<User[]>([
-  { id: 1, username: 'admin', nickname: '杨科', role: '管理员', email: 'ke.yang@example.com', phone: '13800000001', status: '启用', last_login: '2026-05-19 09:12' },
-  { id: 2, username: 'liu_pj', nickname: '刘佩珺', role: '比价员', email: 'liu.pj@example.com', phone: '13800000002', status: '启用', last_login: '2026-05-18 17:45' },
-  { id: 3, username: 'wang_jb', nickname: '王建波', role: '比价员', email: 'wang.jb@example.com', phone: '13800000003', status: '启用', last_login: '2026-05-19 08:20' },
-  { id: 4, username: 'zhang_my', nickname: '张明月', role: '查看者', email: 'zhang.my@example.com', phone: '13800000004', status: '启用', last_login: '2026-05-15 11:08' },
-  { id: 5, username: 'chen_old', nickname: '陈志远', role: '比价员', email: 'chen@example.com', phone: '13800000005', status: '停用', last_login: '2025-12-10 16:32' },
-])
+const loading = ref(false)
+const data = ref<User[]>([])
+const total = ref(0)
 
 const query = reactive({
   keyword: '',
   role: undefined as string | undefined,
+  page: 1,
+  page_size: 20,
 })
 
 const modalVisible = ref(false)
 const editingId = ref<number | null>(null)
+const saving = ref(false)
 const form = reactive({
   username: '',
   nickname: '',
   role: '比价员' as User['role'],
   email: '',
   phone: '',
+  password: '',
 })
 
 const columns = [
@@ -54,43 +44,91 @@ const columns = [
   { title: '操作', key: 'action', width: 150, fixed: 'right' as const },
 ]
 
+async function fetchData() {
+  loading.value = true
+  try {
+    const { data: resp } = await userApi.list({
+      keyword: query.keyword || undefined,
+      role: query.role,
+      page: query.page,
+      page_size: query.page_size,
+    })
+    data.value = resp.items
+    total.value = resp.total
+  } catch {
+    // interceptor handles notification
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(fetchData)
+
 function openCreate() {
   editingId.value = null
-  Object.assign(form, { username: '', nickname: '', role: '比价员', email: '', phone: '' })
+  Object.assign(form, { username: '', nickname: '', role: '比价员', email: '', phone: '', password: '' })
   modalVisible.value = true
 }
 
 function openEdit(r: User) {
   editingId.value = r.id
-  Object.assign(form, { username: r.username, nickname: r.nickname, role: r.role, email: r.email, phone: r.phone })
+  Object.assign(form, { username: r.username, nickname: r.nickname, role: r.role, email: r.email, phone: r.phone, password: '' })
   modalVisible.value = true
 }
 
-function save() {
-  if (editingId.value) {
-    const target = data.value.find((u) => u.id === editingId.value)
-    if (target) Object.assign(target, form)
-    message.success('已更新')
-  } else {
-    data.value.push({
-      id: Math.max(...data.value.map((u) => u.id), 0) + 1,
-      ...form,
-      status: '启用',
-      last_login: dayjs().format('YYYY-MM-DD HH:mm'),
-    })
-    message.success('已新增')
+async function save() {
+  if (!form.username.trim()) {
+    message.warning('请输入用户名')
+    return
   }
-  modalVisible.value = false
+  saving.value = true
+  try {
+    if (editingId.value) {
+      const payload: Record<string, unknown> = {
+        nickname: form.nickname,
+        role: form.role,
+        email: form.email,
+        phone: form.phone,
+      }
+      if (form.password) payload.password = form.password
+      await userApi.update(editingId.value, payload as Partial<User>)
+      message.success('已更新')
+    } else {
+      if (!form.password) {
+        message.warning('请输入密码')
+        saving.value = false
+        return
+      }
+      await userApi.create({ ...form } as never)
+      message.success('已新增')
+    }
+    modalVisible.value = false
+    fetchData()
+  } catch {
+    // interceptor handles notification
+  } finally {
+    saving.value = false
+  }
 }
 
-function remove(id: number) {
-  data.value = data.value.filter((u) => u.id !== id)
-  message.success('已删除')
+async function remove(id: number) {
+  try {
+    await userApi.delete(id)
+    message.success('已删除')
+    fetchData()
+  } catch {
+    // interceptor handles notification
+  }
 }
 
-function toggleStatus(r: User) {
-  r.status = r.status === '启用' ? '停用' : '启用'
-  message.success(`已${r.status}`)
+async function toggleStatus(r: User) {
+  try {
+    await userApi.toggleStatus(r.id)
+    message.success(r.status === '启用' ? '已停用' : '已启用')
+    fetchData()
+  } catch {
+    // interceptor handles notification
+  }
 }
 
 function roleColor(role: User['role']) {
@@ -113,8 +151,14 @@ function roleColor(role: User['role']) {
 
     <a-card :body-style="{ padding: '14px 16px' }" class="mb-16">
       <a-space>
-        <a-input v-model:value="query.keyword" placeholder="搜索用户名或昵称" style="width:200px" allow-clear />
-        <a-select v-model:value="query.role" placeholder="全部角色" allow-clear style="width:140px">
+        <a-input
+          v-model:value="query.keyword"
+          placeholder="搜索用户名或昵称"
+          style="width:200px"
+          allow-clear
+          @press-enter="fetchData"
+        />
+        <a-select v-model:value="query.role" placeholder="全部角色" allow-clear style="width:140px" @change="fetchData">
           <a-select-option value="管理员">管理员</a-select-option>
           <a-select-option value="比价员">比价员</a-select-option>
           <a-select-option value="查看者">查看者</a-select-option>
@@ -126,7 +170,14 @@ function roleColor(role: User['role']) {
       <a-table
         :columns="columns"
         :data-source="data"
-        :pagination="{ pageSize: 10, showTotal: (t: number) => `共 ${t} 人` }"
+        :loading="loading"
+        :pagination="{
+          current: query.page,
+          pageSize: query.page_size,
+          total,
+          showTotal: (t: number) => `共 ${t} 人`,
+          onChange: (p: number) => { query.page = p; fetchData() },
+        }"
         row-key="id"
         size="middle"
       >
@@ -158,7 +209,7 @@ function roleColor(role: User['role']) {
       </a-table>
     </a-card>
 
-    <a-modal v-model:open="modalVisible" :title="editingId ? '编辑用户' : '新增用户'" @ok="save" :width="520">
+    <a-modal v-model:open="modalVisible" :title="editingId ? '编辑用户' : '新增用户'" @ok="save" :confirm-loading="saving" :width="520">
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :span="12">
@@ -172,6 +223,9 @@ function roleColor(role: User['role']) {
             </a-form-item>
           </a-col>
         </a-row>
+        <a-form-item :label="editingId ? '密码（留空不修改）' : '密码'" :required="!editingId">
+          <a-input-password v-model:value="form.password" />
+        </a-form-item>
         <a-form-item label="角色" required>
           <a-select v-model:value="form.role">
             <a-select-option value="管理员">管理员</a-select-option>

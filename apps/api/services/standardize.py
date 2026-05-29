@@ -115,11 +115,14 @@ def _normalize_dimensions(text: str) -> tuple[str, list[str]]:
 # ─── Name synonym normalization ──────────────────────────────────────────────
 
 _SYNONYMS = [
-    # Surface treatment
-    (r'热镀锌|热浸锌', '热浸镀锌'),
+    # Surface treatment — 热浸镀锌 and 热镀锌 are DIFFERENT materials (20-50% price gap)
+    (r'热浸锌', '热浸镀锌'),
     (r'冷镀锌', '电镀锌'),
-    # Bridge types
+    # Bridge types — normalize structural names
     (r'电缆桥架|线缆桥架', '桥架'),
+    (r'线槽|槽盒', '槽式桥架'),
+    (r'消防桥架', '防火桥架'),
+    (r'室外桥架', '防水桥架'),
     (r'槽式托盘', '槽式'),
     (r'托盘型', '托盘式'),
     # Valve types

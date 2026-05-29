@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { ExportOutlined, SearchOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
+import dayjs from 'dayjs'
 import { quoteApi, supplierApi, exportApi } from '@/api'
 import type { Quote, Supplier } from '@/api/client'
 import { normalizeAlert, alertColors, formatDeviation } from '@/utils/alert'
 import { doExport } from '@/utils/download'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
+const isAdmin = computed(() => userStore.userInfo?.role === '管理员')
 
 interface QuoteRow extends Quote {
   material_name?: string
@@ -20,15 +25,16 @@ const total = ref(0)
 const loading = ref(false)
 const suppliers = ref<Supplier[]>([])
 
+const DEFAULT_DATE_FROM = dayjs('2021-03-01')
+
 const query = reactive({
   page: 1,
   page_size: 20,
   profession: undefined as string | undefined,
   keyword: undefined as string | undefined,
   supplier_id: undefined as number | undefined,
-  date_range: undefined as [Dayjs, Dayjs] | undefined,
-  price_min: undefined as number | undefined,
-  price_max: undefined as number | undefined,
+  date_range: [DEFAULT_DATE_FROM, dayjs()] as [Dayjs, Dayjs] | undefined,
+  spec: undefined as string | undefined,
 })
 
 const PROFESSIONS = ['电气', '给排水', '暖通']
@@ -61,8 +67,7 @@ async function fetchData() {
       params.date_from = query.date_range[0].format('YYYY-MM-DD')
       params.date_to = query.date_range[1].format('YYYY-MM-DD')
     }
-    if (query.price_min !== undefined) params.price_min = query.price_min
-    if (query.price_max !== undefined) params.price_max = query.price_max
+    if (query.spec) params.spec = query.spec
 
     const { data: resp } = await quoteApi.list(params)
     data.value = resp.items as QuoteRow[]
@@ -88,9 +93,8 @@ function reset() {
   query.profession = undefined
   query.keyword = undefined
   query.supplier_id = undefined
-  query.date_range = undefined
-  query.price_min = undefined
-  query.price_max = undefined
+  query.date_range = [DEFAULT_DATE_FROM, dayjs()]
+  query.spec = undefined
   query.page = 1
   fetchData()
 }
@@ -114,13 +118,13 @@ onMounted(() => {
     <!-- 标题 -->
     <div class="history-page__header">
       <div>
-        <h1 class="history-page__title">采购数据分析</h1>
+        <h1 class="history-page__title">历史价格查询</h1>
         <div class="history-page__subtitle">
           历史采购价格 · 偏差分析 · 已收录 <strong>{{ total }}</strong> 条记录
         </div>
       </div>
       <div class="flex gap-8">
-        <a-button @click="doExport(() => exportApi.quotes({ category: query.profession, supplier_id: query.supplier_id }), 'MEMPAS_采购数据.xlsx')">
+        <a-button v-if="isAdmin" @click="doExport(() => exportApi.quotes({ category: query.profession, supplier_id: query.supplier_id }), 'MEMPAS_采购数据.xlsx')">
           <template #icon><ExportOutlined /></template>
           导出
         </a-button>
@@ -168,21 +172,12 @@ onMounted(() => {
         <a-col :xs="24" :sm="24" :md="5">
           <a-range-picker v-model:value="query.date_range" style="width:100%" />
         </a-col>
-        <a-col :xs="24" :sm="24" :md="4">
-          <a-input-group compact>
-            <a-input-number
-              v-model:value="query.price_min"
-              placeholder="¥0"
-              :min="0"
-              style="width:50%"
-            />
-            <a-input-number
-              v-model:value="query.price_max"
-              placeholder="¥不限"
-              :min="0"
-              style="width:50%"
-            />
-          </a-input-group>
+        <a-col :xs="24" :sm="12" :md="4">
+          <a-input
+            v-model:value="query.spec"
+            placeholder="规格/材质"
+            allow-clear
+          />
         </a-col>
         <a-col :xs="24" :sm="24" :md="3">
           <a-space style="display:flex;justify-content:flex-end;width:100%">

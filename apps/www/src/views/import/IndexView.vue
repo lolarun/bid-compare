@@ -9,7 +9,8 @@ import {
   RobotOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons-vue'
-import { quoteApi } from '@/api'
+import { quoteApi, intakeApi, brandTierApi } from '@/api'
+import ExtractionEditor from '@/components/ExtractionEditor.vue'
 
 const activeTab = ref<'excel' | 'ocr'>('excel')
 
@@ -32,6 +33,36 @@ const excelTemplates = [
 ]
 
 const selectedTemplate = ref<string>('桥架')
+
+const TEMPLATE_HEADERS: Record<string, string[]> = {
+  '桥架': ['名称', '规格', '材质', '厚度', '单价', '品牌', '供应商'],
+  '阀门': ['名称', '规格', '型号', '材质', '价税合计', '品牌', '供应商'],
+  '风口风阀': ['名称', '型号', '规格', '钢板厚度', '含税单价', '品牌', '供应商'],
+  '母线槽': ['名称', '母线类型', '规格型号', '铜牌厚度', '含税单价', '品牌', '供应商'],
+  '配电箱': ['元器件名称', '品牌', '系列', '规格', '数量', '单价', '供应商'],
+  '不锈钢管': ['名称', '规格', '壁厚', '牌号', '含税单价', '品牌', '供应商'],
+  '水箱': ['名称', '规格型号', '价税合计', '品牌', '供应商'],
+  '潜水泵': ['名称', '型号', '流量', '扬程', '功率', '单价', '品牌', '供应商'],
+  '风机盘管': ['名称', '型号', '管制', '风量', '单价合计', '品牌', '供应商'],
+  '空调泵': ['名称', '规格', '流量', '扬程', '功率', '单价', '品牌', '供应商'],
+}
+
+function downloadTemplate() {
+  const headers = TEMPLATE_HEADERS[selectedTemplate.value]
+  if (!headers) {
+    message.warning('未找到该品类的模板')
+    return
+  }
+  const bom = '﻿'
+  const csv = bom + headers.join(',') + '\n'
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${selectedTemplate.value}_导入模板.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 async function doExcelImport() {
   if (!excelFileList.value || excelFileList.value.length === 0) {
@@ -77,7 +108,10 @@ const ocrFile = ref<File | null>(null)
 const ocrPreviewUrl = ref<string | null>(null)
 const ocrParsing = ref(false)
 const ocrResult = ref<Array<{
-  material: string; spec: string; brand: string; unit: string; qty: number; price: number;
+  material: string; spec: string; brand: string; unit: string;
+  qty: number | null; unit_price: number | null;
+  unit_price_excl_tax: number | null; total_price: number | null;
+  tax_rate: number | null; remark: string;
 }> | null>(null)
 
 const ocrDraggerProps: UploadProps = {
@@ -96,35 +130,90 @@ watch(ocrPreviewUrl, (_, old) => { if (old) URL.revokeObjectURL(old) })
 onBeforeUnmount(() => { if (ocrPreviewUrl.value) URL.revokeObjectURL(ocrPreviewUrl.value) })
 
 async function parseOcr() {
+  if (!ocrFile.value) return
   ocrParsing.value = true
-  // 实际接入：POST /api/quotes/ocr
-  // 此处用 mock 数据演示流程
-  setTimeout(() => {
-    ocrResult.value = [
-      { material: 'DN100 无缝钢管', spec: 'Q235', brand: '宝钢', unit: '米', qty: 200, price: 71.0 },
-      { material: '配电箱 XL-21', spec: '600×800×200', brand: '正泰电器', unit: '台', qty: 8, price: 1180 },
-      { material: 'PPR 给水管 De32', spec: '3.6mm壁厚', brand: '伟星新材', unit: '米', qty: 500, price: 12.80 },
-    ]
+  try {
+    const form = new FormData()
+    form.append('file', ocrFile.value)
+    form.append('type', 'quote')
+    const { data: job } = await intakeApi.upload(form)
+    let jobId = job.id
+    let status = job.status
+
+    // Poll until done
+    while (status === 'pending' || status === 'running') {
+      await new Promise((r) => setTimeout(r, 2000))
+      const { data: poll } = await intakeApi.getJob(jobId)
+      status = poll.status
+      if (status === 'done' && poll.result) {
+        const items = (poll.result as Record<string, unknown>).items as Array<Record<string, unknown>> | undefined
+        if (items && items.length > 0) {
+          ocrResult.value = items.map((it) => ({
+            material: String(it.material || ''),
+            spec: String(it.spec || ''),
+            brand: String(it.brand || ''),
+            unit: String(it.unit || ''),
+            qty: it.qty != null ? Number(it.qty) : null,
+            unit_price: it.unit_price != null ? Number(it.unit_price) : null,
+            unit_price_excl_tax: it.unit_price_excl_tax != null ? Number(it.unit_price_excl_tax) : null,
+            total_price: it.total_price != null ? Number(it.total_price) : null,
+            tax_rate: it.tax_rate != null ? Number(it.tax_rate) : null,
+            remark: String(it.remark || ''),
+          }))
+          message.success(`OCR 解析完成，识别 ${items.length} 行，可编辑后确认入库`)
+          // Check for unknown brands → trigger brand tier modal
+          const brands = [...new Set(items.map((it) => String(it.brand || '')).filter(Boolean))]
+          if (brands.length > 0) {
+            try {
+              const { data: knownTiers } = await brandTierApi.list()
+              const knownNames = new Set(knownTiers.map((t) => t.brand_name))
+              const unknown = brands.filter((b) => !knownNames.has(b))
+              if (unknown.length > 0) {
+                unknownBrands.value = unknown
+                brandTierForm.value = Object.fromEntries(unknown.map((b) => [b, '国产']))
+                brandTierVisible.value = true
+              }
+            } catch { /* ignore brand check errors */ }
+          }
+        } else {
+          message.warning('OCR 未识别到报价行，请检查文件内容')
+        }
+        break
+      }
+      if (status === 'failed') {
+        message.error(`OCR 解析失败：${poll.error || '未知错误'}`)
+        break
+      }
+    }
+    // Handle synchronous done (single-page fast extraction)
+    if (status === 'done' && job.result && !ocrResult.value) {
+      const items = (job.result as Record<string, unknown>).items as Array<Record<string, unknown>> | undefined
+      if (items && items.length > 0) {
+        ocrResult.value = items.map((it) => ({
+          material: String(it.material || ''),
+          spec: String(it.spec || ''),
+          brand: String(it.brand || ''),
+          unit: String(it.unit || ''),
+          qty: it.qty != null ? Number(it.qty) : null,
+          unit_price: it.unit_price != null ? Number(it.unit_price) : null,
+          unit_price_excl_tax: it.unit_price_excl_tax != null ? Number(it.unit_price_excl_tax) : null,
+          total_price: it.total_price != null ? Number(it.total_price) : null,
+          tax_rate: it.tax_rate != null ? Number(it.tax_rate) : null,
+          remark: String(it.remark || ''),
+        }))
+        message.success(`OCR 解析完成，识别 ${items.length} 行，可编辑后确认入库`)
+      }
+    }
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'OCR 解析失败'
+    message.error(detail)
+  } finally {
     ocrParsing.value = false
-    message.success('OCR 解析完成，可编辑后确认入库')
-    // mock 触发新品牌弹窗
-    brandTierVisible.value = true
-    unknownBrands.value = ['正泰电器']
-  }, 1200)
+  }
 }
 
-const ocrColumns = [
-  { title: '材料名称', dataIndex: 'material' },
-  { title: '规格', dataIndex: 'spec', width: 130 },
-  { title: '品牌', dataIndex: 'brand', width: 120 },
-  { title: '单位', dataIndex: 'unit', width: 60 },
-  { title: '数量', dataIndex: 'qty', width: 80, align: 'right' as const },
-  { title: '单价', dataIndex: 'price', width: 100, align: 'right' as const,
-    customRender: ({ text }: { text: number }) => `¥${text.toFixed(2)}` },
-]
-
-async function confirmOcr() {
-  message.success(`已入库 ${ocrResult.value?.length || 0} 条记录`)
+function onOcrConfirm(rows: unknown[]) {
+  message.success(`已入库 ${rows.length} 条记录`)
   ocrResult.value = null
   ocrFile.value = null
   ocrPreviewUrl.value = null
@@ -132,12 +221,18 @@ async function confirmOcr() {
 
 // ─── 品牌档位弹窗 ────────────────────────────────────────────────────────
 const brandTierVisible = ref(false)
-const unknownBrands = ref<string[]>(['正泰电器'])
-const brandTierForm = ref<Record<string, string>>({ '正泰电器': '一档' })
+const unknownBrands = ref<string[]>([])
+const brandTierForm = ref<Record<string, string>>({})
 
 async function saveBrandTiers() {
-  // 实际接入：POST /api/brand-tiers （逐条或批量）
-  message.success('品牌档位已写入')
+  try {
+    for (const [brand, tier] of Object.entries(brandTierForm.value)) {
+      await brandTierApi.create({ brand_name: brand, tier: tier as '国产' | '合资' | '三档', category: null })
+    }
+    message.success(`已写入 ${Object.keys(brandTierForm.value).length} 个品牌档位`)
+  } catch {
+    message.error('品牌档位写入失败')
+  }
   brandTierVisible.value = false
 }
 </script>
@@ -194,7 +289,7 @@ async function saveBrandTiers() {
                   <a-button type="primary" :loading="excelImporting" @click="doExcelImport">
                     开始导入
                   </a-button>
-                  <a-button>
+                  <a-button @click="downloadTemplate">
                     <template #icon><DownloadOutlined /></template>
                     下载模板
                   </a-button>
@@ -261,22 +356,16 @@ async function saveBrandTiers() {
                       type="info"
                       show-icon
                       message="OCR 解析完成"
-                      description="请核对字段后点击确认入库；不一致的可直接在表格中编辑修改。"
+                      description="请核对字段后点击确认入库；可直接编辑修改品牌、价格等字段，或删除无关行。"
                       style="margin-bottom:12px"
                     />
-                    <a-table
-                      :columns="ocrColumns"
-                      :data-source="ocrResult"
-                      :pagination="false"
-                      :row-key="(r: { material: string }) => r.material"
-                      size="middle"
+                    <ExtractionEditor
+                      schema="quote"
+                      :model-value="ocrResult as any"
+                      confirm-label="确认入库"
+                      @update:model-value="(v: any) => ocrResult = v"
+                      @confirm="onOcrConfirm"
                     />
-                    <div style="margin-top:12px;text-align:right">
-                      <a-button type="primary" @click="confirmOcr">
-                        <template #icon><CheckCircleOutlined /></template>
-                        确认入库
-                      </a-button>
-                    </div>
                   </template>
                 </a-spin>
               </a-col>
@@ -302,8 +391,8 @@ async function saveBrandTiers() {
       <a-form layout="horizontal" :label-col="{ span: 8 }">
         <a-form-item v-for="brand in unknownBrands" :key="brand" :label="brand">
           <a-radio-group v-model:value="brandTierForm[brand]">
-            <a-radio-button value="一档">一档</a-radio-button>
-            <a-radio-button value="二档">二档</a-radio-button>
+            <a-radio-button value="国产">国产</a-radio-button>
+            <a-radio-button value="合资">合资</a-radio-button>
             <a-radio-button value="三档">三档</a-radio-button>
           </a-radio-group>
         </a-form-item>

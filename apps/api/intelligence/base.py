@@ -37,10 +37,10 @@ class ExtractionResponse:
 
 
 class LLMProvider(ABC):
-    """Vision-capable LLM provider interface.
+    """LLM/OCR provider interface for document extraction.
 
     Implementations:
-    - QwenVLProvider: Qwen-VL via DashScope (OpenAI-compatible mode)
+    - DashScopeOCRProvider: two-stage OCR (Qwen-VL-OCR) + LLM (qwen3.6-flash)
     - MockProvider: deterministic stub for tests
     """
 

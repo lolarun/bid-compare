@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.intelligence.providers.qwen_vl import QwenVLProvider
 from apps.api.services.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
@@ -340,34 +339,6 @@ class TestInviteSaveValidation:
             if t.get("project_name") == "Phantom Project"
         ]
         assert bodies == [], "Tender must NOT be persisted when all suppliers invalid"
-
-
-# ─── Intelligence audit-fix H7: dynamic timeout ────────────────────────────
-class TestQwenVLDynamicTimeout:
-    def test_timeout_scales_with_page_count(self):
-        # The internal calculation: BASE + PER_PAGE * len(images)
-        # We can't easily test the OpenAI call, but we can test the formula.
-        base = QwenVLProvider.BASE_TIMEOUT_S
-        per = QwenVLProvider.PER_PAGE_TIMEOUT_S
-        # For 1 page → small budget
-        assert base + per * 1 < base + per * 10
-        # For 10 pages → ample budget
-        assert base + per * 10 >= 200  # > the old fixed 90s
-
-
-# ─── Intelligence audit-fix H8: JSON parser trailing-comma tolerance ───────
-class TestJsonParseTrailingComma:
-    def test_trailing_comma_in_object(self):
-        out = QwenVLProvider._parse_json_strict('{"a": 1, "b": 2,}')
-        assert out == {"a": 1, "b": 2}
-
-    def test_trailing_comma_in_array(self):
-        out = QwenVLProvider._parse_json_strict('{"items": [1, 2, 3,]}')
-        assert out == {"items": [1, 2, 3]}
-
-    def test_trailing_comma_combined_with_fence(self):
-        out = QwenVLProvider._parse_json_strict('```json\n{"x":[1,2,],}\n```')
-        assert out == {"x": [1, 2]}
 
 
 # ─── Backend audit-fix M2: orphan project_id detection ────────────────────
@@ -820,71 +791,3 @@ class TestThreadPoolExtraction:
             db.close()
 
 
-# ─── Intelligence audit-fix H6: known-bad memoization ──────────────────────
-class TestQwenVLBadModelMemo:
-    def test_known_bad_skipped_on_subsequent_call(self, monkeypatch):
-        """If a model is rejected with BadRequestError, it should be
-        skipped on the next extract() call."""
-        import httpx
-        from openai import BadRequestError
-
-        # Build a real BadRequestError (the OpenAI SDK requires a fully
-        # formed httpx.Response for the constructor).
-        def _make_bad_request() -> BadRequestError:
-            request = httpx.Request("POST", "https://example/x")
-            response = httpx.Response(400, request=request)
-            return BadRequestError(
-                message="model not found",
-                response=response,
-                body={"error": "model not found"},
-            )
-
-        call_log: list[str] = []
-
-        class FakeChat:
-            class Completions:
-                @staticmethod
-                def create(model, **kw):
-                    call_log.append(model)
-                    if model == "bad-model":
-                        raise _make_bad_request()
-                    # Successful response shape with `choices[0].message.content`
-                    class Resp:
-                        class Choice:
-                            class Message:
-                                content = '{"items": []}'
-                            message = Message()
-                        choices = [Choice()]
-                        usage = None
-                    return Resp()
-            completions = Completions
-
-        class FakeOpenAI:
-            def __init__(self, *a, **kw):
-                self.chat = FakeChat
-
-        monkeypatch.setattr(
-            "apps.api.intelligence.providers.qwen_vl.OpenAI", FakeOpenAI
-        )
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test")
-
-        provider = QwenVLProvider(
-            api_key="test",
-            models=["bad-model", "good-model"],
-        )
-        assert "bad-model" in provider.candidates
-
-        # First call: bad-model fails → falls back to good-model
-        r1 = provider.extract([b"img"], {"type": "object", "required": []}, "p")
-        assert r1.data == {"items": []}
-        assert "bad-model" in provider._known_bad
-        # Both models were attempted on first call
-        assert call_log == ["bad-model", "good-model"]
-
-        # Second call: bad-model is in _known_bad → SKIPPED
-        call_log.clear()
-        r2 = provider.extract([b"img"], {"type": "object", "required": []}, "p")
-        assert r2.data == {"items": []}
-        assert call_log == ["good-model"], (
-            f"bad-model should have been skipped; instead got call sequence {call_log}"
-        )

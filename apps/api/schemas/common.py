@@ -17,3 +17,4 @@ class ImportResult(BaseModel):
     skipped: int
     errors: list[dict] = []
     unknown_brands: list[str] = []
+    supplier_ids: list[int] = []

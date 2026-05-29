@@ -17,6 +17,12 @@ import type {
   ExtractionJob,
   QuoteExtractionItem,
   BatchConfirmResult,
+  ImportResult,
+  AlignmentGroup,
+  AlignmentFieldFix,
+  AlignmentSuggestResult,
+  AlignmentApplyGroup,
+  AlignmentApplyFieldFix,
 } from '@/api/client'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
@@ -26,23 +32,36 @@ import BidMatrix from './components/BidMatrix.vue'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { asQuoteShape } from '@/utils/extraction'
 
-const CATEGORIES = [
-  '桥架', '母线槽', '配电箱',
-  '阀门', '不锈钢管', '水箱', '潜水泵',
-  '风口风阀', '风机盘管', '空调泵',
-] as const
+const PROFESSION_CATEGORIES: Record<string, string[]> = {
+  '电气': ['桥架', '母线槽', '配电箱'],
+  '给排水': ['阀门', '不锈钢管', '水箱', '潜水泵'],
+  '暖通': ['风口风阀', '风机盘管', '空调泵'],
+}
+const PROFESSIONS = Object.keys(PROFESSION_CATEGORIES)
 
 // ─── State ───────────────────────────────────────────────────────────────
 const currentStep = ref(0)
+const selectedProfession = ref<string | undefined>(undefined)
+
+const filteredCategories = computed(() => {
+  if (!selectedProfession.value) return []
+  return PROFESSION_CATEGORIES[selectedProfession.value] || []
+})
 
 const taskConfig = reactive<{
   projectId: number | undefined
   category: string
   supplierIds: number[]
+  bidStatus: string
 }>({
   projectId: undefined,
   category: '',
   supplierIds: [],
+  bidStatus: '',
+})
+
+watch(selectedProfession, () => {
+  taskConfig.category = ''
 })
 
 const projects = ref<Project[]>([])
@@ -76,6 +95,15 @@ interface BatchFileEntry {
 }
 const batchFiles = ref<BatchFileEntry[]>([])
 const useBatchMode = computed(() => taskConfig.supplierIds.length === 0)
+
+const batchProgress = computed(() => {
+  const total = batchFiles.value.length
+  if (total === 0) return null
+  const done = batchFiles.value.filter((f) => f.status === 'done' || f.confirmed).length
+  const failed = batchFiles.value.filter((f) => f.status === 'failed').length
+  const processing = total - done - failed
+  return { total, done, failed, processing }
+})
 
 const BATCH_PROGRESS_STEPS = [
   { key: 'upload', label: '上传', pct: 1 },
@@ -135,13 +163,12 @@ async function handleCreateProject() {
 
 // ─── Computed ────────────────────────────────────────────────────────────
 const canProceedFromConfig = computed(
-  () => !!taskConfig.category && (taskConfig.supplierIds.length >= 2 || taskConfig.supplierIds.length === 0)
+  () => !!taskConfig.category && (taskConfig.supplierIds.length >= 1 || taskConfig.supplierIds.length === 0)
 )
 // AUDIT-FIX C1: require explicit confirmation OR "skip with history" for every supplier.
 const canProceedFromUpload = computed(() => {
   if (useBatchMode.value) {
-    // Batch mode: need ≥ 2 confirmed files
-    return batchFiles.value.filter((f) => f.confirmed).length >= 2
+    return batchFiles.value.filter((f) => f.confirmed).length >= 1
   }
   return taskConfig.supplierIds.every((sid) => supplierUploads[sid]?.confirmed === true)
 })
@@ -225,6 +252,121 @@ const savingsPercent = computed(() => {
   return ratio > 0 ? (ratio * 100).toFixed(1) : null
 })
 
+// ─── AI Alignment (Step 2 for multi-supplier) ──────────────────────────
+const alignmentResult = ref<AlignmentSuggestResult | null>(null)
+const alignmentLoading = ref(false)
+// Per-group status: confirmed / rejected (default: confirmed)
+const alignmentGroupStatus = ref<Record<number, 'confirmed' | 'rejected'>>({})
+// Per-fix status: accepted / rejected (default: accepted)
+const alignmentFixStatus = ref<Record<number, boolean>>({})
+
+// Whether alignment step applies (multi-supplier only)
+const needsAlignmentStep = computed(() => effectiveSupplierIds.value.length >= 2)
+
+// Effective step count based on mode
+const STEP_RESULTS = computed(() => needsAlignmentStep.value ? 3 : 2)
+
+async function runAlignmentSuggest() {
+  alignmentLoading.value = true
+  alignmentResult.value = null
+  alignmentGroupStatus.value = {}
+  alignmentFixStatus.value = {}
+  try {
+    const sids = effectiveSupplierIds.value
+    // Mode 2: let backend query quote rows from DB
+    const { data } = await analysisApi.alignmentSuggest({
+      project_id: taskConfig.projectId,
+      category: taskConfig.category,
+      supplier_ids: sids,
+      rows: [],
+    })
+    alignmentResult.value = data
+
+    if (data.error) {
+      message.error(`AI 分析失败：${data.error}`)
+    } else {
+      // Default: all groups confirmed, all fixes accepted
+      data.groups.forEach((_: AlignmentGroup, i: number) => { alignmentGroupStatus.value[i] = 'confirmed' })
+      data.field_fixes.forEach((_: AlignmentFieldFix, i: number) => { alignmentFixStatus.value[i] = true })
+      const gn = data.groups.length
+      const fn = data.field_fixes.length
+      if (gn > 0 || fn > 0) {
+        message.success(`AI 发现 ${gn} 组对齐建议、${fn} 个字段纠错`)
+      } else {
+        message.info('AI 未发现需要对齐的行，可直接进入比价')
+      }
+    }
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'AI 对齐分析失败'
+    message.error(detail)
+  } finally {
+    alignmentLoading.value = false
+  }
+}
+
+async function applyAlignmentAndRunMatrix() {
+  // Apply confirmed alignment groups + accepted fixes
+  if (alignmentResult.value) {
+    const groups: AlignmentApplyGroup[] = []
+    const fixes: AlignmentApplyFieldFix[] = []
+
+    for (const [iStr, status] of Object.entries(alignmentGroupStatus.value)) {
+      const i = Number(iStr)
+      const g = alignmentResult.value.groups[i]
+      if (!g) continue
+      groups.push({
+        suggested_name: g.suggested_name,
+        suggested_spec: g.suggested_spec,
+        confidence: g.confidence,
+        reason: g.reason,
+        status,
+        items: g.items.map(it => ({
+          quote_id: it.quote_id,
+          supplier_id: it.supplier_id,
+          action: it.action,
+          spec_note: it.spec_note,
+          name_note: it.name_note,
+        })),
+      })
+    }
+
+    for (const [iStr, accepted] of Object.entries(alignmentFixStatus.value)) {
+      if (!accepted) continue
+      const i = Number(iStr)
+      const f = alignmentResult.value.field_fixes[i]
+      if (!f) continue
+      fixes.push({
+        quote_id: f.quote_id,
+        field: f.field,
+        new_value: f.suggested,
+      })
+    }
+
+    if (groups.length > 0 || fixes.length > 0) {
+      try {
+        await analysisApi.alignmentApply({
+          project_id: taskConfig.projectId,
+          category: taskConfig.category,
+          groups,
+          field_fixes: fixes,
+        })
+      } catch (e: unknown) {
+        const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '保存对齐结果失败'
+        message.error(detail)
+      }
+    }
+  }
+  runMatrix()
+}
+
+function skipAlignment() {
+  currentStep.value = STEP_RESULTS.value
+  runMatrix()
+}
+
+// Single-supplier mode: compare against history instead of across suppliers
+const isSingleSupplierMode = computed(() => effectiveSupplierIds.value.length === 1)
+
 // Effective supplier IDs for BidMatrix export
 const effectiveSupplierIds = computed(() => {
   if (useBatchMode.value) {
@@ -279,25 +421,38 @@ watch(() => taskConfig.supplierIds, (ids, prev) => {
 function goNext() {
   if (currentStep.value === 0) {
     if (!canProceedFromConfig.value) {
-      message.warning('请选择品类并至少 2 家供应商')
+      message.warning('请选择品类（供应商可选）')
       return
     }
     currentStep.value = 1
   } else if (currentStep.value === 1) {
     if (!canProceedFromUpload.value) {
-      message.warning('请为每家供应商点击「确认入库」或「使用历史数据」')
+      message.warning('请为每家供应商点击「校对入库」或「使用历史数据」')
       return
     }
-    currentStep.value = 2
-    runMatrix()
+    if (needsAlignmentStep.value) {
+      currentStep.value = 2
+      runAlignmentSuggest()
+    } else {
+      // Single-supplier: skip alignment, go straight to results
+      currentStep.value = STEP_RESULTS.value
+      runMatrix()
+    }
+  } else if (currentStep.value === 2 && needsAlignmentStep.value) {
+    // From alignment step → results
+    currentStep.value = 3
+    applyAlignmentAndRunMatrix()
   }
 }
 
 function goBack() {
   if (currentStep.value > 0) {
     // AUDIT-FIX M3: clear stale matrix when stepping back from results
-    if (currentStep.value === 2) {
+    if (currentStep.value === STEP_RESULTS.value) {
       matrixResult.value = null
+    }
+    if (currentStep.value === 2 && needsAlignmentStep.value) {
+      alignmentResult.value = null
     }
     currentStep.value -= 1
   }
@@ -328,6 +483,7 @@ async function confirmSupplier(supplierId: number) {
       project_id: taskConfig.projectId,
       category: taskConfig.category,
       overrides: slot.items as unknown as Array<Record<string, unknown>>,
+      bid_status: taskConfig.bidStatus,
     })
     const result = data as BatchConfirmResult
     slot.confirmed = true
@@ -357,12 +513,21 @@ function skipSupplier(supplierId: number) {
 }
 
 // ─── Batch upload handlers ──────────────────────────────────────────────
+function isExcelFile(file: File) {
+  return /\.(xlsx?|xls)$/i.test(file.name)
+}
+
 function handleBatchFile(file: File) {
   if (!file) return
   const duplicatePending = batchFiles.value.some(
     (entry) => entry.filename === file.name && !entry.confirmed,
   )
   if (duplicatePending) return
+
+  if (isExcelFile(file)) {
+    handleExcelBatchFile(file)
+    return
+  }
 
     const entry: BatchFileEntry = {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -383,6 +548,87 @@ function handleBatchFile(file: File) {
     batchFiles.value.push(entry)
     const reactiveEntry = batchFiles.value[batchFiles.value.length - 1]
     uploadBatchFile(reactiveEntry, file)
+}
+
+async function handleExcelBatchFile(file: File) {
+  const entry: BatchFileEntry = {
+    id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    filename: file.name,
+    status: 'uploading',
+    stage: '解析 Excel',
+    progressPct: 30,
+    uploadPct: 0,
+    jobId: null,
+    detectedSupplierName: '',
+    matchedSupplierId: null,
+    items: [],
+    confirmedSupplierId: null,
+    confirmed: false,
+    error: '',
+    pollTimer: null,
+  }
+  batchFiles.value.push(entry)
+
+  const form = new FormData()
+  form.append('file', file)
+  form.append('category', taskConfig.category)
+  if (taskConfig.projectId) {
+    form.append('project_id', String(taskConfig.projectId))
+    const pName = projects.value.find((p) => p.id === taskConfig.projectId)?.name
+    if (pName) form.append('project_name', pName)
+  }
+  if (taskConfig.bidStatus) {
+    form.append('bid_status', taskConfig.bidStatus)
+  }
+  try {
+    const { data } = await quoteApi.import(form)
+    const result = data as ImportResult
+    entry.status = 'done'
+    entry.stage = '已导入'
+    entry.progressPct = 100
+    entry.confirmed = true
+
+    if (result.supplier_ids?.length >= 1) {
+      entry.confirmedSupplierId = result.supplier_ids[0]
+      const sup = allSuppliers.value.find((s) => s.id === result.supplier_ids[0])
+      entry.detectedSupplierName = sup?.name || ''
+    }
+    if (result.supplier_ids?.length > 1) {
+      await fetchSuppliers()
+      for (let i = 1; i < result.supplier_ids.length; i++) {
+        const sid = result.supplier_ids[i]
+        const sup = allSuppliers.value.find((s) => s.id === sid)
+        batchFiles.value.push({
+          id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          filename: `${file.name} (${sup?.name || `供应商${sid}`})`,
+          status: 'done',
+          stage: '已导入',
+          progressPct: 100,
+          uploadPct: 100,
+          jobId: null,
+          detectedSupplierName: sup?.name || '',
+          matchedSupplierId: sid,
+          items: [],
+          confirmedSupplierId: sid,
+          confirmed: true,
+          error: '',
+          pollTimer: null,
+        })
+      }
+    }
+    message.success(`Excel 导入完成：${result.imported} 条报价，${result.supplier_ids?.length || 0} 家供应商`)
+  } catch (e) {
+    entry.status = 'failed'
+    entry.stage = '导入失败'
+    const errResp = (e as any)?.response?.data?.detail
+    if (typeof errResp === 'string') {
+      entry.error = errResp
+    } else if (errResp?.errors?.[0]?.reason) {
+      entry.error = errResp.errors[0].reason
+    } else {
+      entry.error = (e as Error).message || '导入失败'
+    }
+  }
 }
 
 async function uploadBatchFile(entry: BatchFileEntry, file: File) {
@@ -537,6 +783,7 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
       project_id: taskConfig.projectId,
       category: taskConfig.category,
       overrides: entry.items as unknown as Array<Record<string, unknown>>,
+      bid_status: taskConfig.bidStatus,
     })
     entry.confirmed = true
     entry.confirmedSupplierId = data.supplier_id ?? null
@@ -568,8 +815,8 @@ async function runMatrix() {
   const sids = useBatchMode.value
     ? [...new Set(batchFiles.value.filter((f) => f.confirmed && f.confirmedSupplierId).map((f) => f.confirmedSupplierId!))]
     : taskConfig.supplierIds
-  if (sids.length < 2) {
-    message.warning('至少需要 2 家供应商的报价才能比价')
+  if (sids.length < 1) {
+    message.warning('至少需要 1 家供应商的报价才能比价')
     return
   }
   analyzing.value = true
@@ -601,7 +848,7 @@ async function runMatrix() {
       <div>
         <h1 class="compare-page__title">招标比价分析</h1>
         <div class="compare-page__subtitle">
-          按"配置→录入报价→比价结果"分步完成；支持 PDF/扫描件自动识别
+          按"配置→录入报价→比价结果"分步完成；支持 PDF/扫描件自动识别 + Excel 直接导入
         </div>
       </div>
     </div>
@@ -610,7 +857,8 @@ async function runMatrix() {
     <a-steps :current="currentStep" style="margin-bottom:20px">
       <a-step title="配置任务" description="项目 + 品类 + 供应商" />
       <a-step title="录入报价" description="按供应商上传或使用历史数据" />
-      <a-step title="比价结果" description="横向矩阵 + 推荐供应商" />
+      <a-step v-if="needsAlignmentStep" title="AI 对齐复核" description="智能匹配同一报价行" />
+      <a-step title="比价结果" :description="isSingleSupplierMode ? '报价 vs 历史价格对比' : '横向矩阵 + 推荐供应商'" />
     </a-steps>
 
     <!-- Step 0: Configure -->
@@ -643,10 +891,32 @@ async function runMatrix() {
           </a-select>
         </a-form-item>
 
-        <a-form-item label="品类（必选）" required>
-          <a-select v-model:value="taskConfig.category" placeholder="选择品类" style="width:280px">
-            <a-select-option v-for="c in CATEGORIES" :key="c" :value="c">{{ c }}</a-select-option>
+        <a-form-item label="专业" required>
+          <a-select v-model:value="selectedProfession" placeholder="先选专业" style="width:180px">
+            <a-select-option v-for="p in PROFESSIONS" :key="p" :value="p">{{ p }}</a-select-option>
           </a-select>
+        </a-form-item>
+        <a-form-item label="品类（必选）" required>
+          <a-select
+            v-model:value="taskConfig.category"
+            placeholder="再选品类"
+            style="width:280px"
+            :disabled="!selectedProfession"
+          >
+            <a-select-option v-for="c in filteredCategories" :key="c" :value="c">{{ c }}</a-select-option>
+          </a-select>
+        </a-form-item>
+
+        <a-form-item>
+          <a-checkbox
+            :checked="taskConfig.bidStatus === '未中标'"
+            @change="(e: any) => taskConfig.bidStatus = e.target.checked ? '未中标' : ''"
+          >
+            标记为未中标清单
+          </a-checkbox>
+          <div style="margin-top:4px;font-size:12px;color:rgba(0,0,0,0.45)">
+            勾选后导入的报价不在热力图/气泡图中显示，但参与品牌档位比价与邀标推荐
+          </div>
         </a-form-item>
 
         <a-form-item label="参与供应商（可选）">
@@ -684,15 +954,32 @@ async function runMatrix() {
       <template v-if="useBatchMode">
         <a-upload-dragger
           :multiple="true"
-          accept=".pdf,.png,.jpg,.jpeg"
+          accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls"
           :show-upload-list="false"
           :before-upload="(file: File) => { handleBatchFile(file); return false; }"
         >
           <p class="ant-upload-drag-icon"><CloudUploadOutlined /></p>
-          <p class="ant-upload-text">拖入所有供应商的报价 PDF</p>
-          <p class="ant-upload-hint">支持多文件同时上传 · 系统自动识别每份报价的供应商</p>
+          <p class="ant-upload-text">拖入所有供应商的报价文件</p>
+          <p class="ant-upload-hint">支持 PDF / 图片（OCR 识别）和 Excel（直接解析）· 多文件同时上传</p>
         </a-upload-dragger>
 
+        <div v-if="batchProgress && batchProgress.total > 1" class="batch-overall">
+          <span>
+            识别进度：{{ batchProgress.done }}/{{ batchProgress.total }} 完成
+            <template v-if="batchProgress.failed > 0">
+              · <span style="color:#ff4d4f">{{ batchProgress.failed }} 失败</span>
+            </template>
+            <template v-if="batchProgress.processing > 0">
+              · {{ batchProgress.processing }} 处理中
+            </template>
+          </span>
+          <a-progress
+            :percent="Math.round((batchProgress.done / batchProgress.total) * 100)"
+            :status="batchProgress.failed > 0 ? 'exception' : batchProgress.done === batchProgress.total ? 'success' : 'active'"
+            size="small"
+            style="width:200px;margin-left:12px"
+          />
+        </div>
         <div v-if="batchFiles.length > 0" class="batch-list">
           <div v-for="f in batchFiles" :key="f.id" class="batch-card" :class="{ 'batch-card--done': f.confirmed }">
             <div class="batch-card__head">
@@ -708,6 +995,7 @@ async function runMatrix() {
                 {{ f.stage }} · {{ f.progressPct }}%
               </a-tag>
               <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
+              <a-tag v-else-if="f.confirmed && !f.jobId" color="green">Excel 已导入</a-tag>
               <a-tag v-else-if="f.confirmed" color="green">已入库</a-tag>
               <a-tag v-else color="cyan">{{ f.stage }} · {{ f.items.length }} 项</a-tag>
               <a-button v-if="!f.confirmed" size="small" type="text" danger @click="removeBatchEntry(f)">移除</a-button>
@@ -728,7 +1016,7 @@ async function runMatrix() {
               <span v-if="f.jobId"> · 任务 {{ f.jobId.slice(0, 8) }}</span>
             </div>
             <div
-              v-if="f.status === 'uploading' || f.status === 'processing' || f.status === 'done'"
+              v-if="f.jobId && (f.status === 'uploading' || f.status === 'processing' || f.status === 'done')"
               class="batch-card__steps"
             >
               <div
@@ -769,7 +1057,7 @@ async function runMatrix() {
                   style="width:200px"
                   placeholder="供应商名称"
                 />
-                <a-button type="primary" size="small" @click="confirmBatchEntry(f)">确认入库</a-button>
+                <a-button type="primary" size="small" @click="confirmBatchEntry(f)">校对入库</a-button>
               </div>
             </div>
           </div>
@@ -801,13 +1089,13 @@ async function runMatrix() {
                 <a-alert
                   type="info"
                   show-icon
-                  message="识别完成，请核对后点击「确认入库」"
+                  message="识别完成，请核对后点击「校对入库」"
                   style="margin-bottom:10px"
                 />
                 <ExtractionEditor
                   schema="quote"
                   :model-value="supplierUploads[s.id]?.items as unknown[] as any"
-                  :confirm-label="'确认入库'"
+                  :confirm-label="'校对入库'"
                   @confirm="() => confirmSupplier(s.id)"
                   @update:model-value="(v: any) => supplierUploads[s.id].items = v"
                 />
@@ -824,8 +1112,112 @@ async function runMatrix() {
       </template>
     </a-card>
 
-    <!-- Step 2: Results -->
-    <template v-else-if="currentStep === 2">
+    <!-- Step: AI Alignment Review (multi-supplier only) -->
+    <a-card v-else-if="currentStep === 2 && needsAlignmentStep" :body-style="{ padding: '20px' }">
+      <div v-if="alignmentLoading" style="text-align:center; padding:40px 0">
+        <a-spin size="large" />
+        <div style="margin-top:12px; color:#666">AI 正在分析报价对齐...</div>
+        <div style="margin-top:4px; color:#999; font-size:12px">通常需要 30~60 秒</div>
+      </div>
+      <div v-else-if="alignmentResult">
+        <!-- Error state -->
+        <a-alert v-if="alignmentResult.error" type="warning" :message="alignmentResult.error" show-icon style="margin-bottom:16px" />
+
+        <!-- Info bar -->
+        <div style="margin-bottom:16px; display:flex; gap:16px; align-items:center; flex-wrap:wrap">
+          <a-tag color="blue">{{ alignmentResult.groups.length }} 组对齐建议</a-tag>
+          <a-tag color="orange">{{ alignmentResult.field_fixes.length }} 个字段纠错</a-tag>
+          <span style="color:#999; font-size:12px">
+            耗时 {{ (alignmentResult.duration_ms / 1000).toFixed(1) }}s
+            / {{ alignmentResult.tokens_used }} tokens
+          </span>
+        </div>
+
+        <!-- Alignment groups -->
+        <div v-if="alignmentResult.groups.length > 0">
+          <h4 style="margin:0 0 12px">对齐分组建议</h4>
+          <a-collapse>
+            <a-collapse-panel
+              v-for="(group, gi) in alignmentResult.groups"
+              :key="gi"
+              :header="`${group.suggested_name} — ${group.suggested_spec}`"
+            >
+              <template #extra>
+                <a-space @click.stop>
+                  <a-tag :color="group.confidence >= 0.9 ? 'green' : group.confidence >= 0.7 ? 'orange' : 'red'">
+                    {{ (group.confidence * 100).toFixed(0) }}%
+                  </a-tag>
+                  <a-switch
+                    :checked="alignmentGroupStatus[gi] === 'confirmed'"
+                    checked-children="确认"
+                    un-checked-children="拒绝"
+                    @change="(v: boolean) => alignmentGroupStatus[gi] = v ? 'confirmed' : 'rejected'"
+                  />
+                </a-space>
+              </template>
+              <p style="color:#666; margin-bottom:8px">{{ group.reason }}</p>
+              <a-table
+                :data-source="group.items"
+                :columns="[
+                  { title: 'Quote ID', dataIndex: 'quote_id', width: 100 },
+                  { title: '供应商', dataIndex: 'supplier_id', width: 100 },
+                  { title: '操作', dataIndex: 'action', width: 80 },
+                  { title: '备注', dataIndex: 'spec_note' },
+                ]"
+                :pagination="false"
+                size="small"
+                :row-key="(r: Record<string, unknown>) => `${r.quote_id}`"
+              />
+            </a-collapse-panel>
+          </a-collapse>
+        </div>
+
+        <!-- Field fixes -->
+        <div v-if="alignmentResult.field_fixes.length > 0" style="margin-top:20px">
+          <h4 style="margin:0 0 12px">字段纠错建议</h4>
+          <a-table
+            :data-source="alignmentResult.field_fixes"
+            :columns="[
+              { title: 'Quote ID', dataIndex: 'quote_id', width: 100 },
+              { title: '字段', dataIndex: 'field', width: 100 },
+              { title: '当前值', dataIndex: 'current', width: 120 },
+              { title: '建议值', dataIndex: 'suggested', width: 120 },
+              { title: '置信度', dataIndex: 'confidence', width: 100,
+                customRender: ({ text }: { text: number }) => `${(text * 100).toFixed(0)}%` },
+              { title: '原因', dataIndex: 'reason' },
+              { title: '接受', key: 'accept', width: 80 },
+            ]"
+            :pagination="false"
+            size="small"
+            :row-key="(_r: Record<string, unknown>, i: number) => `fix-${i}`"
+          >
+            <template #bodyCell="{ column, record, index }">
+              <template v-if="column.key === 'accept'">
+                <a-checkbox
+                  :checked="alignmentFixStatus[index] !== false"
+                  @change="(e: { target: { checked: boolean } }) => alignmentFixStatus[index] = e.target.checked"
+                />
+              </template>
+              <template v-else-if="column.dataIndex === 'current'">
+                <span style="color:#999">{{ record.current }}</span>
+              </template>
+              <template v-else-if="column.dataIndex === 'suggested'">
+                <span style="color:#1677ff; font-weight:500">{{ record.suggested }}</span>
+              </template>
+            </template>
+          </a-table>
+        </div>
+
+        <!-- No suggestions -->
+        <a-empty
+          v-if="alignmentResult.groups.length === 0 && alignmentResult.field_fixes.length === 0 && !alignmentResult.error"
+          description="AI 未发现需要对齐的报价行，可直接进入比价"
+        />
+      </div>
+    </a-card>
+
+    <!-- Step: Results -->
+    <template v-else-if="currentStep === STEP_RESULTS">
       <!-- Context tags -->
       <div v-if="matrixSummary" class="result-context">
         <a-tag color="default">{{ taskConfig.category }}</a-tag>
@@ -841,25 +1233,47 @@ async function runMatrix() {
           :value="matrixSummary.total_materials"
           unit="项"
         />
-        <StatCard
-          :icon="TeamOutlined"
-          icon-bg="rgba(114,46,209,0.1)"
-          label="参与供应商"
-          :value="matrixSummary.total_suppliers"
-          unit="家"
-        />
-        <StatCard
-          :icon="TrophyOutlined"
-          icon-bg="rgba(82,196,26,0.1)"
-          label="推荐主供"
-          :value="matrixSummary.recommended_supplier?.name ?? '—'"
-        />
-        <StatCard
-          :icon="DollarOutlined"
-          icon-bg="rgba(250,140,22,0.1)"
-          label="最优组合总价"
-          :value="'¥' + matrixSummary.optimal_total.toLocaleString()"
-        />
+        <template v-if="isSingleSupplierMode">
+          <StatCard
+            :icon="TeamOutlined"
+            icon-bg="rgba(114,46,209,0.1)"
+            label="报价供应商"
+            :value="matrixSuppliers[0]?.name ?? '—'"
+          />
+          <StatCard
+            :icon="DollarOutlined"
+            icon-bg="rgba(250,140,22,0.1)"
+            label="报价总额"
+            :value="'¥' + (matrixTotals[0]?.total ?? 0).toLocaleString()"
+          />
+          <StatCard
+            :icon="LineChartOutlined"
+            icon-bg="rgba(22,119,255,0.1)"
+            label="平均偏差"
+            :value="formatDeviation(matrixTotals[0]?.avg_deviation ?? 0)"
+          />
+        </template>
+        <template v-else>
+          <StatCard
+            :icon="TeamOutlined"
+            icon-bg="rgba(114,46,209,0.1)"
+            label="参与供应商"
+            :value="matrixSummary.total_suppliers"
+            unit="家"
+          />
+          <StatCard
+            :icon="TrophyOutlined"
+            icon-bg="rgba(82,196,26,0.1)"
+            label="推荐主供"
+            :value="matrixSummary.recommended_supplier?.name ?? '—'"
+          />
+          <StatCard
+            :icon="DollarOutlined"
+            icon-bg="rgba(250,140,22,0.1)"
+            label="最优组合总价"
+            :value="'¥' + matrixSummary.optimal_total.toLocaleString()"
+          />
+        </template>
         <StatCard
           :icon="WarningOutlined"
           icon-bg="rgba(255,77,79,0.1)"
@@ -885,8 +1299,8 @@ async function runMatrix() {
         />
       </a-card>
 
-      <!-- ③ Supplier evaluation cards -->
-      <div v-if="matrixSummary && matrixResult" class="supplier-eval">
+      <!-- ③ Supplier evaluation cards (multi-supplier only) -->
+      <div v-if="matrixSummary && matrixResult && !isSingleSupplierMode" class="supplier-eval">
         <h3 class="section-title">供应商综合评估</h3>
         <a-row :gutter="[14, 14]">
           <a-col
@@ -1000,7 +1414,15 @@ async function runMatrix() {
       <!-- ⑤ Bottom action bar -->
       <div class="result-bottom-bar">
         <div class="result-bottom-bar__info">
-          <template v-if="matrixSummary">
+          <template v-if="matrixSummary && isSingleSupplierMode">
+            <span class="result-bottom-bar__total">
+              报价总额：<strong>¥{{ (matrixTotals[0]?.total ?? 0).toLocaleString() }}</strong>
+            </span>
+            <a-tag :color="matrixSummary.anomaly_count > 0 ? 'red' : 'green'" style="margin-left:8px">
+              {{ matrixSummary.anomaly_count > 0 ? `${matrixSummary.anomaly_count} 项偏差较大` : '价格正常' }}
+            </a-tag>
+          </template>
+          <template v-else-if="matrixSummary">
             <span class="result-bottom-bar__total">
               推荐方案总价：<strong>¥{{ matrixSummary.optimal_total.toLocaleString() }}</strong>
             </span>
@@ -1022,13 +1444,23 @@ async function runMatrix() {
       </div>
     </template>
 
-    <!-- Footer nav (Steps 0-1 only) -->
-    <div v-if="currentStep < 2" class="compare-page__footer">
+    <!-- Footer nav (before results) -->
+    <div v-if="currentStep < STEP_RESULTS" class="compare-page__footer">
       <a-button v-if="currentStep > 0" @click="goBack">
         <template #icon><LeftOutlined /></template>
         上一步
       </a-button>
-      <a-button type="primary" @click="goNext">
+      <template v-if="currentStep === 2 && needsAlignmentStep">
+        <a-button @click="skipAlignment" :disabled="alignmentLoading">
+          跳过对齐
+          <template #icon><RightOutlined /></template>
+        </a-button>
+        <a-button type="primary" @click="goNext" :disabled="alignmentLoading">
+          确认并比价
+          <template #icon><RightOutlined /></template>
+        </a-button>
+      </template>
+      <a-button v-else type="primary" @click="goNext">
         下一步
         <template #icon><RightOutlined /></template>
       </a-button>
@@ -1101,8 +1533,19 @@ async function runMatrix() {
   }
 }
 
+.batch-overall {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #f6f8fa;
+  border-radius: @border-radius-base;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: @text-color-secondary;
+}
+
 .batch-list {
-  margin-top: 16px;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;

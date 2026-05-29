@@ -9,6 +9,9 @@ from apps.api.models.brand_tier import BrandTier
 from apps.api.models.extraction_job import ExtractionJob
 from apps.api.models.tender_document import TenderDocument
 from apps.api.models.bid_invitation import BidInvitation
+from apps.api.models.user import User
+from apps.api.models.operation_log import OperationLog
+from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 
 from apps.api.core.config import (
     PROFESSION_ABBR, CATEGORY_ABBR, PROFESSION_MAP,
@@ -17,7 +20,8 @@ from apps.api.core.config import (
 
 __all__ = [
     "Material", "Supplier", "Project", "Quote", "AnalysisConfig", "BrandTier",
-    "ExtractionJob", "TenderDocument", "BidInvitation",
+    "ExtractionJob", "TenderDocument", "BidInvitation", "User", "OperationLog",
+    "BidAlignmentGroup", "BidAlignmentItem",
     "PROFESSION_ABBR", "CATEGORY_ABBR", "PROFESSION_MAP",
     "DEFAULT_SCORING_WEIGHTS", "DEFAULT_THRESHOLDS",
 ]

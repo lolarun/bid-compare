@@ -86,6 +86,7 @@ const stats = computed(() => {
 // ─── Columns ────────────────────────────────────────────────────────────
 const columns = [
   { title: '供应商名称', dataIndex: 'name', width: 160, ellipsis: true },
+  { title: '类型', dataIndex: 'supplier_type', width: 90, align: 'center' as const },
   { title: '主营物料类别', dataIndex: 'categories', width: 150, ellipsis: true,
     customRender: ({ text }: { text: string[] }) => text?.join('、') || '—' },
   { title: '合作次数', dataIndex: 'win_count', width: 90, align: 'center' as const,
@@ -289,6 +290,11 @@ onMounted(fetchData)
           <template v-if="column.dataIndex === 'name'">
             <span style="font-weight:500;color:#1677ff">{{ (record as SupplierRow).name }}</span>
           </template>
+          <template v-else-if="column.dataIndex === 'supplier_type'">
+            <a-tag :color="(record as SupplierRow).supplier_type === '厂家' ? 'purple' : 'blue'">
+              {{ (record as SupplierRow).supplier_type || '供应商' }}
+            </a-tag>
+          </template>
           <template v-else-if="column.dataIndex === 'history_deviation'">
             <span :style="{ color: getDeviationColor((record as SupplierRow).history_deviation) }">
               {{ fmtDeviation((record as SupplierRow).history_deviation) }}
@@ -323,7 +329,8 @@ onMounted(fetchData)
       <a-spin :spinning="drawerLoading">
         <template v-if="drawerSupplier && drawerScore">
           <a-descriptions :column="2" bordered size="small">
-            <a-descriptions-item label="主营品类" :span="2">
+            <a-descriptions-item label="类型">{{ drawerSupplier.supplier_type || '供应商' }}</a-descriptions-item>
+            <a-descriptions-item label="主营品类">
               {{ drawerSupplier.categories?.join('、') || '—' }}
             </a-descriptions-item>
             <a-descriptions-item label="中标次数">{{ drawerSupplier.win_count }} 次</a-descriptions-item>

@@ -21,10 +21,12 @@ Post-processing:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image
@@ -38,6 +40,7 @@ from apps.api.intelligence.prompts import TENDER_PROMPT, QUOTE_PROMPT
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
 
 log = logging.getLogger(__name__)
+extraction_log = logging.getLogger("mempas.extraction")
 
 # Used by category inference; matches apps/api/core/config.py ALL_CATEGORIES
 KNOWN_CATEGORIES = [
@@ -46,7 +49,7 @@ KNOWN_CATEGORIES = [
 ]
 
 BATCH_SIZE = 1          # legacy export; extraction now uses one page per call
-PAGE_CONCURRENCY = 10   # max concurrent page-level LLM calls
+PAGE_CONCURRENCY = 6    # max concurrent page-level LLM calls
 ProgressCallback = Callable[[str, int], None]
 
 
@@ -63,10 +66,12 @@ class ExtractionPipeline:
         progress_cb: ProgressCallback | None = None,
     ) -> ExtractionResponse:
         _notify(progress_cb, "渲染PDF", 10)
+        t_start = time.time()
         images = DocumentLoader.to_images(file_path)
         resp = self._run_batched(images, TENDER_SCHEMA, TENDER_PROMPT, "tender", progress_cb)
         _notify(progress_cb, "整理结果", 95)
         resp.data = self._postprocess_tender(resp.data)
+        self._log_extraction("tender", file_path, images, resp, t_start)
         return resp
 
     def extract_quote(
@@ -76,10 +81,12 @@ class ExtractionPipeline:
         progress_cb: ProgressCallback | None = None,
     ) -> ExtractionResponse:
         _notify(progress_cb, "渲染PDF", 10)
+        t_start = time.time()
         images = DocumentLoader.to_images(file_path)
         resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
         _notify(progress_cb, "整理结果", 95)
         resp.data = self._postprocess_quote(resp.data, context or {})
+        self._log_extraction("quote", file_path, images, resp, t_start)
         return resp
 
     # ─── batched execution ─────────────────────────────────────────────────
@@ -170,6 +177,33 @@ class ExtractionPipeline:
         )
         return merged
 
+    def _log_extraction(
+        self,
+        doc_type: str,
+        file_path: str,
+        images: list[bytes],
+        resp: ExtractionResponse,
+        t_start: float,
+    ) -> None:
+        """Emit a structured JSON log line for every extraction run."""
+        items = (resp.data or {}).get("items") or []
+        skipped = (resp.metadata or {}).get("skipped_pages") or []
+        record = {
+            "type": doc_type,
+            "file": Path(file_path).name,
+            "provider": getattr(self.provider, "name", "unknown"),
+            "model": getattr(self.provider, "model", "unknown"),
+            "pages": len(images),
+            "concurrency": PAGE_CONCURRENCY,
+            "items": len(items),
+            "tokens": resp.tokens_used or 0,
+            "skipped": len(skipped),
+            "skipped_detail": skipped or None,
+            "duration_s": round(time.time() - t_start, 1),
+            "duration_llm_ms": resp.duration_ms,
+        }
+        extraction_log.info(json.dumps(record, ensure_ascii=False))
+
     def _extract_page(
         self,
         page_idx: int,
@@ -240,6 +274,10 @@ class ExtractionPipeline:
             category = (it.get("category") or "").strip()
             if not category:
                 category = _infer_category(name)
+            ext = it.get("extended_attrs")
+            if not isinstance(ext, dict):
+                ext = {}
+            ext = {k: v for k, v in ext.items() if v is not None and v != ""}
             cleaned.append({
                 "name": name,
                 "category": category,
@@ -247,6 +285,7 @@ class ExtractionPipeline:
                 "unit": (it.get("unit") or "").strip(),
                 "quantity": _coerce_num(it.get("quantity")),
                 "remark": (it.get("remark") or "").strip(),
+                "extended_attrs": ext,
             })
         return {
             "project_name": (data.get("project_name") or "").strip(),

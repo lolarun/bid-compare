@@ -10,6 +10,7 @@ class SupplierBase(BaseModel):
     contact: str = ""
     phone: str = ""
     categories: list[str] = Field(default_factory=list)
+    supplier_type: str = "供应商"
     remark: str = ""
 
 
@@ -23,6 +24,7 @@ class SupplierUpdate(BaseModel):
     contact: str | None = None
     phone: str | None = None
     categories: list[str] | None = None
+    supplier_type: str | None = None
     remark: str | None = None
 
 

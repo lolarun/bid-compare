@@ -37,6 +37,7 @@ class BatchConfirmRequest(BaseModel):
     project_name: str = ""
     category: str = ""  # required if items don't carry their own
     overrides: list[dict[str, Any]] | None = None  # user-edited items, if any
+    bid_status: str = ""
 
 
 @router.get("", response_model=dict)
@@ -104,6 +105,50 @@ def list_quotes(
         "page_size": page_size,
         "items": result_items,
     }
+
+
+# ─── Batches ──────────────────────────────────────────────────────────────────
+
+@router.get("/batches", response_model=dict)
+def list_batches(
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(
+            Quote.batch_id,
+            func.count(Quote.id).label("count"),
+            func.min(Quote.created_at).label("created_at"),
+            func.max(Quote.supplier_id).label("supplier_id"),
+            func.max(Quote.project_id).label("project_id"),
+        )
+        .filter(Quote.batch_id.isnot(None), Quote.batch_id != "")
+        .group_by(Quote.batch_id)
+        .order_by(func.min(Quote.created_at).desc())
+        .all()
+    )
+    items = []
+    for r in rows:
+        supplier = db.query(Supplier).get(r.supplier_id) if r.supplier_id else None
+        project = db.query(Project).get(r.project_id) if r.project_id else None
+        items.append({
+            "batch_id": r.batch_id,
+            "count": r.count,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "supplier_id": r.supplier_id,
+            "supplier_name": supplier.name if supplier else "",
+            "project_id": r.project_id,
+            "project_name": project.name if project else "",
+        })
+    return {"items": items, "total": len(items)}
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: str, db: Session = Depends(get_db)):
+    count = db.query(Quote).filter(Quote.batch_id == batch_id).delete()
+    db.commit()
+    if count == 0:
+        raise HTTPException(404, f"Batch {batch_id} not found")
+    return {"deleted": count}
 
 
 # ─── Stats (must be before /{quote_id} to avoid route conflict) ────────────
@@ -223,6 +268,9 @@ async def import_file(
     file: UploadFile = File(...),
     category: str = Form(...),
     project_name: str = Form(""),
+    project_id: int | None = Form(None),
+    supplier_id: int | None = Form(None),
+    bid_status: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Import a CSV or Excel file, creating Material + Quote records."""
@@ -231,8 +279,17 @@ async def import_file(
     if not file.filename.endswith((".csv", ".xlsx", ".xls")):
         raise HTTPException(400, "Only .csv, .xlsx, .xls files are supported")
 
+    if project_id and not project_name:
+        proj = db.get(Project, project_id)
+        if proj:
+            project_name = proj.name
+
     content = await file.read()
-    result = import_csv_data(db, content, file.filename, category, project_name)
+    result = import_csv_data(
+        db, content, file.filename, category, project_name,
+        default_supplier_id=supplier_id,
+        bid_status=bid_status,
+    )
     if result["status"] == "error" and result["imported"] == 0:
         raise HTTPException(422, detail=result)
     return result
@@ -474,6 +531,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 remark=str(item.get("remark") or "")[:500],
                 quote_date=str(item.get("quote_date") or ""),
                 batch_id=batch_id,
+                bid_status=body.bid_status,
                 deviation_pct=deviation,
                 alert_level=alert,
             )

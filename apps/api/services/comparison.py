@@ -35,8 +35,12 @@ def determine_alert(deviation_pct: float, thresholds: dict) -> str:
     return "red"
 
 
-def compute_baseline(db: Session, category: str, sub_category: str | None = None) -> dict:
-    """Compute IQR-filtered price statistics for a category/sub_category."""
+def compute_baseline(db: Session, category: str, sub_category: str | None = None,
+                     brand_tier: str | None = None) -> dict:
+    """Compute IQR-filtered price statistics for a category/sub_category.
+
+    brand_tier: if set, only include quotes with matching brand_tier (e.g. '合资').
+    """
     q = db.query(Quote.unit_price).join(Material).filter(
         Material.category == category,
         Quote.unit_price.isnot(None),
@@ -44,6 +48,8 @@ def compute_baseline(db: Session, category: str, sub_category: str | None = None
     )
     if sub_category:
         q = q.filter(Material.sub_category == sub_category)
+    if brand_tier:
+        q = q.filter(Quote.brand_tier == brand_tier)
 
     prices = [row[0] for row in q.all()]
     if not prices:
@@ -86,17 +92,12 @@ def compute_reasonable_low(
     db: Session,
     category: str,
     sub_category: str | None = None,
+    brand_tier: str | None = None,
 ) -> dict:
     """
     Compute the reasonable low price (合理史低) with its source project and date.
 
-    Returns:
-        {
-            "reasonable_low": float | None,
-            "reasonable_low_project": str | None,
-            "reasonable_low_date": str | None,
-            "historical_min": float | None,
-        }
+    brand_tier: if set, only include quotes with matching brand_tier (e.g. '合资').
     """
     q = (
         db.query(Quote.unit_price, Quote.quote_date, Quote.project_id)
@@ -109,6 +110,8 @@ def compute_reasonable_low(
     )
     if sub_category:
         q = q.filter(Material.sub_category == sub_category)
+    if brand_tier:
+        q = q.filter(Quote.brand_tier == brand_tier)
 
     rows = q.all()
     if not rows:

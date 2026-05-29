@@ -1,39 +1,22 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { SearchOutlined, ExportOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
-import { exportApi } from '@/api'
+import { logApi, exportApi } from '@/api'
 import { doExport } from '@/utils/download'
+import type { LogEntry } from '@/api/client'
 
-interface LogRow {
-  id: number
-  time: string
-  user: string
-  module: string
-  action: string
-  target: string
-  result: '成功' | '失败'
-  remark: string
-}
-
-const data = ref<LogRow[]>([
-  { id: 1, time: '2026-05-19 09:35:12', user: '杨科', module: '采购价格导入', action: '导入 Excel', target: '桥架报价_江苏华润_202605.xlsx', result: '成功', remark: '新增 36 条，跳过 2 条（重复）' },
-  { id: 2, time: '2026-05-19 09:12:45', user: '杨科', module: '招标比价分析', action: '生成横向矩阵', target: '项目 X 给排水材料采购', result: '成功', remark: '5 物料 × 4 供应商' },
-  { id: 3, time: '2026-05-19 08:50:21', user: '刘佩珺', module: '物料主数据', action: '编辑物料', target: 'DN100 无缝钢管 (Q235)', result: '成功', remark: '调整推荐品牌为 鞍钢' },
-  { id: 4, time: '2026-05-18 17:45:09', user: '刘佩珺', module: '邀标建议', action: '生成邀标清单', target: '项目 Y 数据中心电缆桥架采购', result: '成功', remark: 'AI 推荐 5 家，已选 3 家' },
-  { id: 5, time: '2026-05-18 16:20:33', user: '王建波', module: '采购数据分析', action: '查询', target: '关键词「PPR」', result: '成功', remark: '命中 87 条' },
-  { id: 6, time: '2026-05-18 15:11:08', user: '杨科', module: '系统设置', action: '更新偏差阈值', target: '桥架类 (yellow:5%, red:10%)', result: '成功', remark: '原值 yellow:8%, red:15%' },
-  { id: 7, time: '2026-05-18 11:32:55', user: '杨科', module: '采购价格导入', action: 'OCR 识别', target: '现场扫描件_配电箱.pdf', result: '成功', remark: '识别 12 项，新品牌「正泰电器」' },
-  { id: 8, time: '2026-05-17 14:08:42', user: '王建波', module: '供应商管理', action: '查看画像', target: '江苏华润管业', result: '成功', remark: 'AI 评分 92' },
-  { id: 9, time: '2026-05-17 10:18:01', user: 'admin', module: '用户管理', action: '停用账号', target: 'chen_old', result: '成功', remark: '员工离职' },
-  { id: 10, time: '2026-05-16 09:25:17', user: '刘佩珺', module: '招标比价分析', action: '导出报告', target: '项目 W 暖通改造', result: '失败', remark: '后端 5xx，已重试' },
-])
+const loading = ref(false)
+const data = ref<LogEntry[]>([])
+const total = ref(0)
 
 const query = reactive({
   user: undefined as string | undefined,
   module: undefined as string | undefined,
   action: undefined as string | undefined,
   range: undefined as [Dayjs, Dayjs] | undefined,
+  page: 1,
+  page_size: 20,
 })
 
 const columns = [
@@ -45,6 +28,36 @@ const columns = [
   { title: '结果', dataIndex: 'result', width: 80 },
   { title: '备注', dataIndex: 'remark', ellipsis: true },
 ]
+
+async function fetchData() {
+  loading.value = true
+  try {
+    const params: Record<string, unknown> = {
+      page: query.page,
+      page_size: query.page_size,
+    }
+    if (query.user) params.user = query.user
+    if (query.module) params.module = query.module
+    if (query.action) params.action = query.action
+    if (query.range?.[0]) params.date_from = query.range[0].format('YYYY-MM-DD')
+    if (query.range?.[1]) params.date_to = query.range[1].format('YYYY-MM-DD')
+
+    const { data: resp } = await logApi.list(params)
+    data.value = resp.items
+    total.value = resp.total
+  } catch {
+    // interceptor handles notification
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(fetchData)
+
+function search() {
+  query.page = 1
+  fetchData()
+}
 </script>
 
 <template>
@@ -62,28 +75,32 @@ const columns = [
 
     <a-card :body-style="{ padding: '14px 16px' }" class="mb-16">
       <a-space wrap>
-        <a-select v-model:value="query.user" placeholder="操作人" allow-clear style="width:140px">
-          <a-select-option value="杨科">杨科</a-select-option>
-          <a-select-option value="刘佩珺">刘佩珺</a-select-option>
-          <a-select-option value="王建波">王建波</a-select-option>
-        </a-select>
+        <a-input
+          v-model:value="query.user"
+          placeholder="操作人"
+          allow-clear
+          style="width:140px"
+        />
         <a-select v-model:value="query.module" placeholder="模块" allow-clear style="width:160px">
           <a-select-option value="招标比价分析">招标比价分析</a-select-option>
           <a-select-option value="邀标建议">邀标建议</a-select-option>
           <a-select-option value="物料主数据">物料主数据</a-select-option>
-          <a-select-option value="采购数据分析">采购数据分析</a-select-option>
+          <a-select-option value="历史价格查询">历史价格查询</a-select-option>
           <a-select-option value="供应商管理">供应商管理</a-select-option>
           <a-select-option value="采购价格导入">采购价格导入</a-select-option>
           <a-select-option value="系统设置">系统设置</a-select-option>
+          <a-select-option value="用户管理">用户管理</a-select-option>
         </a-select>
         <a-select v-model:value="query.action" placeholder="操作类型" allow-clear style="width:140px">
           <a-select-option value="导入">导入</a-select-option>
           <a-select-option value="编辑">编辑</a-select-option>
           <a-select-option value="导出">导出</a-select-option>
           <a-select-option value="查询">查询</a-select-option>
+          <a-select-option value="新增">新增</a-select-option>
+          <a-select-option value="删除">删除</a-select-option>
         </a-select>
         <a-range-picker v-model:value="query.range" />
-        <a-button type="primary">
+        <a-button type="primary" @click="search">
           <template #icon><SearchOutlined /></template>
           查询
         </a-button>
@@ -94,14 +111,21 @@ const columns = [
       <a-table
         :columns="columns"
         :data-source="data"
-        :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
+        :loading="loading"
+        :pagination="{
+          current: query.page,
+          pageSize: query.page_size,
+          total,
+          showTotal: (t: number) => `共 ${t} 条`,
+          onChange: (p: number) => { query.page = p; fetchData() },
+        }"
         row-key="id"
         size="middle"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.dataIndex === 'result'">
-            <a-tag :color="(record as LogRow).result === '成功' ? 'green' : 'red'">
-              {{ (record as LogRow).result }}
+            <a-tag :color="(record as LogEntry).result === '成功' ? 'green' : 'red'">
+              {{ (record as LogEntry).result }}
             </a-tag>
           </template>
         </template>

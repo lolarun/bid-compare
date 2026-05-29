@@ -30,6 +30,7 @@ class Quote(Base):
 
     # 导入批次
     batch_id = Column(String(50), default="")
+    bid_status = Column(String(20), default="")
 
     # 分析标记
     deviation_pct = Column(Float, nullable=True)

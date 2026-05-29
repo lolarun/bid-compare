@@ -55,6 +55,7 @@ export function asTenderShape(result: unknown): TenderExtractionShape {
         unit: asStr(it.unit),
         quantity: asNumOrNull(it.quantity),
         remark: asStr(it.remark),
+        extended_attrs: isObj(it.extended_attrs) ? it.extended_attrs as Record<string, unknown> : {},
       }))
     : []
   if (!Array.isArray(rawItems)) {

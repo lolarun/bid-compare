@@ -20,6 +20,7 @@ class RecommendRequest(BaseModel):
     tender_items: list[dict[str, Any]] = Field(default_factory=list)
     top_n: int = 5
     project_id: int | None = None
+    brand_requirements: list[str] = Field(default_factory=list)
 
 
 class RecommendReason(BaseModel):
@@ -30,6 +31,7 @@ class RecommendReason(BaseModel):
     overall_score: float = 0
     brand_score: float = 0
     summary: str = ""
+    brands: list[str] = Field(default_factory=list)
 
 
 class SupplierRecommendation(BaseModel):

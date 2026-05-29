@@ -5,7 +5,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
-from apps.api.core.config import PROFESSION_ABBR, CATEGORY_ABBR, PROFESSION_MAP, EXTENDED_ATTR_SCHEMAS
+from apps.api.core.config import PROFESSION_ABBR, CATEGORY_ABBR, PROFESSION_MAP, EXTENDED_ATTR_SCHEMAS, NAMING_STANDARDS
 from apps.api.models import Material
 from apps.api.schemas import (
     MaterialCreate, MaterialUpdate, MaterialOut,
@@ -92,6 +92,15 @@ def get_extended_schema(category: str):
     if fields is None:
         raise HTTPException(404, f"No extended schema for category '{category}'")
     return {"category": category, "fields": fields}
+
+
+@router.get("/naming-standards/{category}")
+def get_naming_standards(category: str):
+    """Get the naming standard reference for a given category."""
+    standards = NAMING_STANDARDS.get(category)
+    if standards is None:
+        raise HTTPException(404, f"No naming standards for category '{category}'")
+    return {"category": category, "dimensions": standards}
 
 
 @router.get("/{material_id}", response_model=MaterialOut)

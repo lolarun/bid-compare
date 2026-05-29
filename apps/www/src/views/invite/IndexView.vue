@@ -6,6 +6,7 @@ import {
   ThunderboltOutlined,
   TrophyOutlined,
   TeamOutlined,
+  TagOutlined,
 } from '@ant-design/icons-vue'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
@@ -40,6 +41,7 @@ const categories = ref<string[]>([])
 const selectedSupplierIds = ref<number[]>([])
 const topN = ref(5)
 
+const brandRequirements = ref<string[]>([])
 const saving = ref(false)
 const savedTenderId = ref<number | null>(null)
 
@@ -92,6 +94,7 @@ async function generateRecommendations() {
     const { data } = await inviteApi.recommend({
       tender_items: tenderItems.value as unknown as Array<Record<string, unknown>>,
       top_n: topN.value,
+      brand_requirements: brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
     })
     recommendations.value = data.recommendations
     categories.value = data.categories
@@ -231,6 +234,18 @@ function toggleSupplier(id: number) {
               show-icon
               style="margin-bottom:12px"
             />
+            <div style="margin-bottom:12px">
+              <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:4px">
+                <TagOutlined /> 品牌要求（可选，输入后回车添加）
+              </div>
+              <a-select
+                v-model:value="brandRequirements"
+                mode="tags"
+                placeholder="例：施耐德、ABB、正泰"
+                style="width:100%"
+                :token-separators="[',', '，', '、']"
+              />
+            </div>
             <a-button
               type="primary"
               :loading="recommending"
@@ -285,6 +300,20 @@ function toggleSupplier(id: number) {
                     偏差 {{ (r.reason.avg_deviation_pct * 100).toFixed(1) }}%
                   </a-tag>
                   <a-tag>综合 {{ r.reason.overall_score.toFixed(0) }}</a-tag>
+                </div>
+                <div v-if="r.reason.brands?.length" class="reco-card__brands">
+                  <TagOutlined style="color:rgba(0,0,0,0.35);font-size:11px" />
+                  <a-tag
+                    v-for="b in r.reason.brands.slice(0, 5)"
+                    :key="b"
+                    :color="brandRequirements.includes(b) ? 'green' : 'default'"
+                    size="small"
+                  >
+                    {{ b }}
+                  </a-tag>
+                  <span v-if="r.reason.brands.length > 5" style="font-size:11px;color:rgba(0,0,0,0.35)">
+                    +{{ r.reason.brands.length - 5 }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -395,6 +424,15 @@ function toggleSupplier(id: number) {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  &__brands {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed @border-color-split;
   }
 }
 </style>

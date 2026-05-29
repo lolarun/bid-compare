@@ -12,6 +12,8 @@ from apps.api.schemas import (
     BidMatrixRequest, BidMatrixResult,
     BidInsightRequest, BidInsightResult,
     DashboardHeatmapData, DashboardBubbleData,
+    AlignmentSuggestRequest, AlignmentSuggestResult,
+    AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
 )
 from apps.api.services.comparison import compare_price
 from apps.api.services.scoring import score_supplier, compare_multiple_suppliers
@@ -98,9 +100,13 @@ def dashboard_heatmap(
 
 
 @router.get("/dashboard/bubble", response_model=DashboardBubbleData)
-def dashboard_bubble(db: Session = Depends(get_db)):
+def dashboard_bubble(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
     """气泡图数据：品类 → 供应商 → 采购金额。"""
-    return get_dashboard_bubble(db)
+    return get_dashboard_bubble(db, date_from, date_to)
 
 
 @router.post("/refresh-baselines")
@@ -124,3 +130,184 @@ def bid_insight(body: BidInsightRequest):
     matrix_data = body.model_dump()
     result = generate_bid_insight(matrix_data, client, model="qwen-plus")
     return result
+
+
+@router.post("/bid-alignment/suggest", response_model=AlignmentSuggestResult)
+def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(get_db)):
+    """AI 报价对齐复核 — 分析多供应商报价行，建议对齐分组和字段纠错。
+
+    Two modes:
+      1. Pass `rows` directly (from OCR results before DB import)
+      2. Pass `project_id + supplier_ids + category` (query confirmed quotes from DB)
+    """
+    from openai import OpenAI
+    from apps.api.services.bid_alignment import suggest_alignment
+    from apps.api.models import Quote, Material, Supplier
+
+    _settings = get_settings()
+    api_key = _settings.DASHSCOPE_API_KEY
+    base_url = _settings.DASHSCOPE_BASE_URL
+    if not api_key:
+        return AlignmentSuggestResult(error="LLM API key not configured")
+
+    rows_data: list[dict] = []
+    supplier_names: list[str] = []
+
+    if body.rows:
+        # Mode 1: rows passed directly
+        rows_data = [r.model_dump() for r in body.rows]
+        supplier_names = sorted(set(r.supplier_name for r in body.rows if r.supplier_name))
+    elif body.supplier_ids:
+        # Mode 2: query from DB
+        q = db.query(Quote, Material, Supplier).join(
+            Material, Quote.material_id == Material.id
+        ).join(
+            Supplier, Quote.supplier_id == Supplier.id
+        ).filter(
+            Quote.supplier_id.in_(body.supplier_ids),
+            Quote.unit_price > 0,
+        )
+        if body.project_id:
+            q = q.filter(Quote.project_id == body.project_id)
+        if body.category:
+            q = q.filter(Material.category == body.category)
+        results = q.order_by(Material.standard_name, Supplier.name).limit(60).all()
+        if not results:
+            return AlignmentSuggestResult(error="No quote data found for given parameters")
+        for qt, mat, sup in results:
+            rows_data.append({
+                "quote_id": qt.id,
+                "supplier_id": qt.supplier_id,
+                "supplier_name": sup.name,
+                "material_name": mat.standard_name,
+                "spec": mat.spec or "",
+                "unit": mat.unit or "",
+                "quantity": qt.quantity,
+                "unit_price": qt.unit_price,
+                "total_price": qt.total_price,
+            })
+        supplier_names = sorted(set(r["supplier_name"] for r in rows_data if r.get("supplier_name")))
+    else:
+        return AlignmentSuggestResult(error="No quote rows or supplier_ids provided")
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    result = suggest_alignment(
+        rows=rows_data,
+        category=body.category,
+        supplier_names=supplier_names,
+        client=client,
+        model="qwen-plus",
+    )
+    return result
+
+
+@router.post("/bid-alignment/apply", response_model=AlignmentApplyResult)
+def bid_alignment_apply(body: AlignmentApplyRequest, db: Session = Depends(get_db)):
+    """用户确认 AI 对齐建议 — 持久化分组并可选地修正字段。"""
+    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+
+    groups_saved = 0
+    items_saved = 0
+
+    for g in body.groups:
+        if g.status == "rejected":
+            continue
+        group = BidAlignmentGroup(
+            project_id=body.project_id,
+            category=body.category,
+            suggested_name=g.suggested_name,
+            suggested_spec=g.suggested_spec,
+            suggested_unit=g.suggested_unit,
+            suggested_qty=g.suggested_qty,
+            confidence=g.confidence,
+            reason=g.reason,
+            status=g.status,
+        )
+        db.add(group)
+        db.flush()  # get group.id
+        for item in g.items:
+            ai = BidAlignmentItem(
+                group_id=group.id,
+                quote_id=item.quote_id,
+                supplier_id=item.supplier_id,
+                action=item.action,
+                spec_note=item.spec_note,
+                name_note=item.name_note,
+            )
+            db.add(ai)
+            items_saved += 1
+        groups_saved += 1
+
+    # Apply field fixes to quotes (e.g. correct unit_price ↔ total_price)
+    fixes_applied = 0
+    for fix in body.field_fixes:
+        if fix.new_value is None:
+            continue
+        from apps.api.models.quote import Quote
+        quote = db.query(Quote).get(fix.quote_id)
+        if quote and fix.field == "unit_price":
+            quote.unit_price = fix.new_value
+            fixes_applied += 1
+
+    db.commit()
+    return AlignmentApplyResult(
+        groups_saved=groups_saved,
+        items_saved=items_saved,
+        fixes_applied=fixes_applied,
+    )
+
+
+@router.get("/bid-alignment/groups", response_model=list[AlignmentGroupOut])
+def bid_alignment_groups(
+    project_id: int | None = Query(None),
+    category: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """获取已确认的对齐分组。"""
+    from apps.api.models.bid_alignment import BidAlignmentGroup
+    q = db.query(BidAlignmentGroup)
+    if project_id is not None:
+        q = q.filter(BidAlignmentGroup.project_id == project_id)
+    if category:
+        q = q.filter(BidAlignmentGroup.category == category)
+    q = q.filter(BidAlignmentGroup.status == "confirmed")
+    groups = q.all()
+
+    result = []
+    for g in groups:
+        items = [
+            {
+                "quote_id": it.quote_id,
+                "supplier_id": it.supplier_id,
+                "action": it.action,
+                "spec_note": it.spec_note,
+                "name_note": it.name_note,
+            }
+            for it in g.items
+        ]
+        result.append(AlignmentGroupOut(
+            id=g.id,
+            project_id=g.project_id,
+            category=g.category,
+            suggested_name=g.suggested_name,
+            suggested_spec=g.suggested_spec,
+            suggested_unit=g.suggested_unit,
+            suggested_qty=g.suggested_qty,
+            confidence=g.confidence,
+            reason=g.reason,
+            status=g.status,
+            items=items,
+        ))
+    return result
+
+
+@router.delete("/bid-alignment/groups/{group_id}")
+def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
+    """删除一个对齐分组（撤销对齐）。"""
+    from apps.api.models.bid_alignment import BidAlignmentGroup
+    group = db.query(BidAlignmentGroup).get(group_id)
+    if not group:
+        raise HTTPException(404, "Alignment group not found")
+    db.delete(group)
+    db.commit()
+    return {"status": "ok", "deleted_group_id": group_id}

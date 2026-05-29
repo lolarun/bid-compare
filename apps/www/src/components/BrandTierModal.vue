@@ -34,11 +34,11 @@ const emit = defineEmits<{
 }>()
 
 // AUDIT-FIX C2: undefined-by-default; user MUST pick
-const tiers = ref<Record<string, '一档' | '二档' | '三档' | undefined>>({})
+const tiers = ref<Record<string, '国产' | '合资' | '三档' | undefined>>({})
 const saving = ref(false)
 
 watch(() => props.brands, (b) => {
-  const next: Record<string, '一档' | '二档' | '三档' | undefined> = {}
+  const next: Record<string, '国产' | '合资' | '三档' | undefined> = {}
   for (const brand of b) {
     next[brand] = tiers.value[brand]  // preserve prior selection if any
   }
@@ -119,8 +119,8 @@ function cancel() {
     <a-form layout="horizontal" :label-col="{ span: 8 }">
       <a-form-item v-for="brand in brands" :key="brand" :label="brand">
         <a-radio-group v-model:value="tiers[brand]">
-          <a-radio-button value="一档">一档</a-radio-button>
-          <a-radio-button value="二档">二档</a-radio-button>
+          <a-radio-button value="国产">国产</a-radio-button>
+          <a-radio-button value="合资">合资</a-radio-button>
           <a-radio-button value="三档">三档</a-radio-button>
         </a-radio-group>
       </a-form-item>

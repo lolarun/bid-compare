@@ -17,6 +17,7 @@ class QuoteBase(BaseModel):
     brand_tier: str = ""
     remark: str = ""
     quote_date: str = ""
+    bid_status: str = ""
 
 
 class QuoteCreate(QuoteBase):
@@ -39,6 +40,7 @@ class QuoteUpdate(BaseModel):
 class QuoteOut(QuoteBase):
     id: int
     batch_id: str = ""
+    bid_status: str = ""
     deviation_pct: float | None = None
     alert_level: str = ""
     created_at: datetime | None = None

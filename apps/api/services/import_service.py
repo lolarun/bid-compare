@@ -133,6 +133,8 @@ def import_csv_data(
     filename: str,
     category: str,
     project_name: str = "",
+    default_supplier_id: int | None = None,
+    bid_status: str = "",
 ) -> dict:
     """Import a CSV or Excel file for a given category.
 
@@ -151,6 +153,7 @@ def import_csv_data(
     imported = 0
     skipped = 0
     unknown_brands: set[str] = set()
+    supplier_ids: set[int] = set()
 
     try:
         if filename.endswith((".xlsx", ".xls")):
@@ -215,8 +218,12 @@ def import_csv_data(
             if sub_category and not mat.sub_category:
                 mat.sub_category = sub_category
 
-            # 供应商（从专用列，不用品牌）
+            # 供应商（从专用列，不用品牌；fallback to default_supplier_id）
             supplier = _get_or_create_supplier(db, supplier_name) if supplier_name else None
+            if not supplier and default_supplier_id:
+                supplier = db.get(Supplier, default_supplier_id)
+            if supplier:
+                supplier_ids.add(supplier.id)
 
             # 品牌档位
             brand_tier = ""
@@ -237,6 +244,7 @@ def import_csv_data(
                 brand_tier=brand_tier,
                 remark=remark,
                 batch_id=batch_id,
+                bid_status=bid_status,
             )
             db.add(quote)
             imported += 1
@@ -261,6 +269,7 @@ def import_csv_data(
         "skipped": skipped,
         "errors": errors[:50],
         "unknown_brands": sorted(unknown_brands),
+        "supplier_ids": sorted(supplier_ids),
     }
 
 

@@ -215,6 +215,7 @@ def recommend_suppliers(
     tender_items: list[dict[str, Any]],
     top_n: int = 5,
     project_id: int | None = None,
+    brand_requirements: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Recommend up to `top_n` suppliers for the given tender items."""
     if top_n <= 0:
@@ -249,7 +250,7 @@ def recommend_suppliers(
     # ── 3. Score each candidate ──
     scored: list[dict[str, Any]] = []
     for sup in candidates:
-        scored.append(_score_one(db, sup, categories, cat_stats.get(sup.id)))
+        scored.append(_score_one(db, sup, categories, cat_stats.get(sup.id), brand_requirements))
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     primary = scored[:top_n]
@@ -262,7 +263,7 @@ def recommend_suppliers(
         all_others = all_others_q.limit(50).all()
         # Score without category constraint → use empty cat_stats
         global_stats = _aggregate_supplier_stats(db, []) if all_others else {}
-        extras = [_score_one(db, sup, [], global_stats.get(sup.id)) for sup in all_others]
+        extras = [_score_one(db, sup, [], global_stats.get(sup.id), brand_requirements) for sup in all_others]
         extras.sort(key=lambda x: x["score"], reverse=True)
         primary.extend(extras[: top_n - len(primary)])
 
@@ -292,11 +293,30 @@ def _per_category_breakdown(
     return {cat: int(cnt) for cat, cnt in rows}
 
 
+def _get_supplier_brands(
+    db: Session, supplier_id: int, categories: list[str],
+) -> list[str]:
+    """Return distinct brand names this supplier has quoted in the given categories."""
+    q = (
+        db.query(func.distinct(Quote.brand))
+        .join(Material, Material.id == Quote.material_id)
+        .filter(
+            Quote.supplier_id == supplier_id,
+            Quote.brand.isnot(None),
+            Quote.brand != "",
+        )
+    )
+    if categories:
+        q = q.filter(Material.category.in_(categories))
+    return sorted(r[0] for r in q.all() if r[0])
+
+
 def _score_one(
     db: Session,
     sup: Supplier,
     categories: list[str],
     agg: dict[str, Any] | None,
+    brand_requirements: list[str] | None = None,
 ) -> dict[str, Any]:
     """4-dim weighted score for a single supplier.
 
@@ -331,11 +351,23 @@ def _score_one(
         overall_score = 50.0
         brand_score = 70.0
 
+    # Query distinct brands this supplier has quoted
+    supplier_brands = _get_supplier_brands(db, sup.id, categories)
+
+    # Brand requirements bonus: if caller specified required brands,
+    # boost suppliers that have supplied those brands
+    brand_req_bonus = 0.0
+    if brand_requirements:
+        matched = [b for b in brand_requirements if b in supplier_brands]
+        match_ratio = len(matched) / len(brand_requirements)
+        brand_req_bonus = match_ratio * 20.0  # up to +20 points
+
     total = (
         0.30 * history_score
         + 0.25 * price_score
         + 0.25 * overall_score
         + 0.20 * brand_score
+        + brand_req_bonus
     )
 
     # AUDIT-FIX L1: instead of "在 N 个品类成交 K 次" (misleading when most
@@ -371,5 +403,6 @@ def _score_one(
             "overall_score": round(overall_score, 1),
             "brand_score": round(brand_score, 1),
             "summary": " · ".join(summary_parts),
+            "brands": supplier_brands[:10],
         },
     }
