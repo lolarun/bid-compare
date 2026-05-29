@@ -7,7 +7,6 @@ import {
   ScanOutlined,
   DownloadOutlined,
   RobotOutlined,
-  CheckCircleOutlined,
 } from '@ant-design/icons-vue'
 import { quoteApi, intakeApi, brandTierApi } from '@/api'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'

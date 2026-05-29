@@ -256,12 +256,12 @@ function applyCorrection(rid: number) {
 
 const columns = computed(() => {
   const base = props.schema === 'tender' ? tenderColumns : quoteColumns
-  const cols = [...base]
+  const cols: Array<Record<string, unknown>> = [...base]
   if (props.schema === 'quote') {
-    cols.push({ title: '', dataIndex: '_warn' as string, width: 36, align: 'center' as const })
+    cols.push({ title: '', dataIndex: '_warn', width: 36, align: 'center' })
   }
   if (props.showActions) {
-    cols.push({ title: '操作', dataIndex: '_actions', width: 60, fixed: 'right' as const })
+    cols.push({ title: '操作', dataIndex: '_actions', width: 60, fixed: 'right' })
   }
   return cols
 })
