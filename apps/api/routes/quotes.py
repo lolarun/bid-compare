@@ -370,18 +370,19 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             )
 
     # ── Determine category ─────────────────────────────────────────────────
-    category = (
+    # Category can now come from three sources (highest to lowest priority):
+    #   1. Per-item "category" field (from AI enhance step)
+    #   2. Job context "category"
+    #   3. Top-level body.category
+    # If all items carry their own category, the top-level is optional.
+    default_category = (
         body.category.strip()
         or (job.context or {}).get("category", "")
         or ""
     )
-    if not category:
-        raise HTTPException(
-            400, "Category required (provide `category` or set in job.context)"
-        )
-    if category not in PROFESSION_MAP:
-        raise HTTPException(400, f"Unknown category: {category}")
-    profession = PROFESSION_MAP[category]
+    # Validate default if provided (but don't require it)
+    if default_category and default_category not in PROFESSION_MAP:
+        raise HTTPException(400, f"Unknown category: {default_category}")
 
     # ── Resolve item list (validate shape) ─────────────────────────────────
     raw_items: Any = (
@@ -450,7 +451,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     # ── Iterate & create ───────────────────────────────────────────────────
     from apps.api.services.comparison import get_category_thresholds, determine_alert
 
-    thresholds = get_category_thresholds(db, category)
+    thresholds_cache: dict[str, dict] = {}  # cache per category
     created = 0
     skipped = 0
     errors: list[dict] = list(shape_errors)
@@ -463,21 +464,47 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             if not raw_name:
                 skipped += 1
                 continue
-            std_result = standardize_name(raw_name, category)
-            standard_name = std_result["standardized"]
-            spec = str(item.get("spec") or "").strip()
 
-            mat = (
-                db.query(Material)
-                .filter_by(category=category, standard_name=standard_name, spec=spec)
-                .first()
-            )
+            # Per-item category: item.category > default_category
+            item_category = str(item.get("category") or "").strip() or default_category
+            if not item_category or item_category not in PROFESSION_MAP:
+                errors.append({"row": idx + 1, "reason": f"Missing or invalid category: '{item_category}'"})
+                skipped += 1
+                continue
+            item_profession = PROFESSION_MAP[item_category]
+
+            # Use AI standard_name if provided, else rule-based standardization
+            ai_standard_name = str(item.get("standard_name") or "").strip()
+            if ai_standard_name:
+                standard_name = ai_standard_name
+            else:
+                std_result = standardize_name(raw_name, item_category)
+                standard_name = std_result["standardized"]
+
+            # Use AI standard_spec if provided, else original spec
+            spec = str(item.get("standard_spec") or item.get("spec") or "").strip()
+
+            # Try matched_material_id first (from AI enhance)
+            mat = None
+            matched_mid = item.get("matched_material_id")
+            if matched_mid is not None:
+                try:
+                    mat = db.get(Material, int(matched_mid))
+                except (ValueError, TypeError):
+                    pass
+
+            if not mat:
+                mat = (
+                    db.query(Material)
+                    .filter_by(category=item_category, standard_name=standard_name, spec=spec)
+                    .first()
+                )
             if not mat:
                 mat = Material(
-                    material_code=_gen_code(db, profession, category),
+                    material_code=_gen_code(db, item_profession, item_category),
                     standard_name=standard_name,
-                    profession=profession,
-                    category=category,
+                    profession=item_profession,
+                    category=item_category,
                     sub_category="",
                     spec=spec,
                     material_type="",
@@ -509,7 +536,10 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             if total is None and price is not None and qty is not None:
                 total = round(price * qty, 4)
 
-            # Deviation + alert
+            # Deviation + alert (cache thresholds per category)
+            if item_category not in thresholds_cache:
+                thresholds_cache[item_category] = get_category_thresholds(db, item_category)
+            thresholds = thresholds_cache[item_category]
             ref = mat.ref_price_reasonable_low or mat.ref_price_median
             deviation = None
             alert = ""

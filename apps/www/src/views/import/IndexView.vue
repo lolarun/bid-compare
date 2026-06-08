@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount } from 'vue'
+import { ref, watch, onBeforeUnmount, onMounted } from 'vue'
 import { message, Upload, type UploadProps } from 'ant-design-vue'
 import {
   InboxOutlined,
@@ -7,8 +7,10 @@ import {
   ScanOutlined,
   DownloadOutlined,
   RobotOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons-vue'
-import { quoteApi, intakeApi, brandTierApi } from '@/api'
+import { quoteApi, intakeApi, projectApi } from '@/api'
+import type { EnhanceSummary } from '@/api/client'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
 
 const activeTab = ref<'excel' | 'ocr'>('excel')
@@ -78,10 +80,6 @@ async function doExcelImport() {
     const { data } = await quoteApi.import(form)
     excelResult.value = data
     message.success(`成功导入 ${data.imported} 条`)
-    // 检测未知品牌（mock 触发）
-    if (data.errors?.some((e) => String((e as { code?: string }).code).includes('unknown_brand'))) {
-      brandTierVisible.value = true
-    }
   } catch (e) {
     message.error('Excel 导入失败，请检查模板格式')
   } finally {
@@ -106,11 +104,31 @@ const excelDraggerProps: UploadProps = {
 const ocrFile = ref<File | null>(null)
 const ocrPreviewUrl = ref<string | null>(null)
 const ocrParsing = ref(false)
+const ocrEnhancing = ref(false)
+const ocrJobId = ref<string | null>(null)
+const ocrSupplierName = ref<string>('')
+const ocrProjectId = ref<number | null>(null)
+const enhanceSummary = ref<EnhanceSummary | null>(null)
+const projectList = ref<Array<{ id: number; name: string }>>([])
+
+// Load project list for dropdown
+onMounted(async () => {
+  try {
+    const { data } = await projectApi.list({ page_size: 200 })
+    projectList.value = data.items.map((p) => ({ id: p.id, name: p.name }))
+  } catch {
+    // ignore
+  }
+})
+
 const ocrResult = ref<Array<{
   material: string; spec: string; brand: string; unit: string;
   qty: number | null; unit_price: number | null;
   unit_price_excl_tax: number | null; total_price: number | null;
   tax_rate: number | null; remark: string;
+  // AI-enhanced fields
+  category?: string; original_name?: string; name_note?: string;
+  alignment_note?: string; matched_material_id?: number | null;
 }> | null>(null)
 
 const ocrDraggerProps: UploadProps = {
@@ -128,15 +146,81 @@ const ocrDraggerProps: UploadProps = {
 watch(ocrPreviewUrl, (_, old) => { if (old) URL.revokeObjectURL(old) })
 onBeforeUnmount(() => { if (ocrPreviewUrl.value) URL.revokeObjectURL(ocrPreviewUrl.value) })
 
+/** Extract items from a completed job result and call AI enhance. */
+async function applyEnhance(jobId: string, rawItems: Array<Record<string, unknown>>, supplierFromOcr: string) {
+  // Auto-populate supplier name from OCR if not already set
+  if (!ocrSupplierName.value && supplierFromOcr) {
+    ocrSupplierName.value = supplierFromOcr
+  }
+
+  ocrEnhancing.value = true
+  try {
+    const { data: enhanced } = await intakeApi.enhance({
+      job_id: jobId,
+      project_id: ocrProjectId.value,
+    })
+
+    enhanceSummary.value = enhanced.summary
+
+    // Map enhanced items → ocrResult rows
+    // Use standard_name as material (the AI-corrected name), keep AI metadata for highlights
+    ocrResult.value = enhanced.items.map((it) => ({
+      material: it.standard_name || it.material,
+      spec: it.standard_spec || it.spec,
+      brand: it.brand,
+      unit: it.unit,
+      qty: it.qty,
+      unit_price: it.unit_price,
+      unit_price_excl_tax: it.unit_price_excl_tax,
+      total_price: it.total_price,
+      tax_rate: it.tax_rate,
+      remark: it.remark,
+      category: it.category,
+      original_name: it.original_name,
+      name_note: it.name_note,
+      alignment_note: it.alignment_note,
+      matched_material_id: it.matched_material_id,
+    }))
+
+    const s = enhanced.summary
+    const parts: string[] = [`共 ${s.total} 行`]
+    if (s.categorized > 0) parts.push(`自动分类 ${s.categorized} 项`)
+    if (s.renamed > 0) parts.push(`名称标准化 ${s.renamed} 项`)
+    if (s.aligned > 0) parts.push(`可对齐 ${s.aligned} 项`)
+    message.success(`AI 增强完成：${parts.join('，')}`)
+  } catch (e) {
+    // Enhance failed — fall back to raw OCR items without highlights
+    message.warning('AI 增强失败，使用原始 OCR 结果')
+    ocrResult.value = rawItems.map((it) => ({
+      material: String(it.material || ''),
+      spec: String(it.spec || ''),
+      brand: String(it.brand || ''),
+      unit: String(it.unit || ''),
+      qty: it.qty != null ? Number(it.qty) : null,
+      unit_price: it.unit_price != null ? Number(it.unit_price) : null,
+      unit_price_excl_tax: it.unit_price_excl_tax != null ? Number(it.unit_price_excl_tax) : null,
+      total_price: it.total_price != null ? Number(it.total_price) : null,
+      tax_rate: it.tax_rate != null ? Number(it.tax_rate) : null,
+      remark: String(it.remark || ''),
+    }))
+  } finally {
+    ocrEnhancing.value = false
+  }
+
+}
+
 async function parseOcr() {
   if (!ocrFile.value) return
   ocrParsing.value = true
+  ocrResult.value = null
+  enhanceSummary.value = null
+  ocrJobId.value = null
   try {
     const form = new FormData()
     form.append('file', ocrFile.value)
     form.append('type', 'quote')
     const { data: job } = await intakeApi.upload(form)
-    let jobId = job.id
+    const jobId = job.id
     let status = job.status
 
     // Poll until done
@@ -146,61 +230,31 @@ async function parseOcr() {
       status = poll.status
       if (status === 'done' && poll.result) {
         const items = (poll.result as Record<string, unknown>).items as Array<Record<string, unknown>> | undefined
+        const supplierFromOcr = String((poll.result as Record<string, unknown>).supplier_name || '')
+        ocrParsing.value = false
         if (items && items.length > 0) {
-          ocrResult.value = items.map((it) => ({
-            material: String(it.material || ''),
-            spec: String(it.spec || ''),
-            brand: String(it.brand || ''),
-            unit: String(it.unit || ''),
-            qty: it.qty != null ? Number(it.qty) : null,
-            unit_price: it.unit_price != null ? Number(it.unit_price) : null,
-            unit_price_excl_tax: it.unit_price_excl_tax != null ? Number(it.unit_price_excl_tax) : null,
-            total_price: it.total_price != null ? Number(it.total_price) : null,
-            tax_rate: it.tax_rate != null ? Number(it.tax_rate) : null,
-            remark: String(it.remark || ''),
-          }))
-          message.success(`OCR 解析完成，识别 ${items.length} 行，可编辑后确认入库`)
-          // Check for unknown brands → trigger brand tier modal
-          const brands = [...new Set(items.map((it) => String(it.brand || '')).filter(Boolean))]
-          if (brands.length > 0) {
-            try {
-              const { data: knownTiers } = await brandTierApi.list()
-              const knownNames = new Set(knownTiers.map((t) => t.brand_name))
-              const unknown = brands.filter((b) => !knownNames.has(b))
-              if (unknown.length > 0) {
-                unknownBrands.value = unknown
-                brandTierForm.value = Object.fromEntries(unknown.map((b) => [b, '国产']))
-                brandTierVisible.value = true
-              }
-            } catch { /* ignore brand check errors */ }
-          }
+          ocrJobId.value = jobId
+          message.info(`OCR 识别 ${items.length} 行，正在 AI 增强…`)
+          await applyEnhance(jobId, items, supplierFromOcr)
         } else {
           message.warning('OCR 未识别到报价行，请检查文件内容')
         }
-        break
+        return
       }
       if (status === 'failed') {
         message.error(`OCR 解析失败：${poll.error || '未知错误'}`)
-        break
+        return
       }
     }
-    // Handle synchronous done (single-page fast extraction)
-    if (status === 'done' && job.result && !ocrResult.value) {
+    // Synchronous done
+    if (status === 'done' && job.result) {
       const items = (job.result as Record<string, unknown>).items as Array<Record<string, unknown>> | undefined
+      const supplierFromOcr = String((job.result as Record<string, unknown>).supplier_name || '')
+      ocrParsing.value = false
       if (items && items.length > 0) {
-        ocrResult.value = items.map((it) => ({
-          material: String(it.material || ''),
-          spec: String(it.spec || ''),
-          brand: String(it.brand || ''),
-          unit: String(it.unit || ''),
-          qty: it.qty != null ? Number(it.qty) : null,
-          unit_price: it.unit_price != null ? Number(it.unit_price) : null,
-          unit_price_excl_tax: it.unit_price_excl_tax != null ? Number(it.unit_price_excl_tax) : null,
-          total_price: it.total_price != null ? Number(it.total_price) : null,
-          tax_rate: it.tax_rate != null ? Number(it.tax_rate) : null,
-          remark: String(it.remark || ''),
-        }))
-        message.success(`OCR 解析完成，识别 ${items.length} 行，可编辑后确认入库`)
+        ocrJobId.value = jobId
+        message.info(`OCR 识别 ${items.length} 行，正在 AI 增强…`)
+        await applyEnhance(jobId, items, supplierFromOcr)
       }
     }
   } catch (e) {
@@ -208,32 +262,50 @@ async function parseOcr() {
     message.error(detail)
   } finally {
     ocrParsing.value = false
+    ocrEnhancing.value = false
   }
 }
 
-function onOcrConfirm(rows: unknown[]) {
-  message.success(`已入库 ${rows.length} 条记录`)
-  ocrResult.value = null
-  ocrFile.value = null
-  ocrPreviewUrl.value = null
-}
-
-// ─── 品牌档位弹窗 ────────────────────────────────────────────────────────
-const brandTierVisible = ref(false)
-const unknownBrands = ref<string[]>([])
-const brandTierForm = ref<Record<string, string>>({})
-
-async function saveBrandTiers() {
+async function onOcrConfirm(rows: unknown[]) {
+  if (!ocrJobId.value) {
+    message.error('缺少任务 ID，请重新上传文件')
+    return
+  }
+  const supplierName = ocrSupplierName.value.trim()
+  if (!supplierName) {
+    message.error('请填写供应商名称后再入库')
+    return
+  }
   try {
-    for (const [brand, tier] of Object.entries(brandTierForm.value)) {
-      await brandTierApi.create({ brand_name: brand, tier: tier as '国产' | '合资' | '三档', category: null })
+    const { data } = await quoteApi.batchConfirm({
+      job_id: ocrJobId.value,
+      supplier_name: supplierName,
+      project_id: ocrProjectId.value ?? undefined,
+      category: '',  // per-item category comes from enhanced items
+      overrides: rows as Array<Record<string, unknown>>,
+    })
+    if (data.created > 0) {
+      message.success(`入库成功：新增 ${data.created} 条，跳过 ${data.skipped} 条`)
+    } else {
+      message.warning(`未新增任何报价（跳过 ${data.skipped} 条，错误 ${data.errors?.length ?? 0} 条）`)
     }
-    message.success(`已写入 ${Object.keys(brandTierForm.value).length} 个品牌档位`)
-  } catch {
-    message.error('品牌档位写入失败')
+    if (data.errors && data.errors.length > 0) {
+      const errMsg = data.errors.slice(0, 3).map((e) => `第${e.row}行: ${e.reason}`).join('；')
+      message.warning(`部分行跳过：${errMsg}`)
+    }
+    // Reset OCR state
+    ocrResult.value = null
+    ocrFile.value = null
+    ocrPreviewUrl.value = null
+    ocrJobId.value = null
+    enhanceSummary.value = null
+    ocrSupplierName.value = ''
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '入库失败'
+    message.error(detail)
   }
-  brandTierVisible.value = false
 }
+
 </script>
 
 <template>
@@ -243,7 +315,7 @@ async function saveBrandTiers() {
       <div>
         <h1 class="import-page__title">采购价格导入</h1>
         <div class="import-page__subtitle">
-          Excel 批量导入 · PDF/JPG 自动 OCR 入库 · 首次品牌档位弹窗写入
+          Excel 批量导入 · PDF/JPG 自动 OCR 识别 + AI 增强
         </div>
       </div>
     </div>
@@ -324,6 +396,34 @@ async function saveBrandTiers() {
           </template>
 
           <div class="tab-body">
+            <!-- Project & supplier selection (needed for batch-confirm) -->
+            <a-row :gutter="12" style="margin-bottom:14px;align-items:center">
+              <a-col :xs="24" :sm="10">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="white-space:nowrap;font-size:13px;color:rgba(0,0,0,0.65)">所属项目</span>
+                  <a-select
+                    v-model:value="ocrProjectId"
+                    :options="projectList.map(p => ({ value: p.id, label: p.name }))"
+                    placeholder="选择项目（可选）"
+                    allow-clear
+                    style="flex:1"
+                    size="small"
+                  />
+                </div>
+              </a-col>
+              <a-col :xs="24" :sm="10">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="white-space:nowrap;font-size:13px;color:rgba(0,0,0,0.65)">供应商名称</span>
+                  <a-input
+                    v-model:value="ocrSupplierName"
+                    placeholder="OCR 识别后自动填入"
+                    size="small"
+                    style="flex:1"
+                  />
+                </div>
+              </a-col>
+            </a-row>
+
             <a-row :gutter="20">
               <a-col :xs="24" :md="10">
                 <Upload.Dragger
@@ -334,7 +434,7 @@ async function saveBrandTiers() {
                     <ScanOutlined />
                   </p>
                   <p class="ant-upload-text">点击或拖拽 PDF / JPG / PNG 到此区域</p>
-                  <p class="ant-upload-hint">系统将自动 OCR 识别并提取报价表结构</p>
+                  <p class="ant-upload-hint">系统将自动 OCR 识别 → AI 增强分类 → 可编辑确认</p>
                 </Upload.Dragger>
 
                 <div v-if="ocrPreviewUrl" style="margin-top:14px">
@@ -345,27 +445,65 @@ async function saveBrandTiers() {
                 </div>
               </a-col>
               <a-col :xs="24" :md="14">
-                <a-spin :spinning="ocrParsing">
-                  <div v-if="!ocrResult" class="ocr-placeholder">
-                    <RobotOutlined style="font-size:32px;color:rgba(0,0,0,0.25)" />
-                    <div style="margin-top:8px">上传后将自动开始 OCR 识别</div>
-                  </div>
-                  <template v-else>
-                    <a-alert
-                      type="info"
-                      show-icon
-                      message="OCR 解析完成"
-                      description="请核对字段后点击确认入库；可直接编辑修改品牌、价格等字段，或删除无关行。"
-                      style="margin-bottom:12px"
-                    />
-                    <ExtractionEditor
-                      schema="quote"
-                      :model-value="ocrResult as any"
-                      confirm-label="确认入库"
-                      @update:model-value="(v: any) => ocrResult = v"
-                      @confirm="onOcrConfirm"
-                    />
-                  </template>
+                <a-spin :spinning="ocrParsing" tip="OCR 识别中…">
+                  <a-spin :spinning="ocrEnhancing" tip="AI 增强中（分类 + 标准化）…">
+                    <div v-if="!ocrResult && !ocrParsing && !ocrEnhancing" class="ocr-placeholder">
+                      <RobotOutlined style="font-size:32px;color:rgba(0,0,0,0.25)" />
+                      <div style="margin-top:8px">上传后将自动 OCR 识别 → AI 增强</div>
+                    </div>
+                    <template v-if="ocrResult">
+                      <!-- AI enhance summary card -->
+                      <div v-if="enhanceSummary" class="enhance-summary">
+                        <ThunderboltOutlined style="color:#722ed1;margin-right:6px" />
+                        <span class="enhance-summary__label">AI 增强</span>
+                        <span class="enhance-summary__stat">识别 <b>{{ enhanceSummary.total }}</b> 行</span>
+                        <a-divider type="vertical" />
+                        <span class="enhance-summary__stat">
+                          自动分类 <b>{{ enhanceSummary.categorized }}</b> 项
+                        </span>
+                        <a-divider type="vertical" />
+                        <span class="enhance-summary__stat">
+                          名称标准化
+                          <b :style="enhanceSummary.renamed > 0 ? 'color:#d46b08' : ''">
+                            {{ enhanceSummary.renamed }}
+                          </b> 项
+                        </span>
+                        <a-divider type="vertical" />
+                        <span class="enhance-summary__stat">
+                          可对齐
+                          <b :style="enhanceSummary.aligned > 0 ? 'color:#389e0d' : ''">
+                            {{ enhanceSummary.aligned }}
+                          </b> 项
+                        </span>
+                        <span v-if="enhanceSummary.errors > 0" style="margin-left:8px;color:#cf1322;font-size:12px">
+                          ⚠ {{ enhanceSummary.errors }} 项未分类
+                        </span>
+                      </div>
+                      <!-- Highlight legend -->
+                      <div v-if="enhanceSummary" class="enhance-legend">
+                        <span class="legend-item legend-item--yellow">■ 名称已标准化（悬停看原名）</span>
+                        <span class="legend-item legend-item--blue">■ 品类标签</span>
+                        <span class="legend-item legend-item--green">■ 可与已有报价对齐</span>
+                      </div>
+                      <!-- Supplier name reminder -->
+                      <a-alert
+                        v-if="!ocrSupplierName.trim()"
+                        type="warning"
+                        show-icon
+                        message="请在上方填写供应商名称后再入库"
+                        style="margin-bottom:10px"
+                        :closable="false"
+                      />
+                      <ExtractionEditor
+                        schema="quote"
+                        :model-value="ocrResult as any"
+                        :ai-mode="!!enhanceSummary"
+                        confirm-label="确认入库"
+                        @update:model-value="(v: any) => ocrResult = v"
+                        @confirm="onOcrConfirm"
+                      />
+                    </template>
+                  </a-spin>
                 </a-spin>
               </a-col>
             </a-row>
@@ -374,32 +512,6 @@ async function saveBrandTiers() {
       </a-tabs>
     </a-card>
 
-    <!-- 品牌档位弹窗 -->
-    <a-modal
-      v-model:open="brandTierVisible"
-      title="发现新品牌，请录入档位"
-      :width="520"
-      @ok="saveBrandTiers"
-    >
-      <a-alert
-        type="warning"
-        show-icon
-        message="以下品牌未在档位映射表中，请指定档位后继续入库"
-        style="margin-bottom:12px"
-      />
-      <a-form layout="horizontal" :label-col="{ span: 8 }">
-        <a-form-item v-for="brand in unknownBrands" :key="brand" :label="brand">
-          <a-radio-group v-model:value="brandTierForm[brand]">
-            <a-radio-button value="国产">国产</a-radio-button>
-            <a-radio-button value="合资">合资</a-radio-button>
-            <a-radio-button value="三档">三档</a-radio-button>
-          </a-radio-group>
-        </a-form-item>
-      </a-form>
-      <div style="font-size:12px;color:rgba(0,0,0,0.45);margin-top:8px">
-        档位写入后可在「系统设置 → 品牌档位映射」中维护
-      </div>
-    </a-modal>
   </div>
 </template>
 
@@ -468,5 +580,45 @@ async function saveBrandTiers() {
   padding: 60px 0;
   color: @text-color-tertiary;
   font-size: 13px;
+}
+
+.enhance-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  background: #f9f0ff;
+  border: 1px solid #d3adf7;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+
+  &__label {
+    font-weight: 600;
+    color: #722ed1;
+    margin-right: 8px;
+  }
+
+  &__stat {
+    color: @text-color;
+    b { font-weight: 600; }
+  }
+}
+
+.enhance-legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: @text-color-secondary;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.legend-item {
+  &--yellow { color: #d48806; }
+  &--blue { color: #1677ff; }
+  &--green { color: #389e0d; }
 }
 </style>

@@ -4,7 +4,7 @@ import numpy as np
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Quote, Supplier, BrandTier, AnalysisConfig, DEFAULT_SCORING_WEIGHTS
+from apps.api.models import Material, Quote, Supplier, AnalysisConfig, DEFAULT_SCORING_WEIGHTS
 
 
 def get_scoring_weights(db: Session) -> dict:
@@ -76,21 +76,19 @@ def score_supplier(
     ).scalar() or 0
     completeness_score = min(100.0, (valid_quotes / total_quotes) * 100) if total_quotes > 0 else 50.0
 
-    # ── 4. Brand compliance (品牌档位命中率) ──────────────────────────────
-    brand_score = _compute_brand_score(db, supplier_id, category)
-
-    # ── 5. Commercial terms ───────────────────────────────────────────────
+    # ── 4. Commercial terms ───────────────────────────────────────────────
     commercial_score = float(supplier.cooperation_score) if supplier.cooperation_score > 0 else 60.0
 
     # Keys must match DEFAULT_SCORING_WEIGHTS / SettingsView.vue (long names).
     # Bug-fix 2026-05-21: previously used short keys ("price", "history", ...)
     # which never matched the stored config → user weight changes had zero effect.
+    # 2026-06-06: dropped brand_compliance dimension — manual bid comparison
+    # never scores by brand tier; weight redistributed to the remaining 4 dims.
     total = (
-        price_score * weights.get("price_competitiveness", 0.40)
-        + history_score * weights.get("history_cooperation", 0.20)
+        price_score * weights.get("price_competitiveness", 0.45)
+        + history_score * weights.get("history_cooperation", 0.25)
         + completeness_score * weights.get("quote_completeness", 0.15)
-        + brand_score * weights.get("brand_compliance", 0.15)
-        + commercial_score * weights.get("commercial_terms", 0.10)
+        + commercial_score * weights.get("commercial_terms", 0.15)
     )
 
     return {
@@ -99,32 +97,10 @@ def score_supplier(
         "price_score": round(price_score, 1),
         "history_score": round(history_score, 1),
         "completeness_score": round(completeness_score, 1),
-        "brand_score": round(brand_score, 1),
         "commercial_score": round(commercial_score, 1),
         "total_score": round(total, 1),
         "weights": weights,
     }
-
-
-def _compute_brand_score(db: Session, supplier_id: int, category: str | None) -> float:
-    """计算品牌档位命中率得分：有档位的品牌数 / 总品牌数 × 100，无数据则返回 70.0。"""
-    q = db.query(Quote.brand).filter(
-        Quote.supplier_id == supplier_id,
-        Quote.brand != "",
-        Quote.brand.isnot(None),
-    )
-    if category:
-        q = q.join(Material).filter(Material.category == category)
-    brands = list({r[0] for r in q.all() if r[0]})
-
-    if not brands:
-        return 70.0
-
-    # 查哪些品牌有档位
-    tiered = db.query(BrandTier.brand_name).filter(BrandTier.brand_name.in_(brands)).all()
-    tiered_set = {r[0] for r in tiered}
-    hit_rate = len(tiered_set) / len(brands)
-    return round(hit_rate * 100, 1)
 
 
 def compare_multiple_suppliers(

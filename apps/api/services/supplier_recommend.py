@@ -1,11 +1,15 @@
 """SupplierRecommendService — recommend invitees for a tender.
 
-Algorithm (4-dim weighted score, see plan §6):
+Algorithm (3-dim weighted score, see plan §6):
 
-   total = 0.30 · history_score   (volume + recency)
-         + 0.25 · price_score     (avg deviation_pct vs reasonable_low)
-         + 0.25 · overall_score   (existing 5-dim score_supplier)
-         + 0.20 · brand_score     (brand-tier hit rate from score_supplier)
+   total = 0.35 · history_score   (volume + recency)
+         + 0.30 · price_score     (avg deviation_pct vs reasonable_low)
+         + 0.35 · overall_score   (existing supplier score_supplier total)
+
+Plus an optional brand_req_bonus when the caller specifies required brands
+(matches suppliers who have actually quoted those brands). The old brand-tier
+hit-rate dimension was removed 2026-06-06 (manual bid comparison never scores
+suppliers by brand tier).
 
 Robustness fixes vs. v1 (post-audit):
 - infer_categories uses token-boundary match → no "止回阀门" false-positive
@@ -340,16 +344,14 @@ def _score_one(
         x = max(-0.10, min(0.20, float(avg_dev)))
         price_score = (0.20 - x) / 0.30 * 100.0
 
-    # Overall + brand from existing 5-dim service (kept compatible)
+    # Overall from existing supplier-scoring service (kept compatible)
     try:
         cat_for_overall = categories[0] if categories else None
         overall_obj = scoring.score_supplier(db, sup.id, cat_for_overall)
         overall_score = overall_obj["total_score"]
-        brand_score = overall_obj["brand_score"]
     except Exception:
         log.exception("score_supplier failed for supplier_id=%s", sup.id)
         overall_score = 50.0
-        brand_score = 70.0
 
     # Query distinct brands this supplier has quoted
     supplier_brands = _get_supplier_brands(db, sup.id, categories)
@@ -363,10 +365,9 @@ def _score_one(
         brand_req_bonus = match_ratio * 20.0  # up to +20 points
 
     total = (
-        0.30 * history_score
-        + 0.25 * price_score
-        + 0.25 * overall_score
-        + 0.20 * brand_score
+        0.35 * history_score
+        + 0.30 * price_score
+        + 0.35 * overall_score
         + brand_req_bonus
     )
 
@@ -401,7 +402,6 @@ def _score_one(
             "avg_deviation_pct": round(float(avg_dev), 4) if avg_dev is not None else None,
             "price_score": round(price_score, 1),
             "overall_score": round(overall_score, 1),
-            "brand_score": round(brand_score, 1),
             "summary": " · ".join(summary_parts),
             "brands": supplier_brands[:10],
         },

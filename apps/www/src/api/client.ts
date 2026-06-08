@@ -159,7 +159,6 @@ export interface SupplierScore {
   price_score: number
   history_score: number
   completeness_score: number
-  brand_score: number
   commercial_score: number
   total_score: number
   weights: Record<string, number>
@@ -336,7 +335,6 @@ export interface RecommendReason {
   avg_deviation_pct: number | null
   price_score: number
   overall_score: number
-  brand_score: number
   summary: string
   brands: string[]
 }
@@ -444,6 +442,46 @@ export interface OcrResult {
   batch_id: string | null
 }
 
+// ─── AI Enhance (OCR post-processing) ────────────────────────────────────────
+
+export interface EnhancedItem {
+  material: string
+  spec: string
+  brand: string
+  unit: string
+  qty: number | null
+  unit_price: number | null
+  unit_price_excl_tax: number | null
+  total_price: number | null
+  tax_rate: number | null
+  remark: string
+  // AI-added fields
+  category: string
+  standard_name: string
+  original_name: string
+  standard_spec: string
+  original_spec: string
+  name_note: string
+  alignment_note: string
+  matched_material_id: number | null
+}
+
+export interface EnhanceSummary {
+  total: number
+  categorized: number
+  renamed: number
+  aligned: number
+  errors: number
+}
+
+export interface EnhanceResponse {
+  items: EnhancedItem[]
+  summary: EnhanceSummary
+  tokens_used: number
+  duration_ms: number
+  error: string
+}
+
 // ─── Bid Alignment ─────────────────────────────────────────────────────────
 
 export interface AlignmentRowInput {
@@ -527,6 +565,51 @@ export interface AlignmentGroupOut {
   reason: string
   status: string
   items: AlignmentGroupItem[]
+}
+
+// ─── Anchor / Tender-list matching ──────────────────────────────────────────
+
+export interface AnchorMatchSummary {
+  anchors_total: number
+  anchors_covered: number
+  comparable_2plus: number
+  three_way: number
+  matched_quotes: number
+  total_quotes: number
+  low_conf: number
+  residue: number
+}
+
+export interface AnchorGroupItem {
+  quote_id: number
+  supplier_id: number
+  supplier_name: string
+  material_name: string
+  spec: string
+  cosine: number
+}
+
+export interface AnchorReviewGroup {
+  group_id: number
+  anchor_name: string
+  anchor_spec: string
+  confidence: number
+  items: AnchorGroupItem[]
+}
+
+export interface AnchorResidueQuote {
+  quote_id: number
+  supplier_id: number
+  supplier_name: string
+  material_name: string
+  spec: string
+  unit_price: number | null
+}
+
+export interface AnchorReviewResult {
+  low_conf_groups: AnchorReviewGroup[]
+  confirmed_groups: AnchorReviewGroup[]
+  residue_quotes: AnchorResidueQuote[]
 }
 
 // ─── Dashboard visualisation ────────────────────────────────────────────────

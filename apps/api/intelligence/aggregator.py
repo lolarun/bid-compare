@@ -27,6 +27,12 @@ from apps.api.intelligence.base import ExtractionResponse
 _TENDER_SCALARS = ("project_name", "project_code", "tender_date", "deadline")
 _QUOTE_SCALARS  = ("supplier_name", "quote_date")
 
+# Organisation-name suffixes that mark a real bidding company (vs. a product brand).
+_COMPANY_SUFFIXES = (
+    "公司", "集团", "厂", "有限", "股份", "经营部", "商行", "贸易",
+    "实业", "工程", "设备", "科技", "中心", "门市部", "经销", "商贸", "物资",
+)
+
 
 class ResultAggregator:
     """Stateless utility — merge a list of ExtractionResponse into one."""
@@ -84,6 +90,25 @@ class ResultAggregator:
                 all_items.append(item)
         merged_data[item_key] = all_items
 
+        # ── 2b. Smarter supplier_name pick: prefer a company name, never a brand ──
+        # OCR on bid documents that quote a single brand (e.g. KITZ, 伯尔梅特)
+        # often mislabels that brand as supplier_name. Re-pick from all candidate
+        # values, preferring one that looks like a company and is not a brand seen
+        # in the line items. (See feedback 2026-06-06.)
+        if doc_type == "quote":
+            candidates = []
+            for p in partials:
+                v = (p.data or {}).get("supplier_name") or ""
+                v = v.strip() if isinstance(v, str) else ""
+                if v and v not in candidates:
+                    candidates.append(v)
+            item_brands = {
+                (it.get("brand") or "").strip()
+                for it in all_items if isinstance(it, dict)
+            }
+            item_brands.discard("")
+            merged_data["supplier_name"] = _pick_supplier_name(candidates, item_brands)
+
         # ── 3. Carry over quote's context field ───────────────────────────
         if doc_type == "quote":
             for p in partials:
@@ -117,6 +142,27 @@ class ResultAggregator:
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
+def _pick_supplier_name(candidates: list[str], item_brands: set[str]) -> str:
+    """Choose the best supplier_name, avoiding product brands.
+
+    Priority:
+      1. A candidate with a company suffix that is NOT a line-item brand.
+      2. Any candidate that is NOT a line-item brand (first such, page order).
+      3. Empty string — every candidate is just a brand, so refuse to use it
+         as the company name (a blank is safer than polluting the supplier
+         master with a brand; the user fills it in on review).
+    """
+    if not candidates:
+        return ""
+    for c in candidates:
+        if c not in item_brands and any(s in c for s in _COMPANY_SUFFIXES):
+            return c
+    for c in candidates:
+        if c not in item_brands:
+            return c
+    return ""
+
+
 def _item_key(item: dict, doc_type: str) -> str:
     """Stable dedup key for an extracted item."""
     if doc_type == "tender":

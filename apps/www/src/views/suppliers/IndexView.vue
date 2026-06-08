@@ -121,10 +121,9 @@ async function openProfile(record: SupplierRow) {
       price_score: Math.round(85 + (record.history_deviation ?? 0) * -200),
       history_score: Math.min(100, 40 + record.win_count * 8),
       completeness_score: Math.round((record.delivery_score ?? 0.9) * 100),
-      brand_score: 85,
       commercial_score: 75,
       total_score: record.ai_score ?? 80,
-      weights: { price: 0.4, history: 0.2, completeness: 0.15, brand: 0.15, commercial: 0.1 },
+      weights: { price_competitiveness: 0.45, history_cooperation: 0.25, quote_completeness: 0.15, commercial_terms: 0.15 },
     }
   } finally {
     drawerLoading.value = false
@@ -173,7 +172,7 @@ onMounted(fetchData)
           供应商管理
           <a-tag v-if="isMockData" color="orange" style="font-size:11px;margin-left:8px;vertical-align:middle">示例数据</a-tag>
         </h1>
-        <div class="suppliers-page__subtitle">供应商档案 · 历史合作沉淀 · 五维评分体系</div>
+        <div class="suppliers-page__subtitle">供应商档案 · 历史合作沉淀 · 四维评分体系</div>
       </div>
       <div class="flex gap-8">
         <a-button>
@@ -343,14 +342,14 @@ onMounted(fetchData)
             </a-descriptions-item>
           </a-descriptions>
 
-          <h3 style="margin: 18px 0 8px; font-size:14px; font-weight:600">五维评分</h3>
+          <h3 style="margin: 18px 0 8px; font-size:14px; font-weight:600">四维评分</h3>
           <div class="score-bars">
             <div class="score-bar">
-              <span class="score-bar__label">价格竞争力 (40%)</span>
+              <span class="score-bar__label">价格竞争力 (45%)</span>
               <a-progress :percent="drawerScore.price_score" :stroke-color="getScoreColor(drawerScore.price_score)" />
             </div>
             <div class="score-bar">
-              <span class="score-bar__label">历史合作 (20%)</span>
+              <span class="score-bar__label">历史合作 (25%)</span>
               <a-progress :percent="drawerScore.history_score" :stroke-color="getScoreColor(drawerScore.history_score)" />
             </div>
             <div class="score-bar">
@@ -358,11 +357,7 @@ onMounted(fetchData)
               <a-progress :percent="drawerScore.completeness_score" :stroke-color="getScoreColor(drawerScore.completeness_score)" />
             </div>
             <div class="score-bar">
-              <span class="score-bar__label">品牌合规 (15%)</span>
-              <a-progress :percent="drawerScore.brand_score" :stroke-color="getScoreColor(drawerScore.brand_score)" />
-            </div>
-            <div class="score-bar">
-              <span class="score-bar__label">商务条款 (10%)</span>
+              <span class="score-bar__label">商务条款 (15%)</span>
               <a-progress :percent="drawerScore.commercial_score" :stroke-color="getScoreColor(drawerScore.commercial_score)" />
             </div>
           </div>

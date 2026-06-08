@@ -225,6 +225,29 @@ class TestResultAggregator:
         merged = ResultAggregator.merge([r1, r2, r3], "quote")
         assert merged.data["supplier_name"] == "第二批次有名字"
 
+    def test_supplier_name_prefers_company_over_brand(self):
+        """A page may mislabel a product brand as supplier_name; pick the company."""
+        items = [{"material": "闸阀", "spec": "DN50", "brand": "KITZ", "qty": 1}]
+        r1 = _resp(items, doc_type="quote", supplier_name="KITZ")          # brand
+        r2 = _resp(items, doc_type="quote", supplier_name="凯硕新正机电设备有限公司")  # cover
+        merged = ResultAggregator.merge([r1, r2], "quote")
+        assert merged.data["supplier_name"] == "凯硕新正机电设备有限公司"
+
+    def test_supplier_name_brand_only_blanks(self):
+        """If every candidate is just the line-item brand, refuse to use it."""
+        items = [{"material": "蝶阀", "spec": "DN80", "brand": "伯尔梅特", "qty": 1}]
+        r1 = _resp(items, doc_type="quote", supplier_name="伯尔梅特")
+        r2 = _resp(items, doc_type="quote", supplier_name="伯尔梅特")
+        merged = ResultAggregator.merge([r1, r2], "quote")
+        assert merged.data["supplier_name"] == ""
+
+    def test_supplier_name_real_company_with_brandy_items_kept(self):
+        """A genuine company name must survive even when items carry brands/models."""
+        items = [{"material": "止回阀", "spec": "DN50", "brand": "W-H44X-16Q", "qty": 1}]
+        r1 = _resp(items, doc_type="quote", supplier_name="上海绵存设备有限公司")
+        merged = ResultAggregator.merge([r1], "quote")
+        assert merged.data["supplier_name"] == "上海绵存设备有限公司"
+
     def test_tokens_summed(self):
         r1 = _resp([], tokens_used=100)
         r2 = _resp([], tokens_used=200)

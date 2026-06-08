@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     # LLM / Intelligence — DashScope (Alibaba Cloud)
     DASHSCOPE_API_KEY: str = ""
+    # Comma-separated list of keys for multi-key rotation (takes priority over single key)
+    DASHSCOPE_API_KEYS: str = ""
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     LLM_PROVIDER: str = "dashscope_ocr"  # 'dashscope_ocr' | 'mock'
 
@@ -78,11 +80,12 @@ ALL_CATEGORIES = list(PROFESSION_MAP.keys())
 
 DEFAULT_SCORING_WEIGHTS = {
     # Keys must match SettingsView.vue (long names) — scoring.py reads with same.
-    "price_competitiveness": 0.40,
-    "history_cooperation":   0.20,
+    # 2026-06-06: removed brand_compliance (品牌档位打分) per user — manual bid
+    # comparison never scores by brand tier; its 0.15 redistributed to price/history/commercial.
+    "price_competitiveness": 0.45,
+    "history_cooperation":   0.25,
     "quote_completeness":    0.15,
-    "brand_compliance":      0.15,
-    "commercial_terms":      0.10,
+    "commercial_terms":      0.15,
 }
 
 # ─── Default alert thresholds (B层 各品类) ──────────────────────────────────

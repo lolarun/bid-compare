@@ -13,6 +13,8 @@ import type {
   AlignmentRowInput, AlignmentSuggestResult,
   AlignmentApplyGroup, AlignmentApplyFieldFix, AlignmentApplyResult,
   AlignmentGroupOut,
+  EnhanceResponse,
+  AnchorMatchSummary, AnchorReviewResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -118,6 +120,8 @@ export const intakeApi = {
     api.get<ExtractionJob>(`/intake/jobs/${jobId}`),
   listJobs: (params?: Record<string, unknown>) =>
     api.get<{ items: ExtractionJob[]; total: number }>('/intake/jobs', { params }),
+  enhance: (data: { job_id?: string; project_id?: number | null; items?: Array<Record<string, unknown>> }) =>
+    api.post<EnhanceResponse>('/intake/enhance', data, { timeout: 180_000 }),
 }
 
 // ─── Analysis ───────────────────────────────────────────────────────────────
@@ -162,6 +166,11 @@ export const analysisApi = {
     api.get<AlignmentGroupOut[]>('/analysis/bid-alignment/groups', { params }),
   alignmentDeleteGroup: (groupId: number) =>
     api.delete(`/analysis/bid-alignment/groups/${groupId}`),
+  // ── Anchor / Tender-list ──
+  tenderListMatch: (formData: FormData) =>
+    api.post<AnchorMatchSummary>('/analysis/tender-list/match', formData, { timeout: 180_000 }),
+  anchorReview: (params: { project_id: number; category: string }) =>
+    api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────

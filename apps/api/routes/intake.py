@@ -2,6 +2,7 @@
 
 Endpoints:
 - POST /api/intake/upload?type=tender|quote  (multipart file + context fields)
+- POST /api/intake/enhance                   (AI post-processing: categorize + standardize + align)
 - GET  /api/intake/jobs/{job_id}             (poll status)
 - GET  /api/intake/jobs                      (list, for admin / debug)
 """
@@ -25,7 +26,10 @@ from sqlalchemy.orm import Session
 from apps.api.core.database import get_db
 from apps.api.core.runtime import submit_extraction
 from apps.api.intelligence.pipeline import ExtractionPipeline
-from apps.api.schemas.intake import JobListResponse, JobResponse
+from apps.api.schemas.intake import (
+    JobListResponse, JobResponse,
+    EnhanceRequest, EnhanceResponse,
+)
 from apps.api.services.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
@@ -129,6 +133,48 @@ def list_jobs(
         items=[JobResponse.model_validate(j) for j in jobs],
         total=len(jobs),
     )
+
+
+@router.post("/enhance", response_model=EnhanceResponse)
+def enhance_extraction(
+    body: EnhanceRequest,
+    db: Session = Depends(get_db),
+) -> EnhanceResponse:
+    """AI-enhanced post-processing of OCR results.
+
+    Call after OCR extraction is done (job status=done) and before batch-confirm.
+    Adds per-item category, standardized names, and pre-alignment flags.
+
+    Two input modes:
+      1. Pass ``job_id`` — loads items from the completed job's result.
+      2. Pass ``items`` directly — skips job lookup (useful for testing).
+
+    Optionally pass ``project_id`` to enable pre-alignment against existing
+    project quotes from other suppliers.
+    """
+    from apps.api.services.enhance import enhance_ocr_items
+
+    items: list[dict] = []
+
+    if body.items is not None:
+        items = body.items
+    elif body.job_id:
+        # Load from job
+        from apps.api.models.extraction_job import ExtractionJob
+        job = db.query(ExtractionJob).filter(ExtractionJob.id == body.job_id).first()
+        if not job:
+            raise HTTPException(404, f"Job {body.job_id} not found")
+        if job.status != "done":
+            raise HTTPException(400, f"Job not done yet (status={job.status})")
+        result = job.result or {}
+        items = result.get("items", [])
+        if not items:
+            raise HTTPException(400, "Job has no items to enhance")
+    else:
+        raise HTTPException(400, "Provide job_id or items")
+
+    result = enhance_ocr_items(items, body.project_id, db)
+    return EnhanceResponse(**result)
 
 
 # Extraction is now dispatched via core/runtime.submit_extraction(), which

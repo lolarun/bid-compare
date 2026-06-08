@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, WarningOutlined, SwapOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, WarningOutlined, SwapOutlined, LinkOutlined } from '@ant-design/icons-vue'
 
 /**
  * Generic editable extraction-result table.
@@ -53,6 +53,12 @@ interface QuoteRow extends RowBase {
   total_price: number | null
   tax_rate: number | null
   remark: string
+  // AI-enhanced fields (populated after /api/intake/enhance)
+  category?: string
+  original_name?: string
+  name_note?: string
+  alignment_note?: string
+  matched_material_id?: number | null
 }
 
 type Row = TenderRow | QuoteRow
@@ -62,9 +68,12 @@ const props = withDefaults(defineProps<{
   modelValue: Row[]
   confirmLabel?: string
   showActions?: boolean
+  /** Enable AI-highlight mode: yellow for renamed, blue tag for category, green for aligned */
+  aiMode?: boolean
 }>(), {
   confirmLabel: '确认入库',
   showActions: true,
+  aiMode: false,
 })
 
 const emit = defineEmits<{
@@ -256,9 +265,18 @@ function applyCorrection(rid: number) {
 
 const columns = computed(() => {
   const base = props.schema === 'tender' ? tenderColumns : quoteColumns
-  const cols: Array<Record<string, unknown>> = [...base]
+  const cols: Array<Record<string, unknown>> = []
+  // In AI mode, prepend a read-only category tag column
+  if (props.aiMode && props.schema === 'quote') {
+    cols.push({ title: '分类', dataIndex: '_category', width: 80, align: 'center' })
+  }
+  cols.push(...base)
   if (props.schema === 'quote') {
     cols.push({ title: '', dataIndex: '_warn', width: 36, align: 'center' })
+  }
+  // In AI mode, add alignment indicator column
+  if (props.aiMode && props.schema === 'quote') {
+    cols.push({ title: '', dataIndex: '_align', width: 36, align: 'center' })
   }
   if (props.showActions) {
     cols.push({ title: '操作', dataIndex: '_actions', width: 60, fixed: 'right' })
@@ -279,7 +297,27 @@ const columns = computed(() => {
       :scroll="{ x: schema === 'quote' ? 1200 : undefined }"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.dataIndex === '_warn'">
+        <!-- AI mode: category tag column -->
+        <template v-if="column.dataIndex === '_category'">
+          <a-tag
+            v-if="(record as QuoteRow).category"
+            color="blue"
+            style="font-size:11px;margin:0;padding:0 4px;line-height:18px"
+          >{{ (record as QuoteRow).category }}</a-tag>
+          <span v-else style="color:rgba(0,0,0,0.25);font-size:11px">—</span>
+        </template>
+
+        <!-- AI mode: alignment indicator column -->
+        <template v-else-if="column.dataIndex === '_align'">
+          <a-tooltip
+            v-if="(record as QuoteRow).alignment_note"
+            :title="(record as QuoteRow).alignment_note"
+          >
+            <LinkOutlined style="color:#52c41a;font-size:15px;cursor:default" />
+          </a-tooltip>
+        </template>
+
+        <template v-else-if="column.dataIndex === '_warn'">
           <!-- Correction suggestion (clickable auto-fix) -->
           <a-tooltip
             v-if="detectCorrection(record as Row)"
@@ -333,6 +371,29 @@ const columns = computed(() => {
           />
         </template>
 
+        <!-- Material cell: yellow highlight + tooltip when AI renamed it -->
+        <template v-else-if="column.dataIndex === 'material' && aiMode && schema === 'quote'">
+          <a-tooltip
+            v-if="(record as QuoteRow).original_name && (record as QuoteRow).original_name !== (record as QuoteRow).material"
+            :title="`原始名称：${(record as QuoteRow).original_name}${(record as QuoteRow).name_note ? '（' + (record as QuoteRow).name_note + '）' : ''}`"
+          >
+            <a-input
+              :value="(record as Record<string, string>)[column.dataIndex as string]"
+              size="small"
+              placeholder="材料名称"
+              class="ai-renamed-cell"
+              @update:value="(v: string) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
+            />
+          </a-tooltip>
+          <a-input
+            v-else
+            :value="(record as Record<string, string>)[column.dataIndex as string]"
+            size="small"
+            placeholder="材料名称"
+            @update:value="(v: string) => updateField((record as Row)._rid as number, column.dataIndex as string, v)"
+          />
+        </template>
+
         <!-- Default: text cell -->
         <template v-else>
           <a-input
@@ -378,6 +439,19 @@ const columns = computed(() => {
     font-size: 11px;
     line-height: 18px;
     margin: 0;
+  }
+}
+
+// AI highlight: yellow background on renamed material cells
+.ai-renamed-cell {
+  :deep(.ant-input) {
+    background-color: #fffbe6;
+    border-color: #faad14;
+  }
+  :deep(.ant-input:focus) {
+    background-color: #fffbe6;
+    border-color: #d48806;
+    box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.2);
   }
 }
 </style>

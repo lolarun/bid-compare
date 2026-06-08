@@ -163,6 +163,22 @@ class ExtractionPipeline:
         _notify(progress_cb, "合并识别结果", 88)
         merged = ResultAggregator.merge(partials, doc_type)
         merged.duration_ms = int((time.time() - t0) * 1000)
+
+        # ── Supplier name cover fallback ───────────────────────────────────
+        # If aggregation still couldn't find a company name (e.g. every page only
+        # had a product brand), re-OCR the first 1-2 cover pages with a targeted
+        # prompt to recover the supplier name before postprocessing.
+        if (doc_type == "quote"
+                and not (merged.data or {}).get("supplier_name")
+                and images
+                and hasattr(self.provider, "extract_supplier_name_from_cover")):
+            _notify(progress_cb, "封面补充供应商名", 89)
+            # Scan front pages (bidder name may be buried on the stamped 投标单位名称
+            # page, deeper than the cover which often shows only the 招标人/buyer).
+            name = self.provider.extract_supplier_name_from_cover(images[:10])
+            if name:
+                merged.data["supplier_name"] = name
+
         if skipped_pages:
             merged.metadata["skipped_pages"] = skipped_pages
             log.warning(

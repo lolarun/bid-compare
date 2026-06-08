@@ -1,5 +1,5 @@
 """Analysis and comparison API endpoints — v2."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -158,20 +158,32 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
         rows_data = [r.model_dump() for r in body.rows]
         supplier_names = sorted(set(r.supplier_name for r in body.rows if r.supplier_name))
     elif body.supplier_ids:
-        # Mode 2: query from DB
-        q = db.query(Quote, Material, Supplier).join(
+        # Mode 2: query from DB — sample evenly per supplier to avoid
+        # one supplier dominating the LLM context window.
+        ROW_CAP = 75
+        per_supplier = max(ROW_CAP // len(body.supplier_ids), 20)
+
+        base_q = db.query(Quote, Material, Supplier).join(
             Material, Quote.material_id == Material.id
         ).join(
             Supplier, Quote.supplier_id == Supplier.id
-        ).filter(
-            Quote.supplier_id.in_(body.supplier_ids),
-            Quote.unit_price > 0,
-        )
+        ).filter(Quote.unit_price > 0)
         if body.project_id:
-            q = q.filter(Quote.project_id == body.project_id)
+            base_q = base_q.filter(Quote.project_id == body.project_id)
         if body.category:
-            q = q.filter(Material.category == body.category)
-        results = q.order_by(Material.standard_name, Supplier.name).limit(60).all()
+            base_q = base_q.filter(Material.category == body.category)
+
+        results = []
+        for sid in body.supplier_ids:
+            chunk = (
+                base_q
+                .filter(Quote.supplier_id == sid)
+                .order_by(Material.standard_name)
+                .limit(per_supplier)
+                .all()
+            )
+            results.extend(chunk)
+
         if not results:
             return AlignmentSuggestResult(error="No quote data found for given parameters")
         for qt, mat, sup in results:
@@ -225,7 +237,11 @@ def bid_alignment_apply(body: AlignmentApplyRequest, db: Session = Depends(get_d
         )
         db.add(group)
         db.flush()  # get group.id
+        seen_quotes: set[int] = set()  # dedupe: (group, quote_id) is UNIQUE; LLM may repeat a quote
         for item in g.items:
+            if item.quote_id in seen_quotes:
+                continue  # same quote listed twice in one group — skip the duplicate
+            seen_quotes.add(item.quote_id)
             ai = BidAlignmentItem(
                 group_id=group.id,
                 quote_id=item.quote_id,
@@ -311,3 +327,183 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     db.delete(group)
     db.commit()
     return {"status": "ok", "deleted_group_id": group_id}
+
+
+@router.get("/anchor-review")
+def anchor_review(
+    project_id: int = Query(...),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """人工复核:返回低置信锚点组 + 残差报价,含供应商/物料名称。
+
+    低置信 = group.confidence < 0.70。
+    残差   = 本项目/品类的报价中未出现在任何对齐组里的条目。
+    """
+    import re as _re
+    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+    from apps.api.models.quote import Quote as QuoteModel
+    from apps.api.models.material import Material as MaterialModel
+    from apps.api.models.supplier import Supplier as SupplierModel
+
+    LOW_CONF = 0.70
+
+    # 所有该 project+category 的已确认锚点组
+    groups = (
+        db.query(BidAlignmentGroup)
+        .filter(
+            BidAlignmentGroup.project_id == project_id,
+            BidAlignmentGroup.category == category,
+            BidAlignmentGroup.status == "confirmed",
+        )
+        .all()
+    )
+
+    # 构建 quote_id → (quote, material, supplier) 映射
+    all_rows = (
+        db.query(QuoteModel, MaterialModel, SupplierModel)
+        .join(MaterialModel, QuoteModel.material_id == MaterialModel.id)
+        .outerjoin(SupplierModel, QuoteModel.supplier_id == SupplierModel.id)
+        .filter(
+            QuoteModel.project_id == project_id,
+            MaterialModel.category == category,
+        )
+        .all()
+    )
+    quote_map = {qt.id: (qt, mat, sup) for qt, mat, sup in all_rows}
+
+    # 已匹配 quote_id 集合
+    matched_ids: set[int] = set()
+    for g in groups:
+        for item in g.items:
+            matched_ids.add(item.quote_id)
+
+    # 残差:未匹配的报价
+    residue_quotes = []
+    for qt, mat, sup in all_rows:
+        if qt.id not in matched_ids:
+            residue_quotes.append({
+                "quote_id": qt.id,
+                "supplier_id": qt.supplier_id,
+                "supplier_name": sup.name if sup else "",
+                "material_name": mat.standard_name,
+                "spec": mat.spec or "",
+                "unit_price": qt.unit_price,
+            })
+
+    # 低置信组(含物料+供应商明细)
+    low_conf_groups = []
+    for g in groups:
+        if g.confidence is None or g.confidence >= LOW_CONF:
+            continue
+        items = []
+        for item in g.items:
+            if item.quote_id not in quote_map:
+                continue
+            qt, mat, sup = quote_map[item.quote_id]
+            # 从 spec_note "cos=0.69" 提取余弦值
+            cosine = g.confidence  # 默认用组置信度
+            if item.spec_note:
+                m = _re.search(r"cos=(\d+\.?\d*)", item.spec_note)
+                if m:
+                    cosine = float(m.group(1))
+            items.append({
+                "quote_id": item.quote_id,
+                "supplier_id": item.supplier_id or qt.supplier_id,
+                "supplier_name": sup.name if sup else "",
+                "material_name": mat.standard_name,
+                "spec": mat.spec or "",
+                "cosine": cosine,
+            })
+        # 按余弦降序排列便于快速扫描
+        items.sort(key=lambda x: -x["cosine"])
+        low_conf_groups.append({
+            "group_id": g.id,
+            "anchor_name": g.suggested_name,
+            "anchor_spec": g.suggested_spec or "",
+            "confidence": g.confidence,
+            "items": items,
+        })
+
+    # 低置信组按置信度升序(最需要关注的在前)
+    low_conf_groups.sort(key=lambda x: x["confidence"])
+
+    # 高置信已匹配组
+    confirmed_groups = []
+    for g in groups:
+        if g.confidence is not None and g.confidence < LOW_CONF:
+            continue
+        items = []
+        for item in g.items:
+            if item.quote_id not in quote_map:
+                continue
+            qt, mat, sup = quote_map[item.quote_id]
+            cosine = g.confidence or 1.0
+            if item.spec_note:
+                m = _re.search(r"cos=(\d+\.?\d*)", item.spec_note)
+                if m:
+                    cosine = float(m.group(1))
+            items.append({
+                "quote_id": item.quote_id,
+                "supplier_id": item.supplier_id or qt.supplier_id,
+                "supplier_name": sup.name if sup else "",
+                "material_name": mat.standard_name,
+                "spec": mat.spec or "",
+                "cosine": cosine,
+            })
+        items.sort(key=lambda x: -x["cosine"])
+        confirmed_groups.append({
+            "group_id": g.id,
+            "anchor_name": g.suggested_name,
+            "anchor_spec": g.suggested_spec or "",
+            "confidence": g.confidence or 1.0,
+            "items": items,
+        })
+
+    confirmed_groups.sort(key=lambda x: -x["confidence"])
+
+    return {
+        "low_conf_groups": low_conf_groups,
+        "confirmed_groups": confirmed_groups,
+        "residue_quotes": residue_quotes,
+    }
+
+
+@router.post("/tender-list/match")
+async def tender_list_match(
+    file: UploadFile = File(...),
+    project_id: int = Form(...),
+    category: str = Form(...),
+    supplier_ids: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """锚点模式：上传招标清单 xlsx → 解析锚点 → 嵌入匹配供应商报价 → 落对齐组。
+
+    落组后，现有 /bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
+    见 docs/design/05-比价流程的智能化分层.md。
+    """
+    from apps.api.services.anchor_match import import_and_match
+
+    name = (file.filename or "").lower()
+    if not name.endswith((".xlsx", ".xls")):
+        raise HTTPException(400, "招标清单需为 Excel 文件(.xlsx/.xls)")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file upload")
+
+    sids = None
+    if supplier_ids:
+        try:
+            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
+
+    try:
+        summary = import_and_match(db, content, project_id, category, sids)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        import traceback, logging
+        logging.error("tender-list/match error: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(500, f"招标清单匹配失败：{type(e).__name__}: {e}")
+    return summary.as_dict()

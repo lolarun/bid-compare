@@ -38,7 +38,6 @@ class SupplierScoreResult(BaseModel):
     price_score: float
     history_score: float
     completeness_score: float
-    brand_score: float
     commercial_score: float
     total_score: float
     weights: dict

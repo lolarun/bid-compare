@@ -29,7 +29,6 @@ class RecommendReason(BaseModel):
     avg_deviation_pct: float | None = None
     price_score: float = 0
     overall_score: float = 0
-    brand_score: float = 0
     summary: str = ""
     brands: list[str] = Field(default_factory=list)
 

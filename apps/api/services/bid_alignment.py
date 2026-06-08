@@ -72,9 +72,9 @@ BID_ALIGNMENT_PROMPT = """你是建筑机电材料采购比价对齐分析专家
 def _build_rows_text(rows: list[dict]) -> str:
     """Build a compact text table of quote rows for the LLM prompt."""
     lines = []
-    for r in rows[:60]:  # Cap at 60 rows for token budget
+    for r in rows[:80]:  # Cap at 80 rows for token budget
         line = (
-            f"[id={r.get('quote_id')}] "
+            f"[quote_id={r.get('quote_id')}, supplier_id={r.get('supplier_id','')}] "
             f"供应商={r.get('supplier_name','')} | "
             f"名称={r.get('material_name','')} | "
             f"规格={r.get('spec','')} | "
@@ -85,9 +85,18 @@ def _build_rows_text(rows: list[dict]) -> str:
         )
         lines.append(line)
     text = "\n".join(lines)
-    if len(rows) > 60:
-        text += f"\n...（共 {len(rows)} 行，仅展示前 60 行）"
+    if len(rows) > 80:
+        text += f"\n...（共 {len(rows)} 行，仅展示前 80 行）"
     return text
+
+
+def _build_quote_id_map(rows: list[dict]) -> dict[int, int]:
+    """Build a quote_id → supplier_id lookup from the input rows."""
+    return {
+        int(r["quote_id"]): int(r["supplier_id"])
+        for r in rows
+        if r.get("quote_id") is not None and r.get("supplier_id") is not None
+    }
 
 
 def suggest_alignment(
@@ -96,7 +105,7 @@ def suggest_alignment(
     supplier_names: list[str],
     client: OpenAI,
     model: str = "qwen-plus",
-    timeout: int = 120,
+    timeout: int = 300,
 ) -> dict[str, Any]:
     """Call LLM to suggest alignment groups and field corrections.
 
@@ -106,6 +115,7 @@ def suggest_alignment(
     """
     try:
         rows_text = _build_rows_text(rows)
+        qid_to_sid = _build_quote_id_map(rows)
         prompt = BID_ALIGNMENT_PROMPT.format(
             category=category,
             supplier_names="、".join(supplier_names),
@@ -144,12 +154,40 @@ def suggest_alignment(
         valid_groups = []
         for g in groups:
             if isinstance(g, dict) and "suggested_name" in g and "items" in g:
+                # Fix items: ensure quote_id and supplier_id are ints.
+                # LLM sometimes returns supplier_name instead of supplier_id;
+                # use qid_to_sid map to correct.
+                fixed_items = []
+                for item in g.get("items", []):
+                    if not isinstance(item, dict) or "quote_id" not in item:
+                        continue
+                    try:
+                        qid = int(item["quote_id"])
+                    except (ValueError, TypeError):
+                        continue
+                    # Resolve supplier_id: prefer map lookup, fall back to item value
+                    sid_raw = item.get("supplier_id")
+                    try:
+                        sid = int(sid_raw)
+                    except (ValueError, TypeError):
+                        sid = qid_to_sid.get(qid)
+                    if sid is None:
+                        continue  # skip item with no resolvable supplier_id
+                    fixed_items.append({
+                        "quote_id": qid,
+                        "supplier_id": sid,
+                        "action": str(item.get("action", "align")),
+                        "spec_note": str(item.get("spec_note") or ""),
+                        "name_note": str(item.get("name_note") or ""),
+                    })
+                if not fixed_items:
+                    continue  # skip groups with no valid items
                 valid_groups.append({
                     "suggested_name": str(g.get("suggested_name", "")),
                     "suggested_spec": str(g.get("suggested_spec", "")),
                     "confidence": float(g.get("confidence", 0)),
                     "reason": str(g.get("reason", "")),
-                    "items": g.get("items", []),
+                    "items": fixed_items,
                 })
 
         valid_fixes = []

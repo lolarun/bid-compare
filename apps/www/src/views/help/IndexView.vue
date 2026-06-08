@@ -51,13 +51,6 @@ const dataItems = [
 const ruleItems = [
   { title: '偏差阈值', desc: '用于判断报价是否明显高于或低于其他报价。' },
   { title: '评分权重', desc: '用于综合价格、历史合作和匹配程度，形成推荐顺序。' },
-  { title: '品牌档位', desc: '用于处理同一物料下不同品牌等级的价格差异。' },
-]
-
-const brandTierTips = [
-  { title: '为什么会弹出', desc: '确认入库时，系统发现报价 PDF 中有新品牌未录入档位表。' },
-  { title: '该怎么处理', desc: '真实品牌选择国产、合资或三档后保存；测试时可以先点”稍后再说”。' },
-  { title: '需要注意', desc: '如果“球墨铸铁 EPDM”这类材质被识别成品牌，不建议直接保存为品牌档位，应在核对时修正。' },
 ]
 
 function scrollToSection(key: string) {
@@ -140,15 +133,6 @@ function openInNewWindow(path: string) {
             </div>
           </div>
 
-          <div class="brand-tier-help">
-            <h3>确认入库时出现“发现新品牌”怎么办</h3>
-            <div class="info-grid">
-              <article v-for="item in brandTierTips" :key="item.title" class="info-card">
-                <h3>{{ item.title }}</h3>
-                <p>{{ item.desc }}</p>
-              </article>
-            </div>
-          </div>
         </section>
 
         <section id="invite" class="help-section">

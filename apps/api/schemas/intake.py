@@ -32,3 +32,54 @@ class JobResponse(BaseModel):
 class JobListResponse(BaseModel):
     items: list[JobResponse]
     total: int
+
+
+# ── Enhance (AI post-processing) ─────────────────────────────────────────────
+
+class EnhanceRequest(BaseModel):
+    """Request body for POST /api/intake/enhance."""
+    job_id: str | None = None          # load items from a completed job
+    project_id: int | None = None      # for pre-alignment against existing quotes
+    items: list[dict[str, Any]] | None = None  # override items (skip job lookup)
+
+
+class EnhancedItem(BaseModel):
+    """A single OCR item with AI enhancements."""
+    # Original OCR fields
+    material: str = ""
+    spec: str = ""
+    brand: str = ""
+    unit: str = ""
+    qty: float | None = None
+    unit_price: float | None = None
+    unit_price_excl_tax: float | None = None
+    total_price: float | None = None
+    tax_rate: float | None = None
+    remark: str = ""
+    # AI-enhanced fields
+    category: str = ""
+    standard_name: str = ""
+    original_name: str = ""
+    standard_spec: str = ""
+    original_spec: str = ""
+    name_note: str = ""             # explanation of name change
+    alignment_note: str = ""        # pre-alignment match info
+    matched_material_id: int | None = None
+
+
+class EnhanceSummary(BaseModel):
+    """Statistics about AI enhancements applied."""
+    total: int = 0
+    categorized: int = 0
+    renamed: int = 0
+    aligned: int = 0
+    errors: int = 0
+
+
+class EnhanceResponse(BaseModel):
+    """Response from POST /api/intake/enhance."""
+    items: list[EnhancedItem] = Field(default_factory=list)
+    summary: EnhanceSummary = Field(default_factory=EnhanceSummary)
+    tokens_used: int = 0
+    duration_ms: int = 0
+    error: str = ""
