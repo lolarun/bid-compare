@@ -18,7 +18,6 @@ import type {
   ExtractionJob,
   QuoteExtractionItem,
   BatchConfirmResult,
-  ImportResult,
   AnchorMatchSummary,
   AnchorReviewResult,
   TenderPreviewResult,
@@ -36,19 +35,12 @@ const PROFESSION_CATEGORIES: Record<string, string[]> = {
   '给排水': ['阀门', '不锈钢管', '水箱', '潜水泵'],
   '暖通': ['风口风阀', '风机盘管', '空调泵'],
 }
-const PROFESSIONS = Object.keys(PROFESSION_CATEGORIES)
-
 // Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
 const STEP_RESULTS = 4
 
 // ─── State ───────────────────────────────────────────────────────────────
 const currentStep = ref(0)
 const selectedProfession = ref<string | undefined>(undefined)
-
-const filteredCategories = computed(() => {
-  if (!selectedProfession.value) return []
-  return PROFESSION_CATEGORIES[selectedProfession.value] || []
-})
 
 const taskConfig = reactive<{
   projectId: number | undefined
