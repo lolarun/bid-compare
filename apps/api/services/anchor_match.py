@@ -5,16 +5,19 @@
 
 分层(本版到 Tier2):
   Tier1 嵌入召回:每条报价找余弦最近、DN 一致的锚点
-  Tier2 DN 规则核对:DN 不一致的候选跳过
+  Tier2 canonical 硬过滤:valve_type/DN/PN 冲突 → hard block 0.0
   Tier3 闸②LLM复核 + 缓存:暂缓(见设计文档 §9 决策 2026-06-08)
 
-归一靠嵌入语义,**零硬编码同义词表**——对任何品类通用。
+Combined score: cos × (1.0 + 0.3 × c_score) 提升同类型匹配排序。
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 from openai import OpenAI
 from sqlalchemy.orm import Session
@@ -23,6 +26,7 @@ from apps.api.core.config import get_settings
 from apps.api.models import Material, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.supplier import Supplier
+from apps.api.services.canonical import canonical_match_score, extract_valve_canonical
 from apps.api.services.tender_list import TenderAnchor, parse_tender_xlsx
 
 # 余弦低于此视为无可信锚点(与测量脚本一致)
@@ -88,46 +92,373 @@ def _cosine_matrix(Q: list[list[float]], A: list[list[float]]) -> list[list[floa
     return [[sum(qi * ai for qi, ai in zip(q, a)) for a in An] for q in Qn]
 
 
+def embed_anchor_vecs(anchors: list[TenderAnchor], client: OpenAI | None = None) -> list[list[float]]:
+    """Embed the anchor axis once so callers (e.g. N supplier-fill workers) can
+    reuse the vectors instead of re-embedding 90 anchors per supplier."""
+    if not anchors:
+        return []
+    client = client or _embed_client()
+    a_text = [f"{a.name} {a.spec} {a.pressure} {a.material_text()}".strip() for a in anchors]
+    return _embed(client, a_text)
+
+
+def _anchor_dns(anchors: list[TenderAnchor]) -> list[int | None]:
+    return [_dn_of(a.spec) or _dn_of(a.name) for a in anchors]
+
+
+def _score_anchors_for_quote(
+    sims_row: list[float],
+    anchors: list[TenderAnchor],
+    a_dn: list[int | None],
+    q_dn: int | None,
+    q_canon: dict,
+) -> list[tuple[int, float, float, float]]:
+    """Score every candidate anchor for one quote.
+
+    Returns [(anchor_idx, cos, c_score, combined), ...] for anchors that pass the
+    SIM_THRESHOLD + DN hard-filter + canonical hard-block (0.0 → excluded). Shared
+    by match_anchors (argmax) and match_anchors_topk (top-K). c_score is 0.5
+    (neutral) when neither side carries canonical info.
+    """
+    scored: list[tuple[int, float, float, float]] = []
+    for ai in range(len(anchors)):
+        cos = sims_row[ai]
+        if cos < SIM_THRESHOLD:
+            continue
+        if q_dn is not None and a_dn[ai] is not None and q_dn != a_dn[ai]:
+            continue
+        a_canon = getattr(anchors[ai], "canonical", {}) or {}
+        if q_canon or a_canon:
+            c_score = canonical_match_score(a_canon, q_canon)
+            if c_score == 0.0:
+                continue  # hard block: valve_type / DN / PN conflict
+            combined = cos * (1.0 + 0.3 * c_score)
+        else:
+            c_score = 0.5
+            combined = cos
+        scored.append((ai, cos, c_score, combined))
+    return scored
+
+
 def match_anchors(
     anchors: list[TenderAnchor],
     quotes: list[Quote],
     quote_texts: list[str],
     quote_dns: list[int | None],
     client: OpenAI | None = None,
+    quote_canonicals: list[dict] | None = None,
 ) -> list[tuple[int, int, float]]:
-    """返回 [(quote_idx, anchor_idx, cosine), ...](未匹配的不在列表里)。"""
+    """返回 [(quote_idx, anchor_idx, cosine), ...](未匹配的不在列表里)。
+
+    quote_canonicals: per-quote canonical dicts for hard-filter + combined scoring.
+    If None, falls back to v2.3 cosine-only behavior (backward compatible).
+    """
     if not anchors or not quotes:
         return []
     client = client or _embed_client()
-    a_text = [f"{a.name} {a.spec} {a.pressure} {a.material_text()}".strip() for a in anchors]
-    a_dn = [_dn_of(a.spec) or _dn_of(a.name) for a in anchors]
-
-    A = _embed(client, a_text)
+    a_dn = _anchor_dns(anchors)
+    A = embed_anchor_vecs(anchors, client)
     Q = _embed(client, quote_texts)
     sims = _cosine_matrix(Q, A)
 
     result: list[tuple[int, int, float]] = []
     for qi in range(len(quotes)):
-        ranked = sorted(range(len(anchors)), key=lambda ai: -sims[qi][ai])
-        for ai in ranked:
-            if sims[qi][ai] < SIM_THRESHOLD:
-                break
-            if quote_dns[qi] is not None and a_dn[ai] is not None and quote_dns[qi] != a_dn[ai]:
-                continue  # DN 核对不过,看下一候选
-            result.append((qi, ai, sims[qi][ai]))
-            break
+        q_canon = (quote_canonicals[qi] if quote_canonicals else None) or {}
+        scored = _score_anchors_for_quote(sims[qi], anchors, a_dn, quote_dns[qi], q_canon)
+        if not scored:
+            continue
+        best_ai, best_cos, _c, _comb = max(scored, key=lambda x: x[3])
+        result.append((qi, best_ai, best_cos))
+
+    return result
+
+
+def match_anchors_topk(
+    anchors: list[TenderAnchor],
+    quotes: list[Quote],
+    quote_texts: list[str],
+    quote_dns: list[int | None],
+    client: OpenAI | None = None,
+    quote_canonicals: list[dict] | None = None,
+    k: int = 3,
+    anchor_vecs: list[list[float]] | None = None,
+) -> list[list[tuple[int, float, float]]]:
+    """Per-quote Top-K anchor candidates for the LLM supplier-fill agent.
+
+    Returns result[qi] = [(anchor_idx, cosine, c_score), ...] — up to K candidates
+    ordered by combined score (cos × (1 + 0.3·c_score)) descending. Candidates that
+    violate the DN hard-filter or canonical hard-block (0.0) are excluded, so the
+    LLM never sees a hint that contradicts a hard rule. Empty list when no candidate.
+
+    anchor_vecs: pre-embedded anchor vectors (from embed_anchor_vecs) to avoid
+    re-embedding the 90 anchors for every supplier.
+    """
+    if not anchors or not quotes:
+        return [[] for _ in quotes]
+    client = client or _embed_client()
+    a_dn = _anchor_dns(anchors)
+    A = anchor_vecs if anchor_vecs is not None else embed_anchor_vecs(anchors, client)
+    Q = _embed(client, quote_texts)
+    sims = _cosine_matrix(Q, A)
+
+    out: list[list[tuple[int, float, float]]] = []
+    for qi in range(len(quotes)):
+        q_canon = (quote_canonicals[qi] if quote_canonicals else None) or {}
+        scored = _score_anchors_for_quote(sims[qi], anchors, a_dn, quote_dns[qi], q_canon)
+        scored.sort(key=lambda x: x[3], reverse=True)
+        out.append([(ai, cos, c_score) for ai, cos, c_score, _comb in scored[:k]])
+    return out
+
+
+@dataclass
+class AnchorCandidate:
+    """One candidate anchor for a quote row, with safety tier label.
+
+    tier values:
+      "safe"                  — passes all hard-filters (cos ≥ threshold, DN ok, canonical ok)
+      "risky_dn_mismatch"     — DN conflict between quote and anchor
+      "risky_canonical_conflict" — canonical_match_score == 0.0 (valve_type/DN/PN clash)
+      "risky_low_similarity"  — cos in [min_cos_risky, SIM_THRESHOLD)
+
+    Risky candidates are shown to LLM but validator must downgrade to pending if selected.
+    """
+    seq: int
+    anchor_idx: int
+    cosine: float
+    c_score: float   # canonical_match_score (0.5 = no canonical info)
+    combined: float  # cos × (1 + 0.3 × c_score)
+    tier: str
+
+
+# Minimum cosine for risky candidates — below this is too noisy to show LLM
+_MIN_COS_RISKY = 0.35
+
+
+def match_anchors_wide(
+    anchors,
+    rows,
+    quote_texts: list[str],
+    quote_dns: list[int | None],
+    quote_canonicals: list[dict],
+    k_safe: int = 5,
+    k_risky: int = 5,
+    anchor_vecs: list[list[float]] | None = None,
+    client: "OpenAI | None" = None,
+) -> list[list[AnchorCandidate]]:
+    """Wide Top-(k_safe + k_risky) recall with safe/risky tier classification.
+
+    Unlike match_anchors_topk which hard-blocks risky items, this function:
+    - safe: cos ≥ SIM_THRESHOLD AND no DN conflict AND canonical_score > 0 (or no canonical)
+    - risky_dn_mismatch: cos ≥ _MIN_COS_RISKY but DN conflict
+    - risky_canonical_conflict: cos ≥ _MIN_COS_RISKY but canonical_score == 0.0
+    - risky_low_similarity: _MIN_COS_RISKY ≤ cos < SIM_THRESHOLD
+
+    Returns per-row list: safe candidates first (sorted by combined), then risky (sorted by cosine).
+    Risky candidates must only become pending in the LLM stage, never quoted.
+    """
+    if not anchors or not rows:
+        return [[] for _ in rows]
+    client = client or _embed_client()
+    a_dn = _anchor_dns(anchors)
+    A = anchor_vecs if anchor_vecs is not None else embed_anchor_vecs(anchors, client)
+    Q = _embed(client, quote_texts)
+    sims = _cosine_matrix(Q, A)
+
+    idx_to_seq = {i: int(getattr(a, "seq", i)) for i, a in enumerate(anchors)}
+    result: list[list[AnchorCandidate]] = []
+
+    for qi in range(len(rows)):
+        q_dn = quote_dns[qi] if qi < len(quote_dns) else None
+        q_canon = quote_canonicals[qi] if qi < len(quote_canonicals) else {}
+        sims_row = sims[qi]
+
+        safe: list[AnchorCandidate] = []
+        risky: list[AnchorCandidate] = []
+
+        for ai in range(len(anchors)):
+            cos = sims_row[ai]
+            if cos < _MIN_COS_RISKY:
+                continue  # too noisy even for risky list
+
+            seq = idx_to_seq[ai]
+            a_canon = getattr(anchors[ai], "canonical", {}) or {}
+
+            dn_conflict = (q_dn is not None and a_dn[ai] is not None and q_dn != a_dn[ai])
+
+            if q_canon or a_canon:
+                c_score = canonical_match_score(a_canon, q_canon)
+                canonical_conflict = (c_score == 0.0)
+            else:
+                c_score = 0.5
+                canonical_conflict = False
+
+            combined = cos * (1.0 + 0.3 * c_score)
+            low_sim = cos < SIM_THRESHOLD
+
+            if dn_conflict:
+                tier = "risky_dn_mismatch"
+            elif canonical_conflict:
+                tier = "risky_canonical_conflict"
+            elif low_sim:
+                tier = "risky_low_similarity"
+            else:
+                tier = "safe"
+
+            cand = AnchorCandidate(
+                seq=seq, anchor_idx=ai, cosine=cos, c_score=c_score, combined=combined, tier=tier,
+            )
+            if tier == "safe":
+                safe.append(cand)
+            else:
+                risky.append(cand)
+
+        safe.sort(key=lambda c: c.combined, reverse=True)
+        risky.sort(key=lambda c: c.cosine, reverse=True)
+        result.append(safe[:k_safe] + risky[:k_risky])
+
+    return result
+
+
+@dataclass
+class QuoteCandidate:
+    """One candidate quote row for an anchor (anchor-centric direction).
+
+    tier values:
+      "safe"                     — cos ≥ SIM_THRESHOLD, no canonical conflict
+      "risky_ocr_typo"           — row has normalized_material (OCR correction present)
+      "risky_canonical_conflict" — canonical_match_score == 0.0
+      "risky_low_similarity"     — cos in [_MIN_COS_RISKY, SIM_THRESHOLD)
+      "risky_material_missing"   — no canonical info on either side (can't confirm safe)
+
+    All tiers are shown to LLM; risky tiers result in pending if selected without
+    strong evidence. There is no hard-block (that's the key difference from AnchorCandidate).
+    """
+    quote_id: int
+    quote_idx: int
+    cosine: float
+    c_score: float
+    combined: float
+    tier: str
+    has_normalized: bool = False
+
+
+def attach_nearest_hints(
+    anchors: list,
+    rows: list,
+    client: "OpenAI | None" = None,
+    k: int = 5,
+    anchor_vecs: list[list[float]] | None = None,
+) -> dict[int, list[QuoteCandidate]]:
+    """Per-anchor Top-K quote candidates — anchor-centric direction (reversed vs match_anchors_wide).
+
+    Pure cosine initial sort; NO canonical/DN hard-filter (risky rows stay visible so
+    the LLM can apply OCR error correction). Tier labels signal confidence but never block.
+
+    anchors: list of AnchorView (from supplier_fill_llm) or TenderAnchor.
+    rows: list of SupplierQuoteRow — ALL rows for this supplier, not just residue.
+    Returns {anchor_seq: [QuoteCandidate, ...]} sorted by combined score desc.
+    """
+    if not anchors or not rows:
+        return {}
+
+    client = client or _embed_client()
+
+    # Embed quote rows — use normalized_material when available (corrected text = better embedding)
+    quote_texts: list[str] = []
+    for r in rows:
+        nm = str(getattr(r, "normalized_material", "") or "")
+        mat = nm or str(getattr(r, "raw_material", "") or getattr(r, "material", "") or "")
+        spec = str(getattr(r, "raw_spec", "") or getattr(r, "spec", "") or "")
+        quote_texts.append(f"{mat} {spec}".strip() or str(mat))
+
+    # P0 guard: if caller passed anchor_vecs for a different (larger) anchor set, re-embed.
+    # This happens when analysis.py pre-computes full-90-anchor vectors then passes them
+    # to an AC pass that only uses a gap subset.
+    if anchor_vecs is not None and len(anchor_vecs) != len(anchors):
+        log.debug(
+            "attach_nearest_hints: anchor_vecs length %d != anchors length %d — re-embedding subset",
+            len(anchor_vecs), len(anchors),
+        )
+        anchor_vecs = None
+
+    A = anchor_vecs if anchor_vecs is not None else embed_anchor_vecs(anchors, client)
+    Q = _embed(client, quote_texts)
+    # sims[qi][ai] = cosine(quote_qi, anchor_ai) — symmetric, same values as A×Q direction
+    sims = _cosine_matrix(Q, A)
+
+    idx_to_seq = {i: int(getattr(a, "seq", i)) for i, a in enumerate(anchors)}
+    result: dict[int, list[QuoteCandidate]] = {}
+
+    for ai, anchor in enumerate(anchors):
+        seq = idx_to_seq[ai]
+        a_canon = getattr(anchor, "canonical", {}) or {}
+        candidates: list[QuoteCandidate] = []
+
+        for qi, row in enumerate(rows):
+            cos = sims[qi][ai]
+            if cos < _MIN_COS_RISKY:
+                continue
+
+            r_canon = getattr(row, "canonical", {}) or {}
+            has_norm = bool(getattr(row, "normalized_material", ""))
+
+            if r_canon or a_canon:
+                c_score = canonical_match_score(a_canon, r_canon)
+            else:
+                c_score = 0.5
+
+            combined = cos * (1.0 + 0.3 * c_score)
+
+            # Tier — no hard blocks; all candidates surfaced to LLM
+            if has_norm:
+                # OCR typo row: show always (LLM error-correction is the point)
+                tier = "risky_ocr_typo"
+            elif c_score == 0.0:
+                tier = "risky_canonical_conflict"
+            elif cos < SIM_THRESHOLD:
+                tier = "risky_low_similarity"
+            elif not r_canon and not a_canon:
+                tier = "risky_material_missing"
+            else:
+                tier = "safe"
+
+            candidates.append(QuoteCandidate(
+                quote_id=getattr(row, "quote_id", 0),
+                quote_idx=qi,
+                cosine=round(cos, 4),
+                c_score=round(c_score, 4),
+                combined=round(combined, 4),
+                tier=tier,
+                has_normalized=has_norm,
+            ))
+
+        candidates.sort(key=lambda c: c.combined, reverse=True)
+        result[seq] = candidates[:k]
+
     return result
 
 
 def import_and_match(
     db: Session,
-    xlsx_bytes: bytes,
+    xlsx_bytes: bytes | None,
     project_id: int,
     category: str,
     supplier_ids: list[int] | None = None,
-) -> MatchSummary:
-    """解析清单 + 嵌入匹配 + 落 BidAlignmentGroup。幂等:先清同 (project,category) 旧组。"""
-    anchors = parse_tender_xlsx(xlsx_bytes)
+    anchors: list[TenderAnchor] | None = None,
+    tender_list_session_id: int | None = None,
+) -> tuple[MatchSummary, dict]:
+    """解析清单 + 嵌入匹配 + 落 BidAlignmentGroup。幂等:先清同 (project,category) 旧组。
+
+    xlsx_bytes: raw xlsx content; ignored when anchors is provided.
+    anchors: pre-built TenderAnchor list (from TenderListSession); takes priority.
+
+    Returns:
+        (MatchSummary, per_supplier_stats)
+        per_supplier_stats: {supplier_id: {quote_rows, matched_rows, pending_rows,
+                                           residue_rows, aggregated_rows}}
+    """
+    if anchors is None:
+        anchors = parse_tender_xlsx(xlsx_bytes)
 
     # 载入报价
     q = (
@@ -141,15 +472,33 @@ def import_and_match(
         q = q.filter(Quote.supplier_id.in_(supplier_ids))
     rows = q.all()
     quotes = [qt for qt, _ in rows]
-    quote_texts = [f"{m.standard_name} {m.spec or ''}".strip() for _, m in rows]
-    quote_dns = [_dn_of(m.spec) or _dn_of(m.standard_name) for _, m in rows]
+    materials = [m for _, m in rows]
+    quote_texts = [f"{m.standard_name} {m.spec or ''}".strip() for m in materials]
+    quote_dns = [_dn_of(m.spec) or _dn_of(m.standard_name) for m in materials]
 
-    matches = match_anchors(anchors, quotes, quote_texts, quote_dns)
+    # Compute/load canonical per quote (cache hit from extended_attrs, else code extract)
+    quote_canonicals: list[dict] = []
+    for m in materials:
+        ext = m.extended_attrs or {}
+        canon = ext.get("canonical")
+        if not canon:
+            canon = extract_valve_canonical(m.standard_name or "", m.spec or "")
+        quote_canonicals.append(canon or {})
+
+    matches = match_anchors(anchors, quotes, quote_texts, quote_dns,
+                            quote_canonicals=quote_canonicals)
+
+    # Persist canonical to Material.extended_attrs (cache only; don't overwrite)
+    for mi, m in enumerate(materials):
+        canon = quote_canonicals[mi]
+        if canon.get("valve_type"):
+            ext = dict(m.extended_attrs or {})
+            if "canonical" not in ext:
+                ext["canonical"] = canon
+                m.extended_attrs = ext
 
     # 预载有效 supplier_id 集合，避免向已删除供应商插外键
-    valid_sids: set[int] = {
-        row[0] for row in db.query(Supplier.id).all()
-    }
+    valid_sids: set[int] = {row[0] for row in db.query(Supplier.id).all()}
 
     # 幂等:清掉本 (project,category) 既有对齐组(及级联 items)
     old = db.query(BidAlignmentGroup).filter(
@@ -160,16 +509,55 @@ def import_and_match(
         db.delete(g)
     db.flush()
 
-    # 按锚点聚合匹配
-    by_anchor: dict[int, list[tuple[int, float]]] = {}
+    # per_supplier_stats: init all suppliers with their total quote counts
+    per_supplier_stats: dict[int, dict] = {}
+    for qi, qt in enumerate(quotes):
+        sid = qt.supplier_id or 0
+        if sid not in per_supplier_stats:
+            per_supplier_stats[sid] = {
+                "supplier_id": sid,
+                "quote_rows": 0,
+                "matched_rows": 0,
+                "pending_rows": 0,
+                "residue_rows": 0,
+                "aggregated_rows": 0,
+                "computed_total": 0.0,
+                "validation_failed_rows": 0,
+                "cross_type_conflicts": 0,
+            }
+        per_supplier_stats[sid]["quote_rows"] += 1
+        if qt.total_price is not None:
+            per_supplier_stats[sid]["computed_total"] += float(qt.total_price)
+        m = materials[qi]
+        if (m.extended_attrs or {}).get("validation_warning"):
+            per_supplier_stats[sid]["validation_failed_rows"] += 1
+
+    # Track which quote indices were matched
+    matched_qi: set[int] = set()
+    # by_anchor_supplier[ai][sid] = [(qi, cos), ...]
+    by_anchor_supplier: dict[int, dict[int, list[tuple[int, float]]]] = {}
     for qi, ai, cos in matches:
-        by_anchor.setdefault(ai, []).append((qi, cos))
+        sid = quotes[qi].supplier_id or 0
+        by_anchor_supplier.setdefault(ai, {}).setdefault(sid, []).append((qi, cos))
+        matched_qi.add(qi)
+
+    # Unmatched quotes → residue
+    for qi, qt in enumerate(quotes):
+        if qi not in matched_qi:
+            sid = qt.supplier_id or 0
+            per_supplier_stats[sid]["residue_rows"] += 1
 
     low_conf = 0
-    for ai, items in by_anchor.items():
+
+    for ai, supplier_groups in by_anchor_supplier.items():
         a = anchors[ai]
         spec = " ".join(x for x in [a.spec, a.pressure, a.material_text()] if x).strip()
-        min_cos = min(c for _, c in items)
+
+        # Group representative confidence: min cosine across all quotes
+        all_cos = [cos for items in supplier_groups.values() for _, cos in items]
+        min_cos = min(all_cos) if all_cos else 0.0
+
+        # Groups are always "confirmed" — pending moves to item level
         group = BidAlignmentGroup(
             project_id=project_id,
             category=category,
@@ -178,34 +566,121 @@ def import_and_match(
             suggested_unit=a.unit,
             suggested_qty=a.qty,
             confidence=round(min_cos, 3),
-            reason=f"招标清单锚点 #{a.seq}" + ("(含低置信匹配,建议复核)" if min_cos < LOW_CONF else ""),
+            reason=f"招标清单锚点 #{a.seq}",
             status="confirmed",
+            tender_list_session_id=tender_list_session_id,
+            anchor_seq=str(a.seq),
         )
         db.add(group)
         db.flush()
-        seen: set[int] = set()
-        for qi, cos in items:
-            qt = quotes[qi]
-            if qt.id in seen:
-                continue
-            seen.add(qt.id)
-            if cos < LOW_CONF:
-                low_conf += 1
-            sid = qt.supplier_id if qt.supplier_id in valid_sids else None
-            db.add(BidAlignmentItem(
-                group_id=group.id,
-                quote_id=qt.id,
-                supplier_id=sid,
-                action="align",
-                spec_note=f"cos={cos:.2f}",
-            ))
+
+        seen_qids: set[int] = set()
+
+        for sid, items in supplier_groups.items():
+            if len(items) <= 1:
+                # Single row: item action depends on individual cosine
+                qi, cos = items[0]
+                if qi in seen_qids:
+                    continue
+                seen_qids.add(qi)
+                if cos < LOW_CONF:
+                    low_conf += 1
+                item_action = "align" if cos >= LOW_CONF else "pending"
+                qt = quotes[qi]
+                qsid = qt.supplier_id if qt.supplier_id in valid_sids else None
+                canon_snap = quote_canonicals[qi] if qi < len(quote_canonicals) else {}
+                note = f"cos={cos:.2f}"
+                if canon_snap.get("valve_type"):
+                    note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
+                db.add(BidAlignmentItem(
+                    group_id=group.id,
+                    quote_id=qt.id,
+                    supplier_id=qsid,
+                    action=item_action,
+                    spec_note=note.strip(),
+                ))
+                if item_action == "align":
+                    per_supplier_stats[sid]["matched_rows"] += 1
+                else:
+                    per_supplier_stats[sid]["pending_rows"] += 1
+            else:
+                # Multiple rows from same supplier to same anchor
+                # Group by canonical+unit: same key → aggregate; different keys → each pending
+                canon_key_groups: dict[tuple, list[tuple[int, float]]] = {}
+                for qi, cos in items:
+                    if qi in seen_qids:
+                        continue
+                    qc = quote_canonicals[qi] if qi < len(quote_canonicals) else {}
+                    unit_str = (materials[qi].unit or "") if qi < len(materials) else ""
+                    key = (qc.get("valve_type", ""), qc.get("dn", ""), qc.get("pn", ""), unit_str)
+                    canon_key_groups.setdefault(key, []).append((qi, cos))
+
+                # Multiple distinct canonical keys → conflicting specs, all items pending
+                has_conflict = len(canon_key_groups) > 1
+
+                for key, key_items in canon_key_groups.items():
+                    fresh = [(qi, cos) for qi, cos in key_items if qi not in seen_qids]
+                    if not fresh:
+                        continue
+                    best_qi, best_cos = max(fresh, key=lambda x: x[1])
+                    if best_cos < LOW_CONF:
+                        low_conf += 1
+                    seen_qids.update(qi for qi, _ in fresh)
+
+                    # Conflicting specs OR low confidence → pending; otherwise align
+                    if has_conflict or best_cos < LOW_CONF:
+                        item_action = "pending"
+                    else:
+                        item_action = "align"
+
+                    qt = quotes[best_qi]
+                    qsid = qt.supplier_id if qt.supplier_id in valid_sids else None
+                    canon_snap = quote_canonicals[best_qi] if best_qi < len(quote_canonicals) else {}
+                    note = f"cos={best_cos:.2f}"
+                    if canon_snap.get("valve_type"):
+                        note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
+                    if has_conflict:
+                        note += " (规格冲突,需确认)"
+
+                    # Aggregate total/qty for same-canonical items (only when no conflict)
+                    agg_total_val: float | None = None
+                    agg_qty_val: float | None = None
+                    if not has_conflict and len(fresh) > 1:
+                        totals = [float(quotes[qi].total_price) for qi, _ in fresh
+                                  if quotes[qi].total_price is not None]
+                        qtys = [float(quotes[qi].quantity) for qi, _ in fresh
+                                if quotes[qi].quantity is not None]
+                        if totals:
+                            agg_total_val = sum(totals)
+                        if qtys:
+                            agg_qty_val = sum(qtys)
+                        agg_ids = [quotes[qi].id for qi, _ in fresh if qi != best_qi]
+                        if agg_ids:
+                            note += f" aggregated={agg_ids}"
+                            per_supplier_stats[sid]["aggregated_rows"] += len(agg_ids)
+
+                    db.add(BidAlignmentItem(
+                        group_id=group.id,
+                        quote_id=qt.id,
+                        supplier_id=qsid,
+                        action=item_action,
+                        spec_note=note.strip(),
+                        agg_total=agg_total_val,
+                        agg_qty=agg_qty_val,
+                    ))
+                    if item_action == "align":
+                        per_supplier_stats[sid]["matched_rows"] += 1
+                    else:
+                        per_supplier_stats[sid]["pending_rows"] += 1
+
     db.commit()
 
     # 指标
     anchor_suppliers: dict[int, set[int]] = {}
     for qi, ai, _ in matches:
         anchor_suppliers.setdefault(ai, set()).add(quotes[qi].supplier_id)
-    return MatchSummary(
+
+    summary = MatchSummary(
         anchors_total=len(anchors),
         anchors_covered=len(anchor_suppliers),
         comparable_2plus=sum(1 for s in anchor_suppliers.values() if len(s) >= 2),
@@ -213,5 +688,6 @@ def import_and_match(
         matched_quotes=len(matches),
         total_quotes=len(quotes),
         low_conf=low_conf,
-        residue=len(quotes) - len(matches),
+        residue=len(quotes) - len(matched_qi),
     )
+    return summary, per_supplier_stats

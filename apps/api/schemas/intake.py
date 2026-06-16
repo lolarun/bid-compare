@@ -56,6 +56,10 @@ class EnhancedItem(BaseModel):
     total_price: float | None = None
     tax_rate: float | None = None
     remark: str = ""
+    # Canonical key (valve type / DN / PN / material / connection)
+    canonical: dict = Field(default_factory=dict)
+    # Row-level arithmetic validation result (empty = OK)
+    validation_warning: str = ""
     # AI-enhanced fields
     category: str = ""
     standard_name: str = ""

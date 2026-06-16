@@ -52,6 +52,7 @@ interface QuoteRow extends RowBase {
   unit_price_excl_tax: number | null
   total_price: number | null
   tax_rate: number | null
+  material_type?: string
   remark: string
   // AI-enhanced fields (populated after /api/intake/enhance)
   category?: string
@@ -59,6 +60,17 @@ interface QuoteRow extends RowBase {
   name_note?: string
   alignment_note?: string
   matched_material_id?: number | null
+  // hidden fields — not edited in UI but must survive the round-trip to
+  // batch-confirm so canonical / validation_warning / source_ref reach
+  // anchor-match and LLM supplier-fill intact. Declared explicitly so the
+  // editor's row-spread doesn't silently drop them on a contract change.
+  canonical?: Record<string, unknown>
+  validation_warning?: string
+  source_ref?: Record<string, unknown>
+  normalized_material?: string
+  ocr_correction_reason?: string
+  standard_name?: string
+  standard_spec?: string
 }
 
 type Row = TenderRow | QuoteRow

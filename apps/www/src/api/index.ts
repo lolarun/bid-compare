@@ -14,7 +14,7 @@ import type {
   AlignmentApplyGroup, AlignmentApplyFieldFix, AlignmentApplyResult,
   AlignmentGroupOut,
   EnhanceResponse,
-  AnchorMatchSummary, AnchorReviewResult,
+  AnchorMatchSummary, AnchorReviewResult, TenderPreviewResult, LlmFillResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -167,10 +167,40 @@ export const analysisApi = {
   alignmentDeleteGroup: (groupId: number) =>
     api.delete(`/analysis/bid-alignment/groups/${groupId}`),
   // ── Anchor / Tender-list ──
+  tenderListPreview: (formData: FormData) =>
+    api.post<TenderPreviewResult>('/analysis/tender-list/preview', formData),
   tenderListMatch: (formData: FormData) =>
     api.post<AnchorMatchSummary>('/analysis/tender-list/match', formData, { timeout: 180_000 }),
+  tenderListLlmFill: (data: {
+    project_id: number; category: string; supplier_ids?: number[];
+    tender_list_session_id?: number | null; k?: number; mode?: string; model?: string | null
+  }) =>
+    api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
   anchorReview: (params: { project_id: number; category: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
+  anchorReviewConfirm: (data: { group_id: number; action: 'confirm' | 'reject' }) =>
+    api.post('/analysis/anchor-review/confirm', data),
+  anchorReviewItemConfirm: (data: { item_id: number; action: 'align' | 'exclude' }) =>
+    api.post('/analysis/anchor-review/item-confirm', data),
+  anchorReviewBulkConfirm: (params: { project_id: number; category: string }) =>
+    api.post('/analysis/anchor-review/bulk-confirm', null, { params }),
+  anchorReviewFinalize: (data: {
+    project_id?: number; category: string; force?: boolean; reason?: string; finalized_by?: string
+  }) =>
+    api.post<{ ok: boolean; id: number; status: string; group_ids_count: number; pending_at_finalize: number }>('/analysis/anchor-review/finalize', data),
+  tenderListConfirm: (data: {
+    project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string
+  }) =>
+    api.post<{ ok: boolean; id: number; version: number }>('/analysis/tender-list/confirm', data),
+  bidMatrixSave: (data: {
+    project_id?: number; category: string; alignment_finalization_id: number;
+    tender_list_session_id?: number; matrix_json?: object; readiness_json?: unknown[];
+    anchors_count?: number; compared_rows?: number; excluded_rows_json?: unknown[];
+    supplier_ids_json?: unknown[]; recommended_supplier?: string
+  }) =>
+    api.post<{ ok: boolean; id: number; version: number }>('/analysis/bid-matrix/save', data),
+  bidMatrixVersionApprove: (versionId: number, data: { note?: string; approved_by?: string }) =>
+    api.post<{ ok: boolean; id: number; status: string }>(`/analysis/bid-matrix/versions/${versionId}/approve`, data),
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────

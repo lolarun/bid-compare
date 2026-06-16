@@ -1,6 +1,6 @@
 """Quote (报价记录) ORM model."""
 
-from sqlalchemy import Column, Integer, Float, String, Text, DateTime, ForeignKey, Index
+from sqlalchemy import Column, Integer, Float, String, Text, DateTime, ForeignKey, Index, JSON
 from sqlalchemy.orm import relationship
 
 from apps.api.core.database import Base
@@ -36,6 +36,11 @@ class Quote(Base):
     deviation_pct = Column(Float, nullable=True)
     alert_level = Column(String(10), default="")
     baseline_type = Column(String(20), default="median")
+
+    # 行级抽取证据 (供 LLM 供应商填表代理「像人一样看报价」+ 审计)
+    # {extraction_job_id, source_ref, raw_material, raw_spec, raw_unit, raw_remark,
+    #  canonical, validation_warning}
+    extraction_meta_json = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)

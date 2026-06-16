@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
     DASHSCOPE_LLM_MODEL: str = "qwen3.6-flash"
 
+    # OCR PDF render quality (Layer 0). Higher = clearer small-font scanned tables
+    # (reduces 形近字 OCR errors like 闸阀→阀阀, 橡胶瓣→橡胶海). Defaults preserve
+    # prior behavior (2.0 / 2400); raise via env after A/B confirms improvement.
+    OCR_RENDER_SCALE: float = 2.0
+    OCR_MAX_EDGE_PX: int = 2400
+
     # File storage
     UPLOAD_DIR: str = "data/uploads"
 

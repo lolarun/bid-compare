@@ -507,12 +507,29 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                     category=item_category,
                     sub_category="",
                     spec=spec,
-                    material_type="",
+                    material_type=str(item.get("material_type") or "").strip(),
                     unit=str(item.get("unit") or ""),
                     brand=str(item.get("brand") or ""),
                 )
                 db.add(mat)
                 db.flush()
+
+            # Persist canonical, validation_warning, and OCR-correction fields
+            canonical = item.get("canonical")
+            validation_warning = item.get("validation_warning") or ""
+            norm_mat = str(item.get("normalized_material") or "").strip()
+            ocr_reason = str(item.get("ocr_correction_reason") or "").strip()
+            if canonical or validation_warning or norm_mat or ocr_reason:
+                ext = dict(mat.extended_attrs or {})
+                if canonical and "canonical" not in ext:
+                    ext["canonical"] = canonical
+                if validation_warning:
+                    ext["validation_warning"] = validation_warning
+                if norm_mat and "normalized_material" not in ext:
+                    ext["normalized_material"] = norm_mat
+                if ocr_reason and "ocr_correction_reason" not in ext:
+                    ext["ocr_correction_reason"] = ocr_reason
+                mat.extended_attrs = ext
 
             # Brand-tier lookup (track unknowns)
             brand = str(item.get("brand") or "").strip()
@@ -547,6 +564,23 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 deviation = round((price - ref) / ref, 4)
                 alert = determine_alert(deviation, thresholds)
 
+            # Row-level extraction evidence: preserve the supplier's ORIGINAL
+            # expression (pre-standardization) so the LLM supplier-fill agent can
+            # judge "like a human reading the quote" rather than the normalized name.
+            extraction_meta = {
+                "extraction_job_id": body.job_id,
+                "source_ref": item.get("source_ref"),
+                "raw_material": raw_name,
+                "raw_spec": str(item.get("spec") or "").strip(),
+                "raw_unit": str(item.get("unit") or "").strip(),
+                "raw_remark": str(item.get("remark") or "").strip(),
+                "material_type": str(item.get("material_type") or "").strip(),
+                "canonical": item.get("canonical") or {},
+                "validation_warning": item.get("validation_warning") or "",
+                "normalized_material": str(item.get("normalized_material") or "").strip(),
+                "ocr_correction_reason": str(item.get("ocr_correction_reason") or "").strip(),
+            }
+
             q = Quote(
                 material_id=mat.id,
                 supplier_id=supplier.id if supplier else None,
@@ -564,6 +598,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 bid_status=body.bid_status,
                 deviation_pct=deviation,
                 alert_level=alert,
+                extraction_meta_json=extraction_meta,
             )
             db.add(q)
             db.flush()
@@ -574,6 +609,16 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             skipped += 1
 
     db.commit()
+
+    # Write supplier_id back to ExtractionJob.context so doc_meta lookup can find it
+    if supplier:
+        ctx = dict(job.context or {})
+        if ctx.get("supplier_id") != supplier.id:
+            ctx["supplier_id"] = supplier.id
+            job.context = ctx
+            db.add(job)
+            db.commit()
+
     return {
         "status": "ok",
         "created": created,

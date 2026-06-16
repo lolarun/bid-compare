@@ -52,7 +52,16 @@ def _build_pipeline() -> ExtractionPipeline:
 
     # Default: dashscope_ocr (two-stage OCR + LLM)
     if not settings.DASHSCOPE_API_KEY:
-        log.warning("DASHSCOPE_API_KEY not set; using MockProvider")
+        allow_mock = os.environ.get("ALLOW_MOCK_PROVIDER", "true").lower() in ("1", "true", "yes")
+        if not allow_mock:
+            raise RuntimeError(
+                "DASHSCOPE_API_KEY is not set and ALLOW_MOCK_PROVIDER=false — "
+                "refusing to start with MockProvider. Set the API key or export ALLOW_MOCK_PROVIDER=true."
+            )
+        log.warning(
+            "DASHSCOPE_API_KEY not set; falling back to MockProvider "
+            "(set ALLOW_MOCK_PROVIDER=false to block this in production)"
+        )
         return ExtractionPipeline(MockProvider())
     try:
         provider = DashScopeOCRProvider(

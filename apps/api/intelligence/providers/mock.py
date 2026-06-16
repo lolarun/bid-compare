@@ -30,12 +30,29 @@ class MockProvider(LLMProvider):
         self.canned = canned
         self.fixture_dir = Path(fixture_dir) if fixture_dir else None
 
+    def ocr_pages_with_roles(
+        self, images: list[bytes],
+    ) -> list[tuple[Any, str]]:
+        """Stub: every page classified as QUOTE_TABLE with empty HTML."""
+        from apps.api.intelligence.page_classifier import (
+            classify_page, PageRole, PageClassification,
+        )
+        stub_html = "<table><tr><td>mock</td></tr></table>"
+        cls = PageClassification(primary_role=PageRole.QUOTE_TABLE)
+        return [(cls, stub_html) for _ in images]
+
+    def extract_doc_meta(self, meta_htmls: list[str]) -> dict:
+        return {"supplier_name": None, "bid_total": None,
+                "bid_total_basis": "unknown", "tax_rate": None}
+
     def extract(
         self,
         images: list[bytes],
         schema: dict[str, Any],
         prompt: str,
         timeout: int = 90,
+        page_html: str | None = None,
+        table_grids=None,  # accepted but ignored — mock always uses canned data
     ) -> ExtractionResponse:
         t0 = time.time()
         if self.canned is not None:

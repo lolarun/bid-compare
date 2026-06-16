@@ -68,10 +68,61 @@ _QUOTE_S2_PROMPT = """你是机电材料报价单解析助理。下面是OCR识�
 - 品牌按原文
 - 无法识别的字段返回空字符串或null
 
+对于阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等），
+额外填写 canonical 对象：
+- valve_type: 阀门类型，如"截止阀"（按原文）
+- dn: 公称直径，格式"DN25"；Φ57/2寸/50mm 请转换
+- pn: 公称压力，格式"PN16"；1.6MPa→PN16
+- material: 主材质（不锈钢/铸铁/球墨铸铁等）
+- connection: 连接方式（螺纹/法兰/焊接等）
+非阀门类材料，canonical 留空对象 {}。
+
+OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR 错误时（如"阀阀"→闸阀、"橡胶海"→橡胶瓣）：
+- normalized_material: 纠错后的正确名称（确信时填，否则留空字符串）
+- ocr_correction_reason: 纠错依据（词表命中+相邻行规格连续性），无纠错时留空字符串
+合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
+material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
+
 返回JSON格式：
-{"supplier_name": "供应商名称", "items": [{"material": "材料名称", "spec": "规格型号", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": 含税单价, "unit_price_excl_tax": 不含税单价, "total_price": 总价, "tax_rate": 税率小数, "remark": "备注"}]}
+{"supplier_name": "供应商名称", "items": [{"material": "材料名称", "spec": "规格型号", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": 含税单价, "unit_price_excl_tax": 不含税单价, "total_price": 总价, "tax_rate": 税率小数, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
 
 如果该页没有报价明细（如封面、证书等非报价页），返回 {"items": []}"""
+
+_META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件封面/汇总页的OCR HTML内容。
+请提取元信息，只返回JSON：
+{"supplier_name": "投标单位全称或空字符串", "bid_total": 投标总价数字或null, "bid_total_basis": "tax_included|tax_excluded|unknown", "tax_rate": 税率小数或null}
+若该页没有相关信息，对应字段返回null或空字符串。"""
+
+# Stage 2 prompt for structured TableGrid JSON input (replaces raw HTML when available)
+_QUOTE_S2_TABLE_PROMPT = """你是机电材料报价单解析助理。以下是 OCR 识别后按页面表格整理的结构化数据（JSON 格式）。
+
+请从所有 row_type="quote_line" 的行中提取每一条报价明细。每条明细必须包含该行的 table_index 和 row_index（直接从输入复制，不要修改）。
+row_type 为 subtotal/grand_total/header/empty/note 的行忽略不提取。
+
+要求：
+- 【完整性】所有 row_type=quote_line 的行都要提取，一行不能遗漏
+- 区分 unit_price（含税单价）与 unit_price_excl_tax（不含税单价）；只有一个价格时填到 unit_price
+- 对阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等）额外填写 canonical 对象：valve_type/dn/pn/material/connection
+- material_type：若表格有独立材质列按原文填；否则从规格型号中提取；无则留空字符串
+- 总价若表格已标注使用原值，否则留 null（不要自己计算）
+- 税率用小数如 0.13 表示 13%
+- supplier_name：若当前页面有明确供应商/投标单位名称则填，否则留空字符串
+- 无法识别的字段返回空字符串或 null，不要猜测
+
+OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR 错误时（如"阀阀"→闸阀、"橡胶海"→橡胶瓣）：
+- normalized_material: 纠错后的正确名称（确信时填，否则留空字符串）
+- ocr_correction_reason: 纠错依据（词表命中+相邻行规格连续性），无纠错时留空字符串
+合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
+material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
+
+返回 JSON 格式（table_index 和 row_index 必须包含）：
+{"supplier_name": "供应商名称", "items": [{"table_index": 0, "row_index": 2, "material": "材料名称", "spec": "规格型号", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": 含税单价, "unit_price_excl_tax": 不含税单价, "total_price": 总价, "tax_rate": 税率, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
+
+没有报价明细时返回 {"items": []}"""
+
+# Limits replacing the old hard MAX_PAGES = 12
+MAX_QUOTE_TABLE_PAGES = 30
+MAX_META_PAGES = 5
 
 # ── Cover-page supplier-name fallback prompt ─────────────────────────────
 _SUPPLIER_NAME_PROMPT = """从以下HTML内容中，找出【投标人/投标单位（卖方报价方）的公司全称】。
@@ -152,6 +203,25 @@ class DashScopeOCRProvider(LLMProvider):
                 self._llm_clients[key] = OpenAI(api_key=key, base_url=self.base_url)
             return self._llm_clients[key]
 
+    # ─── page classification (single OCR pass, HTML cached) ──────────────
+
+    def ocr_pages_with_roles(
+        self, images: list[bytes],
+    ) -> list[tuple["PageClassification", str]]:
+        """Stage 1 for all pages: OCR → HTML → classify role.
+
+        Returns a list of (PageClassification, html) tuples in page order.
+        HTML is cached here so the caller can pass it back to extract() without
+        re-OCRing.
+        """
+        from apps.api.intelligence.page_classifier import classify_page, PageClassification
+        results: list[tuple[PageClassification, str]] = []
+        for image in images:
+            html, _ = self._ocr_page(image)
+            cls = classify_page(html)
+            results.append((cls, html))
+        return results
+
     # ─── public API (called per-page by pipeline) ─────────────────────────
 
     def extract(
@@ -160,16 +230,30 @@ class DashScopeOCRProvider(LLMProvider):
         schema: dict[str, Any],
         prompt: str,
         timeout: int = 90,
+        page_html: str | None = None,
+        table_grids=None,  # list[TableGrid] | None — structured input from table_parser
     ) -> ExtractionResponse:
-        """Two-stage extraction for a single page image."""
+        """Two-stage extraction for a single page image.
+
+        If page_html is provided (pre-computed from ocr_pages_with_roles),
+        Stage 1 OCR is skipped and the cached HTML is used directly.
+
+        If table_grids is also provided (and doc_type is 'quote'), the Stage-2
+        LLM receives structured TableGrid JSON instead of raw HTML, which reduces
+        hallucination and enables row-level source_ref tracking.
+        """
         if not images:
             raise ProviderError("extract() requires at least one image")
 
         t0 = time.time()
         total_tokens = 0
 
-        html, ocr_tokens = self._ocr_page(images[0])
-        total_tokens += ocr_tokens
+        if page_html is not None:
+            html = page_html
+            ocr_tokens = 0
+        else:
+            html, ocr_tokens = self._ocr_page(images[0])
+            total_tokens += ocr_tokens
 
         if not html.strip():
             return ExtractionResponse(
@@ -181,7 +265,17 @@ class DashScopeOCRProvider(LLMProvider):
             )
 
         doc_type = self._guess_doc_type(prompt)
-        data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
+
+        if table_grids and doc_type == "quote":
+            # Structured path: TableGrid JSON → LLM (lower token cost, row-level source_ref)
+            from apps.api.intelligence.table_parser import grids_to_llm_json
+            grid_json = grids_to_llm_json(table_grids)
+            data, raw_text, llm_tokens = self._llm_call_json(
+                _QUOTE_S2_TABLE_PROMPT, grid_json
+            )
+        else:
+            data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
+
         total_tokens += llm_tokens
 
         return ExtractionResponse(
@@ -191,6 +285,64 @@ class DashScopeOCRProvider(LLMProvider):
             provider=f"{self.name}:{self.model}",
             duration_ms=int((time.time() - t0) * 1000),
         )
+
+    def extract_doc_meta(self, meta_htmls: list[str]) -> dict:
+        """Extract document-level metadata from cover/summary page HTMLs.
+
+        Returns: {supplier_name, bid_total, bid_total_basis, tax_rate}
+        """
+        if not meta_htmls:
+            return {
+                "supplier_name": None,
+                "bid_total": None,
+                "bid_total_basis": "unknown",
+                "tax_rate": None,
+            }
+
+        combined_html = "\n---\n".join(meta_htmls[:MAX_META_PAGES])
+        t0 = time.time()
+        key = self._next_key()
+        client = self._get_client(key)
+        sem = self._per_key_sem[key]
+        sem.acquire()
+        try:
+            resp = client.chat.completions.create(
+                model=self.llm_model,
+                messages=[
+                    {"role": "system", "content": _META_S2_PROMPT},
+                    {"role": "user", "content": combined_html},
+                ],
+                temperature=0.0,
+                max_tokens=256,
+                extra_body={"enable_thinking": False},
+            )
+        except Exception as e:
+            sem.release()
+            log.warning("Doc meta extraction error: %s", e)
+            return {"supplier_name": None, "bid_total": None,
+                    "bid_total_basis": "unknown", "tax_rate": None}
+        sem.release()
+
+        raw = (resp.choices[0].message.content or "").strip()
+        if "</think>" in raw:
+            raw = raw.split("</think>")[-1].strip()
+        clean = raw
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\s*", "", clean)
+            clean = re.sub(r"\s*```$", "", clean)
+        try:
+            import json as _json
+            data = _json.loads(clean)
+        except Exception:
+            log.warning("Doc meta JSON parse failed: %s", raw[:200])
+            data = {}
+
+        return {
+            "supplier_name": data.get("supplier_name") or None,
+            "bid_total": data.get("bid_total"),
+            "bid_total_basis": data.get("bid_total_basis") or "unknown",
+            "tax_rate": data.get("tax_rate"),
+        }
 
     def extract_supplier_name_from_cover(
         self, cover_images: list[bytes], max_pages: int = 10,
@@ -312,9 +464,12 @@ class DashScopeOCRProvider(LLMProvider):
     # ─── Stage 2: Text LLM ────────────────────────────────────────────────
 
     def _llm_parse(self, html: str, doc_type: str) -> tuple[dict, str, int]:
-        """Parse OCR HTML into structured JSON. Retries on 429 / JSON parse failure."""
+        """Parse OCR HTML into structured JSON via Stage-2 LLM."""
         s2_prompt = _QUOTE_S2_PROMPT if doc_type == "quote" else _TENDER_S2_PROMPT
+        return self._llm_call_json(s2_prompt, html)
 
+    def _llm_call_json(self, system_prompt: str, user_content: str) -> tuple[dict, str, int]:
+        """Call the text LLM with retry; return (parsed_dict, raw_text, tokens)."""
         for attempt in range(_MAX_RETRIES):
             key = self._next_key()
             client = self._get_client(key)
@@ -324,8 +479,8 @@ class DashScopeOCRProvider(LLMProvider):
                 resp = client.chat.completions.create(
                     model=self.llm_model,
                     messages=[
-                        {"role": "system", "content": s2_prompt},
-                        {"role": "user", "content": html},
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
                     ],
                     temperature=0.0,  # 降低抽取非确定性(召回波动);见 design/05 §9.1
                     max_tokens=8192,

@@ -7,7 +7,7 @@ import {
   PlusOutlined,
   AppstoreOutlined, TeamOutlined, TrophyOutlined, DollarOutlined,
   WarningOutlined, BulbOutlined, RobotOutlined,
-  FileExcelOutlined, UploadOutlined, AimOutlined,
+  FileExcelOutlined, AimOutlined,
 } from '@ant-design/icons-vue'
 import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
 import type {
@@ -19,13 +19,10 @@ import type {
   QuoteExtractionItem,
   BatchConfirmResult,
   ImportResult,
-  AlignmentGroup,
-  AlignmentFieldFix,
-  AlignmentSuggestResult,
-  AlignmentApplyGroup,
-  AlignmentApplyFieldFix,
   AnchorMatchSummary,
   AnchorReviewResult,
+  TenderPreviewResult,
+  LlmFillResult,
 } from '@/api/client'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
@@ -40,6 +37,9 @@ const PROFESSION_CATEGORIES: Record<string, string[]> = {
   '暖通': ['风口风阀', '风机盘管', '空调泵'],
 }
 const PROFESSIONS = Object.keys(PROFESSION_CATEGORIES)
+
+// Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
+const STEP_RESULTS = 4
 
 // ─── State ───────────────────────────────────────────────────────────────
 const currentStep = ref(0)
@@ -68,6 +68,157 @@ watch(selectedProfession, () => {
 
 const projects = ref<Project[]>([])
 const allSuppliers = ref<Supplier[]>([])
+
+// ─── Step 1: Procurement list preview ────────────────────────────────────
+const tenderFile = ref<File | null>(null)
+const tenderPreview = ref<TenderPreviewResult | null>(null)
+const tenderPreviewing = ref(false)
+const tenderCategory = ref('')
+const tenderListConfirming = ref(false)
+const tenderListSessionId = ref<number | null>(null)
+
+// ─── Step 3: Alignment finalization gate ─────────────────────────────────
+const alignmentFinalizing = ref(false)
+const alignmentFinalizationId = ref<number | null>(null)
+
+// ─── Step 4: Matrix save / approve gate ──────────────────────────────────
+const matrixSaving = ref(false)
+const savedMatrixVersionId = ref<number | null>(null)
+const matrixApproving = ref(false)
+const matrixApproved = ref(false)
+
+async function previewTenderList(file: File) {
+  tenderPreviewing.value = true
+  tenderPreview.value = null
+  const form = new FormData()
+  form.append('file', file)
+  try {
+    const { data } = await analysisApi.tenderListPreview(form)
+    tenderFile.value = file
+    tenderPreview.value = data
+    tenderCategory.value = data.detected_category || taskConfig.category || ''
+    message.success(`采购清单已解析：${data.total} 条采购项`)
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '解析失败'
+    message.error(detail)
+  } finally {
+    tenderPreviewing.value = false
+  }
+}
+
+async function confirmTenderListVersion() {
+  if (!tenderPreview.value) return
+  tenderListConfirming.value = true
+  try {
+    const { data } = await analysisApi.tenderListConfirm({
+      project_id: taskConfig.projectId,
+      category: tenderCategory.value || taskConfig.category,
+      file_name: tenderFile.value?.name ?? '',
+      anchors_total: tenderPreview.value.total,
+      anchors_json: tenderPreview.value.items,
+    })
+    tenderListSessionId.value = data.id
+    message.success(`采购清单版本 v${data.version} 已确认`)
+  } catch {
+    message.error('确认失败，请重试')
+  } finally {
+    tenderListConfirming.value = false
+  }
+}
+
+async function finalizeAlignment() {
+  alignmentFinalizing.value = true
+  try {
+    const { data } = await analysisApi.anchorReviewFinalize({
+      project_id: taskConfig.projectId,
+      category: tenderCategory.value || taskConfig.category,
+    })
+    alignmentFinalizationId.value = data.id
+    message.success(`对齐审核已完成 (${data.group_ids_count} 组已锁定)`)
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    message.error(detail ?? '完成对齐审核失败')
+  } finally {
+    alignmentFinalizing.value = false
+  }
+}
+
+async function saveMatrixVersion() {
+  if (alignmentFinalizationId.value === null) {
+    message.warning('请先完成对齐审核，再保存比价版本')
+    return
+  }
+  matrixSaving.value = true
+  try {
+    const { data } = await analysisApi.bidMatrixSave({
+      project_id: taskConfig.projectId,
+      category: tenderCategory.value || taskConfig.category,
+      alignment_finalization_id: alignmentFinalizationId.value,
+      tender_list_session_id: tenderListSessionId.value ?? undefined,
+      supplier_ids_json: effectiveSupplierIds.value,
+      recommended_supplier: matrixSummary.value?.recommended_supplier?.name ?? '',
+    })
+    savedMatrixVersionId.value = data.id
+    message.success(`比价版本 v${data.version} 已保存`)
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    message.error(detail ?? '保存失败')
+  } finally {
+    matrixSaving.value = false
+  }
+}
+
+async function approveMatrixVersion() {
+  if (!savedMatrixVersionId.value) return
+  matrixApproving.value = true
+  try {
+    await analysisApi.bidMatrixVersionApprove(savedMatrixVersionId.value, {})
+    matrixApproved.value = true
+    message.success('比价已审批通过')
+  } catch {
+    message.error('审批失败，请重试')
+  } finally {
+    matrixApproving.value = false
+  }
+}
+
+// ─── Step 3: Pending item gate ────────────────────────────────────────────
+const pendingGroupLoading = ref<Record<number, boolean>>({})
+const pendingItemLoading = ref<Record<number, boolean>>({})
+const matchRunning = ref(false)
+
+const allPendingActioned = computed(() => {
+  if (!anchorReviewResult.value) return false
+  return (anchorReviewResult.value.pending_items_total ?? anchorReviewResult.value.low_conf_groups.length) === 0
+})
+
+/** Item-level: confirm single pending item into matrix or exclude it */
+async function confirmPendingItem(itemId: number, action: 'align' | 'exclude') {
+  pendingItemLoading.value[itemId] = true
+  try {
+    await analysisApi.anchorReviewItemConfirm({ item_id: itemId, action })
+    await loadAnchorReview()
+    message.success(action === 'align' ? '已确认归入矩阵' : '已排除')
+  } catch {
+    message.error('操作失败，请重试')
+  } finally {
+    pendingItemLoading.value[itemId] = false
+  }
+}
+
+/** Group-level bulk: confirm entire group (all pending items → align) */
+async function confirmPendingGroup(groupId: number, action: 'confirm' | 'reject') {
+  pendingGroupLoading.value[groupId] = true
+  try {
+    await analysisApi.anchorReviewConfirm({ group_id: groupId, action })
+    await loadAnchorReview()
+    message.success(action === 'confirm' ? '已批量确认整组' : '已移除整组')
+  } catch {
+    message.error('操作失败，请重试')
+  } finally {
+    pendingGroupLoading.value[groupId] = false
+  }
+}
 
 // Per-supplier upload state for Step 2 (legacy slot mode)
 const supplierUploads = reactive<Record<number, {
@@ -118,7 +269,7 @@ const BATCH_PROGRESS_STEPS = [
   { key: 'done', label: '已识别', pct: 100 },
 ] as const
 
-// Bid matrix result for Step 3
+// Bid matrix result (Step 4)
 const matrixResult = ref<BidMatrixResult | null>(null)
 const analyzing = ref(false)
 
@@ -160,10 +311,8 @@ async function handleCreateProject() {
 }
 
 // ─── Computed ────────────────────────────────────────────────────────────
-const canProceedFromConfig = computed(
-  () => !!taskConfig.category && (taskConfig.supplierIds.length >= 1 || taskConfig.supplierIds.length === 0)
-)
-// AUDIT-FIX C1: require explicit confirmation OR "skip with history" for every supplier.
+const canProceedFromConfig = computed(() => !!taskConfig.projectId)
+
 const canProceedFromUpload = computed(() => {
   if (useBatchMode.value) {
     return batchFiles.value.filter((f) => f.confirmed).length >= 1
@@ -252,49 +401,80 @@ const savingsPercent = computed(() => {
 
 // ─── Tender List / Anchor matching ──────────────────────────────────────
 const tenderMatchSummary = ref<AnchorMatchSummary | null>(null)
+
+// ─── LLM 供应商视角填表(replace) ──────────────────────────────────────────
+const llmFilling = ref(false)
+const llmFillResult = ref<LlmFillResult | null>(null)
+const llmFillColumns = [
+  { title: '供应商', dataIndex: 'supplier_name', key: 'supplier_name' },
+  { title: '已填', dataIndex: 'quoted', key: 'quoted', align: 'right' as const },
+  { title: '聚合', dataIndex: 'aggregated', key: 'aggregated', align: 'right' as const },
+  { title: '待审', dataIndex: 'pending', key: 'pending', align: 'right' as const },
+  { title: '排除', dataIndex: 'excluded', key: 'excluded', align: 'right' as const },
+  { title: '清单外', dataIndex: 'residue', key: 'residue', align: 'right' as const },
+  { title: '清单外(高相似)', dataIndex: 'residue_high_cos', key: 'residue_high_cos', align: 'right' as const },
+  { title: '丢弃', dataIndex: 'dropped', key: 'dropped', align: 'right' as const },
+  { title: '状态', key: 'error', align: 'center' as const },
+]
+
+async function runLlmFill() {
+  if (!taskConfig.projectId) return
+  llmFilling.value = true
+  try {
+    const sids = effectiveSupplierIds.value
+    const { data } = await analysisApi.tenderListLlmFill({
+      project_id: taskConfig.projectId,
+      category: tenderCategory.value || taskConfig.category,
+      supplier_ids: sids.length ? sids : undefined,
+      tender_list_session_id: tenderListSessionId.value ?? undefined,
+      mode: 'replace',
+    })
+    llmFillResult.value = data
+    // replace 改写了对齐组 → 旧 finalization/矩阵版本已失效，必须重新 finalize
+    if (data.finalization_invalidated || alignmentFinalizationId.value !== null) {
+      alignmentFinalizationId.value = null
+      savedMatrixVersionId.value = null
+      matrixApproved.value = false
+      message.warning('LLM 填表已重写对齐结果，请重新「完成对齐审核」后再保存比价版本')
+    }
+    const delta = data.comparable_2plus - data.comparable_2plus_embedding_baseline
+    message.success(
+      `LLM 填表完成：可比≥2 ${data.comparable_2plus}/${data.anchors_total}` +
+      `（embedding 基线 ${data.comparable_2plus_embedding_baseline}，` +
+      `${delta >= 0 ? '+' : ''}${delta}）`,
+    )
+    await loadAnchorReview()
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    message.error(detail ?? 'LLM 填表失败')
+  } finally {
+    llmFilling.value = false
+  }
+}
 const tenderUploading = ref(false)
 const anchorReviewResult = ref<AnchorReviewResult | null>(null)
 const anchorReviewLoading = ref(false)
-// Per low-conf group: undefined = keep (default), true = rejected by user
-const anchorGroupRejected = ref<Record<number, boolean>>({})
 
-// Whether anchor review step is active (tender list was uploaded)
-const hasTenderStep = computed(() => tenderMatchSummary.value !== null)
-
-// ─── AI Alignment (Step 2 for multi-supplier, only when no tender list) ──
-const alignmentResult = ref<AlignmentSuggestResult | null>(null)
-const alignmentLoading = ref(false)
-// Per-group status: confirmed / rejected (default: confirmed)
-const alignmentGroupStatus = ref<Record<number, 'confirmed' | 'rejected'>>({})
-// Per-fix status: accepted / rejected (default: accepted)
-const alignmentFixStatus = ref<Record<number, boolean>>({})
-
-// Whether alignment step applies (multi-supplier only, no tender list)
-const needsAlignmentStep = computed(() => !hasTenderStep.value && effectiveSupplierIds.value.length >= 2)
-
-// Effective step count based on mode
-const STEP_RESULTS = computed(() => (hasTenderStep.value || needsAlignmentStep.value) ? 3 : 2)
-
-// ─── Tender list upload & anchor review ──────────────────────────────────
-async function uploadTenderList(file: File) {
-  if (!taskConfig.projectId) {
-    message.warning('请先选择项目再上传招标清单')
-    return
-  }
+// Run tender list matching (called when entering Step 3)
+async function runTenderMatch(): Promise<boolean> {
+  if (!tenderFile.value || !taskConfig.projectId) return false
   tenderUploading.value = true
   const form = new FormData()
-  form.append('file', file)
+  form.append('file', tenderFile.value)
   form.append('project_id', String(taskConfig.projectId))
-  form.append('category', taskConfig.category)
+  const cat = tenderCategory.value || taskConfig.category
+  if (cat) form.append('category', cat)
   const sids = effectiveSupplierIds.value
   if (sids.length) form.append('supplier_ids', sids.join(','))
   try {
     const { data } = await analysisApi.tenderListMatch(form)
     tenderMatchSummary.value = data
-    message.success(`招标清单匹配完成：${data.comparable_2plus}/${data.anchors_total} 行可比价，三方 ${data.three_way} 行`)
+    if (cat && !taskConfig.category) taskConfig.category = cat
+    return true
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '招标清单匹配失败'
     message.error(detail)
+    return false
   } finally {
     tenderUploading.value = false
   }
@@ -303,11 +483,10 @@ async function uploadTenderList(file: File) {
 async function loadAnchorReview() {
   if (!taskConfig.projectId) return
   anchorReviewLoading.value = true
-  anchorGroupRejected.value = {}
   try {
     const { data } = await analysisApi.anchorReview({
       project_id: taskConfig.projectId,
-      category: taskConfig.category,
+      category: tenderCategory.value || taskConfig.category,
     })
     anchorReviewResult.value = data
   } catch (e: unknown) {
@@ -317,120 +496,16 @@ async function loadAnchorReview() {
   }
 }
 
-async function applyAnchorAndRunMatrix() {
-  // Delete groups the user explicitly rejected
-  const rejectIds = Object.entries(anchorGroupRejected.value)
-    .filter(([, v]) => v)
-    .map(([id]) => Number(id))
-  if (rejectIds.length > 0) {
-    for (const gid of rejectIds) {
-      try {
-        await analysisApi.alignmentDeleteGroup(gid)
-      } catch {
-        // non-fatal
-      }
-    }
-    message.info(`已删除 ${rejectIds.length} 个低置信组`)
+async function runTenderMatchAndReview() {
+  matchRunning.value = true
+  const ok = await runTenderMatch()
+  if (!ok) {
+    currentStep.value = 2
+    matchRunning.value = false
+    return
   }
-  runMatrix()
-}
-
-async function runAlignmentSuggest() {
-  alignmentLoading.value = true
-  alignmentResult.value = null
-  alignmentGroupStatus.value = {}
-  alignmentFixStatus.value = {}
-  try {
-    const sids = effectiveSupplierIds.value
-    // Mode 2: let backend query quote rows from DB
-    const { data } = await analysisApi.alignmentSuggest({
-      project_id: taskConfig.projectId,
-      category: taskConfig.category,
-      supplier_ids: sids,
-      rows: [],
-    })
-    alignmentResult.value = data
-
-    if (data.error) {
-      message.error(`AI 分析失败：${data.error}`)
-    } else {
-      // Default: all groups confirmed, all fixes accepted
-      data.groups.forEach((_: AlignmentGroup, i: number) => { alignmentGroupStatus.value[i] = 'confirmed' })
-      data.field_fixes.forEach((_: AlignmentFieldFix, i: number) => { alignmentFixStatus.value[i] = true })
-      const gn = data.groups.length
-      const fn = data.field_fixes.length
-      if (gn > 0 || fn > 0) {
-        message.success(`AI 发现 ${gn} 组对齐建议、${fn} 个字段纠错`)
-      } else {
-        message.info('AI 未发现需要对齐的行，可直接进入比价')
-      }
-    }
-  } catch (e: unknown) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'AI 对齐分析失败'
-    message.error(detail)
-  } finally {
-    alignmentLoading.value = false
-  }
-}
-
-async function applyAlignmentAndRunMatrix() {
-  // Apply confirmed alignment groups + accepted fixes
-  if (alignmentResult.value) {
-    const groups: AlignmentApplyGroup[] = []
-    const fixes: AlignmentApplyFieldFix[] = []
-
-    for (const [iStr, status] of Object.entries(alignmentGroupStatus.value)) {
-      const i = Number(iStr)
-      const g = alignmentResult.value.groups[i]
-      if (!g) continue
-      groups.push({
-        suggested_name: g.suggested_name,
-        suggested_spec: g.suggested_spec,
-        confidence: g.confidence,
-        reason: g.reason,
-        status,
-        items: g.items.map(it => ({
-          quote_id: it.quote_id,
-          supplier_id: it.supplier_id,
-          action: it.action,
-          spec_note: it.spec_note,
-          name_note: it.name_note,
-        })),
-      })
-    }
-
-    for (const [iStr, accepted] of Object.entries(alignmentFixStatus.value)) {
-      if (!accepted) continue
-      const i = Number(iStr)
-      const f = alignmentResult.value.field_fixes[i]
-      if (!f) continue
-      fixes.push({
-        quote_id: f.quote_id,
-        field: f.field,
-        new_value: f.suggested,
-      })
-    }
-
-    if (groups.length > 0 || fixes.length > 0) {
-      try {
-        await analysisApi.alignmentApply({
-          project_id: taskConfig.projectId,
-          category: taskConfig.category,
-          groups,
-          field_fixes: fixes,
-        })
-      } catch (e: unknown) {
-        const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '保存对齐结果失败'
-        message.error(detail)
-      }
-    }
-  }
-  runMatrix()
-}
-
-function skipAlignment() {
-  currentStep.value = STEP_RESULTS.value
-  runMatrix()
+  await loadAnchorReview()
+  matchRunning.value = false
 }
 
 // Single-supplier mode: compare against history instead of across suppliers
@@ -490,49 +565,48 @@ watch(() => taskConfig.supplierIds, (ids, prev) => {
 function goNext() {
   if (currentStep.value === 0) {
     if (!canProceedFromConfig.value) {
-      message.warning('请选择品类（供应商可选）')
+      message.warning('请先选择项目')
       return
     }
     currentStep.value = 1
   } else if (currentStep.value === 1) {
-    if (!canProceedFromUpload.value) {
-      message.warning('请为每家供应商点击「校对入库」或「使用历史数据」')
+    if (!tenderPreview.value) {
+      message.warning('请先上传采购清单')
       return
     }
-    if (hasTenderStep.value) {
-      // Anchor path: go to anchor review
-      currentStep.value = 2
-      loadAnchorReview()
-    } else if (needsAlignmentStep.value) {
-      // Degraded path: go to AI alignment
-      currentStep.value = 2
-      runAlignmentSuggest()
-    } else {
-      // Single-supplier: skip alignment, go straight to results
-      currentStep.value = STEP_RESULTS.value
-      runMatrix()
+    if (!tenderCategory.value) {
+      message.warning('请确认品类')
+      return
     }
-  } else if (currentStep.value === 2 && hasTenderStep.value) {
-    // From anchor review → results
+    if (!taskConfig.category) taskConfig.category = tenderCategory.value
+    currentStep.value = 2
+  } else if (currentStep.value === 2) {
+    if (!canProceedFromUpload.value) {
+      message.warning('请为每家供应商点击「校对入库」')
+      return
+    }
     currentStep.value = 3
-    applyAnchorAndRunMatrix()
-  } else if (currentStep.value === 2 && needsAlignmentStep.value) {
-    // From AI alignment → results
-    currentStep.value = 3
-    applyAlignmentAndRunMatrix()
+    runTenderMatchAndReview()
+  } else if (currentStep.value === 3) {
+    // v2.5: pending no longer blocks matrix generation — pending cells appear in matrix with orange status
+    // Only warn (not block) so user can proceed to see the full anchor matrix
+    if (!allPendingActioned.value) {
+      const n = anchorReviewResult.value?.pending_items_total ?? anchorReviewResult.value?.low_conf_groups.length ?? 0
+      message.warning(`仍有 ${n} 条待确认项，矩阵中以橙色"待确认"显示，不计入合计和推荐`)
+    }
+    currentStep.value = STEP_RESULTS
+    runMatrix()
   }
 }
 
 function goBack() {
   if (currentStep.value > 0) {
-    // AUDIT-FIX M3: clear stale matrix when stepping back from results
-    if (currentStep.value === STEP_RESULTS.value) {
+    if (currentStep.value === STEP_RESULTS) {
       matrixResult.value = null
     }
-    if (currentStep.value === 2 && hasTenderStep.value) {
+    if (currentStep.value === 3) {
       anchorReviewResult.value = null
-    } else if (currentStep.value === 2 && needsAlignmentStep.value) {
-      alignmentResult.value = null
+      tenderMatchSummary.value = null
     }
     currentStep.value -= 1
   }
@@ -588,9 +662,10 @@ function skipSupplier(supplierId: number) {
 }
 
 // ─── Batch upload handlers ──────────────────────────────────────────────
-function isExcelFile(file: File) {
-  return /\.(xlsx?|xls)$/i.test(file.name)
-}
+// NOTE: Excel/CSV files now go through the same intakeApi.upload → ExtractionJob →
+// batch-confirm pipeline as PDFs.  handleExcelBatchFile (legacy import_service fork)
+// has been removed.  quoteApi.import / import_service are still used by the
+// materials-library import screen; this compare flow no longer forks to them.
 
 function handleBatchFile(file: File) {
   if (!file) return
@@ -598,11 +673,6 @@ function handleBatchFile(file: File) {
     (entry) => entry.filename === file.name && !entry.confirmed,
   )
   if (duplicatePending) return
-
-  if (isExcelFile(file)) {
-    handleExcelBatchFile(file)
-    return
-  }
 
     const entry: BatchFileEntry = {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -623,87 +693,6 @@ function handleBatchFile(file: File) {
     batchFiles.value.push(entry)
     const reactiveEntry = batchFiles.value[batchFiles.value.length - 1]
     uploadBatchFile(reactiveEntry, file)
-}
-
-async function handleExcelBatchFile(file: File) {
-  const entry: BatchFileEntry = {
-    id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    filename: file.name,
-    status: 'uploading',
-    stage: '解析 Excel',
-    progressPct: 30,
-    uploadPct: 0,
-    jobId: null,
-    detectedSupplierName: '',
-    matchedSupplierId: null,
-    items: [],
-    confirmedSupplierId: null,
-    confirmed: false,
-    error: '',
-    pollTimer: null,
-  }
-  batchFiles.value.push(entry)
-
-  const form = new FormData()
-  form.append('file', file)
-  form.append('category', taskConfig.category)
-  if (taskConfig.projectId) {
-    form.append('project_id', String(taskConfig.projectId))
-    const pName = projects.value.find((p) => p.id === taskConfig.projectId)?.name
-    if (pName) form.append('project_name', pName)
-  }
-  if (taskConfig.bidStatus) {
-    form.append('bid_status', taskConfig.bidStatus)
-  }
-  try {
-    const { data } = await quoteApi.import(form)
-    const result = data as ImportResult
-    entry.status = 'done'
-    entry.stage = '已导入'
-    entry.progressPct = 100
-    entry.confirmed = true
-
-    if (result.supplier_ids?.length >= 1) {
-      entry.confirmedSupplierId = result.supplier_ids[0]
-      const sup = allSuppliers.value.find((s) => s.id === result.supplier_ids[0])
-      entry.detectedSupplierName = sup?.name || ''
-    }
-    if (result.supplier_ids?.length > 1) {
-      await fetchSuppliers()
-      for (let i = 1; i < result.supplier_ids.length; i++) {
-        const sid = result.supplier_ids[i]
-        const sup = allSuppliers.value.find((s) => s.id === sid)
-        batchFiles.value.push({
-          id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          filename: `${file.name} (${sup?.name || `供应商${sid}`})`,
-          status: 'done',
-          stage: '已导入',
-          progressPct: 100,
-          uploadPct: 100,
-          jobId: null,
-          detectedSupplierName: sup?.name || '',
-          matchedSupplierId: sid,
-          items: [],
-          confirmedSupplierId: sid,
-          confirmed: true,
-          error: '',
-          pollTimer: null,
-        })
-      }
-    }
-    message.success(`Excel 导入完成：${result.imported} 条报价，${result.supplier_ids?.length || 0} 家供应商`)
-  } catch (e) {
-    entry.status = 'failed'
-    entry.stage = '导入失败'
-    const errResp = (e as any)?.response?.data?.detail
-    if (typeof errResp === 'string') {
-      entry.error = errResp
-    } else if (errResp?.errors?.[0]?.reason) {
-      entry.error = errResp.errors[0].reason
-    } else {
-      entry.error = (e as Error).message || '导入失败'
-    }
-  }
 }
 
 async function uploadBatchFile(entry: BatchFileEntry, file: File) {
@@ -880,7 +869,7 @@ onBeforeUnmount(() => {
   }
 })
 
-// ─── Step 3: run bid-matrix ──────────────────────────────────────────────
+// ─── Step 4: run bid-matrix ──────────────────────────────────────────────
 async function runMatrix() {
   // Gather supplier IDs: from pre-selected OR from batch confirmed entries
   const sids = useBatchMode.value
@@ -896,7 +885,7 @@ async function runMatrix() {
     const { data } = await analysisApi.bidMatrix({
       project_id: taskConfig.projectId,
       supplier_ids: sids,
-      category: taskConfig.category || undefined,
+      category: tenderCategory.value || taskConfig.category || undefined,
     })
     matrixResult.value = data
     if ((data.rows ?? []).length === 0) {
@@ -926,17 +915,17 @@ async function runMatrix() {
 
     <!-- Steps indicator -->
     <a-steps :current="currentStep" style="margin-bottom:20px">
-      <a-step title="配置任务" description="项目 + 品类 + 供应商" />
-      <a-step title="录入报价" description="上传采购清单 + 供应商报价" />
-      <a-step v-if="hasTenderStep" title="锚点复核" description="审核低置信匹配与残差" />
-      <a-step v-else-if="needsAlignmentStep" title="AI 对齐复核" description="智能匹配同一报价行" />
-      <a-step title="比价结果" :description="isSingleSupplierMode ? '报价 vs 历史价格对比' : '横向矩阵 + 推荐供应商'" />
+      <a-step title="配置任务" description="选项目 + 供应商" />
+      <a-step title="采购清单" description="上传 Excel，预览内容" />
+      <a-step title="供应商报价" description="PDF / Excel 批量上传" />
+      <a-step title="对齐核查" description="确认低置信匹配项" />
+      <a-step title="比价矩阵" :description="isSingleSupplierMode ? '报价 vs 历史价格' : '横向对比 + 推荐'" />
     </a-steps>
 
     <!-- Step 0: Configure -->
     <a-card v-if="currentStep === 0" :body-style="{ padding: '20px' }">
       <a-form layout="vertical">
-        <a-form-item label="项目（可选；不选则跨项目比价）">
+        <a-form-item label="项目（必选）" required>
           <a-select
             v-model:value="taskConfig.projectId"
             placeholder="选择项目"
@@ -960,22 +949,6 @@ async function runMatrix() {
                 <PlusOutlined /> 新建项目
               </div>
             </template>
-          </a-select>
-        </a-form-item>
-
-        <a-form-item label="专业" required>
-          <a-select v-model:value="selectedProfession" placeholder="先选专业" style="width:180px">
-            <a-select-option v-for="p in PROFESSIONS" :key="p" :value="p">{{ p }}</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="品类（必选）" required>
-          <a-select
-            v-model:value="taskConfig.category"
-            placeholder="再选品类"
-            style="width:280px"
-            :disabled="!selectedProfession"
-          >
-            <a-select-option v-for="c in filteredCategories" :key="c" :value="c">{{ c }}</a-select-option>
           </a-select>
         </a-form-item>
 
@@ -1019,77 +992,110 @@ async function runMatrix() {
       </a-form>
     </a-card>
 
-    <!-- Step 1: Upload (batch mode OR per-supplier mode) -->
+    <!-- Step 1: Upload Procurement List -->
     <a-card v-else-if="currentStep === 1" :body-style="{ padding: '20px' }">
-
-      <!-- ① 采购清单（始终显示在顶部） -->
-      <div class="tender-upload" style="margin-bottom:16px">
-        <div class="tender-upload__header">
-          <FileExcelOutlined style="color:#52c41a;font-size:15px;flex-shrink:0" />
-          <span class="tender-upload__title">采购清单（推荐先上传）</span>
-          <span class="tender-upload__hint">上传后按锚点自动归一报价，替代 AI 对齐步骤，覆盖率从 30% 提升至 64%+</span>
-        </div>
-        <div v-if="!tenderMatchSummary" class="tender-upload__action">
-          <a-upload
-            accept=".xlsx,.xls"
-            :show-upload-list="false"
-            :before-upload="(f: File) => { uploadTenderList(f); return false; }"
-          >
-            <a-button :loading="tenderUploading">
-              <template #icon><UploadOutlined /></template>
-              上传采购清单 .xlsx
-            </a-button>
-          </a-upload>
-          <span style="font-size:12px;color:rgba(0,0,0,0.4);margin-left:8px">跳过则上传供应商报价后使用 AI 对齐（多供应商）或直接比价（单供应商）</span>
-        </div>
-        <div v-else class="tender-upload__result">
-          <a-tag color="success" style="font-size:13px;padding:2px 10px">
-            <template #icon><CheckCircleOutlined /></template>
-            采购清单已匹配
-          </a-tag>
-          <div class="tender-stats">
-            <span class="tender-stat">
-              <strong>{{ tenderMatchSummary.matched_quotes }}</strong>/{{ tenderMatchSummary.total_quotes }}
-              <em>报价匹配</em>
-            </span>
-            <span class="tender-stat-sep">·</span>
-            <span class="tender-stat">
-              <strong>{{ tenderMatchSummary.comparable_2plus }}</strong>/{{ tenderMatchSummary.anchors_total }}
-              <em>行可比价</em>
-            </span>
-            <span class="tender-stat-sep">·</span>
-            <span class="tender-stat">
-              <strong>{{ tenderMatchSummary.three_way }}</strong>
-              <em>三方</em>
-            </span>
-            <template v-if="tenderMatchSummary.low_conf > 0">
-              <span class="tender-stat-sep">·</span>
-              <span class="tender-stat tender-stat--warn">
-                <WarningOutlined />
-                <strong>{{ tenderMatchSummary.low_conf }}</strong>
-                <em>低置信需复核</em>
-              </span>
-            </template>
+      <div v-if="!tenderPreview">
+        <div style="margin-bottom:20px">
+          <h3 style="margin:0 0 6px;font-size:15px;font-weight:600">上传采购清单</h3>
+          <div style="font-size:12px;color:rgba(0,0,0,0.45)">
+            上传工程量清单（.xlsx），系统解析品名/规格/数量，作为比价骨架
           </div>
-          <a-button size="small" type="link" style="padding:0;margin-left:8px" @click="tenderMatchSummary = null; anchorReviewResult = null">
-            重新上传
-          </a-button>
+        </div>
+        <a-upload-dragger
+          accept=".xlsx,.xls"
+          :show-upload-list="false"
+          :before-upload="(f: File) => { previewTenderList(f); return false; }"
+        >
+          <p class="ant-upload-drag-icon">
+            <FileExcelOutlined style="color:#52c41a;font-size:36px" />
+          </p>
+          <p class="ant-upload-text">点击或拖入采购清单 Excel</p>
+          <p class="ant-upload-hint">支持 .xlsx / .xls · 自动识别品名、规格、数量、单位</p>
+        </a-upload-dragger>
+        <div v-if="tenderPreviewing" style="text-align:center;padding:32px 0">
+          <a-spin size="large" />
+          <div style="margin-top:12px;color:#666">正在解析...</div>
         </div>
       </div>
-      <a-divider style="margin:0 0 16px" />
 
-      <!-- ② 供应商报价文件 -->
+      <div v-else>
+        <!-- Detected category + edit -->
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px;background:#f6f8fa;border-radius:6px">
+          <FileExcelOutlined style="color:#52c41a;font-size:18px;flex-shrink:0" />
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:14px">{{ tenderFile?.name }}</div>
+            <div style="font-size:12px;color:rgba(0,0,0,0.45);margin-top:2px">
+              共 {{ tenderPreview.total }} 条采购项
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:rgba(0,0,0,0.55);white-space:nowrap">品类：</span>
+            <a-select
+              v-model:value="tenderCategory"
+              style="width:160px"
+              placeholder="请选择品类"
+              show-search
+              allow-clear
+            >
+              <a-select-option v-for="c in Object.values(PROFESSION_CATEGORIES).flat()" :key="c" :value="c">{{ c }}</a-select-option>
+            </a-select>
+          </div>
+          <a-button size="small" type="link" @click="tenderPreview = null; tenderFile = null">重新上传</a-button>
+        </div>
+
+        <!-- Preview table -->
+        <a-table
+          :data-source="tenderPreview.items"
+          :row-key="(r: Record<string,unknown>) => String(r.seq)"
+          size="small"
+          :pagination="{ pageSize: 10, size: 'small' }"
+          :scroll="{ x: 600 }"
+          :columns="[
+            { title: '序号', dataIndex: 'seq', width: 60 },
+            { title: '品名', dataIndex: 'name', ellipsis: true },
+            { title: '规格', dataIndex: 'spec', width: 200, ellipsis: true },
+            { title: '单位', dataIndex: 'unit', width: 70 },
+            { title: '数量', dataIndex: 'qty', width: 80,
+              customRender: ({ text }: { text: number | null }) => text ?? '—' },
+          ]"
+        />
+
+        <!-- Confirm tender list version -->
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+          <a-button
+            type="primary"
+            ghost
+            :loading="tenderListConfirming"
+            :disabled="tenderListConfirming"
+            @click="confirmTenderListVersion"
+          >
+            确认采购清单版本
+          </a-button>
+          <a-tag v-if="tenderListSessionId" color="green">已确认 (session #{{ tenderListSessionId }})</a-tag>
+        </div>
+      </div>
+    </a-card>
+
+    <!-- Step 2: Upload Supplier Quotes -->
+    <a-card v-else-if="currentStep === 2" :body-style="{ padding: '20px' }">
+      <!-- Context bar -->
+      <div style="margin-bottom:16px;padding:10px 12px;background:#f6f8fa;border-radius:6px;display:flex;gap:10px;align-items:center;font-size:12px;color:rgba(0,0,0,0.55)">
+        <FileExcelOutlined style="color:#52c41a" />
+        <span>采购清单：<strong>{{ tenderFile?.name }}</strong>（{{ tenderPreview?.total ?? 0 }} 项）</span>
+        <span v-if="tenderCategory" style="margin-left:4px">· 品类：<strong>{{ tenderCategory }}</strong></span>
+      </div>
+
       <!-- Batch mode: no suppliers pre-selected -->
       <template v-if="useBatchMode">
         <a-upload-dragger
           :multiple="true"
-          accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls"
+          accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv"
           :show-upload-list="false"
           :before-upload="(file: File) => { handleBatchFile(file); return false; }"
         >
           <p class="ant-upload-drag-icon"><CloudUploadOutlined /></p>
           <p class="ant-upload-text">拖入所有供应商的报价文件</p>
-          <p class="ant-upload-hint">支持 PDF / 图片（OCR 识别）和 Excel（直接解析）· 多文件同时上传</p>
+          <p class="ant-upload-hint">支持 PDF / 图片（OCR 识别）、Excel / CSV（直接解析）· 多文件同时上传</p>
         </a-upload-dragger>
 
         <div v-if="batchProgress && batchProgress.total > 1" class="batch-overall">
@@ -1242,19 +1248,21 @@ async function runMatrix() {
       </template>
     </a-card>
 
-    <!-- Step: Anchor Review (when tender list uploaded) -->
-    <a-card v-else-if="currentStep === 2 && hasTenderStep" :body-style="{ padding: '20px' }">
-      <!-- Loading -->
-      <div v-if="anchorReviewLoading" style="text-align:center;padding:48px 0">
+    <!-- Step 3: Alignment Gate -->
+    <a-card v-else-if="currentStep === 3" :body-style="{ padding: '20px' }">
+      <!-- Matching in progress -->
+      <div v-if="matchRunning || tenderUploading" style="text-align:center;padding:48px 0">
         <a-spin size="large" />
-        <div style="margin-top:14px;color:#666">正在加载复核数据...</div>
+        <div style="margin-top:14px;color:#666">正在运行嵌入匹配，请稍候...</div>
+        <div style="margin-top:4px;font-size:12px;color:#999">通常 15~60 秒</div>
       </div>
 
+      <!-- Review loaded -->
       <template v-else-if="anchorReviewResult && tenderMatchSummary">
         <!-- ① 匹配总览 -->
         <div class="anchor-summary">
           <div class="anchor-summary__title">
-            <AimOutlined style="color:#1677ff" /> 锚点匹配总览
+            <AimOutlined style="color:#1677ff" /> 对齐核查
           </div>
           <div class="anchor-summary__stats">
             <div class="anchor-stat">
@@ -1263,7 +1271,7 @@ async function runMatrix() {
             </div>
             <div class="anchor-stat">
               <div class="anchor-stat__value">{{ tenderMatchSummary.anchors_covered }}<span class="anchor-stat__denom">/{{ tenderMatchSummary.anchors_total }}</span></div>
-              <div class="anchor-stat__label">锚点有报价</div>
+              <div class="anchor-stat__label">采购项有报价</div>
             </div>
             <div class="anchor-stat anchor-stat--highlight">
               <div class="anchor-stat__value">{{ tenderMatchSummary.comparable_2plus }}</div>
@@ -1273,78 +1281,154 @@ async function runMatrix() {
               <div class="anchor-stat__value">{{ tenderMatchSummary.three_way }}</div>
               <div class="anchor-stat__label">三方齐全</div>
             </div>
-            <div class="anchor-stat" :class="tenderMatchSummary.low_conf > 0 ? 'anchor-stat--warn' : 'anchor-stat--ok'">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.low_conf }}</div>
-              <div class="anchor-stat__label">低置信组</div>
+            <div class="anchor-stat" :class="(anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length) > 0 ? 'anchor-stat--warn' : 'anchor-stat--ok'">
+              <div class="anchor-stat__value">{{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }}</div>
+              <div class="anchor-stat__label">待确认项</div>
             </div>
             <div class="anchor-stat" :class="tenderMatchSummary.residue > 0 ? 'anchor-stat--warn' : 'anchor-stat--ok'">
               <div class="anchor-stat__value">{{ tenderMatchSummary.residue }}</div>
-              <div class="anchor-stat__label">未匹配报价</div>
+              <div class="anchor-stat__label">清单外报价</div>
+            </div>
+          </div>
+          <!-- LLM 供应商视角填表（replace） -->
+          <div class="llm-fill-bar">
+            <a-button type="primary" ghost :loading="llmFilling" @click="runLlmFill">
+              <BulbOutlined /> LLM 智能填表（供应商视角）
+            </a-button>
+            <span class="llm-fill-bar__hint">
+              让每家供应商代理基于采购清单填表，突破纯 embedding 的可比率天花板；价格仍以真实报价为准
+            </span>
+          </div>
+        </div>
+
+        <!-- LLM 填表 A/B 结果 -->
+        <div v-if="llmFillResult" class="llm-fill-result">
+          <div class="llm-fill-result__title">
+            <BulbOutlined style="color:#722ed1" /> LLM 填表结果
+            <a-tag :color="llmFillResult.comparable_2plus >= llmFillResult.comparable_2plus_embedding_baseline ? 'green' : 'red'">
+              可比≥2：{{ llmFillResult.comparable_2plus }}/{{ llmFillResult.anchors_total }}
+              （embedding 基线 {{ llmFillResult.comparable_2plus_embedding_baseline }}，
+              {{ llmFillResult.comparable_2plus - llmFillResult.comparable_2plus_embedding_baseline >= 0 ? '+' : '' }}{{ llmFillResult.comparable_2plus - llmFillResult.comparable_2plus_embedding_baseline }}）
+            </a-tag>
+            <a-tag v-if="llmFillResult.finalization_invalidated" color="orange">需重新完成对齐审核</a-tag>
+          </div>
+          <a-table
+            :data-source="llmFillResult.per_supplier_fill"
+            :columns="llmFillColumns"
+            :pagination="false"
+            size="small"
+            row-key="supplier_id"
+            style="margin-top:8px"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'error'">
+                <a-tag v-if="record.error" color="red">{{ record.error }}</a-tag>
+                <span v-else style="color:#52c41a">✓</span>
+              </template>
+            </template>
+          </a-table>
+        </div>
+
+        <!-- ② 待确认组（门禁）-->
+        <div v-if="anchorReviewResult.low_conf_groups.length > 0" style="margin-top:20px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+            <WarningOutlined style="color:#faad14;font-size:15px" />
+            <h4 style="margin:0;font-size:14px;font-weight:600">
+              待确认（{{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }} 条）
+            </h4>
+            <a-tag color="orange">逐条处理后才能生成矩阵</a-tag>
+            <span style="font-size:12px;color:rgba(0,0,0,0.4)">置信度 &lt; 70%，请判断是否纳入比价</span>
+          </div>
+          <div class="pending-gate-list">
+            <div
+              v-for="g in anchorReviewResult.low_conf_groups"
+              :key="g.group_id"
+              class="pending-gate-item"
+            >
+              <!-- Group header -->
+              <div class="pending-gate-item__head">
+                <a-tag :color="(g.confidence ?? 0) < 0.65 ? 'red' : 'orange'" style="flex-shrink:0">
+                  {{ ((g.confidence ?? 0) * 100).toFixed(0) }}%
+                </a-tag>
+                <div class="pending-gate-item__desc">
+                  <span class="pending-gate-item__anchor">
+                    采购项：<strong>{{ g.anchor_name }}</strong> {{ g.anchor_spec }}
+                  </span>
+                  <span style="font-size:11px;color:rgba(0,0,0,0.4);margin-left:8px">
+                    {{ g.pending_count }} 条待确认 / {{ g.align_count }} 条已纳入
+                  </span>
+                </div>
+                <!-- Group-level bulk (secondary) -->
+                <a-space style="flex-shrink:0">
+                  <a-button
+                    size="small"
+                    :loading="pendingGroupLoading[g.group_id]"
+                    @click="confirmPendingGroup(g.group_id, 'confirm')"
+                  >
+                    批量确认整组
+                  </a-button>
+                  <a-button
+                    danger size="small"
+                    :loading="pendingGroupLoading[g.group_id]"
+                    @click="confirmPendingGroup(g.group_id, 'reject')"
+                  >
+                    移除整组
+                  </a-button>
+                </a-space>
+              </div>
+              <!-- Item-level rows -->
+              <div style="margin-top:8px;padding-left:16px">
+                <div
+                  v-for="it in g.items"
+                  :key="it.item_id"
+                  style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f0f0f0"
+                >
+                  <a-tag
+                    :color="it.action === 'pending' ? 'orange' : it.action === 'align' ? 'green' : 'default'"
+                    style="font-size:10px;min-width:44px;text-align:center"
+                  >
+                    {{ it.action === 'pending' ? '待确认' : it.action === 'align' ? '已纳入' : '已排除' }}
+                  </a-tag>
+                  <a-tag
+                    :color="(it.cosine ?? 0) >= 0.7 ? 'green' : (it.cosine ?? 0) >= 0.6 ? 'orange' : 'red'"
+                    style="font-size:10px"
+                  >
+                    {{ it.cosine != null ? (it.cosine * 100).toFixed(0) + '%' : '-' }}
+                  </a-tag>
+                  <span style="flex:1;font-size:12px">
+                    <strong>{{ it.supplier_name || `供应商#${it.supplier_id}` }}</strong>
+                    → {{ it.material_name }}
+                    <span v-if="it.spec" style="color:rgba(0,0,0,0.4)"> {{ it.spec }}</span>
+                  </span>
+                  <a-space v-if="it.action === 'pending'" style="flex-shrink:0">
+                    <a-button
+                      type="primary" size="small"
+                      :loading="pendingItemLoading[it.item_id]"
+                      @click="confirmPendingItem(it.item_id, 'align')"
+                    >
+                      纳入
+                    </a-button>
+                    <a-button
+                      danger size="small"
+                      :loading="pendingItemLoading[it.item_id]"
+                      @click="confirmPendingItem(it.item_id, 'exclude')"
+                    >
+                      排除
+                    </a-button>
+                  </a-space>
+                  <span v-else style="font-size:11px;color:rgba(0,0,0,0.3);flex-shrink:0">已处理</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-
-        <!-- ② 低置信组 -->
-        <div v-if="anchorReviewResult.low_conf_groups.length > 0" style="margin-top:20px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <WarningOutlined style="color:#faad14;font-size:15px" />
-            <h4 style="margin:0;font-size:14px;font-weight:600">低置信匹配 — 建议人工核对（{{ anchorReviewResult.low_conf_groups.length }} 组）</h4>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">系统将系数 &lt; 0.70 的匹配标记在此；确认无误后直接跳过，有疑问可点「拒绝」移除</span>
-          </div>
-          <a-collapse ghost>
-            <a-collapse-panel
-              v-for="g in anchorReviewResult.low_conf_groups"
-              :key="g.group_id"
-            >
-              <template #header>
-                <div class="lc-group-header">
-                  <a-tag
-                    :color="g.confidence < 0.65 ? 'red' : 'orange'"
-                    style="font-size:12px;padding:0 6px"
-                  >conf {{ (g.confidence * 100).toFixed(0) }}%</a-tag>
-                  <span class="lc-group-name">{{ g.anchor_name }}</span>
-                  <span class="lc-group-spec">{{ g.anchor_spec }}</span>
-                </div>
-              </template>
-              <template #extra>
-                <div @click.stop>
-                  <a-switch
-                    :checked="!anchorGroupRejected[g.group_id]"
-                    checked-children="保留"
-                    un-checked-children="拒绝"
-                    @change="(v: boolean) => anchorGroupRejected[g.group_id] = !v"
-                  />
-                </div>
-              </template>
-
-              <a-table
-                :data-source="g.items"
-                :row-key="(r: Record<string,unknown>) => String(r.quote_id)"
-                :pagination="false"
-                size="small"
-                :columns="[
-                  { title: '供应商', dataIndex: 'supplier_name', width: 180 },
-                  { title: 'OCR识别物料名', dataIndex: 'material_name', ellipsis: true },
-                  { title: '规格', dataIndex: 'spec', width: 160 },
-                  { title: '相似度', dataIndex: 'cosine', width: 80,
-                    customRender: ({ text }: { text: number }) =>
-                      `${(text * 100).toFixed(0)}%` },
-                ]"
-              >
-                <template #bodyCell="{ column, record }">
-                  <template v-if="column.dataIndex === 'cosine'">
-                    <a-tag :color="record.cosine >= 0.7 ? 'green' : record.cosine >= 0.6 ? 'orange' : 'red'" style="min-width:44px;text-align:center">
-                      {{ (record.cosine * 100).toFixed(0) }}%
-                    </a-tag>
-                  </template>
-                  <template v-else-if="column.dataIndex === 'material_name'">
-                    <span :title="record.material_name" style="font-size:13px">{{ record.material_name }}</span>
-                  </template>
-                </template>
-              </a-table>
-            </a-collapse-panel>
-          </a-collapse>
-        </div>
+        <a-alert
+          v-else
+          type="success"
+          show-icon
+          message="所有待确认项已处理，可生成比价矩阵"
+          style="margin-top:16px"
+        />
 
         <!-- ③ 已确认匹配组 -->
         <div style="margin-top:20px">
@@ -1353,7 +1437,7 @@ async function runMatrix() {
             <h4 style="margin:0;font-size:14px;font-weight:600">
               已匹配（{{ anchorReviewResult.confirmed_groups?.length ?? 0 }} 组）
             </h4>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">置信度 ≥ 0.70，系统已自动归一；可展开查看明细</span>
+            <span style="font-size:12px;color:rgba(0,0,0,0.4)">置信度 ≥ 0.70，自动归一；可展开查看明细</span>
           </div>
           <a-collapse ghost>
             <a-collapse-panel
@@ -1365,7 +1449,7 @@ async function runMatrix() {
                   <a-tag
                     :color="g.confidence >= 0.90 ? 'green' : 'cyan'"
                     style="font-size:12px;padding:0 6px"
-                  >conf {{ (g.confidence * 100).toFixed(0) }}%</a-tag>
+                  >{{ (g.confidence * 100).toFixed(0) }}%</a-tag>
                   <span class="lc-group-name">{{ g.anchor_name }}</span>
                   <span class="lc-group-spec">{{ g.anchor_spec }}</span>
                   <a-tag style="margin-left:auto;font-size:11px" color="default">{{ g.items.length }} 家</a-tag>
@@ -1377,166 +1461,56 @@ async function runMatrix() {
                 size="small"
                 :pagination="false"
                 :columns="[
-                  { title: '供应商', dataIndex: 'supplier_name', width: 180 },
-                  { title: 'OCR识别物料名', dataIndex: 'material_name', ellipsis: true },
+                  { title: '供应商', dataIndex: 'supplier_name', width: 180,
+                    customRender: ({ text, record }: { text: string; record: Record<string,unknown> }) =>
+                      text || `供应商#${record.supplier_id}` },
+                  { title: '物料名', dataIndex: 'material_name', ellipsis: true },
                   { title: '规格', dataIndex: 'spec', width: 160 },
-                  { title: '相似度', dataIndex: 'cosine', width: 90 },
+                  { title: '相似度', dataIndex: 'cosine', width: 80,
+                    customRender: ({ text }: { text: number }) => `${(text * 100).toFixed(0)}%` },
                 ]"
-              >
-                <template #bodyCell="{ column, record }">
-                  <template v-if="column.dataIndex === 'cosine'">
-                    <a-tag :color="record.cosine >= 0.90 ? 'green' : 'cyan'" style="font-size:11px">
-                      {{ (record.cosine * 100).toFixed(0) }}%
-                    </a-tag>
-                  </template>
-                </template>
-              </a-table>
+              />
             </a-collapse-panel>
           </a-collapse>
-          <a-alert
-            v-if="(anchorReviewResult.confirmed_groups?.length ?? 0) === 0 && anchorReviewResult.low_conf_groups.length === 0"
-            type="success"
-            show-icon
-            message="全部匹配置信度 ≥ 0.70，无需人工复核"
-            style="margin-top:8px"
-          />
         </div>
 
-        <!-- ④ 残差报价 -->
+        <!-- ④ 清单外报价 -->
         <div v-if="anchorReviewResult.residue_quotes.length > 0" style="margin-top:20px">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <h4 style="margin:0;font-size:14px;font-weight:600">未匹配报价（{{ anchorReviewResult.residue_quotes.length }} 条）</h4>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">这些报价没有找到相应的招标清单锚点，不会出现在比价矩阵中</span>
+            <h4 style="margin:0;font-size:14px;font-weight:600;color:rgba(0,0,0,0.55)">
+              清单外报价（{{ anchorReviewResult.residue_quotes.length }} 条）
+            </h4>
+            <span style="font-size:12px;color:rgba(0,0,0,0.4)">未找到对应采购项，不参与比价矩阵</span>
           </div>
           <a-table
             :data-source="anchorReviewResult.residue_quotes"
             :row-key="(r: Record<string,unknown>) => String(r.quote_id)"
             size="small"
-            :pagination="false"
+            :pagination="{ pageSize: 5, size: 'small' }"
             :columns="[
-              { title: '供应商', dataIndex: 'supplier_name', width: 180 },
+              { title: '供应商', dataIndex: 'supplier_name', width: 180,
+                customRender: ({ text, record }: { text: string; record: Record<string,unknown> }) =>
+                  text || `供应商#${record.supplier_id}` },
               { title: '物料名', dataIndex: 'material_name', ellipsis: true },
               { title: '规格', dataIndex: 'spec', width: 160 },
               { title: '单价', dataIndex: 'unit_price', width: 100,
                 customRender: ({ text }: { text: number | null }) =>
                   text != null ? `¥${text.toLocaleString()}` : '—' },
             ]"
-          >
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.dataIndex === 'supplier_name'">
-                <span style="font-size:12px">{{ record.supplier_name || '—' }}</span>
-              </template>
-            </template>
-          </a-table>
+          />
         </div>
       </template>
-    </a-card>
 
-    <!-- Step: AI Alignment Review (multi-supplier only) -->
-    <a-card v-else-if="currentStep === 2 && needsAlignmentStep" :body-style="{ padding: '20px' }">
-      <div v-if="alignmentLoading" style="text-align:center; padding:40px 0">
-        <a-spin size="large" />
-        <div style="margin-top:12px; color:#666">AI 正在分析报价对齐...</div>
-        <div style="margin-top:4px; color:#999; font-size:12px">通常需要 30~60 秒</div>
+      <div v-else-if="!matchRunning && !tenderUploading && !anchorReviewLoading" style="text-align:center;padding:48px 0;color:#999">
+        正在初始化...
       </div>
-      <div v-else-if="alignmentResult">
-        <!-- Error state -->
-        <a-alert v-if="alignmentResult.error" type="warning" :message="alignmentResult.error" show-icon style="margin-bottom:16px" />
-
-        <!-- Info bar -->
-        <div style="margin-bottom:16px; display:flex; gap:16px; align-items:center; flex-wrap:wrap">
-          <a-tag color="blue">{{ alignmentResult.groups.length }} 组对齐建议</a-tag>
-          <a-tag color="orange">{{ alignmentResult.field_fixes.length }} 个字段纠错</a-tag>
-          <span style="color:#999; font-size:12px">
-            耗时 {{ (alignmentResult.duration_ms / 1000).toFixed(1) }}s
-            / {{ alignmentResult.tokens_used }} tokens
-          </span>
-        </div>
-
-        <!-- Alignment groups -->
-        <div v-if="alignmentResult.groups.length > 0">
-          <h4 style="margin:0 0 12px">对齐分组建议</h4>
-          <a-collapse>
-            <a-collapse-panel
-              v-for="(group, gi) in alignmentResult.groups"
-              :key="gi"
-              :header="`${group.suggested_name} — ${group.suggested_spec}`"
-            >
-              <template #extra>
-                <a-space @click.stop>
-                  <a-tag :color="group.confidence >= 0.9 ? 'green' : group.confidence >= 0.7 ? 'orange' : 'red'">
-                    {{ (group.confidence * 100).toFixed(0) }}%
-                  </a-tag>
-                  <a-switch
-                    :checked="alignmentGroupStatus[gi] === 'confirmed'"
-                    checked-children="确认"
-                    un-checked-children="拒绝"
-                    @change="(v: boolean) => alignmentGroupStatus[gi] = v ? 'confirmed' : 'rejected'"
-                  />
-                </a-space>
-              </template>
-              <p style="color:#666; margin-bottom:8px">{{ group.reason }}</p>
-              <a-table
-                :data-source="group.items"
-                :columns="[
-                  { title: 'Quote ID', dataIndex: 'quote_id', width: 100 },
-                  { title: '供应商', dataIndex: 'supplier_id', width: 100 },
-                  { title: '操作', dataIndex: 'action', width: 80 },
-                  { title: '备注', dataIndex: 'spec_note' },
-                ]"
-                :pagination="false"
-                size="small"
-                :row-key="(r: Record<string, unknown>) => `${r.quote_id}`"
-              />
-            </a-collapse-panel>
-          </a-collapse>
-        </div>
-
-        <!-- Field fixes -->
-        <div v-if="alignmentResult.field_fixes.length > 0" style="margin-top:20px">
-          <h4 style="margin:0 0 12px">字段纠错建议</h4>
-          <a-table
-            :data-source="alignmentResult.field_fixes"
-            :columns="[
-              { title: 'Quote ID', dataIndex: 'quote_id', width: 100 },
-              { title: '字段', dataIndex: 'field', width: 100 },
-              { title: '当前值', dataIndex: 'current', width: 120 },
-              { title: '建议值', dataIndex: 'suggested', width: 120 },
-              { title: '置信度', dataIndex: 'confidence', width: 100,
-                customRender: ({ text }: { text: number }) => `${(text * 100).toFixed(0)}%` },
-              { title: '原因', dataIndex: 'reason' },
-              { title: '接受', key: 'accept', width: 80 },
-            ]"
-            :pagination="false"
-            size="small"
-            :row-key="(_r: Record<string, unknown>, i: number) => `fix-${i}`"
-          >
-            <template #bodyCell="{ column, record, index }">
-              <template v-if="column.key === 'accept'">
-                <a-checkbox
-                  :checked="alignmentFixStatus[index] !== false"
-                  @change="(e: { target: { checked: boolean } }) => alignmentFixStatus[index] = e.target.checked"
-                />
-              </template>
-              <template v-else-if="column.dataIndex === 'current'">
-                <span style="color:#999">{{ record.current }}</span>
-              </template>
-              <template v-else-if="column.dataIndex === 'suggested'">
-                <span style="color:#1677ff; font-weight:500">{{ record.suggested }}</span>
-              </template>
-            </template>
-          </a-table>
-        </div>
-
-        <!-- No suggestions -->
-        <a-empty
-          v-if="alignmentResult.groups.length === 0 && alignmentResult.field_fixes.length === 0 && !alignmentResult.error"
-          description="AI 未发现需要对齐的报价行，可直接进入比价"
-        />
+      <div v-else-if="anchorReviewLoading" style="text-align:center;padding:32px 0">
+        <a-spin />
+        <div style="margin-top:10px;color:#666">加载复核数据...</div>
       </div>
     </a-card>
 
-    <!-- Step: Results -->
+    <!-- Step 4: Results / Bid Matrix -->
     <template v-else-if="currentStep === STEP_RESULTS">
       <!-- Context tags -->
       <div v-if="matrixSummary" class="result-context">
@@ -1616,6 +1590,9 @@ async function runMatrix() {
           :category="taskConfig.category"
           :project-id="taskConfig.projectId"
           :supplier-ids="effectiveSupplierIds"
+          :anchor-matrix="matrixResult?.anchor_matrix"
+          :pending-item-loading="pendingItemLoading"
+          @confirm-item="confirmPendingItem"
         />
       </a-card>
 
@@ -1754,50 +1731,73 @@ async function runMatrix() {
         <a-space>
           <a-button @click="goBack">
             <template #icon><LeftOutlined /></template>
-            返回修改
+            返回核查
           </a-button>
           <a-button @click="runMatrix">
             <template #icon><LineChartOutlined /></template>
             重新比价
           </a-button>
+          <a-button
+            type="primary"
+            ghost
+            :loading="matrixSaving"
+            :disabled="matrixSaving || savedMatrixVersionId !== null || alignmentFinalizationId === null"
+            @click="saveMatrixVersion"
+          >
+            保存本版比价
+          </a-button>
+          <template v-if="savedMatrixVersionId">
+            <a-tag color="blue">v{{ savedMatrixVersionId }}</a-tag>
+            <a-button
+              type="primary"
+              :loading="matrixApproving"
+              :disabled="matrixApproving || matrixApproved"
+              @click="approveMatrixVersion"
+            >
+              {{ matrixApproved ? '已审批通过' : '审批通过' }}
+            </a-button>
+          </template>
         </a-space>
       </div>
     </template>
 
     <!-- Footer nav (before results) -->
     <div v-if="currentStep < STEP_RESULTS" class="compare-page__footer">
-      <a-button v-if="currentStep > 0" @click="goBack">
+      <a-button v-if="currentStep > 0" @click="goBack" :disabled="matchRunning || tenderUploading">
         <template #icon><LeftOutlined /></template>
         上一步
       </a-button>
-      <!-- Anchor review step buttons -->
-      <template v-if="currentStep === 2 && hasTenderStep">
-        <span v-if="Object.values(anchorGroupRejected).filter(Boolean).length > 0" style="font-size:12px;color:#faad14;margin-right:4px">
-          已拒绝 {{ Object.values(anchorGroupRejected).filter(Boolean).length }} 组
+
+      <!-- Step 3: gate button -->
+      <template v-if="currentStep === 3">
+        <span v-if="!allPendingActioned && anchorReviewResult" style="font-size:12px;color:#faad14;margin-right:4px">
+          还有 {{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }} 条待确认
         </span>
+        <!-- finalize: still requires pending=0 (backend hard gate) -->
+        <a-button
+          :loading="alignmentFinalizing"
+          :disabled="!allPendingActioned || anchorReviewLoading || matchRunning || alignmentFinalizationId !== null"
+          @click="finalizeAlignment"
+          style="margin-right:6px"
+        >
+          完成对齐审核
+        </a-button>
+        <a-tag v-if="alignmentFinalizationId" color="green" style="margin-right:8px">已锁定</a-tag>
+        <!-- generate matrix: no longer blocked by pending (v2.5) -->
         <a-button
           type="primary"
           :loading="analyzing"
-          :disabled="anchorReviewLoading"
+          :disabled="anchorReviewLoading || matchRunning"
           @click="goNext"
         >
-          确认并进入比价
+          生成比价矩阵
           <template #icon><RightOutlined /></template>
         </a-button>
       </template>
-      <!-- AI alignment step buttons -->
-      <template v-else-if="currentStep === 2 && needsAlignmentStep">
-        <a-button @click="skipAlignment" :disabled="alignmentLoading">
-          跳过对齐
-          <template #icon><RightOutlined /></template>
-        </a-button>
-        <a-button type="primary" @click="goNext" :disabled="alignmentLoading">
-          确认并比价
-          <template #icon><RightOutlined /></template>
-        </a-button>
-      </template>
-      <a-button v-else type="primary" @click="goNext">
-        下一步
+
+      <a-button v-else type="primary" :loading="matchRunning || tenderUploading" @click="goNext">
+        <template v-if="currentStep === 2">开始匹配</template>
+        <template v-else>下一步</template>
         <template #icon><RightOutlined /></template>
       </a-button>
     </div>
@@ -1996,6 +1996,57 @@ async function runMatrix() {
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+}
+
+/* ─── Pending gate ──────────────────────────────────────────────────── */
+
+.pending-gate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pending-gate-item {
+  border: 1px solid #ffd591;
+  border-radius: @border-radius-base;
+  background: #fffbe6;
+  padding: 12px 14px;
+
+  &__head {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  &__desc {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__anchor {
+    font-size: 13px;
+    color: @heading-color;
+    display: block;
+  }
+
+  &__sups {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  &__sup-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: rgba(0,0,0,0.55);
+    background: #fff;
+    border: 1px solid #d9d9d9;
+    border-radius: 4px;
+    padding: 2px 8px;
   }
 }
 
@@ -2225,6 +2276,38 @@ async function runMatrix() {
 }
 
 /* ─── Anchor Review step ────────────────────────────────────────────── */
+.llm-fill-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed #adc6ff;
+
+  &__hint {
+    font-size: 12px;
+    color: rgba(0, 0, 0, 0.45);
+  }
+}
+
+.llm-fill-result {
+  margin-top: 16px;
+  background: #f9f0ff;
+  border: 1px solid #d3adf7;
+  border-radius: @border-radius-base;
+  padding: 14px 16px;
+
+  &__title {
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+}
+
 .anchor-summary {
   background: #f0f5ff;
   border: 1px solid #adc6ff;

@@ -114,6 +114,16 @@ class SupplierCell(BaseModel):
     deviation_pct: float | None
     alert_level: str
     is_lowest: bool
+    # v2.5 anchor-matrix extended fields (all optional for backward compat)
+    cell_status: str | None = None          # quoted|aggregated|pending|excluded|missing
+    item_id: int | None = None              # pending cell: BidAlignmentItem.id
+    confidence: float | None = None         # pending cell: cosine similarity
+    source_quote_id: int | None = None
+    pending_note: str | None = None         # "另有 N 条待确认" when align+pending coexist
+    flags: list[str] | None = None          # validator flags: ocr_corrected_verified, valve_type_conflict, etc.
+    evidence: str | None = None             # LLM fill reasoning/evidence stored in name_note
+
+    model_config = {"extra": "ignore"}
 
 
 class HistoricalAvg(BaseModel):
@@ -129,14 +139,17 @@ class ReasonableLowInfo(BaseModel):
 
 
 class MatrixRow(BaseModel):
-    material_id: int
+    material_id: int | None       # None for anchor rows with no matched quote
     material_name: str
     spec: str
+    anchor_seq: str | None = None  # v2.5: TenderAnchor.seq
     historical_avg: HistoricalAvg | None
     reasonable_low: ReasonableLowInfo | None
     suppliers: list[SupplierCell]
     min_deviation: float | None
     recommended: str | None
+
+    model_config = {"extra": "ignore"}
 
 
 class MatrixTotal(BaseModel):
@@ -160,12 +173,29 @@ class SupplierLabel(BaseModel):
     name: str
 
 
+class MatrixDistribution(BaseModel):
+    supplier_count: int
+    anchors_total: int
+    quoted_distribution: dict[str, int]   # keys "0".."N"
+    covered_distribution: dict[str, int]
+    quoted_ge_2_count: int    # 可比价锚点（quoted ≥2家）
+    quoted_full_count: int    # N家完整自动比价（全部 N 家 quoted/aggregated）
+    covered_ge_2_count: int   # covered ≥2家（quoted+pending，复核后可比价潜力）
+    covered_full_count: int   # N家完整覆盖（含 pending，人工复核后潜在完整能力）
+
+
 class BidMatrixResult(BaseModel):
     project_id: int | None
     suppliers: list[SupplierLabel]
     rows: list[MatrixRow]
     totals: list[MatrixTotal]
     brand_tier_filter: str | None = None
+    # v2.5 meta
+    anchor_matrix: bool | None = None
+    not_finalized_warning: str | None = None
+    matrix_distribution: MatrixDistribution | None = None
+
+    model_config = {"extra": "ignore"}
 
 
 # ─── Bid Insight (AI Analysis) ────────────────────────────────────────────────

@@ -15,7 +15,7 @@ from apps.api.models.material import Material
 from apps.api.models.supplier import Supplier
 from apps.api.models.quote import Quote
 from apps.api.models.project import Project
-from apps.api.services.bid_matrix import build_bid_matrix
+from apps.api.services.bid_matrix import build_bid_matrix, build_anchor_matrix
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
@@ -241,51 +241,312 @@ def export_bid_matrix(
     category: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    """导出横向比价矩阵为 Excel（带色标）。"""
+    """导出横向比价矩阵为 Excel（带色标）。
+
+    v2.5: 优先使用锚点全量矩阵（TenderListSession）；无 session 时 fallback 旧逻辑。
+    """
     sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
-    result = build_bid_matrix(db, supplier_ids=sids, project_id=project_id, category=category)
+
+    # Prefer anchor-full-axis matrix when TenderListSession exists
+    result = None
+    if project_id and category:
+        from apps.api.models.tender_list_session import TenderListSession
+        from apps.api.services.tender_list import TenderAnchor
+        from apps.api.services.canonical import extract_valve_canonical
+
+        session = (
+            db.query(TenderListSession)
+            .filter(
+                TenderListSession.project_id == project_id,
+                TenderListSession.category == category,
+                TenderListSession.is_current.is_(True),
+            )
+            .first()
+        )
+        if session and session.anchors_json:
+            anchors = []
+            for a in session.anchors_json:
+                ta = TenderAnchor(
+                    seq=int(a.get("seq") or 0),
+                    name=str(a.get("name") or ""),
+                    spec=str(a.get("spec") or ""),
+                    model=str(a.get("model") or ""),
+                    pressure=str(a.get("pressure") or ""),
+                    materials=dict(a.get("materials") or {}),
+                    unit=str(a.get("unit") or ""),
+                    qty=float(a.get("qty") or 0) or None,
+                    profession=str(a.get("profession") or ""),
+                )
+                stored_canon = a.get("canonical")
+                if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
+                    ta.canonical = stored_canon
+                else:
+                    ta.canonical = extract_valve_canonical(
+                        ta.name, ta.spec, ta.pressure, ta.material_text()
+                    )
+                anchors.append(ta)
+
+            # Use finalization snapshot so export matches the locked matrix on screen
+            from apps.api.models.alignment_finalization import AlignmentFinalization
+            fin = (
+                db.query(AlignmentFinalization)
+                .filter(
+                    AlignmentFinalization.project_id == project_id,
+                    AlignmentFinalization.category == category,
+                    AlignmentFinalization.status == "finalized",
+                )
+                .order_by(AlignmentFinalization.created_at.desc())
+                .first()
+            )
+            allowed_group_ids = set(fin.group_ids_json) if fin and fin.group_ids_json else None
+
+            result = build_anchor_matrix(
+                db, anchors=anchors,
+                tender_list_session_id=session.id,
+                supplier_ids=sids,
+                project_id=project_id,
+                category=category,
+                allowed_group_ids=allowed_group_ids,
+            )
+
+    if result is None:
+        # Fallback non-anchor path also respects finalization snapshot
+        fallback_allowed = None
+        if project_id and category:
+            from apps.api.models.alignment_finalization import AlignmentFinalization
+            fin = (
+                db.query(AlignmentFinalization)
+                .filter(
+                    AlignmentFinalization.project_id == project_id,
+                    AlignmentFinalization.category == category,
+                    AlignmentFinalization.status == "finalized",
+                )
+                .order_by(AlignmentFinalization.created_at.desc())
+                .first()
+            )
+            fallback_allowed = set(fin.group_ids_json) if fin and fin.group_ids_json else None
+        result = build_bid_matrix(
+            db, supplier_ids=sids, project_id=project_id, category=category,
+            allowed_group_ids=fallback_allowed,
+        )
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "比价矩阵"
 
+    # ── 摘要 sheet ────────────────────────────────────────────────────────────
+    md = result.get("matrix_distribution") or {}
+    if md:
+        ws_sum = wb.active
+        ws_sum.title = "供应商覆盖摘要"
+        N_val = md.get("supplier_count", len(sids))
+        anchors_total = md.get("anchors_total", 0)
+        q_full = md.get("quoted_full_count", 0)
+        c_full = md.get("covered_full_count", 0)
+        q_ge2  = md.get("quoted_ge_2_count", 0)
+        c_ge2  = md.get("covered_ge_2_count", 0)
+        q_dist_raw = md.get("quoted_distribution") or {}
+        c_dist_raw = md.get("covered_distribution") or {}
+
+        def _pct(n, total):
+            return f"{n/total*100:.1f}%" if total else "—"
+
+        # Section 1: overview
+        sum_rows = [
+            ["供应商覆盖摘要", ""],
+            ["供应商数量 (N)", N_val],
+            ["锚点总数", anchors_total],
+            [],
+            ["── 关键指标 ──", "数量", "占比", "含义"],
+            ["可比价锚点（quoted ≥2家）", q_ge2, _pct(q_ge2, anchors_total), "至少2家供应商有明确报价，可自动横向比价"],
+            [f"{N_val}家完整 quoted", q_full, _pct(q_full, anchors_total), "全部供应商均有明确报价，比价最可靠"],
+            [f"覆盖 ≥2家（含待确认）", c_ge2, _pct(c_ge2, anchors_total), "含 pending（待人工复核），复核后可比价潜力"],
+            [f"{N_val}家完整覆盖（含待确认）", c_full, _pct(c_full, anchors_total), "含 pending，人工复核后有机会达到完整比价"],
+            [],
+            ["── quoted 分布（已报价家数）──", "锚点数", "占比"],
+        ]
+        for k in range(N_val + 1):
+            cnt = q_dist_raw.get(str(k), 0)
+            sum_rows.append([f"{k}/{N_val}家 quoted", cnt, _pct(cnt, anchors_total)])
+
+        sum_rows += [
+            [],
+            ["── covered 分布（含待确认）──", "锚点数", "占比"],
+        ]
+        for k in range(N_val + 1):
+            cnt = c_dist_raw.get(str(k), 0)
+            sum_rows.append([f"{k}/{N_val}家 covered", cnt, _pct(cnt, anchors_total)])
+
+        sum_rows += [
+            [],
+            ["说明", ""],
+            ["quoted/aggregated", "供应商已报价（可直接参与比价）"],
+            ["pending（待确认）", "LLM 找到候选但不确定，需人工复核后确认"],
+            ["missing（未报价）", "该锚点本供应商无任何报价，无法比价"],
+            ["DB 口径说明", f"covered_full 实测 ~{c_full}/90；旧版脚本推断的 85 基于错误假设已弃用"],
+        ]
+
+        _BLUE_FILL  = PatternFill(start_color="1677FF", end_color="1677FF", fill_type="solid")
+        _LBLUE_FILL = PatternFill(start_color="E6F4FF", end_color="E6F4FF", fill_type="solid")
+        _GREY_HDR   = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
+
+        for r_idx, row_data in enumerate(sum_rows, start=1):
+            ws_sum.append(row_data)
+            cell0 = ws_sum.cell(row=r_idx, column=1)
+            if row_data and str(row_data[0]).startswith("──"):
+                cell0.font = Font(bold=True)
+                cell0.fill = _GREY_HDR
+            elif row_data and row_data[0] == "供应商覆盖摘要":
+                cell0.font = Font(bold=True, size=14, color="FFFFFF")
+                ws_sum.cell(row=r_idx, column=1).fill = _BLUE_FILL
+
+        # Bold the key metrics section header
+        for r_idx, row_data in enumerate(sum_rows, start=1):
+            if row_data and row_data[0] == "── 关键指标 ──":
+                for col in range(1, 5):
+                    c = ws_sum.cell(row=r_idx, column=col)
+                    c.font = Font(bold=True)
+                    c.fill = _LBLUE_FILL
+
+        ws_sum.column_dimensions["A"].width = 32
+        ws_sum.column_dimensions["B"].width = 12
+        ws_sum.column_dimensions["C"].width = 10
+        ws_sum.column_dimensions["D"].width = 42
+
+        # Main matrix on new sheet
+        ws = wb.create_sheet("比价矩阵")
+    else:
+        ws = wb.active
+        ws.title = "比价矩阵"
+
+    is_anchor = result.get("anchor_matrix", False)
     suppliers = result["suppliers"]
-    # Header row
-    header = ["材料", "规格", "历史均价", "合理史低"]
+
+    # Header row — anchor mode adds seq column
+    if is_anchor:
+        header = ["序号", "材料", "规格", "历史均价", "合理史低"]
+    else:
+        header = ["材料", "规格", "历史均价", "合理史低"]
     for s in suppliers:
-        header += [f"{s['letter']} {s['name']}(单价)", f"{s['letter']}(偏差)", f"{s['letter']}(告警)"]
+        header += [f"{s['letter']} {s['name']}(单价)", f"{s['letter']}(偏差)", f"{s['letter']}(状态)"]
     header += ["最低偏差", "推荐"]
     ws.append(header)
     _style_header(ws, len(header))
 
-    alert_fills = {"red": _RED_FILL, "yellow": _YELLOW_FILL, "normal": _GREEN_FILL}
+    # Cell fills
+    _ORANGE_FILL    = PatternFill(start_color="FFF7E6", end_color="FFF7E6", fill_type="solid")
+    _GREY_FILL      = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+    _OCR_FILL       = PatternFill(start_color="F0FFF0", end_color="F0FFF0", fill_type="solid")  # light green
+    _FP_FILL        = PatternFill(start_color="FFF1F0", end_color="FFF1F0", fill_type="solid")  # light red
+    alert_fills     = {"red": _RED_FILL, "yellow": _YELLOW_FILL, "normal": _GREEN_FILL}
+
+    _STATUS_LABEL = {
+        "quoted":     "",
+        "aggregated": "聚合",
+        "pending":    "待确认",
+        "excluded":   "已排除",
+        "missing":    "未报价",
+        None:         "",
+    }
+
+    def _flags_label(cell: dict) -> str:
+        flags = cell.get("flags") or []
+        if not flags:
+            return ""
+        parts = []
+        for f in flags:
+            if f == "ocr_corrected_verified":
+                parts.append("OCR纠错✓")
+            elif f == "ocr_corrected":
+                parts.append("OCR纠错")
+            elif f.startswith("valve_type_conflict:"):
+                parts.append(f"阀型冲突:{f.split(':',1)[1]}")
+            elif f == "canonical_conflict":
+                parts.append("规格冲突")
+            elif f.startswith("ac_conflict"):
+                parts.append("锚点冲突")
+            elif f == "missing_without_evidence":
+                parts.append("缺少证据")
+            elif f.startswith("risky_candidate"):
+                parts.append("候选风险")
+            elif f.startswith("dup_qids"):
+                parts.append("重复报价")
+        return " | ".join(parts)
 
     for row in result["rows"]:
-        data = [
-            row["material_name"],
-            row.get("spec", ""),
-            row["historical_avg"]["price"] if row.get("historical_avg") else "",
-            row["reasonable_low"]["price"] if row.get("reasonable_low") else "",
-        ]
+        if is_anchor:
+            data = [
+                row.get("anchor_seq", ""),
+                row["material_name"],
+                row.get("spec", ""),
+                row["historical_avg"]["price"] if row.get("historical_avg") else "",
+                row["reasonable_low"]["price"] if row.get("reasonable_low") else "",
+            ]
+            col_offset = 5
+        else:
+            data = [
+                row["material_name"],
+                row.get("spec", ""),
+                row["historical_avg"]["price"] if row.get("historical_avg") else "",
+                row["reasonable_low"]["price"] if row.get("reasonable_low") else "",
+            ]
+            col_offset = 4
+
         for cell in row["suppliers"]:
-            data.append(cell["price"] if cell["price"] is not None else "")
-            data.append(f"{cell['deviation_pct'] * 100:.1f}%" if cell.get("deviation_pct") is not None else "")
-            data.append(cell.get("alert_level", ""))
+            status = cell.get("cell_status")
+            # Price: show for quoted/aggregated/pending; blank for excluded/missing
+            if status in (None, "quoted", "aggregated", "pending"):
+                data.append(cell["price"] if cell["price"] is not None else "")
+            else:
+                data.append("")
+            # Deviation: only for confirmed cells
+            if status in (None, "quoted", "aggregated") and cell.get("deviation_pct") is not None:
+                data.append(f"{cell['deviation_pct'] * 100:.1f}%")
+            else:
+                data.append("")
+            # Status label — combine status + flags + evidence for context
+            status_txt = _STATUS_LABEL.get(status, status or "")
+            flag_txt = _flags_label(cell)
+            evidence_txt = (cell.get("evidence") or "")[:80]
+            if flag_txt:
+                status_txt = f"{status_txt} [{flag_txt}]" if status_txt else f"[{flag_txt}]"
+            if evidence_txt:
+                status_txt = f"{status_txt} {evidence_txt}" if status_txt else evidence_txt
+            data.append(status_txt)
+
         data.append(f"{row['min_deviation'] * 100:.1f}%" if row.get("min_deviation") is not None else "")
         data.append(row.get("recommended", ""))
 
         row_idx = ws.max_row + 1
         ws.append(data)
 
-        # Color alert cells
+        # Color cells by status and flags
         for si, cell in enumerate(row["suppliers"]):
-            alert_col = 4 + si * 3 + 3  # alert column for this supplier
-            fill = alert_fills.get(cell.get("alert_level", "normal"))
-            if fill:
-                ws.cell(row=row_idx, column=alert_col).fill = fill
+            status = cell.get("cell_status")
+            flags  = cell.get("flags") or []
+            price_col  = col_offset + si * 3 + 1
+            status_col = col_offset + si * 3 + 3
+            if status == "pending":
+                ws.cell(row=row_idx, column=price_col).fill  = _ORANGE_FILL
+                ws.cell(row=row_idx, column=status_col).fill = _ORANGE_FILL
+            elif status in ("missing", "excluded"):
+                ws.cell(row=row_idx, column=price_col).fill  = _GREY_FILL
+                ws.cell(row=row_idx, column=status_col).fill = _GREY_FILL
+            elif status in (None, "quoted", "aggregated"):
+                has_fp    = any(f.startswith("valve_type_conflict") for f in flags)
+                has_ocr   = "ocr_corrected_verified" in flags
+                if has_fp:
+                    ws.cell(row=row_idx, column=price_col).fill  = _FP_FILL
+                    ws.cell(row=row_idx, column=status_col).fill = _FP_FILL
+                elif has_ocr:
+                    ws.cell(row=row_idx, column=price_col).fill  = _OCR_FILL
+                    ws.cell(row=row_idx, column=status_col).fill = _OCR_FILL
+                else:
+                    alert = cell.get("alert_level", "normal")
+                    fill = alert_fills.get(alert)
+                    if fill:
+                        ws.cell(row=row_idx, column=status_col).fill = fill
 
-    # Totals row
-    totals_data = ["汇总", "", "", ""]
+    # Totals row (quoted-only — same as backend)
+    totals_data = (["汇总", "", "", "", ""] if is_anchor else ["汇总", "", "", ""])
     totals_map = {t["supplier_id"]: t for t in result["totals"]}
     for s in suppliers:
         t = totals_map.get(s["id"])
@@ -294,7 +555,6 @@ def export_bid_matrix(
         totals_data.append("")
     totals_data += ["", ""]
     ws.append(totals_data)
-    # Bold totals
     for col in range(1, len(header) + 1):
         ws.cell(row=ws.max_row, column=col).font = Font(bold=True)
 

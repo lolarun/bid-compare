@@ -1,5 +1,6 @@
 """Analysis and comparison API endpoints — v2."""
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -65,14 +66,75 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
 
 @router.post("/bid-matrix")
 def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatrixResult:
-    """横向对比矩阵 — F6.1 核心接口。"""
-    result = build_bid_matrix(
-        db,
-        supplier_ids=body.supplier_ids,
-        project_id=body.project_id,
-        material_ids=body.material_ids,
-        category=body.category,
-    )
+    """横向对比矩阵 — F6.1 核心接口。
+
+    v2.5: When a confirmed TenderListSession exists, uses anchor-full-axis matrix
+    (all tender list anchors as rows, cells have cell_status).
+    Falls back to original quote-driven matrix when no session found.
+    """
+    from apps.api.models.alignment_finalization import AlignmentFinalization
+
+    allowed_group_ids = None
+    not_finalized_warning = None
+
+    if body.project_id and body.category:
+        fin = (
+            db.query(AlignmentFinalization)
+            .filter(
+                AlignmentFinalization.project_id == body.project_id,
+                AlignmentFinalization.category == body.category,
+                AlignmentFinalization.status == "finalized",
+            )
+            .order_by(AlignmentFinalization.created_at.desc())
+            .first()
+        )
+        if fin and fin.group_ids_json:
+            allowed_group_ids = set(fin.group_ids_json)
+        else:
+            not_finalized_warning = "对齐审核尚未完成，矩阵使用当前所有已确认组（未锁定快照）"
+
+    # v2.5: prefer anchor-full-axis matrix when TenderListSession exists
+    result = None
+    if body.project_id and body.category:
+        from apps.api.models.tender_list_session import TenderListSession
+        from apps.api.services.tender_list import rebuild_anchors
+        from apps.api.services.bid_matrix import build_anchor_matrix
+
+        session = (
+            db.query(TenderListSession)
+            .filter(
+                TenderListSession.project_id == body.project_id,
+                TenderListSession.category == body.category,
+                TenderListSession.is_current.is_(True),
+            )
+            .first()
+        )
+        if session and session.anchors_json:
+            anchors = rebuild_anchors(session)
+
+            result = build_anchor_matrix(
+                db,
+                anchors=anchors,
+                tender_list_session_id=session.id,
+                supplier_ids=body.supplier_ids,
+                project_id=body.project_id,
+                category=body.category,
+                allowed_group_ids=allowed_group_ids,
+            )
+
+    # Fallback to legacy quote-driven matrix
+    if result is None:
+        result = build_bid_matrix(
+            db,
+            supplier_ids=body.supplier_ids,
+            project_id=body.project_id,
+            material_ids=body.material_ids,
+            category=body.category,
+            allowed_group_ids=allowed_group_ids,
+        )
+
+    if not_finalized_warning:
+        result["not_finalized_warning"] = not_finalized_warning
     return BidMatrixResult.model_validate(result)
 
 
@@ -391,105 +453,194 @@ def anchor_review(
                 "unit_price": qt.unit_price,
             })
 
-    # 低置信组(含物料+供应商明细)
+    def _item_detail(item, quote_map, re_mod):
+        if item.quote_id not in quote_map:
+            return None
+        qt, mat, sup = quote_map[item.quote_id]
+        cosine = None
+        if item.spec_note:
+            m = re_mod.search(r"cos=(\d+\.?\d*)", item.spec_note)
+            if m:
+                cosine = float(m.group(1))
+        return {
+            "item_id": item.id,
+            "action": item.action,
+            "quote_id": item.quote_id,
+            "supplier_id": item.supplier_id or qt.supplier_id,
+            "supplier_name": sup.name if sup else "",
+            "material_name": mat.standard_name,
+            "spec": mat.spec or "",
+            "unit_price": qt.unit_price,
+            "cosine": cosine,
+            "spec_note": item.spec_note or "",
+        }
+
+    # Groups with ANY pending items → need review (item-level)
+    # Groups fully confirmed → show in confirmed_groups
     low_conf_groups = []
-    for g in groups:
-        if g.confidence is None or g.confidence >= LOW_CONF:
-            continue
-        items = []
-        for item in g.items:
-            if item.quote_id not in quote_map:
-                continue
-            qt, mat, sup = quote_map[item.quote_id]
-            # 从 spec_note "cos=0.69" 提取余弦值
-            cosine = g.confidence  # 默认用组置信度
-            if item.spec_note:
-                m = _re.search(r"cos=(\d+\.?\d*)", item.spec_note)
-                if m:
-                    cosine = float(m.group(1))
-            items.append({
-                "quote_id": item.quote_id,
-                "supplier_id": item.supplier_id or qt.supplier_id,
-                "supplier_name": sup.name if sup else "",
-                "material_name": mat.standard_name,
-                "spec": mat.spec or "",
-                "cosine": cosine,
-            })
-        # 按余弦降序排列便于快速扫描
-        items.sort(key=lambda x: -x["cosine"])
-        low_conf_groups.append({
-            "group_id": g.id,
-            "anchor_name": g.suggested_name,
-            "anchor_spec": g.suggested_spec or "",
-            "confidence": g.confidence,
-            "items": items,
-        })
-
-    # 低置信组按置信度升序(最需要关注的在前)
-    low_conf_groups.sort(key=lambda x: x["confidence"])
-
-    # 高置信已匹配组
     confirmed_groups = []
-    for g in groups:
-        if g.confidence is not None and g.confidence < LOW_CONF:
-            continue
-        items = []
-        for item in g.items:
-            if item.quote_id not in quote_map:
-                continue
-            qt, mat, sup = quote_map[item.quote_id]
-            cosine = g.confidence or 1.0
-            if item.spec_note:
-                m = _re.search(r"cos=(\d+\.?\d*)", item.spec_note)
-                if m:
-                    cosine = float(m.group(1))
-            items.append({
-                "quote_id": item.quote_id,
-                "supplier_id": item.supplier_id or qt.supplier_id,
-                "supplier_name": sup.name if sup else "",
-                "material_name": mat.standard_name,
-                "spec": mat.spec or "",
-                "cosine": cosine,
-            })
-        items.sort(key=lambda x: -x["cosine"])
-        confirmed_groups.append({
-            "group_id": g.id,
-            "anchor_name": g.suggested_name,
-            "anchor_spec": g.suggested_spec or "",
-            "confidence": g.confidence or 1.0,
-            "items": items,
-        })
 
+    for g in groups:
+        all_items = [_item_detail(it, quote_map, _re) for it in g.items]
+        all_items = [x for x in all_items if x is not None]
+        pending_items = [x for x in all_items if x["action"] == "pending"]
+        align_items = [x for x in all_items if x["action"] == "align"]
+
+        if pending_items:
+            # Has pending items → surfaces in review queue
+            low_conf_groups.append({
+                "group_id": g.id,
+                "anchor_name": g.suggested_name,
+                "anchor_spec": g.suggested_spec or "",
+                "confidence": g.confidence,
+                "items": sorted(all_items, key=lambda x: (x["action"] != "pending", -(x["cosine"] or 0))),
+                "pending_count": len(pending_items),
+                "align_count": len(align_items),
+            })
+        else:
+            confirmed_groups.append({
+                "group_id": g.id,
+                "anchor_name": g.suggested_name,
+                "anchor_spec": g.suggested_spec or "",
+                "confidence": g.confidence or 1.0,
+                "items": sorted(all_items, key=lambda x: -(x["cosine"] or 0)),
+            })
+
+    # pending 最多的组排最前(优先处理)
+    low_conf_groups.sort(key=lambda x: -x["pending_count"])
     confirmed_groups.sort(key=lambda x: -x["confidence"])
 
     return {
-        "low_conf_groups": low_conf_groups,
+        "low_conf_groups": low_conf_groups,   # groups needing item-level review
         "confirmed_groups": confirmed_groups,
         "residue_quotes": residue_quotes,
+        "pending_items_total": sum(g["pending_count"] for g in low_conf_groups),
     }
+
+
+class _ItemConfirmBody(BaseModel):
+    item_id: int
+    action: str  # "align" or "exclude"
+
+
+@router.post("/anchor-review/item-confirm")
+def anchor_review_item_confirm(
+    body: _ItemConfirmBody,
+    db: Session = Depends(get_db),
+):
+    """Item 级确认/排除。action=align → 进矩阵；action=exclude → 排除。
+
+    与 group 级 confirm 互补：group confirm 批量处理整组，
+    item confirm 精确操作单条低置信报价。
+    """
+    from apps.api.models.bid_alignment import BidAlignmentItem
+
+    if body.action not in ("align", "exclude"):
+        raise HTTPException(400, "action 须为 align 或 exclude")
+    item = db.get(BidAlignmentItem, body.item_id)
+    if not item:
+        raise HTTPException(404, f"BidAlignmentItem {body.item_id} 不存在")
+    item.action = body.action
+    db.commit()
+    return {"ok": True, "item_id": body.item_id, "action": body.action}
+
+
+@router.post("/tender-list/preview")
+async def tender_list_preview(
+    file: UploadFile = File(...),
+):
+    """解析采购清单 xlsx，返回品名/规格/数量预览，不跑嵌入，立即返回。"""
+    from apps.api.services.tender_list import parse_tender_xlsx
+
+    name = (file.filename or "").lower()
+    if not name.endswith((".xlsx", ".xls")):
+        raise HTTPException(400, "采购清单需为 Excel 文件(.xlsx/.xls)")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "文件为空")
+    try:
+        anchors = parse_tender_xlsx(content)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    items = [
+        {
+            "seq": str(a.seq),
+            "name": a.name,
+            "spec": a.spec,
+            "model": a.model,
+            "pressure": a.pressure,
+            "materials": a.materials,   # dict {col_name: material_text}
+            "unit": a.unit,
+            "qty": a.qty,
+            "profession": a.profession,
+            "canonical": a.canonical,   # pre-computed valve canonical key
+        }
+        for a in anchors
+    ]
+    professions = [a.profession for a in anchors if a.profession]
+    detected_category = professions[0] if professions else ""
+    return {"items": items, "detected_category": detected_category, "total": len(items)}
+
+
+class _AnchorConfirmBody(BaseModel):
+    group_id: int
+    action: str  # "confirm" or "reject"
+
+
+@router.post("/anchor-review/confirm")
+def anchor_review_confirm(
+    body: _AnchorConfirmBody,
+    db: Session = Depends(get_db),
+):
+    """人工确认/移除 pending 对齐组。
+    action=confirm → status=confirmed
+    action=reject  → 删除组（级联删 items）
+    """
+    from apps.api.models.bid_alignment import BidAlignmentGroup
+
+    if body.action not in ("confirm", "reject"):
+        raise HTTPException(400, "action 需为 confirm 或 reject")
+    group = db.get(BidAlignmentGroup, body.group_id)
+    if not group:
+        raise HTTPException(404, f"对齐组 {body.group_id} 不存在")
+    if body.action == "confirm":
+        group.status = "confirmed"
+        # Also promote all pending items in this group to align
+        for item in group.items:
+            if item.action == "pending":
+                item.action = "align"
+        db.commit()
+        return {"ok": True, "group_id": body.group_id, "status": "confirmed"}
+    else:
+        db.delete(group)
+        db.commit()
+        return {"ok": True, "group_id": body.group_id, "status": "deleted"}
 
 
 @router.post("/tender-list/match")
 async def tender_list_match(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     project_id: int = Form(...),
     category: str = Form(...),
     supplier_ids: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """锚点模式：上传招标清单 xlsx → 解析锚点 → 嵌入匹配供应商报价 → 落对齐组。
+    """锚点模式：解析招标清单 → 嵌入匹配供应商报价 → 落对齐组。
 
-    落组后，现有 /bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
-    见 docs/design/05-比价流程的智能化分层.md。
+    file 可选：提供时直接解析；省略时自动加载当前已确认的 TenderListSession。
+    落组后，/bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
     """
     from apps.api.services.anchor_match import import_and_match
 
-    name = (file.filename or "").lower()
-    if not name.endswith((".xlsx", ".xls")):
-        raise HTTPException(400, "招标清单需为 Excel 文件(.xlsx/.xls)")
-    content = await file.read()
-    if not content:
-        raise HTTPException(400, "Empty file upload")
+    content: bytes | None = None
+    if file is not None:
+        name = (file.filename or "").lower()
+        if not name.endswith((".xlsx", ".xls")):
+            raise HTTPException(400, "招标清单需为 Excel 文件(.xlsx/.xls)")
+        content = await file.read()
+        if not content:
+            raise HTTPException(400, "Empty file upload")
 
     sids = None
     if supplier_ids:
@@ -498,12 +649,1038 @@ async def tender_list_match(
         except ValueError:
             raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
 
+    # If no file provided, reconstruct anchors from current TenderListSession (issue 6)
+    prebuilt_anchors = None
+    if content is None:
+        from apps.api.models.tender_list_session import TenderListSession
+        from apps.api.services.tender_list import rebuild_anchors
+        session = (
+            db.query(TenderListSession)
+            .filter(
+                TenderListSession.project_id == project_id,
+                TenderListSession.category == category,
+                TenderListSession.is_current.is_(True),
+            )
+            .first()
+        )
+        if not session:
+            raise HTTPException(
+                400,
+                "未提供招标清单文件，且未找到已确认的采购清单 (TenderListSession)。"
+                "请先上传并确认招标清单，或直接上传 xlsx 文件。"
+            )
+        prebuilt_anchors = rebuild_anchors(session)
+
+    # Resolve tender_list_session_id so groups are linked to the session
+    _tls_id: int | None = None
+    if content is None and session is not None:
+        _tls_id = session.id
+    elif content is not None:
+        # File upload path: try to find current session for this project/category
+        from apps.api.models.tender_list_session import TenderListSession as _TLS
+        _s = db.query(_TLS).filter(
+            _TLS.project_id == project_id,
+            _TLS.category == category,
+            _TLS.is_current.is_(True),
+        ).first()
+        if _s:
+            _tls_id = _s.id
+
     try:
-        summary = import_and_match(db, content, project_id, category, sids)
+        summary, per_supplier = import_and_match(
+            db, content, project_id, category, sids,
+            anchors=prebuilt_anchors,
+            tender_list_session_id=_tls_id,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         import traceback, logging
         logging.error("tender-list/match error: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"招标清单匹配失败：{type(e).__name__}: {e}")
-    return summary.as_dict()
+
+    # Enrich per_supplier with doc_meta from latest completed job per supplier
+    from apps.api.models import ExtractionJob, Supplier as SupplierModel
+    from apps.api.services.quote_readiness import assess_readiness
+
+    # Load supplier names
+    sup_names: dict[int, str] = {}
+    for sup in db.query(SupplierModel).filter(
+        SupplierModel.id.in_(per_supplier.keys())
+    ).all():
+        sup_names[sup.id] = sup.name
+
+    # Load latest completed quote job per supplier (context.supplier_id or fallback by name)
+    # Jobs store project_id in context; match by project_id and supplier_id
+    job_rows = db.execute(
+        __import__("sqlalchemy").text(
+            "SELECT j.result, json_extract(j.context, '$.supplier_id') as sid "
+            "FROM extraction_jobs j "
+            "WHERE j.status='done' AND j.type='quote' "
+            "AND json_extract(j.context, '$.project_id')=:pid "
+            "ORDER BY j.created_at DESC"
+        ),
+        {"pid": project_id},
+    ).fetchall()
+
+    doc_meta_by_sid: dict[int, dict] = {}
+    for row in job_rows:
+        try:
+            import json as _json
+            result_dict = row[0] if isinstance(row[0], dict) else (_json.loads(row[0]) if row[0] else {})
+            dm = result_dict.get("_doc_meta")
+            sid_str = row[1]
+            if dm and sid_str is not None:
+                sid_val = int(sid_str)
+                if sid_val not in doc_meta_by_sid:
+                    doc_meta_by_sid[sid_val] = dm
+        except Exception:
+            continue
+
+    readiness_list = []
+    for sid, stats in per_supplier.items():
+        sup_name = sup_names.get(sid, f"supplier_{sid}")
+        dm = doc_meta_by_sid.get(sid)
+        r = assess_readiness(sid, sup_name, stats, doc_meta=dm)
+        readiness_list.append(r.as_dict())
+
+    result = summary.as_dict()
+    result["readiness_list"] = readiness_list
+    result["per_supplier_stats"] = per_supplier
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  LLM 供应商视角填采购清单(replace 模式)
+# ═══════════════════════════════════════════════════════════════════
+
+class _LlmFillBody(BaseModel):
+    project_id: int
+    category: str
+    supplier_ids: list[int] = []
+    tender_list_session_id: int | None = None
+    k: int = 3
+    mode: str = "replace"
+    model: str | None = None
+    force_partial: bool = False  # 允许部分供应商失败时仍落库，默认拒绝
+
+
+def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: int):
+    """路由主线程读 DB → 纯数据 SupplierQuoteRow(worker 不碰 DB)。"""
+    from apps.api.models import Quote, Material
+    from apps.api.services.supplier_fill_llm import SupplierQuoteRow
+    from apps.api.services.canonical import extract_valve_canonical
+
+    q = (
+        db.query(Quote, Material)
+        .join(Material, Quote.material_id == Material.id)
+        .filter(Quote.project_id == project_id, Quote.supplier_id == supplier_id)
+    )
+    if category:
+        q = q.filter(Material.category == category)
+    out = []
+    for qt, m in q.all():
+        ext = m.extended_attrs or {}
+        meta = qt.extraction_meta_json or {}
+        # Quote-level canonical (row-specific OCR) takes priority over material master
+        meta_canon = meta.get("canonical") or {}
+        mat_canon = ext.get("canonical") or extract_valve_canonical(
+            m.standard_name or "", m.spec or "", material=m.material_type or ""
+        )
+        canon = meta_canon if meta_canon.get("valve_type") or meta_canon.get("dn") else mat_canon
+        # Layer 1 OCR correction fields (written to meta by batch-confirm)
+        norm_mat = str(meta.get("normalized_material") or ext.get("normalized_material") or "").strip()
+        ocr_reason = str(meta.get("ocr_correction_reason") or ext.get("ocr_correction_reason") or "").strip()
+        out.append(SupplierQuoteRow(
+            quote_id=qt.id,
+            supplier_id=qt.supplier_id or 0,
+            raw_material=meta.get("raw_material") or m.standard_name or "",
+            raw_spec=meta.get("raw_spec") or m.spec or "",
+            raw_unit=meta.get("raw_unit") or m.unit or "",
+            raw_remark=meta.get("raw_remark") or "",
+            material=m.standard_name or "",
+            spec=m.spec or "",
+            unit=m.unit or "",
+            qty=qt.quantity,
+            unit_price=qt.unit_price,
+            total_price=qt.total_price,
+            material_type=str(m.material_type or "").strip(),
+            normalized_material=norm_mat,
+            ocr_correction_reason=ocr_reason,
+            canonical=canon or {},
+        ))
+    return out
+
+
+def _persist_llm_fill(db, project_id, category, session_id, results, seq_to_anchor, valid_sids):
+    """单写者一次性落库：软删旧组（superseded）→ 按 anchor_seq 建组 → 每 cell 一 item。
+
+    软删而非物理删，保留历史可追溯；bid_matrix 只读 status='confirmed' 故不受影响。
+    """
+    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+
+    # replace 语义：将该 project/category 下所有旧 confirmed 组标为 superseded（软删）
+    old_confirmed = db.query(BidAlignmentGroup).filter(
+        BidAlignmentGroup.project_id == project_id,
+        BidAlignmentGroup.category == category,
+        BidAlignmentGroup.status == "confirmed",
+    ).all()
+    for g in old_confirmed:
+        g.status = "superseded"
+    db.flush()
+
+    cells_by_seq: dict[int, list] = {}
+    for res in results:
+        for cell in res.cells:
+            cells_by_seq.setdefault(cell.anchor_seq, []).append(cell)
+
+    for seq, cells in cells_by_seq.items():
+        anchor = seq_to_anchor.get(seq)
+        name = anchor.name if anchor else f"#{seq}"
+        spec = ""
+        unit = ""
+        qty = None
+        if anchor:
+            spec = " ".join(
+                x for x in [anchor.spec, anchor.pressure, anchor.material_text()] if x
+            ).strip()
+            unit = anchor.unit
+            qty = anchor.qty
+        conf = min((c.confidence for c in cells), default=0.0)
+        group = BidAlignmentGroup(
+            project_id=project_id, category=category,
+            suggested_name=name, suggested_spec=spec, suggested_unit=unit, suggested_qty=qty,
+            confidence=round(conf, 3), reason=f"[llm-fill] #{seq}",
+            status="confirmed", tender_list_session_id=session_id, anchor_seq=str(seq),
+        )
+        db.add(group)
+        db.flush()
+        for cell in cells:
+            qsid = cell.supplier_id if cell.supplier_id in valid_sids else None
+            persist_qid = cell.quote_id if cell.quote_id else None
+            # pending with no quote ref can't satisfy NOT NULL FK — skip DB row,
+            # but the cell is still returned in the API response.
+            if persist_qid is None:
+                continue
+            note = f"LLM cos={cell.confidence:.2f}"
+            if cell.flags:
+                note += " " + ",".join(cell.flags)
+            others = [q for q in (cell.aggregated_quote_ids or []) if q != cell.quote_id]
+            if others:
+                note += f" aggregated={others}"
+            db.add(BidAlignmentItem(
+                group_id=group.id, quote_id=persist_qid, supplier_id=qsid,
+                action=cell.action, spec_note=note.strip()[:500],
+                name_note=(cell.reason or "")[:500],
+                agg_total=cell.agg_total, agg_qty=cell.agg_qty,
+            ))
+
+
+# ─── Dynamic suspect anchor selection ────────────────────────────────────────
+
+_RISKY_FLAGS: frozenset[str] = frozenset({
+    "canonical_conflict",
+    "valve_type_conflict",
+    "risky_candidate",
+    "dup_qids",
+    "missing_without_evidence",
+})
+_RISKY_FLAG_PREFIXES: tuple[str, ...] = ("ac_conflict", "ocr_corrected")
+
+
+def _select_suspect_anchor_seqs(anchors, results, supplier_ids: list[int]) -> set[int]:
+    """Dynamically select anchor seqs needing AC re-evaluation or audit.
+
+    An anchor is suspect (any criterion):
+    - quoted_count < 2  (fewer than 2 suppliers aligned)
+    - covered_count < N (at least one supplier has no align/pending cell)
+    - any pending cell  (LLM uncertain, needs AC confirmation)
+    - any cell carries a risky / conflict flag
+    - a supplier with residue_high_cos rows did NOT align this anchor
+    """
+    N = len(supplier_ids)
+    cells_by_anchor: dict[int, list] = {}
+    residue_high_cos_sids: set[int] = set()
+    for res in results:
+        if res.residue_high_cos:
+            residue_high_cos_sids.add(res.supplier_id)
+        for cell in res.cells:
+            cells_by_anchor.setdefault(cell.anchor_seq, []).append(cell)
+
+    suspect: set[int] = set()
+    for anchor in anchors:
+        seq = int(anchor.seq)
+        cells = cells_by_anchor.get(seq, [])
+        q = sum(1 for c in cells if c.action == "align")
+        cov = sum(1 for c in cells if c.action in ("align", "pending"))
+        if q < 2 or cov < N or any(c.action == "pending" for c in cells):
+            suspect.add(seq)
+            continue
+        for c in cells:
+            for flag in (c.flags or []):
+                if flag in _RISKY_FLAGS or any(flag.startswith(p) for p in _RISKY_FLAG_PREFIXES):
+                    suspect.add(seq)
+                    break
+            if seq in suspect:
+                break
+        if seq not in suspect and residue_high_cos_sids:
+            for sid in residue_high_cos_sids:
+                sid_cell = next((c for c in cells if c.supplier_id == sid), None)
+                if sid_cell is None or sid_cell.action != "align":
+                    suspect.add(seq)
+                    break
+
+    return suspect
+
+
+@router.post("/tender-list/llm-fill")
+async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)):
+    """N 个供应商填表 LLM 代理(replace 模式)。
+
+    路由主线程读 anchors + supplier rows → worker(纯数据) attach_topk+LLM+validate →
+    主线程单写者落库 [llm-fill] 组。replace 会失效旧 AlignmentFinalization。
+    """
+    import asyncio
+    import os
+    from apps.api.models.tender_list_session import TenderListSession
+    from apps.api.models import Supplier, Quote, Material
+    from apps.api.models.alignment_finalization import AlignmentFinalization
+    from apps.api.services.tender_list import rebuild_anchors
+    from apps.api.services.anchor_match import embed_anchor_vecs, _embed_client
+    from apps.api.services.supplier_fill_llm import (
+        AnchorView, fill_one_supplier, fill_one_supplier_anchor_centric, DEFAULT_FILL_MODEL,
+    )
+
+    if body.mode != "replace":
+        raise HTTPException(400, "v1 仅支持 mode='replace'")
+
+    # 1. 解析 session + 重建锚点
+    sq = db.query(TenderListSession).filter(
+        TenderListSession.project_id == body.project_id,
+        TenderListSession.category == body.category,
+    )
+    if body.tender_list_session_id is not None:
+        session = db.get(TenderListSession, body.tender_list_session_id)
+    else:
+        session = sq.filter(TenderListSession.is_current.is_(True)).first()
+    if not session or not session.anchors_json:
+        raise HTTPException(400, "未找到已确认的采购清单 (TenderListSession)")
+
+    tender_anchors = rebuild_anchors(session)
+    anchor_views = [
+        AnchorView(seq=int(a.seq), name=a.name, spec=a.spec, pressure=a.pressure,
+                   unit=a.unit, qty=a.qty, canonical=a.canonical or {})
+        for a in tender_anchors
+    ]
+    seq_to_anchor = {int(a.seq): a for a in tender_anchors}
+
+    # 2. 解析供应商集合
+    sids = list(body.supplier_ids)
+    if not sids:
+        q = (
+            db.query(Quote.supplier_id)
+            .join(Material, Quote.material_id == Material.id)
+            .filter(Quote.project_id == body.project_id, Material.category == body.category)
+            .distinct()
+        )
+        sids = [r[0] for r in q.all() if r[0]]
+    if not sids:
+        raise HTTPException(400, "该项目/品类下没有可填表的供应商报价")
+
+    sup_names = {
+        s.id: s.name for s in db.query(Supplier).filter(Supplier.id.in_(sids)).all()
+    }
+    valid_sids = {row[0] for row in db.query(Supplier.id).all()}
+
+    # 3. 主线程读：每家 supplier rows(纯数据)
+    rows_by_sid = {sid: _load_supplier_fill_rows(db, body.project_id, body.category, sid)
+                   for sid in sids}
+
+    # 4. 锚点向量只算一次(在 executor，避免阻塞事件循环)
+    client = _embed_client()
+    loop = asyncio.get_event_loop()
+    anchor_vecs = await loop.run_in_executor(None, embed_anchor_vecs, tender_anchors, client)
+
+    thinking_model = os.environ.get("SUPPLIER_FILL_THINKING_MODEL") or None
+
+    # 5. 并发 worker(纯数据，不碰 DB)
+    sem = asyncio.Semaphore(3)
+
+    async def _run(sid):
+        async with sem:
+            return sid, await loop.run_in_executor(
+                None,
+                lambda: fill_one_supplier(
+                    rows_by_sid[sid], anchor_views, client,
+                    supplier_name=sup_names.get(sid, str(sid)),
+                    anchor_vecs=anchor_vecs, model=body.model,
+                    thinking_model=thinking_model, k=body.k,
+                ),
+            )
+
+    gathered = await asyncio.gather(*[_run(sid) for sid in sids])
+    results_by_sid = dict(gathered)
+    results = list(results_by_sid.values())
+
+    # 5b. Anchor-centric gap pass (Wave 2): for every anchor with <2 aligned suppliers,
+    # re-run anchor-centric fill with ALL rows (not just residue) so OCR-corrupted
+    # rows that were missed in the first pass can be recovered.
+    # Suspect anchors are always included in the gap pass even if already ≥2 aligned —
+    # they need independent verification to catch first-pass mismatches.
+    _align_sids_1: dict[int, set] = {}
+    for _res in results:
+        for _cell in _res.cells:
+            if _cell.action == "align":
+                _align_sids_1.setdefault(_cell.anchor_seq, set()).add(_cell.supplier_id)
+    # Select suspect anchors dynamically from Wave-1 results (risky flags, pending, coverage gaps)
+    _suspect_seqs_1 = _select_suspect_anchor_seqs(tender_anchors, results, sids)
+    # Include suspect seqs even when ≥2 aligned (need AC confirmation)
+    gap_seqs = [
+        int(a.seq) for a in tender_anchors
+        if len(_align_sids_1.get(int(a.seq), set())) < 2 or int(a.seq) in _suspect_seqs_1
+    ]
+
+    if gap_seqs:
+        _gap_seq_set = set(gap_seqs)
+        gap_anchor_views = [av for av in anchor_views if int(av.seq) in _gap_seq_set]
+
+        async def _run_ac(sid):
+            async with sem:
+                # already_aligned_seqs: skip non-suspect anchors this supplier already confirmed.
+                # Suspect anchors are NOT skipped — AC must re-verify them independently.
+                _aligned_non_suspect = {
+                    _c.anchor_seq for _c in results_by_sid[sid].cells
+                    if _c.action == "align" and _c.anchor_seq not in _suspect_seqs_1
+                }
+                try:
+                    _res = await loop.run_in_executor(
+                        None,
+                        lambda _sid=sid, _al=_aligned_non_suspect: fill_one_supplier_anchor_centric(
+                            rows_by_sid[_sid],        # ALL rows, not just residue
+                            gap_anchor_views,
+                            client,
+                            supplier_name=sup_names.get(_sid, str(_sid)),
+                            anchor_vecs=None,         # gap subset ≠ full anchor_vecs; re-embed
+                            model=body.model,
+                            already_aligned_seqs=_al,
+                        ),
+                    )
+                except Exception as _exc:
+                    from apps.api.services.supplier_fill_llm import SupplierFillResult
+                    _res = SupplierFillResult(supplier_id=sid, error=str(_exc))
+                return sid, _res
+
+        ac_gathered = await asyncio.gather(*[_run_ac(sid) for sid in sids])
+        for _sid, _ac in ac_gathered:
+            if _ac.error and not results_by_sid[_sid].error:
+                results_by_sid[_sid].error = f"anchor_centric: {_ac.error}"
+            _main = results_by_sid[_sid]
+            _main.tokens_used += _ac.tokens_used
+            _main.dropped.extend(_ac.dropped)   # preserve llm_missing evidence for missing_audit
+
+            for _c in _ac.cells:
+                _seq = _c.anchor_seq
+                _existing = next((c for c in _main.cells if c.anchor_seq == _seq), None)
+
+                if _existing is None:
+                    # New anchor coverage from AC pass — just add
+                    _main.cells.append(_c)
+                    continue
+
+                if _seq in _suspect_seqs_1:
+                    # Suspect anchor: smart merge
+                    if _existing.action == "pending" and _c.action == "align":
+                        # AC upgraded pending → align: replace
+                        _main.cells = [c for c in _main.cells if c.anchor_seq != _seq]
+                        _main.cells.append(_c)
+                    elif _existing.action == "align" and _c.action == "align" and _existing.quote_id != _c.quote_id:
+                        # Conflict: two different quotes claimed — downgrade to pending
+                        _existing.action = "pending"
+                        _existing.status = "pending"
+                        _existing.flags = list(_existing.flags or []) + [f"ac_conflict:qid={_c.quote_id}"]
+                        _existing.reason = f"{_existing.reason} | AC says qid={_c.quote_id}: {_c.reason}"
+                    # else: existing align ≥ AC result → keep existing
+                # else: non-suspect, existing cell already there from first pass — skip
+
+            # Cells added by AC pass resolve consumed quote_ids in residue
+            _consumed_qids = {_c.quote_id for _c in _ac.cells if _c.action == "align" and _c.quote_id}
+            _main.residue_quote_ids = [q for q in _main.residue_quote_ids if q not in _consumed_qids]
+
+    # 6a. 安全闸门：任一供应商 LLM 失败 → 拒绝落库，除非 force_partial=True
+    if not body.force_partial:
+        failed = [(sid, results_by_sid[sid].error) for sid in sids if results_by_sid[sid].error]
+        if failed:
+            detail = "; ".join(f"sid={sid}: {err[:120]}" for sid, err in failed)
+            raise HTTPException(
+                422,
+                f"{len(failed)} supplier(s) failed LLM fill — old data preserved. "
+                f"Pass force_partial=true to persist partial results. Errors: {detail}",
+            )
+
+    # 6b. 单写者落库 + 失效旧 finalization(replace 闭环)
+    _persist_llm_fill(db, body.project_id, body.category, session.id,
+                      results, seq_to_anchor, valid_sids)
+    n_fin = db.query(AlignmentFinalization).filter(
+        AlignmentFinalization.project_id == body.project_id,
+        AlignmentFinalization.category == body.category,
+        AlignmentFinalization.status == "finalized",
+    ).update({"status": "superseded"})
+    db.commit()
+
+    # 8. matrix_distribution：基于落库后矩阵，与 /bid-matrix 同源
+    from apps.api.services.bid_matrix import build_anchor_matrix as _bam_fn
+    from apps.api.services.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
+    _bam_result = _bam_fn(db, tender_anchors, session.id, sids, body.project_id, body.category)
+    matrix_distribution = _mdr_fn(_bam_result["rows"], sids)
+
+    # 7. 指标：新验收标准 quoted/pending≥2 + quoted≥2 + embedding 基线
+    llm_align_sids: dict[int, set] = {}   # quoted/aggregated only
+    llm_any_sids: dict[int, set] = {}     # quoted/aggregated OR pending
+    for res in results:
+        for cell in res.cells:
+            if cell.action == "align":
+                llm_align_sids.setdefault(cell.anchor_seq, set()).add(cell.supplier_id)
+                llm_any_sids.setdefault(cell.anchor_seq, set()).add(cell.supplier_id)
+            elif cell.action == "pending":
+                llm_any_sids.setdefault(cell.anchor_seq, set()).add(cell.supplier_id)
+    emb_anchor_sids: dict[int, set] = {}
+    for sid in sids:
+        for r in rows_by_sid[sid]:
+            if r.topk:
+                emb_anchor_sids.setdefault(r.topk[0][0], set()).add(sid)
+
+    # In-memory values used only for missing_audit (audit tool, not primary metrics)
+    anchors_covered = len(llm_align_sids)
+    comparable_2plus_emb = sum(1 for s in emb_anchor_sids.values() if len(s) >= 2)
+
+    # Authoritative metrics from DB-backed matrix_distribution (same source as /bid-matrix)
+    comparable_2plus_quoted = matrix_distribution["quoted_ge_2_count"]   # 可比价锚点（quoted ≥2家）
+    comparable_2plus = matrix_distribution["covered_ge_2_count"]         # covered ≥2家（含 pending）
+    three_way = matrix_distribution["quoted_full_count"]                  # N/N quoted，仅作兼容
+
+    per_supplier_fill = []
+    dropped_audit = []
+    for sid in sids:
+        res = results_by_sid[sid]
+        c = res.counts()
+        per_supplier_fill.append({
+            "supplier_id": sid,
+            "supplier_name": sup_names.get(sid, str(sid)),
+            "quoted": c["quoted"], "aggregated": c["aggregated"],
+            "pending": c["pending"], "excluded": c["excluded"],
+            "residue": len(res.residue_quote_ids),
+            "residue_high_cos": res.residue_high_cos,
+            "dropped": len(res.dropped),
+            "tokens_used": res.tokens_used, "duration_ms": res.duration_ms,
+            "error": res.error or None,
+        })
+        for d in res.dropped:
+            dropped_audit.append({"supplier_id": sid, **d})
+
+    # missing_audit: per-anchor evidence for anchors still <2 quoted or flagged suspect
+    # _suspect_seqs_audit re-evaluated from merged (Wave-1 + AC) results
+    _suspect_seqs_audit = _select_suspect_anchor_seqs(tender_anchors, results, sids)
+
+    missing_audit: list[dict] = []
+    for a in tender_anchors:
+        seq = int(a.seq)
+        quoted_n = len(llm_align_sids.get(seq, set()))
+        if quoted_n >= 2 and seq not in _suspect_seqs_audit:
+            continue
+        supplier_detail = []
+        for sid in sids:
+            res = results_by_sid[sid]
+            sid_cell = next((c for c in res.cells if c.anchor_seq == seq), None)
+            # Gather nearest candidates from dropped (llm_missing evidence) or residue
+            nearest = []
+            for d in res.dropped:
+                if d.get("anchor_seq") == seq and d.get("reason") == "llm_missing":
+                    nearest = d.get("nearest_quote_candidates") or []
+                    break
+            supplier_detail.append({
+                "supplier_id": sid,
+                "supplier_name": sup_names.get(sid, str(sid)),
+                "status": sid_cell.status if sid_cell else "missing",
+                "quote_id": sid_cell.quote_id if sid_cell else None,
+                "confidence": sid_cell.confidence if sid_cell else 0.0,
+                "flags": sid_cell.flags if sid_cell else [],
+                "nearest_quote_candidates": nearest[:3],
+            })
+        missing_audit.append({
+            "anchor_seq": seq,
+            "anchor_name": a.name,
+            "anchor_spec": a.spec,
+            "quoted_count": quoted_n,
+            "is_suspect": seq in _suspect_seqs_audit,
+            "suppliers": supplier_detail,
+        })
+    missing_audit.sort(key=lambda x: (not x["is_suspect"], x["quoted_count"], x["anchor_seq"]))
+    missing_audit_total = len(missing_audit)
+    missing_audit_truncated = missing_audit_total > 60
+    missing_audit = missing_audit[:60]
+
+    # false_positive_audit: cells downgraded by the valve_type_conflict gate.
+    # A non-empty list means the gate caught real mismatches (good).
+    # false_positive_align_count: quoted/aggregated cells that still carry a
+    # valve_type_conflict flag — should be 0 if the gate fired correctly.
+    false_positive_audit = sorted([
+        {
+            "supplier_id": res.supplier_id,
+            "supplier_name": sup_names.get(res.supplier_id, str(res.supplier_id)),
+            **d,
+        }
+        for res in results
+        for d in res.dropped
+        if d.get("reason") == "valve_type_conflict"
+    ], key=lambda x: (x.get("anchor_seq", 0), x.get("supplier_id", 0)))
+
+    false_positive_align_count = sum(
+        1 for res in results
+        for cell in res.cells
+        if cell.status in ("quoted", "aggregated")
+        and any("valve_type_conflict" in f for f in (cell.flags or []))
+    )
+
+    missing_without_evidence_count = sum(
+        1 for res in results
+        for cell in res.cells
+        if cell.status == "pending"
+        and "missing_without_evidence" in (cell.flags or [])
+    )
+    supplier_error_count = sum(1 for f in per_supplier_fill if f.get("error"))
+    _readiness_warnings: list[str] = []
+    if false_positive_align_count > 0:
+        _readiness_warnings.append(f"false_positive_align_count={false_positive_align_count}：quoted/agg 中存在阀型冲突，请先处理")
+    if missing_without_evidence_count > 0:
+        _readiness_warnings.append(f"missing_without_evidence={missing_without_evidence_count}：pending 中有无证据的 missing，需人工复核")
+    if supplier_error_count > 0:
+        _readiness_warnings.append(f"supplier_error_count={supplier_error_count}：部分供应商 LLM 调用失败")
+    readiness = {
+        "can_finalize": (
+            false_positive_align_count == 0
+            and missing_without_evidence_count == 0
+            and supplier_error_count == 0
+        ),
+        "false_positive_align_count": false_positive_align_count,
+        "missing_without_evidence_count": missing_without_evidence_count,
+        "supplier_error_count": supplier_error_count,
+        "warnings": _readiness_warnings,
+    }
+
+    return {
+        "anchors_total": len(tender_anchors),
+        "comparable_2plus": comparable_2plus,          # ≥2 quoted+pending (新主指标)
+        "comparable_2plus_quoted": comparable_2plus_quoted,  # ≥2 quoted 仅(旧主指标)
+        # three_way kept for backward compat; use matrix_distribution.quoted_full_count for N/N coverage
+        "three_way": three_way,
+        "anchors_covered": anchors_covered,
+        "comparable_2plus_embedding_baseline": comparable_2plus_emb,
+        "per_supplier_fill": per_supplier_fill,
+        "finalization_invalidated": bool(n_fin),
+        "dropped_audit": dropped_audit[:50],
+        "missing_audit": missing_audit,
+        "missing_audit_total": missing_audit_total,
+        "missing_audit_truncated": missing_audit_truncated,
+        "false_positive_audit": false_positive_audit,
+        "false_positive_align_count": false_positive_align_count,
+        "readiness": readiness,
+        "matrix_distribution": matrix_distribution,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  v2.4 审核闸门端点
+# ═══════════════════════════════════════════════════════════════════
+
+# ── 采购清单闸门 ──────────────────────────────────────────────────
+
+class _TenderListConfirmBody(BaseModel):
+    project_id: int | None = None
+    category: str
+    file_name: str = ""
+    anchors_json: list = []
+    anchors_total: int = 0
+    confirmed_by: str = ""
+
+
+@router.post("/tender-list/confirm")
+def tender_list_confirm(
+    body: _TenderListConfirmBody,
+    db: Session = Depends(get_db),
+):
+    """保存 TenderListSession，旧版 is_current 设为 False。"""
+    from apps.api.models.tender_list_session import TenderListSession
+    from datetime import datetime as _dt
+
+    # 将旧版标记为非当前版本
+    db.query(TenderListSession).filter(
+        TenderListSession.project_id == body.project_id,
+        TenderListSession.category == body.category,
+        TenderListSession.is_current.is_(True),
+    ).update({"is_current": False, "superseded_at": _dt.utcnow()})
+
+    # 计算新版本号
+    last = (
+        db.query(TenderListSession)
+        .filter(
+            TenderListSession.project_id == body.project_id,
+            TenderListSession.category == body.category,
+        )
+        .order_by(TenderListSession.version.desc())
+        .first()
+    )
+    new_version = (last.version + 1) if last else 1
+
+    session = TenderListSession(
+        project_id=body.project_id,
+        category=body.category,
+        file_name=body.file_name,
+        anchors_total=body.anchors_total,
+        anchors_json=body.anchors_json,
+        version=new_version,
+        is_current=True,
+        status="confirmed",
+        confirmed_by=body.confirmed_by or None,
+        confirmed_at=_dt.utcnow(),
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {"ok": True, "id": session.id, "version": session.version}
+
+
+@router.get("/tender-list/current")
+def tender_list_current(
+    project_id: int | None = Query(None),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    from apps.api.models.tender_list_session import TenderListSession
+    q = db.query(TenderListSession).filter(
+        TenderListSession.category == category,
+        TenderListSession.is_current.is_(True),
+    )
+    if project_id is not None:
+        q = q.filter(TenderListSession.project_id == project_id)
+    session = q.first()
+    if not session:
+        raise HTTPException(404, "No current TenderListSession found")
+    return {
+        "id": session.id,
+        "version": session.version,
+        "category": session.category,
+        "file_name": session.file_name,
+        "anchors_total": session.anchors_total,
+        "status": session.status,
+        "confirmed_by": session.confirmed_by,
+        "confirmed_at": session.confirmed_at,
+        "created_at": session.created_at,
+    }
+
+
+@router.get("/tender-list/versions")
+def tender_list_versions(
+    project_id: int | None = Query(None),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    from apps.api.models.tender_list_session import TenderListSession
+    q = db.query(TenderListSession).filter(TenderListSession.category == category)
+    if project_id is not None:
+        q = q.filter(TenderListSession.project_id == project_id)
+    sessions = q.order_by(TenderListSession.version.desc()).all()
+    return [
+        {
+            "id": s.id, "version": s.version, "is_current": s.is_current,
+            "status": s.status, "anchors_total": s.anchors_total,
+            "file_name": s.file_name, "created_at": s.created_at,
+        }
+        for s in sessions
+    ]
+
+
+@router.delete("/tender-list/current")
+def tender_list_deactivate(
+    project_id: int | None = Query(None),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """将当前版 is_current=False（保留历史，不删除）。"""
+    from apps.api.models.tender_list_session import TenderListSession
+    from datetime import datetime as _dt
+    q = db.query(TenderListSession).filter(
+        TenderListSession.category == category,
+        TenderListSession.is_current.is_(True),
+    )
+    if project_id is not None:
+        q = q.filter(TenderListSession.project_id == project_id)
+    updated = q.update({"is_current": False, "superseded_at": _dt.utcnow()})
+    db.commit()
+    return {"ok": True, "deactivated": updated}
+
+
+# ── 对齐审核闸门 ──────────────────────────────────────────────────
+
+@router.post("/anchor-review/bulk-confirm")
+def anchor_review_bulk_confirm(
+    project_id: int = Query(...),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """批量确认所有 pending 对齐项（item 级），将 action='pending' 升为 'align'。"""
+    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+    group_ids = [
+        g.id for g in db.query(BidAlignmentGroup.id).filter(
+            BidAlignmentGroup.project_id == project_id,
+            BidAlignmentGroup.category == category,
+        ).all()
+    ]
+    if not group_ids:
+        return {"ok": True, "confirmed": 0}
+    updated = (
+        db.query(BidAlignmentItem)
+        .filter(
+            BidAlignmentItem.group_id.in_(group_ids),
+            BidAlignmentItem.action == "pending",
+        )
+        .update({"action": "align"})
+    )
+    db.commit()
+    return {"ok": True, "confirmed": updated}
+
+
+class _FinalizeBody(BaseModel):
+    project_id: int | None = None
+    category: str
+    force: bool = False
+    reason: str = ""
+    finalized_by: str = ""
+
+
+@router.post("/anchor-review/finalize")
+def anchor_review_finalize(
+    body: _FinalizeBody,
+    db: Session = Depends(get_db),
+):
+    """创建 AlignmentFinalization，锁定当前 confirmed 对齐组快照。
+
+    force=True 时必须提供 reason 字段。
+    """
+    from apps.api.models.alignment_finalization import AlignmentFinalization
+    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+    from sqlalchemy import func as _func
+    from datetime import datetime as _dt
+
+    if body.force and not body.reason:
+        raise HTTPException(400, "force=True 时必须提供 reason 字段")
+
+    # v2.5: item-level pending check (group.status is always "confirmed" now)
+    pending_count = (
+        db.query(_func.count(BidAlignmentItem.id))
+        .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
+        .filter(
+            BidAlignmentGroup.project_id == body.project_id,
+            BidAlignmentGroup.category == body.category,
+            BidAlignmentItem.action == "pending",
+        )
+        .scalar() or 0
+    )
+
+    if pending_count > 0 and not body.force:
+        raise HTTPException(
+            409,
+            f"仍有 {pending_count} 条 item 处于 pending 状态未处理。"
+            "请先逐条确认，或使用 force=true 强制完成（需提供原因）。",
+        )
+
+    # Safety gate: refuse finalization if align items still carry valve_type_conflict flag
+    fp_align_count = (
+        db.query(_func.count(BidAlignmentItem.id))
+        .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
+        .filter(
+            BidAlignmentGroup.project_id == body.project_id,
+            BidAlignmentGroup.category == body.category,
+            BidAlignmentGroup.status == "confirmed",
+            BidAlignmentItem.action == "align",
+            BidAlignmentItem.spec_note.like("%valve_type_conflict%"),
+        )
+        .scalar() or 0
+    )
+    if fp_align_count > 0 and not body.force:
+        raise HTTPException(
+            409,
+            f"存在 {fp_align_count} 条 align item 含阀型冲突标记，拒绝 finalize。"
+            "请重新运行 LLM 填表或使用 force=true 强制完成（需提供原因）。",
+        )
+
+    # 锁定当前 confirmed 组的 ID 快照
+    confirmed_groups = (
+        db.query(BidAlignmentGroup)
+        .filter(
+            BidAlignmentGroup.project_id == body.project_id,
+            BidAlignmentGroup.category == body.category,
+            BidAlignmentGroup.status == "confirmed",
+        )
+        .all()
+    )
+    group_ids = [g.id for g in confirmed_groups]
+
+    fin = AlignmentFinalization(
+        project_id=body.project_id,
+        category=body.category,
+        group_ids_json=group_ids,
+        status="finalized",
+        pending_at_finalize=pending_count,
+        finalized_by=body.finalized_by or None,
+        finalized_at=_dt.utcnow(),
+        forced=body.force,
+        force_reason=body.reason if body.force else None,
+    )
+    db.add(fin)
+    db.commit()
+    db.refresh(fin)
+    return {
+        "ok": True,
+        "id": fin.id,
+        "status": "finalized",
+        "group_ids_count": len(group_ids),
+        "pending_at_finalize": pending_count,
+        "forced": body.force,
+    }
+
+
+# ── 比价矩阵闸门 ──────────────────────────────────────────────────
+
+class _BidMatrixSaveBody(BaseModel):
+    project_id: int | None = None
+    category: str
+    alignment_finalization_id: int
+    tender_list_session_id: int | None = None
+    matrix_json: dict = {}
+    readiness_json: list = []
+    anchors_count: int = 0
+    compared_rows: int = 0
+    excluded_rows_json: list = []
+    supplier_ids_json: list = []
+    recommended_supplier: str = ""
+
+
+@router.post("/bid-matrix/save")
+def bid_matrix_save(
+    body: _BidMatrixSaveBody,
+    db: Session = Depends(get_db),
+):
+    """正式保存 BidMatrixVersion。必须有 AlignmentFinalization.status=finalized。"""
+    from apps.api.models.alignment_finalization import AlignmentFinalization
+    from apps.api.models.bid_matrix_version import BidMatrixVersion
+
+    fin = db.get(AlignmentFinalization, body.alignment_finalization_id)
+    if not fin:
+        raise HTTPException(404, f"AlignmentFinalization {body.alignment_finalization_id} 不存在")
+    if fin.status != "finalized":
+        raise HTTPException(
+            400,
+            f"AlignmentFinalization 状态为 '{fin.status}'，必须为 'finalized' 才能保存矩阵版本",
+        )
+
+    # 计算版本号
+    last = (
+        db.query(BidMatrixVersion)
+        .filter(
+            BidMatrixVersion.project_id == body.project_id,
+            BidMatrixVersion.category == body.category,
+        )
+        .order_by(BidMatrixVersion.version.desc())
+        .first()
+    )
+    new_version = (last.version + 1) if last else 1
+
+    bmv = BidMatrixVersion(
+        project_id=body.project_id,
+        category=body.category,
+        version=new_version,
+        tender_list_session_id=body.tender_list_session_id,
+        alignment_finalization_id=body.alignment_finalization_id,
+        matrix_json=body.matrix_json,
+        readiness_json=body.readiness_json,
+        anchors_count=body.anchors_count,
+        compared_rows=body.compared_rows,
+        excluded_rows_json=body.excluded_rows_json,
+        supplier_ids_json=body.supplier_ids_json,
+        recommended_supplier=body.recommended_supplier or None,
+        status="preview",
+    )
+    db.add(bmv)
+    db.commit()
+    db.refresh(bmv)
+    return {"ok": True, "id": bmv.id, "version": bmv.version}
+
+
+@router.get("/bid-matrix/versions")
+def bid_matrix_versions(
+    project_id: int | None = Query(None),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    from apps.api.models.bid_matrix_version import BidMatrixVersion
+    q = db.query(BidMatrixVersion).filter(BidMatrixVersion.category == category)
+    if project_id is not None:
+        q = q.filter(BidMatrixVersion.project_id == project_id)
+    versions = q.order_by(BidMatrixVersion.version.desc()).all()
+    return [
+        {
+            "id": v.id, "version": v.version, "status": v.status,
+            "anchors_count": v.anchors_count, "compared_rows": v.compared_rows,
+            "recommended_supplier": v.recommended_supplier,
+            "approved_by": v.approved_by, "approved_at": v.approved_at,
+            "created_at": v.created_at,
+        }
+        for v in versions
+    ]
+
+
+@router.get("/bid-matrix/versions/{version_id}")
+def bid_matrix_version_get(version_id: int, db: Session = Depends(get_db)):
+    from apps.api.models.bid_matrix_version import BidMatrixVersion
+    v = db.get(BidMatrixVersion, version_id)
+    if not v:
+        raise HTTPException(404, f"BidMatrixVersion {version_id} 不存在")
+    return {
+        "id": v.id, "version": v.version, "status": v.status,
+        "project_id": v.project_id, "category": v.category,
+        "tender_list_session_id": v.tender_list_session_id,
+        "alignment_finalization_id": v.alignment_finalization_id,
+        "matrix_json": v.matrix_json,
+        "readiness_json": v.readiness_json,
+        "anchors_count": v.anchors_count, "compared_rows": v.compared_rows,
+        "excluded_rows_json": v.excluded_rows_json,
+        "supplier_ids_json": v.supplier_ids_json,
+        "recommended_supplier": v.recommended_supplier,
+        "review_note": v.review_note,
+        "approved_by": v.approved_by, "approved_at": v.approved_at,
+        "created_at": v.created_at,
+    }
+
+
+class _ApproveBody(BaseModel):
+    note: str = ""
+    approved_by: str = ""
+
+
+@router.post("/bid-matrix/versions/{version_id}/approve")
+def bid_matrix_version_approve(
+    version_id: int,
+    body: _ApproveBody,
+    db: Session = Depends(get_db),
+):
+    from apps.api.models.bid_matrix_version import BidMatrixVersion
+    from datetime import datetime as _dt
+    v = db.get(BidMatrixVersion, version_id)
+    if not v:
+        raise HTTPException(404, f"BidMatrixVersion {version_id} 不存在")
+    v.status = "approved"
+    v.review_note = body.note or None
+    v.approved_by = body.approved_by or None
+    v.approved_at = _dt.utcnow()
+    db.commit()
+    return {"ok": True, "id": v.id, "status": "approved"}

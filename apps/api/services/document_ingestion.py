@@ -200,13 +200,13 @@ class DocumentIngestionService:
 
             try:
                 ext = Path(job.file_path).suffix.lower()
-                if ext in {".xlsx", ".xls", ".csv"}:
-                    # Excel/CSV path bypasses the LLM and uses import_service.
-                    # For Phase 0 we just stub; full wiring happens in Phase 3.
-                    result = {
-                        "items": [],
-                        "note": "Excel/CSV ingestion uses import_service (Phase 3)",
-                    }
+                if ext in {".xlsx", ".xls", ".csv"} and job.type == IngestionType.QUOTE.value:
+                    # Tabular bypass: deterministic pandas extraction.
+                    # Skips OCR/LLM; produces the same result shape as _postprocess_quote
+                    # so that batch-confirm / anchor-match / 90-row matrix work unchanged.
+                    from apps.api.services.tabular_ingestion import extract_quote_tabular
+                    result = extract_quote_tabular(job.file_path, job.context or {})
+                    update_progress("确定性解析完成", 90)
                 elif job.type == IngestionType.TENDER.value:
                     resp = self.pipeline.extract_tender(
                         job.file_path,
@@ -224,6 +224,9 @@ class DocumentIngestionService:
                         progress_cb=update_progress,
                     )
                     result = resp.data
+                    if resp.metadata.get("doc_meta"):
+                        result = dict(result)
+                        result["_doc_meta"] = resp.metadata["doc_meta"]
                     job.tokens_used = resp.tokens_used
                     job.duration_ms = resp.duration_ms
                     job.provider = resp.provider

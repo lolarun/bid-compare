@@ -80,3 +80,33 @@ def _ensure_sqlite_schema():
                     "ADD COLUMN progress_pct INTEGER NOT NULL DEFAULT 0"
                 )
             )
+
+        item_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(bid_alignment_items)")).fetchall()
+        }
+        if "agg_total" not in item_columns:
+            conn.execute(text("ALTER TABLE bid_alignment_items ADD COLUMN agg_total REAL"))
+        if "agg_qty" not in item_columns:
+            conn.execute(text("ALTER TABLE bid_alignment_items ADD COLUMN agg_qty REAL"))
+
+        # v2.5: anchor linkage columns on bid_alignment_groups
+        group_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(bid_alignment_groups)")).fetchall()
+        }
+        if "tender_list_session_id" not in group_columns:
+            conn.execute(text(
+                "ALTER TABLE bid_alignment_groups ADD COLUMN tender_list_session_id INTEGER"
+            ))
+        if "anchor_seq" not in group_columns:
+            conn.execute(text(
+                "ALTER TABLE bid_alignment_groups ADD COLUMN anchor_seq TEXT"
+            ))
+
+        # v2.6: row-level extraction evidence on quotes (for LLM supplier-fill)
+        quote_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(quotes)")).fetchall()
+        }
+        if "extraction_meta_json" not in quote_columns:
+            conn.execute(text(
+                "ALTER TABLE quotes ADD COLUMN extraction_meta_json JSON"
+            ))

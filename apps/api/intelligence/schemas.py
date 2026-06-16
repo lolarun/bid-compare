@@ -79,13 +79,50 @@ QUOTE_SCHEMA: dict[str, Any] = {
                         "type": ["number", "null"],
                         "description": "税率（如 0.13 = 13%）",
                     },
+                    "material_type": {
+                        "type": "string",
+                        "description": "材质（不锈钢/球墨铸铁/碳钢/黄铜等），无则留空",
+                    },
                     "remark": {
                         "type": "string",
                         "description": "备注（付款条款、保修期等关键条款摘要）",
                     },
+                    "normalized_material": {
+                        "type": "string",
+                        "description": "OCR纠错后的材料名称（仅当发现明显形近字OCR错误时填写，否则留空字符串）",
+                    },
+                    "ocr_correction_reason": {
+                        "type": "string",
+                        "description": "OCR纠错依据（词表命中+相邻行DN/PN连续性等），无纠错时留空字符串",
+                    },
+                    "canonical": {
+                        "type": "object",
+                        "description": "阀门类结构化技术参数（非阀门品类留空 {}）",
+                        "properties": {
+                            "valve_type": {"type": "string", "description": "阀门类型"},
+                            "dn": {"type": "string", "description": "公称直径，如 DN25"},
+                            "pn": {"type": "string", "description": "公称压力，如 PN16"},
+                            "material": {"type": "string", "description": "主材质"},
+                            "connection": {"type": "string", "description": "连接方式"},
+                        },
+                    },
                 },
             },
         },
+    },
+}
+
+
+META_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "supplier_name": {"type": "string", "description": "投标单位/供应商全称"},
+        "bid_total": {"type": ["number", "null"], "description": "投标总价（数字）"},
+        "bid_total_basis": {
+            "type": "string",
+            "description": "总价口径: tax_included | tax_excluded | unknown",
+        },
+        "tax_rate": {"type": ["number", "null"], "description": "税率小数，如 0.13"},
     },
 }
 

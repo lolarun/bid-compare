@@ -70,7 +70,15 @@ export function asTenderShape(result: unknown): TenderExtractionShape {
   }
 }
 
-/** Coerce arbitrary quote-result JSON into QuoteExtractionShape. */
+/** Coerce arbitrary quote-result JSON into QuoteExtractionShape.
+ *
+ * IMPORTANT: hidden fields (canonical, validation_warning, source_ref,
+ * category, standard_name, standard_spec) are preserved on each item even
+ * though they are never displayed in the ExtractionEditor UI.  They must
+ * survive the round-trip to batch-confirm so that canonical reaches
+ * anchor-match intact.  Do NOT add them to the explicit spread above —
+ * they are passed through via the `...hidden` merge at the end of each item.
+ */
 export function asQuoteShape(result: unknown): QuoteExtractionShape {
   if (!isObj(result)) {
     console.warn('[extraction] quote result is not an object', result)
@@ -78,18 +86,40 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
   }
   const rawItems = result.items
   const items: QuoteExtractionItem[] = Array.isArray(rawItems)
-    ? rawItems.filter(isObj).map((it) => ({
-        material: asStr(it.material),
-        spec: asStr(it.spec),
-        brand: asStr(it.brand),
-        unit: asStr(it.unit),
-        qty: asNumOrNull(it.qty),
-        unit_price: asNumOrNull(it.unit_price),
-        unit_price_excl_tax: asNumOrNull(it.unit_price_excl_tax),
-        total_price: asNumOrNull(it.total_price),
-        tax_rate: asNumOrNull(it.tax_rate),
-        remark: asStr(it.remark),
-      }))
+    ? rawItems.filter(isObj).map((it) => {
+        // Destructure the hidden fields that must survive to batch-confirm.
+        const {
+          material, spec, brand, unit, qty, unit_price, unit_price_excl_tax,
+          total_price, tax_rate, remark,
+          // visible fields handled explicitly above — everything else is hidden
+          ...rest
+        } = it as Record<string, unknown>
+        // Pick only the known hidden keys (do not blindly pass rest to avoid
+        // accidental large blobs; add keys here as the contract expands).
+        const hidden: Partial<QuoteExtractionItem> = {}
+        if (isObj(rest.canonical))          hidden.canonical          = rest.canonical as Record<string, unknown>
+        if (typeof rest.validation_warning === 'string') hidden.validation_warning = rest.validation_warning
+        if (isObj(rest.source_ref))         hidden.source_ref         = rest.source_ref as Record<string, unknown>
+        if (typeof rest.material_type === 'string') hidden.material_type = rest.material_type
+        if (typeof rest.normalized_material === 'string') hidden.normalized_material = rest.normalized_material
+        if (typeof rest.ocr_correction_reason === 'string') hidden.ocr_correction_reason = rest.ocr_correction_reason
+        if (typeof rest.category === 'string')      hidden.category      = rest.category
+        if (typeof rest.standard_name === 'string') hidden.standard_name = rest.standard_name
+        if (typeof rest.standard_spec === 'string') hidden.standard_spec = rest.standard_spec
+        return {
+          material: asStr(material),
+          spec: asStr(spec),
+          brand: asStr(brand),
+          unit: asStr(unit),
+          qty: asNumOrNull(qty),
+          unit_price: asNumOrNull(unit_price),
+          unit_price_excl_tax: asNumOrNull(unit_price_excl_tax),
+          total_price: asNumOrNull(total_price),
+          tax_rate: asNumOrNull(tax_rate),
+          remark: asStr(remark),
+          ...hidden,
+        }
+      })
     : []
   if (!Array.isArray(rawItems)) {
     console.warn('[extraction] quote result.items is not an array', rawItems)

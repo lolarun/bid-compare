@@ -20,6 +20,8 @@ from typing import Any
 
 import openpyxl
 
+from apps.api.services.canonical import extract_valve_canonical
+
 
 # ── 列名同义映射:把表头单元格文本归一到标准字段 ──────────────────────────
 # 第一版规范表头;识别不到的列进 raw(freeform),匹配阶段可用。
@@ -62,9 +64,43 @@ class TenderAnchor:
     row_index: int = -1                  # 源行号(0-based),便于回溯
     raw: dict[str, str] = field(default_factory=dict)        # 未识别列的 freeform
 
+    canonical: dict = field(default_factory=dict)  # valve canonical key for hard-filter matching
+
     def material_text(self) -> str:
         """材质拼成单串(供匹配/展示)。"""
         return "/".join(v for v in self.materials.values() if v)
+
+
+def rebuild_anchors(session) -> list[TenderAnchor]:
+    """从 TenderListSession.anchors_json 重建 TenderAnchor 列表。
+
+    取代 routes/analysis.py 中两处重复的重建逻辑。优先用存储的 canonical(含
+    valve_type)，否则用完整字段重算。
+    """
+    from apps.api.services.canonical import extract_valve_canonical
+
+    anchors: list[TenderAnchor] = []
+    for a in (session.anchors_json or []):
+        ta = TenderAnchor(
+            seq=int(a.get("seq") or 0),
+            name=str(a.get("name") or ""),
+            spec=str(a.get("spec") or ""),
+            model=str(a.get("model") or ""),
+            pressure=str(a.get("pressure") or ""),
+            materials=dict(a.get("materials") or {}),
+            unit=str(a.get("unit") or ""),
+            qty=float(a.get("qty") or 0) or None,
+            profession=str(a.get("profession") or ""),
+        )
+        stored_canon = a.get("canonical")
+        if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
+            ta.canonical = stored_canon
+        else:
+            ta.canonical = extract_valve_canonical(
+                ta.name, ta.spec, ta.pressure, ta.material_text()
+            )
+        anchors.append(ta)
+    return anchors
 
 
 def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
@@ -125,7 +161,7 @@ def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
             if v is not None and str(v).strip():
                 raw[str(hv).strip()] = str(v).strip()
 
-        anchors.append(TenderAnchor(
+        anchor = TenderAnchor(
             seq=seq,
             name=str(name).strip(),
             spec=_str(row, colmap.get("spec")),
@@ -139,7 +175,11 @@ def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
             remark=_str(row, colmap.get("remark")),
             row_index=ri,
             raw=raw,
-        ))
+        )
+        anchor.canonical = extract_valve_canonical(
+            anchor.name, anchor.spec, anchor.pressure, anchor.material_text()
+        )
+        anchors.append(anchor)
     return anchors
 
 

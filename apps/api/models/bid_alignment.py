@@ -33,6 +33,10 @@ class BidAlignmentGroup(Base):
     reason = Column(Text, default="")
     status = Column(String(20), default="confirmed")  # confirmed / rejected / pending
 
+    # Anchor linkage: composite key for unique identification across projects/versions
+    tender_list_session_id = Column(Integer, nullable=True)   # FK → tender_list_sessions.id
+    anchor_seq = Column(String(20), nullable=True)            # TenderAnchor.seq (stringified)
+
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -49,8 +53,11 @@ class BidAlignmentItem(Base):
     quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=False, index=True)
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
 
-    action = Column(String(20), default="align")  # align / exclude
+    action = Column(String(20), default="align")  # align / pending / exclude
     spec_note = Column(String(500), default="")
+    # Aggregated pricing for multi-row same-anchor same-canonical items
+    agg_total = Column(Float, nullable=True)  # Σ total_price
+    agg_qty = Column(Float, nullable=True)    # Σ quantity
     name_note = Column(String(500), default="")
 
     created_at = Column(DateTime, default=_now)

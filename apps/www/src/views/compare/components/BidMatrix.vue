@@ -5,7 +5,7 @@ import { DownloadOutlined } from '@ant-design/icons-vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { exportApi } from '@/api'
-import type { MatrixRow, MatrixTotal } from '@/api/client'
+import type { MatrixRow, MatrixTotal, SupplierCell } from '@/api/client'
 
 interface SupplierInfo {
   id: number
@@ -21,6 +21,12 @@ const props = defineProps<{
   category?: string
   projectId?: number
   supplierIds?: number[]
+  anchorMatrix?: boolean          // v2.5: true when anchor-full-axis mode
+  pendingItemLoading?: Record<number, boolean>
+}>()
+
+const emit = defineEmits<{
+  (e: 'confirmItem', itemId: number, action: 'align' | 'exclude'): void
 }>()
 
 const totalsBySupplier = computed(() => {
@@ -29,7 +35,7 @@ const totalsBySupplier = computed(() => {
   return map
 })
 
-// Completeness: computed from row data (no backend dependency)
+// Completeness: only quoted/aggregated cells count (pending cells excluded)
 const completeness = computed(() => {
   const total = props.rows.length
   const map = new Map<number, { quoted: number; total: number }>()
@@ -38,7 +44,9 @@ const completeness = computed(() => {
   }
   for (const row of props.rows) {
     for (const cell of row.suppliers) {
-      if (cell.price !== null) {
+      const status = cell.cell_status
+      const isConfirmed = !status || status === 'quoted' || status === 'aggregated'
+      if (cell.price !== null && isConfirmed) {
         const entry = map.get(cell.supplier_id)
         if (entry) entry.quoted++
       }
@@ -47,9 +55,63 @@ const completeness = computed(() => {
   return map
 })
 
+// Summary: pending cell count across entire matrix
+const pendingCellCount = computed(() =>
+  props.rows.reduce(
+    (n, row) => n + row.suppliers.filter((c) => c.cell_status === 'pending').length,
+    0,
+  ),
+)
+
+/* ---------- Flag badges ---------- */
+interface FlagBadge { label: string; type: 'success' | 'warning' | 'error' | 'info' }
+
+function parseFlagBadges(flags: string[] | null | undefined): FlagBadge[] {
+  if (!flags?.length) return []
+  const badges: FlagBadge[] = []
+  const hasVerified = flags.includes('ocr_corrected_verified')
+  for (const f of flags) {
+    if (f === 'ocr_corrected_verified') {
+      badges.push({ label: 'OCR纠错已验证', type: 'success' })
+    } else if (f === 'ocr_corrected' && !hasVerified) {
+      badges.push({ label: 'OCR纠错', type: 'info' })
+    } else if (f.startsWith('valve_type_conflict:')) {
+      const vt = f.slice('valve_type_conflict:'.length)
+      badges.push({ label: `阀型冲突:${vt}`, type: 'error' })
+    } else if (f === 'canonical_conflict') {
+      badges.push({ label: '规格冲突', type: 'warning' })
+    } else if (f.startsWith('ac_conflict')) {
+      badges.push({ label: '锚点冲突', type: 'warning' })
+    } else if (f === 'missing_without_evidence') {
+      badges.push({ label: '缺少证据', type: 'warning' })
+    } else if (f.startsWith('risky_candidate')) {
+      badges.push({ label: '候选风险', type: 'warning' })
+    } else if (f.startsWith('dup_qids')) {
+      badges.push({ label: '重复报价', type: 'warning' })
+    }
+  }
+  return badges.slice(0, 3)  // cap at 3 flags
+}
+
+/* ---------- Cell helpers ---------- */
+function cellClass(cell: SupplierCell): Record<string, boolean> {
+  const status = cell.cell_status
+  return {
+    'bid-matrix__cell-lowest': cell.is_lowest,
+    'bid-matrix__cell-empty': !status ? cell.price === null : status === 'missing' || status === 'excluded',
+    'bid-matrix__cell-pending': status === 'pending',
+    'bid-matrix__cell-excluded': status === 'excluded',
+  }
+}
+
+function isPendingLoading(itemId: number | null | undefined): boolean {
+  if (!itemId || !props.pendingItemLoading) return false
+  return !!props.pendingItemLoading[itemId]
+}
+
 /* ---------- virtual scroll ---------- */
 const scrollRef = ref<HTMLElement | null>(null)
-const ROW_HEIGHT = 68
+const ROW_HEIGHT = 80  // slightly taller to accommodate cell_status badges
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -74,7 +136,10 @@ const paddingBottom = computed(() =>
 
 const rowCountText = computed(() => {
   const n = props.rows.length
-  return n > 0 ? `共 ${n} 条材料` : ''
+  if (n === 0) return ''
+  return props.anchorMatrix
+    ? `采购清单 ${n} 项（全量主轴）`
+    : `共 ${n} 条材料`
 })
 
 /* ---------- export ---------- */
@@ -112,7 +177,10 @@ async function handleExport() {
     <div class="bid-matrix__toolbar" v-if="rows.length > 0">
       <div>
         <span class="bid-matrix__count">{{ rowCountText }}</span>
-        <span class="bid-matrix__legend">
+        <span v-if="anchorMatrix && pendingCellCount > 0" class="bid-matrix__pending-hint">
+          ⚠ {{ pendingCellCount }} 个格子待确认（橙色标注，未计入最低价）
+        </span>
+        <span v-else class="bid-matrix__legend">
           绿色为该项最低价，灰底为未报价，偏差对比历史均价
         </span>
       </div>
@@ -129,7 +197,10 @@ async function handleExport() {
       <table class="bid-matrix__table">
         <thead>
           <tr>
-            <th class="bid-matrix__col-material" rowspan="2">材料</th>
+            <th class="bid-matrix__col-material" rowspan="2">
+              材料
+              <span v-if="anchorMatrix" style="font-size:10px;color:#1890ff;margin-left:4px;font-weight:400">锚点全量</span>
+            </th>
             <th class="bid-matrix__col-history" rowspan="2">历史均价</th>
             <th
               v-for="s in suppliers"
@@ -152,14 +223,17 @@ async function handleExport() {
 
           <tr
             v-for="vRow in virtualRows"
-            :key="rows[vRow.index].material_id"
+            :key="rows[vRow.index].anchor_seq ?? rows[vRow.index].material_id ?? vRow.index"
             :data-index="vRow.index"
             :ref="(el) => virtualizer.measureElement(el as HTMLElement)"
           >
-            <!-- Material -->
+            <!-- Material / anchor name -->
             <td class="bid-matrix__cell-material">
               <div style="font-weight:500">{{ rows[vRow.index].material_name }}</div>
               <div style="font-size:12px;color:rgba(0,0,0,0.45)">{{ rows[vRow.index].spec }}</div>
+              <div v-if="rows[vRow.index].anchor_seq" style="font-size:10px;color:rgba(0,0,0,0.3);margin-top:1px">
+                #{{ rows[vRow.index].anchor_seq }}
+              </div>
             </td>
 
             <!-- Historical avg -->
@@ -177,27 +251,95 @@ async function handleExport() {
             <td
               v-for="cell in rows[vRow.index].suppliers"
               :key="cell.supplier_id"
-              :class="{
-                'bid-matrix__cell-lowest': cell.is_lowest,
-                'bid-matrix__cell-empty': cell.price === null,
-              }"
+              :class="cellClass(cell)"
             >
-              <template v-if="cell.price !== null">
-                <div class="bid-matrix__price-row">
-                  <span class="bid-matrix__price">¥{{ cell.price.toFixed(2) }}</span>
-                  <span v-if="cell.is_lowest" class="bid-matrix__lowest-badge">★ 最低</span>
-                </div>
-                <span
-                  class="bid-matrix__deviation-pill"
-                  :class="`bid-matrix__deviation-pill--${normalizeAlert(cell.alert_level)}`"
-                >
-                  {{ formatDeviation(cell.deviation_pct) }}
-                </span>
-                <div v-if="cell.total !== null" style="font-size:11px;color:rgba(0,0,0,0.45);margin-top:2px">
-                  合计 ¥{{ cell.total.toLocaleString() }}
+              <!-- quoted / aggregated / legacy (no cell_status) -->
+              <template v-if="!cell.cell_status || cell.cell_status === 'quoted' || cell.cell_status === 'aggregated'">
+                <template v-if="cell.price !== null">
+                  <div class="bid-matrix__price-row">
+                    <span class="bid-matrix__price">¥{{ cell.price.toFixed(2) }}</span>
+                    <span v-if="cell.is_lowest" class="bid-matrix__lowest-badge">★ 最低</span>
+                    <span v-if="cell.cell_status === 'aggregated'" class="bid-matrix__agg-badge">聚合</span>
+                  </div>
+                  <span
+                    class="bid-matrix__deviation-pill"
+                    :class="`bid-matrix__deviation-pill--${normalizeAlert(cell.alert_level)}`"
+                  >
+                    {{ formatDeviation(cell.deviation_pct) }}
+                  </span>
+                  <div v-if="cell.total !== null" style="font-size:11px;color:rgba(0,0,0,0.45);margin-top:2px">
+                    合计 ¥{{ cell.total.toLocaleString() }}
+                  </div>
+                  <div v-if="cell.pending_note" style="font-size:10px;color:#faad14;margin-top:2px">
+                    ⚠ {{ cell.pending_note }}
+                  </div>
+                  <div v-if="parseFlagBadges(cell.flags).length" class="bid-matrix__flags">
+                    <span
+                      v-for="b in parseFlagBadges(cell.flags)"
+                      :key="b.label"
+                      class="bid-matrix__flag-badge"
+                      :class="`bid-matrix__flag-badge--${b.type}`"
+                      :title="b.label === 'OCR纠错已验证' && cell.evidence ? cell.evidence : undefined"
+                    >{{ b.label }}</span>
+                  </div>
+                </template>
+                <span v-else class="bid-matrix__no-quote">未报价</span>
+              </template>
+
+              <!-- pending: show reference price in orange, provide inline action buttons -->
+              <template v-else-if="cell.cell_status === 'pending'">
+                <div class="bid-matrix__pending-cell">
+                  <div class="bid-matrix__price-row">
+                    <span class="bid-matrix__price bid-matrix__price--pending">
+                      {{ cell.price != null ? `¥${cell.price.toFixed(2)}` : '—' }}
+                    </span>
+                    <span class="bid-matrix__pending-badge">待确认</span>
+                  </div>
+                  <div v-if="cell.confidence != null" style="font-size:10px;color:#faad14;margin-top:2px">
+                    置信度 {{ (cell.confidence * 100).toFixed(0) }}%
+                  </div>
+                  <div v-if="parseFlagBadges(cell.flags).length" class="bid-matrix__flags">
+                    <span
+                      v-for="b in parseFlagBadges(cell.flags)"
+                      :key="b.label"
+                      class="bid-matrix__flag-badge"
+                      :class="`bid-matrix__flag-badge--${b.type}`"
+                    >{{ b.label }}</span>
+                  </div>
+                  <!-- LLM evidence (tooltip trigger) -->
+                  <div
+                    v-if="cell.evidence"
+                    class="bid-matrix__evidence"
+                    :title="cell.evidence"
+                  >💬 {{ cell.evidence.length > 36 ? cell.evidence.slice(0, 36) + '…' : cell.evidence }}</div>
+                  <!-- Inline confirm buttons (only if parent listens to confirmItem) -->
+                  <div v-if="cell.item_id" class="bid-matrix__pending-actions">
+                    <a-button
+                      type="primary"
+                      size="small"
+                      style="font-size:10px;height:20px;padding:0 6px"
+                      :loading="isPendingLoading(cell.item_id)"
+                      @click.stop="emit('confirmItem', cell.item_id!, 'align')"
+                    >纳入</a-button>
+                    <a-button
+                      danger size="small"
+                      style="font-size:10px;height:20px;padding:0 6px"
+                      :loading="isPendingLoading(cell.item_id)"
+                      @click.stop="emit('confirmItem', cell.item_id!, 'exclude')"
+                    >排除</a-button>
+                  </div>
                 </div>
               </template>
-              <span v-else class="bid-matrix__no-quote">未报价</span>
+
+              <!-- excluded -->
+              <template v-else-if="cell.cell_status === 'excluded'">
+                <span class="bid-matrix__excluded">已排除</span>
+              </template>
+
+              <!-- missing -->
+              <template v-else>
+                <span class="bid-matrix__no-quote">未报价</span>
+              </template>
             </td>
 
             <!-- Min deviation -->
@@ -229,9 +371,9 @@ async function handleExport() {
 
         <!-- Footer: 3 rows -->
         <tfoot>
-          <!-- Row 1: Totals -->
+          <!-- Row 1: Totals (quoted-only) -->
           <tr>
-            <td colspan="2" class="bid-matrix__footer-label">合计（已报材料合计）</td>
+            <td colspan="2" class="bid-matrix__footer-label">合计（已确认报价）</td>
             <td v-for="s in suppliers" :key="'total-' + s.id">
               <div style="font-weight:600;font-size:14px">
                 ¥{{ totalsBySupplier.get(s.id)?.total?.toLocaleString() ?? '—' }}
@@ -258,9 +400,9 @@ async function handleExport() {
             </td>
             <td colspan="2"></td>
           </tr>
-          <!-- Row 3: Completeness -->
+          <!-- Row 3: Completeness (quoted/aggregated only) -->
           <tr>
-            <td colspan="2" class="bid-matrix__footer-label">报价完整度</td>
+            <td colspan="2" class="bid-matrix__footer-label">已确认报价完整度</td>
             <td v-for="s in suppliers" :key="'comp-' + s.id">
               <span :style="{ color: completeness.get(s.id)?.quoted === completeness.get(s.id)?.total ? '#52c41a' : 'rgba(0,0,0,0.65)' }">
                 {{ completeness.get(s.id)?.quoted ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
@@ -308,6 +450,11 @@ async function handleExport() {
     color: @text-color-tertiary;
   }
 
+  &__pending-hint {
+    font-size: 12px;
+    color: #faad14;
+  }
+
   &__table {
     width: 100%;
     border-collapse: collapse;
@@ -334,7 +481,7 @@ async function handleExport() {
 
   &__col-material { min-width: 160px; }
   &__col-history { min-width: 110px; }
-  &__col-supplier-header { min-width: 140px; text-align: center; }
+  &__col-supplier-header { min-width: 148px; text-align: center; }
   &__col-min,
   &__col-rec { min-width: 80px; }
 
@@ -381,6 +528,16 @@ async function handleExport() {
     background: #fafafa;
   }
 
+  &__cell-pending {
+    background: rgba(250, 173, 20, 0.04);
+    border-left: 2px solid #faad14 !important;
+  }
+
+  &__cell-excluded {
+    background: rgba(0, 0, 0, 0.02);
+    opacity: 0.6;
+  }
+
   &__price-row {
     display: flex;
     align-items: center;
@@ -389,6 +546,10 @@ async function handleExport() {
 
   &__price {
     font-weight: 500;
+
+    &--pending {
+      color: #faad14;
+    }
   }
 
   &__lowest-badge {
@@ -402,6 +563,91 @@ async function handleExport() {
     line-height: 18px;
     white-space: nowrap;
     font-weight: 500;
+  }
+
+  &__agg-badge {
+    display: inline-block;
+    background: #e6f7ff;
+    color: #1890ff;
+    border: 1px solid #91d5ff;
+    border-radius: 4px;
+    font-size: 10px;
+    padding: 0 4px;
+    line-height: 18px;
+    white-space: nowrap;
+  }
+
+  &__pending-badge {
+    display: inline-block;
+    background: #fffbe6;
+    color: #faad14;
+    border: 1px solid #ffe58f;
+    border-radius: 4px;
+    font-size: 10px;
+    padding: 0 4px;
+    line-height: 18px;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  &__pending-cell {
+    // container
+  }
+
+  &__pending-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+  }
+
+  &__evidence {
+    font-size: 9px;
+    color: rgba(0, 0, 0, 0.40);
+    margin-top: 3px;
+    line-height: 1.3;
+    cursor: help;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-width: 130px;
+  }
+
+  &__flags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 3px;
+  }
+
+  &__flag-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 8px;
+    line-height: 16px;
+    white-space: nowrap;
+    font-weight: 500;
+
+    &--success {
+      color: #52c41a;
+      background: rgba(82, 196, 26, 0.10);
+      border: 1px solid rgba(82, 196, 26, 0.30);
+    }
+    &--error {
+      color: #ff4d4f;
+      background: rgba(255, 77, 79, 0.08);
+      border: 1px solid rgba(255, 77, 79, 0.25);
+    }
+    &--warning {
+      color: #d46b08;
+      background: rgba(250, 140, 22, 0.08);
+      border: 1px solid rgba(250, 140, 22, 0.25);
+    }
+    &--info {
+      color: #1890ff;
+      background: rgba(24, 144, 255, 0.08);
+      border: 1px solid rgba(24, 144, 255, 0.25);
+    }
   }
 
   &__deviation-pill {
@@ -429,6 +675,12 @@ async function handleExport() {
   &__no-quote {
     color: rgba(0, 0, 0, 0.25);
     font-size: 12px;
+  }
+
+  &__excluded {
+    color: rgba(0, 0, 0, 0.3);
+    font-size: 12px;
+    text-decoration: line-through;
   }
 
   &__footer-label {

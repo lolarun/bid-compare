@@ -237,6 +237,8 @@ export interface MultiCompareResult {
 
 // ─── BidMatrix ───────────────────────────────────────────────────────────────
 
+export type CellStatus = 'quoted' | 'aggregated' | 'pending' | 'excluded' | 'missing'
+
 export interface SupplierCell {
   supplier_id: number
   price: number | null
@@ -244,17 +246,31 @@ export interface SupplierCell {
   deviation_pct: number | null
   alert_level: string
   is_lowest: boolean
+  // v2.5 anchor-matrix fields (null/undefined on legacy rows)
+  cell_status?: CellStatus | null
+  item_id?: number | null          // pending cell: BidAlignmentItem.id for inline confirm
+  confidence?: number | null       // pending cell: cosine similarity
+  source_quote_id?: number | null
+  pending_note?: string | null     // "另有 N 条待确认" when align+pending coexist
+  flags?: string[] | null          // validator flags: ocr_corrected_verified, valve_type_conflict, etc.
+  evidence?: string | null         // LLM fill reasoning/evidence
 }
 
 export interface MatrixRow {
-  material_id: number
+  material_id: number | null
   material_name: string
   spec: string
+  anchor_seq?: string | null       // v2.5: links row back to TenderAnchor.seq
   historical_avg: { price: number; period: string; projects: number } | null
   reasonable_low: { price: number; date: string; project: string } | null
   suppliers: SupplierCell[]
   min_deviation: number | null
   recommended: string | null
+}
+
+export interface BidMatrixMeta {
+  anchor_matrix?: boolean          // v2.5: true when using anchor-full-axis mode
+  not_finalized_warning?: string
 }
 
 export interface MatrixTotal {
@@ -274,12 +290,27 @@ export interface BidInsight {
   error?: string
 }
 
+export interface MatrixDistribution {
+  supplier_count: number
+  anchors_total: number
+  quoted_distribution: Record<string, number>   // keys "0".."N"
+  covered_distribution: Record<string, number>
+  quoted_ge_2_count: number    // 可比价锚点（quoted ≥2家）
+  quoted_full_count: number    // N家完整自动比价
+  covered_ge_2_count: number   // covered ≥2家（复核后可比价潜力）
+  covered_full_count: number   // N家完整覆盖（含 pending）
+}
+
 export interface BidMatrixResult {
   project_id: number | null
   suppliers: { id: number; letter: string; name: string }[]
   rows: MatrixRow[]
   totals: MatrixTotal[]
   brand_tier_filter: string | null
+  // v2.5 meta
+  anchor_matrix?: boolean
+  not_finalized_warning?: string
+  matrix_distribution?: MatrixDistribution
 }
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
@@ -326,7 +357,22 @@ export interface QuoteExtractionItem {
   unit_price_excl_tax: number | null
   total_price: number | null
   tax_rate: number | null
+  material_type?: string
   remark: string
+  // hidden fields — never displayed in UI but must round-trip to batch-confirm
+  // intact so that canonical / validation_warning reach anchor-match unchanged.
+  // source_ref is preserved until batch-confirm; it is persisted into
+  // Quote.extraction_meta_json so LLM supplier-fill judging can trace evidence.
+  canonical?: Record<string, unknown>
+  validation_warning?: string
+  source_ref?: Record<string, unknown>
+  // Layer 1 OCR correction: raw text stays in material; corrected name here
+  normalized_material?: string
+  ocr_correction_reason?: string
+  // optional normalisation fields that batch-confirm may write back
+  category?: string
+  standard_name?: string
+  standard_spec?: string
 }
 
 export interface RecommendReason {
@@ -569,6 +615,25 @@ export interface AlignmentGroupOut {
 
 // ─── Anchor / Tender-list matching ──────────────────────────────────────────
 
+export interface TenderPreviewItem {
+  seq: string
+  name: string
+  spec: string
+  model: string
+  pressure: string
+  materials: Record<string, string>
+  unit: string
+  qty: number | null
+  profession: string
+  canonical: Record<string, string>
+}
+
+export interface TenderPreviewResult {
+  items: TenderPreviewItem[]
+  detected_category: string
+  total: number
+}
+
 export interface AnchorMatchSummary {
   anchors_total: number
   anchors_covered: number
@@ -580,13 +645,44 @@ export interface AnchorMatchSummary {
   residue: number
 }
 
+export interface SupplierFillSummary {
+  supplier_id: number
+  supplier_name: string
+  quoted: number
+  aggregated: number
+  pending: number
+  excluded: number
+  residue: number
+  residue_high_cos: number
+  dropped: number
+  tokens_used: number
+  duration_ms: number
+  error: string | null
+}
+
+export interface LlmFillResult {
+  anchors_total: number
+  comparable_2plus: number
+  three_way: number
+  anchors_covered: number
+  comparable_2plus_embedding_baseline: number
+  per_supplier_fill: SupplierFillSummary[]
+  finalization_invalidated: boolean
+  dropped_audit: Array<{ supplier_id: number; quote_id?: number | null; anchor_seq?: number | null; reason: string }>
+  matrix_distribution?: MatrixDistribution
+}
+
 export interface AnchorGroupItem {
+  item_id: number
+  action: 'align' | 'pending' | 'exclude'
   quote_id: number
   supplier_id: number
   supplier_name: string
   material_name: string
   spec: string
-  cosine: number
+  unit_price: number | null
+  cosine: number | null
+  spec_note: string
 }
 
 export interface AnchorReviewGroup {
@@ -595,6 +691,8 @@ export interface AnchorReviewGroup {
   anchor_spec: string
   confidence: number
   items: AnchorGroupItem[]
+  pending_count?: number   // only on low_conf_groups entries
+  align_count?: number
 }
 
 export interface AnchorResidueQuote {
@@ -610,6 +708,7 @@ export interface AnchorReviewResult {
   low_conf_groups: AnchorReviewGroup[]
   confirmed_groups: AnchorReviewGroup[]
   residue_quotes: AnchorResidueQuote[]
+  pending_items_total: number
 }
 
 // ─── Dashboard visualisation ────────────────────────────────────────────────
