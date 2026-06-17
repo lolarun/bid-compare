@@ -32,12 +32,14 @@ npm run dev   # http://localhost:3000
 
 ## 生产部署（阿里云 ECS）
 
+服务器：`101.37.166.68`，路径：`/opt/mempas`
+
 ```bash
-ssh root@<server-ip>
-cd /opt/mempas
-git pull
-docker compose up -d --build
+# 快速更新（push 到 GitHub 后执行）
+ssh root@101.37.166.68 "cd /opt/mempas && git pull && docker compose up -d --build"
 ```
+
+详细说明见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
 ---
 

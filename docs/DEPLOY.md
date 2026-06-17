@@ -3,6 +3,25 @@
 > 目标：把 MEMPAS（机电材料比价分析系统）以最小成本部署到阿里云 ECS，
 > 满足上线初期 ~50 在线用户 / 每分钟 5–10 次 OCR 任务的吞吐。
 
+## 零、日常快速更新（最常用）
+
+**生产服务器**：`101.37.166.68`，项目路径：`/opt/mempas`
+
+```bash
+# 一条命令完成代码更新 + 重建容器
+ssh root@101.37.166.68 "cd /opt/mempas && git pull && docker compose up -d --build"
+```
+
+需要先确认 push 到 GitHub，然后再执行上面的命令。
+
+**查看日志确认部署成功**：
+
+```bash
+ssh root@101.37.166.68 "cd /opt/mempas && docker compose ps && docker compose logs --tail=20 backend"
+```
+
+---
+
 ## 一、ECS 选型（预算优化）
 
 | 用户数 | ECS 规格 | 月成本（华东1，按量/包月） | 备注 |
