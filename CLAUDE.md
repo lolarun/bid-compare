@@ -1,18 +1,30 @@
-# CLAUDE.md — MEMPAS 项目约定
+# CLAUDE.md — MEMPAS 机电材料查询比价分析系统
 
-## 服务启停规范
+## 本地开发
 
-- 后端端口：**8002**，前端端口：**3000**（固定，不要改）
-- 禁用 `--reload`（生产行为一致）
-- 端口冲突先 kill 再重启：`netstat -ano | findstr :8002` → `taskkill /PID <pid> /F`
-
-本地启动：
+### 首次克隆
 
 ```bash
-# 后端（在 repo 根目录）
-python -m uvicorn apps.api.main:app --port 8002
+git config core.hooksPath .githooks   # 激活 pre-commit 钩子（vue-tsc -b）
+```
 
-# 前端
+### 后端
+
+```bash
+cd apps/api
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env   # 填写 DASHSCOPE_API_KEY 等
+```
+
+- 端口：**8002**（固定，不要改）
+- 禁用 `--reload`（保持与生产行为一致）
+- 启动：`python -m uvicorn apps.api.main:app --port 8002`（在 repo 根目录运行）
+- 端口冲突先 kill 再重启：`netstat -ano | findstr :8002` → `taskkill /PID <pid> /F`
+
+### 前端
+
+```bash
 cd apps/www && npm run dev   # → http://localhost:3000
 ```
 
@@ -35,8 +47,17 @@ ssh root@101.37.166.68 "cd /opt/mempas && docker compose ps && curl -s http://12
 
 ## 代码提交
 
-- 提交前 pre-commit 钩子会跑 `vue-tsc -b`，首次克隆需：`git config core.hooksPath .githooks`
-- 不要 `--no-verify` 绕过，有 TS 报错就先修
+- 提交前 pre-commit 钩子会跑 `vue-tsc -b`，有 TS 报错就先修
+- 不要 `--no-verify` 绕过
+
+## 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `npm run type-check` | 仅做 TS 类型检查（不构建） |
+| `npm run build` | 生产构建（vue-tsc + vite） |
+| `docker compose logs -f backend` | 查看后端日志 |
+| `cp data/mempas.db data/mempas-$(date +%F).bak` | 备份数据库 |
 
 ## 设计原则
 
