@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-commit: run vue-tsc strict type check (same as Docker build).
+# Fails the commit if any TS error exists in apps/www.
+
+set -e
+
+FRONTEND="apps/www"
+
+# Only run if frontend files are staged
+if git diff --cached --name-only | grep -q "^${FRONTEND}/"; then
+  echo "[pre-commit] Running vue-tsc type check..."
+  (cd "$FRONTEND" && npm run type-check)
+  echo "[pre-commit] Type check passed."
+fi
