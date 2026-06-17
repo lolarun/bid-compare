@@ -2,8 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  CheckCircleOutlined, WarningOutlined, QuestionCircleOutlined,
-  MinusCircleOutlined, SearchOutlined, ReloadOutlined,
+  CheckCircleOutlined, SearchOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { analysisApi } from '@/api'
 import type { AnchorReviewMatrixResult, ReviewRow, ReviewCell, ReviewSupplier } from '@/api/client'

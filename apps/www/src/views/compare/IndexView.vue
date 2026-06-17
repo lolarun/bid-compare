@@ -7,7 +7,7 @@ import {
   PlusOutlined,
   AppstoreOutlined, TeamOutlined, TrophyOutlined, DollarOutlined,
   WarningOutlined, BulbOutlined, RobotOutlined,
-  FileExcelOutlined, AimOutlined,
+  FileExcelOutlined,
 } from '@ant-design/icons-vue'
 import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
 import type {
@@ -21,7 +21,6 @@ import type {
   AnchorMatchSummary,
   AnchorReviewResult,
   TenderPreviewResult,
-  LlmFillResult,
 } from '@/api/client'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
@@ -242,19 +241,6 @@ async function confirmPendingItem(itemId: number, action: 'align' | 'exclude') {
   }
 }
 
-/** Group-level bulk: confirm entire group (all pending items → align) */
-async function confirmPendingGroup(groupId: number, action: 'confirm' | 'reject') {
-  pendingGroupLoading.value[groupId] = true
-  try {
-    await analysisApi.anchorReviewConfirm({ group_id: groupId, action })
-    await loadAnchorReview()
-    message.success(action === 'confirm' ? '已批量确认整组' : '已移除整组')
-  } catch {
-    message.error('操作失败，请重试')
-  } finally {
-    pendingGroupLoading.value[groupId] = false
-  }
-}
 
 // Per-supplier upload state for Step 2 (legacy slot mode)
 const supplierUploads = reactive<Record<number, {
@@ -470,59 +456,7 @@ const savingsPercent = computed(() => {
 // ─── Tender List / Anchor matching ──────────────────────────────────────
 const tenderMatchSummary = ref<AnchorMatchSummary | null>(null)
 
-// ─── LLM 供应商视角填表(replace) ──────────────────────────────────────────
-const llmFilling = ref(false)
-const llmFillResult = ref<LlmFillResult | null>(null)
-const llmFillColumns = [
-  { title: '供应商', dataIndex: 'supplier_name', key: 'supplier_name' },
-  { title: '已填', dataIndex: 'quoted', key: 'quoted', align: 'right' as const },
-  { title: '聚合', dataIndex: 'aggregated', key: 'aggregated', align: 'right' as const },
-  { title: '待审', dataIndex: 'pending', key: 'pending', align: 'right' as const },
-  { title: '排除', dataIndex: 'excluded', key: 'excluded', align: 'right' as const },
-  { title: '清单外', dataIndex: 'residue', key: 'residue', align: 'right' as const },
-  { title: '清单外(高相似)', dataIndex: 'residue_high_cos', key: 'residue_high_cos', align: 'right' as const },
-  { title: '丢弃', dataIndex: 'dropped', key: 'dropped', align: 'right' as const },
-  { title: '状态', key: 'error', align: 'center' as const },
-]
 
-async function runLlmFill() {
-  if (!taskConfig.projectId) return
-  if (effectiveSupplierIds.value.length === 0) {
-    message.error('LLM 填表需要供应商报价范围，请先完成报价上传匹配')
-    return
-  }
-  llmFilling.value = true
-  try {
-    const sids = effectiveSupplierIds.value
-    const { data } = await analysisApi.tenderListLlmFill({
-      project_id: taskConfig.projectId,
-      category: tenderCategory.value || taskConfig.category,
-      supplier_ids: sids.length ? sids : undefined,
-      tender_list_session_id: tenderListSessionId.value ?? undefined,
-      mode: 'replace',
-    })
-    llmFillResult.value = data
-    // replace 改写了对齐组 → 旧 finalization/矩阵版本已失效，必须重新 finalize
-    if (data.finalization_invalidated || alignmentFinalizationId.value !== null) {
-      alignmentFinalizationId.value = null
-      savedMatrixVersionId.value = null
-      matrixApproved.value = false
-      message.warning('LLM 填表已重写对齐结果，请重新「完成对齐审核」后再保存比价版本')
-    }
-    const delta = data.comparable_2plus - data.comparable_2plus_embedding_baseline
-    message.success(
-      `LLM 填表完成：可比≥2 ${data.comparable_2plus}/${data.anchors_total}` +
-      `（embedding 基线 ${data.comparable_2plus_embedding_baseline}，` +
-      `${delta >= 0 ? '+' : ''}${delta}）`,
-    )
-    await loadAnchorReview()
-  } catch (e: unknown) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-    message.error(detail ?? 'LLM 填表失败')
-  } finally {
-    llmFilling.value = false
-  }
-}
 const tenderUploading = ref(false)
 const anchorReviewResult = ref<AnchorReviewResult | null>(null)
 const anchorReviewLoading = ref(false)
