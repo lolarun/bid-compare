@@ -213,7 +213,6 @@ async function approveMatrixVersion() {
 }
 
 // ─── Step 3: Pending item gate ────────────────────────────────────────────
-const pendingGroupLoading = ref<Record<number, boolean>>({})
 const pendingItemLoading = ref<Record<number, boolean>>({})
 const matchRunning = ref(false)
 
