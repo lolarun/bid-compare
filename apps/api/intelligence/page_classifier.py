@@ -46,7 +46,7 @@ _QUOTE_CONTENT_SIGNALS = [
 ]
 _BID_LETTER_SIGNALS = ["投标函", "法定代表人授权", "授权委托书"]
 _SUMMARY_SIGNALS = ["汇总表", "报价汇总", "费用汇总"]
-_CERT_SIGNALS = ["营业执照", "资质证书", "安全生产许可", "社会统一信用代码", "注册资本"]
+_CERT_SIGNALS = ["营业执照", "资质证书", "安全生产许可", "统一社会信用代码", "社会统一信用代码", "注册资本", "证照编号"]
 _DOC_TOTAL_SIGNALS = ["投标总价", "报价总额", "总报价"]
 _SUPPLIER_NAME_SIGNALS = ["投标单位", "报价单位", "投标人"]
 

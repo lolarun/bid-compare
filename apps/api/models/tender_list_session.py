@@ -32,6 +32,9 @@ class TenderListSession(Base):
     confirmed_by = Column(String(100), nullable=True)
     confirmed_at = Column(DateTime, nullable=True)
 
+    # supplier_ids confirmed for this bid-comparison session (persisted on tender-list/match)
+    confirmed_supplier_ids = Column(JSON, nullable=True)  # list[int]
+
     created_at = Column(DateTime, default=_now)
 
     __table_args__ = (

@@ -834,12 +834,19 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
     return base  # missing
 
 
-def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> dict:
+def build_anchor_review_matrix(
+    db: Session,
+    project_id: int,
+    category: str,
+    supplier_ids: list[int] | None = None,
+) -> dict:
     """Anchor-first review matrix for the pre-review UI.
 
     Returns one row per TenderAnchor with cells dict keyed by str(supplier_id).
     Includes candidates list for pending cells. Does not compute deviations or
     alert levels (those are for the final bid matrix).
+
+    supplier_ids: 本次比价的供应商集合。若提供，矩阵列严格等于该列表，不自动扫历史报价。
     """
     from apps.api.models.tender_list_session import TenderListSession
     from apps.api.services.tender_list import rebuild_anchors
@@ -859,19 +866,12 @@ def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> d
 
     anchors = rebuild_anchors(session)
 
-    # Discover suppliers from quotes in this project+category
-    raw = (
-        db.query(Quote.supplier_id)
-        .join(Material, Quote.material_id == Material.id)
-        .filter(
-            Quote.project_id == project_id,
-            Material.category == category,
-            Quote.supplier_id.isnot(None),
+    if not supplier_ids:
+        raise ValueError(
+            "supplier_ids 不可为空 — 比价流程禁止扫历史全量供应商。"
+            "请先完成供应商报价上传并「开始匹配」后再调用本接口。"
         )
-        .distinct()
-        .all()
-    )
-    supplier_ids = sorted({sid for (sid,) in raw})
+    supplier_ids = sorted(set(supplier_ids))
 
     # Supplier info + checksum
     suppliers_info = []
@@ -888,13 +888,14 @@ def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> d
             "checksum_delta_pct": cs.get("delta_pct"),
         })
 
-    # Load confirmed groups → seq → group map
+    # Load confirmed groups scoped to current session ONLY (prevents historical data leakage)
     all_groups = (
         db.query(BidAlignmentGroup)
         .filter(
             BidAlignmentGroup.project_id == project_id,
             BidAlignmentGroup.category == category,
             BidAlignmentGroup.status == "confirmed",
+            BidAlignmentGroup.tender_list_session_id == session.id,
         )
         .all()
     )
@@ -903,7 +904,7 @@ def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> d
         if g.anchor_seq is None:
             continue
         seq = str(g.anchor_seq)
-        if seq not in seq_to_group or g.tender_list_session_id == session.id:
+        if seq not in seq_to_group:
             seq_to_group[seq] = g
 
     # Build rows
@@ -936,6 +937,7 @@ def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> d
                     "flags": None,
                     "is_lowest": False,
                     "candidates": [],
+                    "missing_reason": "清单此项无比价组（所有供应商均未报价或未完成匹配）",
                 }
                 missing_cells += 1
             else:
@@ -944,6 +946,7 @@ def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> d
                 status = cell["cell_status"]
                 if status == CELL_MISSING:
                     missing_cells += 1
+                    cell["missing_reason"] = "该供应商未报价此品项"
                 elif status == CELL_PENDING:
                     pending_cells += 1
                 if status in (CELL_QUOTED, CELL_AGGREGATED) and cell["unit_price"]:

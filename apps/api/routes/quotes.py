@@ -1,7 +1,14 @@
 """Quote CRUD API endpoints."""
 
 import logging
+import re
 from typing import Any
+
+# Grand-total/subtotal name patterns — keep in sync with table_parser._GRAND_TOTAL_KEYWORDS.
+# Used as a last-resort DB guard to block aggregate rows that slipped through OCR extraction.
+_GRAND_TOTAL_NAME_RE = re.compile(
+    r"价税合计|总计|合计金额|投标总价|^合计$|含税总计|含税合计|详见投标清单"
+)
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
@@ -321,6 +328,17 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         raise HTTPException(400, f"Job status is {job.status}; must be 'done'")
 
     # ── Resolve supplier ────────────────────────────────────────────────────
+    def _fuzzy_supplier_candidates(db, name: str, threshold: float = 0.75) -> list[dict]:
+        """返回相似度超过 threshold 的已有供应商列表，用于人工确认去重。"""
+        from difflib import SequenceMatcher
+        all_sups = db.query(Supplier).all()
+        candidates = []
+        for s in all_sups:
+            ratio = SequenceMatcher(None, name, s.name).ratio()
+            if ratio >= threshold:
+                candidates.append({"id": s.id, "name": s.name, "similarity": round(ratio, 3)})
+        return sorted(candidates, key=lambda x: -x["similarity"])
+
     supplier: Supplier | None = None
     if body.supplier_id:
         supplier = db.get(Supplier, body.supplier_id)
@@ -330,6 +348,15 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         name = body.supplier_name.strip()
         supplier = db.query(Supplier).filter_by(name=name).first()
         if not supplier:
+            # 模糊去重：相似度≥0.75 时要求人工确认，禁止静默新建
+            candidates = _fuzzy_supplier_candidates(db, name)
+            if candidates:
+                raise HTTPException(409, {
+                    "error": "supplier_alias_conflict",
+                    "message": f"供应商「{name}」与已有记录高度相似，请确认是否为同一家",
+                    "input_name": name,
+                    "candidates": candidates[:5],
+                })
             supplier = Supplier(name=name)
             db.add(supplier)
             db.flush()
@@ -339,6 +366,14 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         if sname:
             supplier = db.query(Supplier).filter_by(name=sname).first()
             if not supplier:
+                candidates = _fuzzy_supplier_candidates(db, sname)
+                if candidates:
+                    raise HTTPException(409, {
+                        "error": "supplier_alias_conflict",
+                        "message": f"OCR 识别供应商「{sname}」与已有记录高度相似，请确认后再入库",
+                        "input_name": sname,
+                        "candidates": candidates[:5],
+                    })
                 supplier = Supplier(name=sname)
                 db.add(supplier)
                 db.flush()
@@ -457,11 +492,18 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     errors: list[dict] = list(shape_errors)
     unknown_brands: set[str] = set()
     quote_ids: list[int] = []
+    line_total_sum: float = 0.0
 
     for idx, item in enumerate(items):
         try:
             raw_name = str(item.get("material") or "").strip()
             if not raw_name:
+                skipped += 1
+                continue
+
+            # Block grand_total/subtotal rows from entering DB as regular quotes
+            if _GRAND_TOTAL_NAME_RE.search(raw_name):
+                log.info("batch_confirm: skipping aggregate row '%s'", raw_name)
                 skipped += 1
                 continue
 
@@ -604,11 +646,38 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
             db.flush()
             quote_ids.append(q.id)
             created += 1
+            if total is not None:
+                line_total_sum += total
         except Exception as e:  # pragma: no cover — per-row resilience
             errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
             skipped += 1
 
     db.commit()
+
+    # Compute checksum: declared total (from PDF cover) vs sum of created quote lines.
+    # Stored in job.result["_checksum"] so bid_matrix can flag OCR-unreliable suppliers.
+    try:
+        doc_meta = (job.result or {}).get("_doc_meta") or {}
+        declared = doc_meta.get("bid_total")
+        if declared and float(declared) > 0 and created > 0:
+            delta_pct = abs(line_total_sum - float(declared)) / float(declared) * 100
+            cs_status = "pass" if delta_pct <= 5 else "fail"
+        else:
+            delta_pct = None
+            cs_status = "unknown"
+        job.result = {
+            **(job.result or {}),
+            "_checksum": {
+                "declared": declared,
+                "line_sum": round(line_total_sum, 2),
+                "delta_pct": round(delta_pct, 1) if delta_pct is not None else None,
+                "status": cs_status,
+            },
+        }
+        db.add(job)
+        db.commit()
+    except Exception:
+        log.exception("batch_confirm: checksum calculation failed for job %s", body.job_id)
 
     # Write supplier_id back to ExtractionJob.context so doc_meta lookup can find it
     if supplier:

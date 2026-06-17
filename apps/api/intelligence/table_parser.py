@@ -40,7 +40,7 @@ _COL_SLOTS: list[tuple[str, list[str]]] = [
     ("remark",              [r"备注", r"说明$"]),
 ]
 
-_GRAND_TOTAL_KEYWORDS = re.compile(r"价税合计|总计|合计金额|投标总价|合计")
+_GRAND_TOTAL_KEYWORDS = re.compile(r"价税合计|总计|合计金额|投标总价|合计|含税总计|含税合计|详见投标清单")
 _SUBTOTAL_KEYWORDS = re.compile(r"小计")
 _HEADER_KEYWORDS = re.compile(
     r"序号|材料名称|品名|规格型号|单位|数量|单价|合价|备注|名称"

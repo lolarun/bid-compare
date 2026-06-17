@@ -11,6 +11,7 @@ import type { AnchorReviewMatrixResult, ReviewRow, ReviewCell, ReviewSupplier } 
 const props = defineProps<{
   projectId: number
   category: string
+  supplierIds?: number[]  // 本次比价供应商集合，不传则拉历史全量（不推荐）
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +23,11 @@ const result = ref<AnchorReviewMatrixResult | null>(null)
 const loading = ref(false)
 const confirmLoading = ref<Record<number, boolean>>({})
 const expandedCells = ref<Record<string, boolean>>({})   // key: `${anchor_seq}_${supplier_id}`
+const confirmedMissing = ref<Record<string, boolean>>({})
+
+function confirmMissing(anchorSeq: string, supplierId: number) {
+  confirmedMissing.value[`${anchorSeq}_${supplierId}`] = true
+}
 
 async function load() {
   if (!props.projectId || !props.category) return
@@ -30,6 +36,7 @@ async function load() {
     const { data } = await analysisApi.anchorReviewMatrix({
       project_id: props.projectId,
       category: props.category,
+      supplier_ids: props.supplierIds?.length ? props.supplierIds.join(',') : undefined,
     })
     result.value = data
     emit('pending-count', data.pending_cells)
@@ -81,6 +88,15 @@ const filteredRows = computed(() => {
 
   return rows
 })
+
+const paginationConfig = computed(() => ({
+  pageSize: 60,
+  size: 'small' as const,
+  showTotal: (t: number) =>
+    activeFilter.value === 'all'
+      ? `全部采购项 ${t} 项`
+      : `当前筛选：${t} 条 / 全部 ${result.value?.anchors_total ?? 0} 项`,
+}))
 
 // Filter counts
 const needsActionCount = computed(() => result.value?.rows.filter(rowNeedsAction).length ?? 0)
@@ -166,6 +182,21 @@ function toggleExpand(anchorSeq: string, supplierId: number) {
 function isExpanded(anchorSeq: string, supplierId: number): boolean {
   return !!expandedCells.value[`${anchorSeq}_${supplierId}`]
 }
+
+// ─── Hard assertion: anchors_total × supplier_count == actual cell count ──────
+const cellAccountingOk = computed(() => {
+  if (!result.value) return true
+  const expected = result.value.anchors_total * result.value.supplier_count
+  const actual = result.value.rows.reduce((sum, row) => sum + Object.keys(row.cells).length, 0)
+  return actual === expected
+})
+
+const cellAccountingDetail = computed(() => {
+  if (!result.value) return ''
+  const expected = result.value.anchors_total * result.value.supplier_count
+  const actual = result.value.rows.reduce((sum, row) => sum + Object.keys(row.cells).length, 0)
+  return `期望 ${result.value.anchors_total} × ${result.value.supplier_count} = ${expected} 格，实际 ${actual} 格`
+})
 </script>
 
 <template>
@@ -234,14 +265,24 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
         </a-input>
       </div>
 
+      <!-- ── Cell accounting hard assertion ── -->
+      <a-alert
+        v-if="!cellAccountingOk"
+        type="error"
+        show-icon
+        style="margin-bottom:12px"
+        message="数据完整性错误：矩阵格数异常，请重新运行匹配"
+        :description="cellAccountingDetail"
+      />
+
       <!-- ── Matrix table ── -->
-      <div class="arm__table-wrap">
+      <div v-if="cellAccountingOk" class="arm__table-wrap">
         <a-table
           :columns="columns"
           :data-source="filteredRows"
           :row-key="(r: ReviewRow) => r.anchor_seq"
           :scroll="{ x: 'max-content', y: 520 }"
-          :pagination="{ pageSize: 60, size: 'small', showTotal: (t: number) => `共 ${t} 条` }"
+          :pagination="paginationConfig"
           size="small"
           :loading="loading"
           class="arm__table"
@@ -280,19 +321,45 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
                   :style="cellBg(record.cells[String(sup.supplier_id)])"
                   style="border-radius:4px;padding:4px 6px;min-height:36px"
                 >
+                  <!-- ── 未报价 ── -->
                   <template v-if="!record.cells[String(sup.supplier_id)] || record.cells[String(sup.supplier_id)].cell_status === 'missing'">
-                    <span style="color:#bbb;font-size:12px">未报价</span>
+                    <div style="display:flex;align-items:center;gap:4px">
+                      <span style="color:#bbb;font-size:11px">未报价</span>
+                      <a-button
+                        type="link" size="small"
+                        style="font-size:10px;padding:0;height:16px;color:#bbb"
+                        @click.stop="toggleExpand(record.anchor_seq, sup.supplier_id)"
+                      >{{ isExpanded(record.anchor_seq, sup.supplier_id) ? '▴' : '▾' }}</a-button>
+                    </div>
+                    <div v-if="isExpanded(record.anchor_seq, sup.supplier_id)"
+                      style="margin-top:4px;font-size:10px;color:#999;line-height:1.5;border-top:1px solid #f0f0f0;padding-top:4px">
+                      <div>{{ record.cells[String(sup.supplier_id)]?.missing_reason || '该供应商未报价此品项' }}</div>
+                      <div style="margin-top:4px;display:flex;gap:4px"
+                        v-if="!confirmedMissing[`${record.anchor_seq}_${sup.supplier_id}`]">
+                        <a-button size="small" style="font-size:10px;height:18px;padding:0 6px"
+                          @click.stop="confirmMissing(record.anchor_seq, sup.supplier_id)"
+                        >确认缺报</a-button>
+                      </div>
+                      <div v-else style="color:#52c41a;font-size:10px;margin-top:2px">✓ 已确认缺报</div>
+                    </div>
                   </template>
 
+                  <!-- ── 已排除 ── -->
                   <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'excluded'">
                     <span style="color:#bbb;font-size:12px;text-decoration:line-through">已排除</span>
                   </template>
 
+                  <!-- ── 待确认 ── -->
                   <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'pending'">
-                    <!-- Pending cell -->
                     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                       <a-tag color="orange" style="font-size:10px;padding:0 4px;margin:0">待确认</a-tag>
-                      <span style="font-size:12px;color:#d46b08;font-weight:600">
+                      <a-tooltip v-if="record.cells[String(sup.supplier_id)].evidence"
+                        :title="record.cells[String(sup.supplier_id)].evidence">
+                        <span style="font-size:12px;color:#d46b08;font-weight:600;cursor:help">
+                          {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                        </span>
+                      </a-tooltip>
+                      <span v-else style="font-size:12px;color:#d46b08;font-weight:600">
                         {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
                       </span>
                       <span v-if="record.cells[String(sup.supplier_id)].confidence != null"
@@ -300,12 +367,6 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
                         {{ fmtConf(record.cells[String(sup.supplier_id)].confidence) }}
                       </span>
                     </div>
-                    <!-- Evidence hint -->
-                    <div v-if="record.cells[String(sup.supplier_id)].evidence"
-                      style="font-size:10px;color:#888;margin-top:2px;line-height:1.3">
-                      {{ record.cells[String(sup.supplier_id)].evidence }}
-                    </div>
-                    <!-- Action buttons -->
                     <div style="display:flex;gap:4px;margin-top:4px;align-items:center">
                       <a-button
                         type="primary" size="small"
@@ -351,9 +412,9 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
                     </div>
                   </template>
 
+                  <!-- ── 已确认/聚合 ── -->
                   <template v-else>
-                    <!-- Quoted / aggregated cell -->
-                    <div style="display:flex;align-items:center;gap:4px">
+                    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                       <CheckCircleOutlined v-if="record.cells[String(sup.supplier_id)].cell_status === 'quoted'"
                         style="color:#52c41a;font-size:11px" />
                       <a-tag v-else color="cyan" style="font-size:10px;padding:0 4px;margin:0">聚合</a-tag>
@@ -365,15 +426,10 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
                       </span>
                       <span v-if="record.cells[String(sup.supplier_id)].is_lowest"
                         style="font-size:10px;color:#389e0d">最低</span>
-                    </div>
-                    <div v-if="record.cells[String(sup.supplier_id)].flags?.length"
-                      style="margin-top:2px">
-                      <a-tag
-                        v-for="f in record.cells[String(sup.supplier_id)].flags"
-                        :key="f"
-                        color="red"
-                        style="font-size:10px;padding:0 3px;margin:0 2px 0 0"
-                      >{{ f }}</a-tag>
+                      <a-tooltip v-if="record.cells[String(sup.supplier_id)].evidence"
+                        :title="record.cells[String(sup.supplier_id)].evidence">
+                        <a style="font-size:10px;color:#bbb;cursor:help">证据</a>
+                      </a-tooltip>
                     </div>
                   </template>
                 </div>
@@ -401,7 +457,7 @@ function isExpanded(anchorSeq: string, supplierId: number): boolean {
       </div>
 
       <!-- ── Empty state ── -->
-      <div v-if="!loading && filteredRows.length === 0" style="text-align:center;padding:24px;color:#999">
+      <div v-if="cellAccountingOk && !loading && filteredRows.length === 0" style="text-align:center;padding:24px;color:#999">
         <a-empty description="当前筛选条件下无数据" />
       </div>
 

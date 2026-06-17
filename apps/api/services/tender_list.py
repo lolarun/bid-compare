@@ -103,6 +103,52 @@ def rebuild_anchors(session) -> list[TenderAnchor]:
     return anchors
 
 
+def anchor_to_json(anchor: "TenderAnchor", category: str | None = None) -> dict:
+    """序列化 TenderAnchor → anchors_json 字典(rebuild_anchors 可还原)。
+
+    category: 显式品类(classify 结果)；None 时即时识别。
+    """
+    if category is None:
+        from apps.api.services.category_classify import classify_category
+        category = classify_category(
+            anchor.name, anchor.spec, anchor.pressure, anchor.material_text()
+        ).category
+    return {
+        "seq": str(anchor.seq),
+        "name": anchor.name,
+        "spec": anchor.spec,
+        "model": anchor.model,
+        "pressure": anchor.pressure,
+        "materials": anchor.materials,
+        "unit": anchor.unit,
+        "qty": anchor.qty,
+        "profession": anchor.profession,
+        "category": category,
+        "canonical": anchor.canonical,
+    }
+
+
+def group_anchors_by_category(
+    anchors: list["TenderAnchor"], default_category: str = "",
+) -> dict[str, list[dict]]:
+    """按品类分组锚点并序列化。unknown(空品类)回退到 default_category。
+
+    Returns {category: [anchor_json, ...]}。default_category 为空且存在 unknown
+    时，unknown 锚点被丢弃(调用方应先保证有默认品类)。
+    """
+    from apps.api.services.category_classify import classify_category
+
+    groups: dict[str, list[dict]] = {}
+    for a in anchors:
+        cat = classify_category(a.name, a.spec, a.pressure, a.material_text()).category
+        if not cat:
+            cat = default_category
+        if not cat:
+            continue
+        groups.setdefault(cat, []).append(anchor_to_json(a, cat))
+    return groups
+
+
 def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
     """解析招标清单 xlsx,返回锚点行列表。
 

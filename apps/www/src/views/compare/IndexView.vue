@@ -67,6 +67,9 @@ const tenderFile = ref<File | null>(null)
 const tenderPreview = ref<TenderPreviewResult | null>(null)
 const tenderPreviewing = ref(false)
 const tenderCategory = ref('')
+const confirmedCategories = ref<string[]>([])   // 已确认的品类(多品类拆分后驱动切换器)
+const categorySessionMap = ref<Record<string, number>>({})  // {品类 → session_id}
+const forceUnknownCategory = ref(false)  // 用户显式确认强制归入
 const tenderListConfirming = ref(false)
 const tenderListSessionId = ref<number | null>(null)
 
@@ -89,8 +92,18 @@ async function previewTenderList(file: File) {
     const { data } = await analysisApi.tenderListPreview(form)
     tenderFile.value = file
     tenderPreview.value = data
+    // 单品类自动选多数派；多品类也先选多数派作为当前处理品类
     tenderCategory.value = data.detected_category || taskConfig.category || ''
-    message.success(`采购清单已解析：${data.total} 条采购项`)
+    if (data.has_multiple_categories) {
+      const parts = Object.entries(data.category_breakdown)
+        .map(([c, n]) => `${c}×${n}`).join('、')
+      message.info(`检测到多个品类：${parts}，确认后将按品类拆分`)
+    } else {
+      message.success(`采购清单已解析：${data.total} 条采购项 · 品类：${data.detected_category || '待确认'}`)
+    }
+    if (data.unknown_count > 0) {
+      message.warning(`有 ${data.unknown_count} 项无法自动识别品类，请在表中核对或手动选择品类`)
+    }
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '解析失败'
     message.error(detail)
@@ -101,6 +114,11 @@ async function previewTenderList(file: File) {
 
 async function confirmTenderListVersion() {
   if (!tenderPreview.value) return
+  const hasUnknown = (tenderPreview.value.unknown_count ?? 0) > 0
+  if (hasUnknown && !forceUnknownCategory.value) {
+    message.warning('存在未识别品类的采购项，请勾选「强制归入默认品类」后再确认')
+    return
+  }
   tenderListConfirming.value = true
   try {
     const { data } = await analysisApi.tenderListConfirm({
@@ -109,11 +127,31 @@ async function confirmTenderListVersion() {
       file_name: tenderFile.value?.name ?? '',
       anchors_total: tenderPreview.value.total,
       anchors_json: tenderPreview.value.items,
+      force: hasUnknown && forceUnknownCategory.value,
     })
-    tenderListSessionId.value = data.id
-    message.success(`采购清单版本 v${data.version} 已确认`)
-  } catch {
-    message.error('确认失败，请重试')
+    // 记录已确认的品类 + 构建 categorySessionMap(切换品类时同步 session_id)
+    confirmedCategories.value = (data.sessions || []).map(s => s.category)
+    categorySessionMap.value = Object.fromEntries(
+      (data.sessions || []).map(s => [s.category, s.id])
+    )
+    // 当前品类对应的 session id
+    const curCat = tenderCategory.value || taskConfig.category
+    tenderListSessionId.value = categorySessionMap.value[curCat] ?? data.id
+    if (data.multi_category) {
+      const parts = data.sessions.map(s => `${s.category}(${s.anchors_total})`).join('、')
+      message.success(`已按品类拆分为 ${data.sessions.length} 份采购清单：${parts}`)
+    } else {
+      message.success(`采购清单版本 v${data.version} 已确认`)
+    }
+    forceUnknownCategory.value = false
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (detail && typeof detail === 'object' && (detail as Record<string, unknown>).error === 'unknown_categories') {
+      const d = detail as { unknown_count: number; unknown_items: string[] }
+      message.error(`${d.unknown_count} 项品类未识别（${d.unknown_items.slice(0, 3).join('、')}…），请核对后勾选强制归入`)
+    } else {
+      message.error('确认失败，请重试')
+    }
   } finally {
     tenderListConfirming.value = false
   }
@@ -354,6 +392,38 @@ const matrixSummary = computed(() => {
   }
 })
 
+// Anchor-matrix cell accounting (Req4 metrics reform)
+const matrixCellStats = computed(() => {
+  if (!matrixResult.value?.anchor_matrix) return null
+  const rows = matrixResult.value.rows
+  const n = matrixResult.value.suppliers.length
+  let confirmed = 0, pending = 0, missing = 0
+  for (const row of rows) {
+    for (const cell of row.suppliers) {
+      const st = cell.cell_status
+      if (!st || st === 'quoted' || st === 'aggregated') {
+        if (cell.price !== null) confirmed++
+        else missing++
+      } else if (st === 'pending') {
+        pending++
+      } else {
+        missing++
+      }
+    }
+  }
+  const md = matrixResult.value.matrix_distribution
+  return {
+    anchors: rows.length,
+    supplier_count: n,
+    total_cells: rows.length * n,
+    confirmed,
+    pending,
+    missing,
+    quoted_ge_2: md?.quoted_ge_2_count ?? 0,
+    quoted_full: md?.quoted_full_count ?? 0,
+  }
+})
+
 // ─── AI Insight ─────────────────────────────────────────────────────────
 const insightResult = ref<BidInsight | null>(null)
 const insightLoading = ref(false)
@@ -417,6 +487,10 @@ const llmFillColumns = [
 
 async function runLlmFill() {
   if (!taskConfig.projectId) return
+  if (effectiveSupplierIds.value.length === 0) {
+    message.error('LLM 填表需要供应商报价范围，请先完成报价上传匹配')
+    return
+  }
   llmFilling.value = true
   try {
     const sids = effectiveSupplierIds.value
@@ -482,9 +556,11 @@ async function loadAnchorReview() {
   if (!taskConfig.projectId) return
   anchorReviewLoading.value = true
   try {
+    const sids = effectiveSupplierIds.value
     const { data } = await analysisApi.anchorReview({
       project_id: taskConfig.projectId,
       category: tenderCategory.value || taskConfig.category,
+      supplier_ids: sids.length ? sids.join(',') : undefined,
     })
     anchorReviewResult.value = data
   } catch (e: unknown) {
@@ -495,6 +571,11 @@ async function loadAnchorReview() {
 }
 
 async function runTenderMatchAndReview() {
+  const sids = effectiveSupplierIds.value
+  if (sids.length === 0) {
+    message.error('请先完成供应商报价上传并「校对入库」，至少需要 1 家供应商的报价文件')
+    return
+  }
   matchRunning.value = true
   const ok = await runTenderMatch()
   if (!ok) {
@@ -544,6 +625,13 @@ onMounted(() => {
 // AUDIT-FIX M1: previously we only ADDED entries — unchecking and re-checking
 // a supplier kept the prior confirmed=true state, making bid-matrix include
 // stale uploads.
+// 切换品类时同步 session_id(多品类场景：confirm 后 categorySessionMap 已填充)
+watch(tenderCategory, (cat) => {
+  if (cat && categorySessionMap.value[cat]) {
+    tenderListSessionId.value = categorySessionMap.value[cat]
+  }
+})
+
 watch(() => taskConfig.supplierIds, (ids, prev) => {
   for (const sid of ids) {
     if (!supplierUploads[sid]) {
@@ -560,7 +648,7 @@ watch(() => taskConfig.supplierIds, (ids, prev) => {
 }, { immediate: true })
 
 // ─── Step navigation ─────────────────────────────────────────────────────
-function goNext() {
+async function goNext() {
   if (currentStep.value === 0) {
     if (!canProceedFromConfig.value) {
       message.warning('请先选择项目')
@@ -576,11 +664,20 @@ function goNext() {
       message.warning('请确认品类')
       return
     }
+    // 尚未锁定时，在跳步前完成锁定；已锁定则直接跳
+    if (!tenderListSessionId.value) {
+      await confirmTenderListVersion()
+      if (!tenderListSessionId.value) return  // 锁定失败（含 unknown 未勾选），留在当前步
+    }
     if (!taskConfig.category) taskConfig.category = tenderCategory.value
     currentStep.value = 2
   } else if (currentStep.value === 2) {
     if (!canProceedFromUpload.value) {
       message.warning('请为每家供应商点击「校对入库」')
+      return
+    }
+    if (effectiveSupplierIds.value.length === 0) {
+      message.error('未检测到已入库的供应商报价，请先完成「校对入库」')
       return
     }
     currentStep.value = 3
@@ -850,9 +947,25 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
     entry.confirmed = true
     entry.confirmedSupplierId = data.supplier_id ?? null
     message.success(`${supplierName}：已入库 ${data.created} 条报价`)
-  } catch (e) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '入库失败'
-    message.error(detail)
+  } catch (e: unknown) {
+    const resp = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (resp && typeof resp === 'object' && (resp as Record<string, unknown>).error === 'supplier_alias_conflict') {
+      const d = resp as { message: string; candidates: { id: number; name: string; similarity: number }[] }
+      const topMatch = d.candidates[0]
+      // 自动选最相似的候选，提示用户确认
+      const confirmed = window.confirm(
+        `${d.message}\n\n最相似：「${topMatch.name}」(相似度 ${Math.round(topMatch.similarity * 100)}%)\n\n点「确定」合并到该供应商，点「取消」手动选择`
+      )
+      if (confirmed) {
+        entry.matchedSupplierId = topMatch.id
+        await confirmBatchEntry(entry)  // 用确认的 supplier_id 重试
+      } else {
+        message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
+      }
+    } else {
+      const detail = typeof resp === 'string' ? resp : '入库失败'
+      message.error(detail)
+    }
   }
 }
 
@@ -1017,8 +1130,8 @@ async function runMatrix() {
       </div>
 
       <div v-else>
-        <!-- Detected category + edit -->
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px;background:#f6f8fa;border-radius:6px">
+        <!-- Detected category + breakdown + edit -->
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px;background:#f6f8fa;border-radius:6px">
           <FileExcelOutlined style="color:#52c41a;font-size:18px;flex-shrink:0" />
           <div style="flex:1">
             <div style="font-weight:600;font-size:14px">{{ tenderFile?.name }}</div>
@@ -1027,7 +1140,9 @@ async function runMatrix() {
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
-            <span style="font-size:12px;color:rgba(0,0,0,0.55);white-space:nowrap">品类：</span>
+            <span style="font-size:12px;color:rgba(0,0,0,0.55);white-space:nowrap">
+              {{ tenderPreview.has_multiple_categories ? '当前品类：' : '品类：' }}
+            </span>
             <a-select
               v-model:value="tenderCategory"
               style="width:160px"
@@ -1041,35 +1156,62 @@ async function runMatrix() {
           <a-button size="small" type="link" @click="tenderPreview = null; tenderFile = null">重新上传</a-button>
         </div>
 
+        <!-- Category breakdown bar -->
+        <div
+          v-if="Object.keys(tenderPreview.category_breakdown || {}).length || tenderPreview.unknown_count"
+          style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;font-size:12px"
+        >
+          <span style="color:rgba(0,0,0,0.55)">识别到品类：</span>
+          <a-tag
+            v-for="(n, c) in tenderPreview.category_breakdown"
+            :key="c"
+            :color="c === tenderCategory ? 'blue' : 'default'"
+            style="cursor:pointer"
+            @click="tenderCategory = String(c)"
+          >{{ c }} × {{ n }}</a-tag>
+          <a-tag v-if="tenderPreview.unknown_count" color="orange">未识别 × {{ tenderPreview.unknown_count }}</a-tag>
+          <span v-if="tenderPreview.has_multiple_categories" style="color:#fa8c16">
+            · 多品类将按品类各自拆分为独立采购清单
+          </span>
+        </div>
+
         <!-- Preview table -->
         <a-table
           :data-source="tenderPreview.items"
           :row-key="(r: Record<string,unknown>) => String(r.seq)"
           size="small"
           :pagination="{ pageSize: 10, size: 'small' }"
-          :scroll="{ x: 600 }"
+          :scroll="{ x: 700 }"
           :columns="[
             { title: '序号', dataIndex: 'seq', width: 60 },
             { title: '品名', dataIndex: 'name', ellipsis: true },
-            { title: '规格', dataIndex: 'spec', width: 200, ellipsis: true },
-            { title: '单位', dataIndex: 'unit', width: 70 },
-            { title: '数量', dataIndex: 'qty', width: 80,
+            { title: '规格', dataIndex: 'spec', width: 180, ellipsis: true },
+            { title: '专业', dataIndex: 'profession', key: 'profession', width: 80 },
+            { title: '品类', dataIndex: 'category', key: 'category', width: 90 },
+            { title: '单位', dataIndex: 'unit', width: 60 },
+            { title: '数量', dataIndex: 'qty', width: 70,
               customRender: ({ text }: { text: number | null }) => text ?? '—' },
           ]"
-        />
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'profession'">
+              <span style="color:rgba(0,0,0,0.45);font-size:12px">{{ record.profession || '—' }}</span>
+            </template>
+            <template v-if="column.key === 'category'">
+              <a-tag v-if="record.category" color="blue" style="margin:0">{{ record.category }}</a-tag>
+              <a-tag v-else color="orange" style="margin:0">待确认</a-tag>
+            </template>
+          </template>
+        </a-table>
 
-        <!-- Confirm tender list version -->
-        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
-          <a-button
-            type="primary"
-            ghost
-            :loading="tenderListConfirming"
-            :disabled="tenderListConfirming"
-            @click="confirmTenderListVersion"
-          >
-            确认采购清单版本
-          </a-button>
-          <a-tag v-if="tenderListSessionId" color="green">已确认 (session #{{ tenderListSessionId }})</a-tag>
+        <!-- Force unknown category checkbox (shown only when unknowns exist) -->
+        <div
+          v-if="tenderPreview.unknown_count > 0"
+          style="margin-top:10px;padding:8px 12px;background:#fff7e6;border:1px solid #ffa940;border-radius:4px;display:flex;align-items:center;gap:8px;font-size:13px"
+        >
+          <a-checkbox v-model:checked="forceUnknownCategory">
+            强制归入默认品类「{{ tenderCategory || taskConfig.category }}」（{{ tenderPreview.unknown_count }} 项未识别将写入审计标记）
+          </a-checkbox>
         </div>
       </div>
     </a-card>
@@ -1256,75 +1398,13 @@ async function runMatrix() {
       </div>
 
       <!-- Review loaded -->
-      <template v-else-if="anchorReviewResult && tenderMatchSummary">
-        <!-- ① 匹配总览 -->
-        <div class="anchor-summary">
-          <div class="anchor-summary__title">
-            <AimOutlined style="color:#1677ff" /> 对齐核查
-          </div>
-          <div class="anchor-summary__stats">
-            <div class="anchor-stat">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.matched_quotes }}<span class="anchor-stat__denom">/{{ tenderMatchSummary.total_quotes }}</span></div>
-              <div class="anchor-stat__label">报价已匹配</div>
-            </div>
-            <div class="anchor-stat">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.anchors_covered }}<span class="anchor-stat__denom">/{{ tenderMatchSummary.anchors_total }}</span></div>
-              <div class="anchor-stat__label">采购项有报价</div>
-            </div>
-            <div class="anchor-stat anchor-stat--highlight">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.comparable_2plus }}</div>
-              <div class="anchor-stat__label">可比价行(≥2家)</div>
-            </div>
-            <div class="anchor-stat anchor-stat--highlight">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.three_way }}</div>
-              <div class="anchor-stat__label">三方齐全</div>
-            </div>
-            <div class="anchor-stat" :class="(anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length) > 0 ? 'anchor-stat--warn' : 'anchor-stat--ok'">
-              <div class="anchor-stat__value">{{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }}</div>
-              <div class="anchor-stat__label">待确认项</div>
-            </div>
-            <div class="anchor-stat" :class="tenderMatchSummary.residue > 0 ? 'anchor-stat--warn' : 'anchor-stat--ok'">
-              <div class="anchor-stat__value">{{ tenderMatchSummary.residue }}</div>
-              <div class="anchor-stat__label">清单外报价</div>
-            </div>
-          </div>
-          <!-- LLM 供应商视角填表（replace） -->
-          <div class="llm-fill-bar">
-            <a-button type="primary" ghost :loading="llmFilling" @click="runLlmFill">
-              <BulbOutlined /> LLM 智能填表（供应商视角）
-            </a-button>
-            <span class="llm-fill-bar__hint">
-              让每家供应商代理基于采购清单填表，突破纯 embedding 的可比率天花板；价格仍以真实报价为准
-            </span>
-          </div>
-        </div>
-
-        <!-- LLM 填表 A/B 结果 -->
-        <div v-if="llmFillResult" class="llm-fill-result">
-          <div class="llm-fill-result__title">
-            <BulbOutlined style="color:#722ed1" /> LLM 填表结果
-            <a-tag :color="llmFillResult.comparable_2plus >= llmFillResult.comparable_2plus_embedding_baseline ? 'green' : 'red'">
-              可比≥2：{{ llmFillResult.comparable_2plus }}/{{ llmFillResult.anchors_total }}
-              （embedding 基线 {{ llmFillResult.comparable_2plus_embedding_baseline }}，
-              {{ llmFillResult.comparable_2plus - llmFillResult.comparable_2plus_embedding_baseline >= 0 ? '+' : '' }}{{ llmFillResult.comparable_2plus - llmFillResult.comparable_2plus_embedding_baseline }}）
-            </a-tag>
-            <a-tag v-if="llmFillResult.finalization_invalidated" color="orange">需重新完成对齐审核</a-tag>
-          </div>
-          <a-table
-            :data-source="llmFillResult.per_supplier_fill"
-            :columns="llmFillColumns"
-            :pagination="false"
-            size="small"
-            row-key="supplier_id"
-            style="margin-top:8px"
-          >
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'error'">
-                <a-tag v-if="record.error" color="red">{{ record.error }}</a-tag>
-                <span v-else style="color:#52c41a">✓</span>
-              </template>
-            </template>
-          </a-table>
+      <template v-else-if="anchorReviewResult">
+        <!-- 多品类切换器 -->
+        <div v-if="confirmedCategories.length > 1" style="margin:8px 0 4px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:12px;color:rgba(0,0,0,0.55)">品类：</span>
+          <a-radio-group v-model:value="tenderCategory" button-style="solid" size="small">
+            <a-radio-button v-for="c in confirmedCategories" :key="c" :value="c">{{ c }}</a-radio-button>
+          </a-radio-group>
         </div>
 
         <!-- ② 采购清单对齐复核矩阵 -->
@@ -1332,6 +1412,7 @@ async function runMatrix() {
           v-if="taskConfig.projectId"
           :project-id="taskConfig.projectId"
           :category="tenderCategory || taskConfig.category"
+          :supplier-ids="effectiveSupplierIds.length ? effectiveSupplierIds : undefined"
           @pending-count="reviewPendingCount = $event"
         />
       </template>
@@ -1353,8 +1434,8 @@ async function runMatrix() {
         <a-tag v-if="selectedProjectName" color="default">{{ selectedProjectName }}</a-tag>
       </div>
 
-      <!-- ① Summary stat cards -->
-      <div v-if="matrixSummary" class="result-stats">
+      <!-- ① Summary stat cards — hidden when anchor-matrix mode has its own metrics bar -->
+      <div v-if="matrixSummary && !matrixCellStats" class="result-stats">
         <StatCard
           :icon="AppstoreOutlined"
           icon-bg="rgba(22,119,255,0.1)"
@@ -1413,7 +1494,49 @@ async function runMatrix() {
         />
       </div>
 
-      <!-- ② Matrix table -->
+      <!-- ② Anchor-matrix cell accounting bar (Req4: 采购项×供应商 view) -->
+      <div v-if="matrixCellStats" class="matrix-cell-bar">
+        <div class="matrix-cell-bar__item">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.anchors }}</span>
+          <span class="matrix-cell-bar__lbl">采购项</span>
+        </div>
+        <div class="matrix-cell-bar__item">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.supplier_count }}</span>
+          <span class="matrix-cell-bar__lbl">供应商</span>
+        </div>
+        <div class="matrix-cell-bar__item">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.total_cells }}</span>
+          <span class="matrix-cell-bar__lbl">单元格</span>
+        </div>
+        <div class="matrix-cell-bar__sep" />
+        <div class="matrix-cell-bar__item matrix-cell-bar__item--ok">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.confirmed }}</span>
+          <span class="matrix-cell-bar__lbl">已确认</span>
+        </div>
+        <div class="matrix-cell-bar__item" :class="matrixCellStats.pending > 0 ? 'matrix-cell-bar__item--warn' : 'matrix-cell-bar__item--ok'">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.pending }}</span>
+          <span class="matrix-cell-bar__lbl">待确认</span>
+        </div>
+        <div class="matrix-cell-bar__item matrix-cell-bar__item--grey">
+          <span class="matrix-cell-bar__val">{{ matrixCellStats.missing }}</span>
+          <span class="matrix-cell-bar__lbl">未报价</span>
+        </div>
+        <div class="matrix-cell-bar__sep" />
+        <div class="matrix-cell-bar__item matrix-cell-bar__item--blue">
+          <span class="matrix-cell-bar__val">
+            {{ matrixCellStats.quoted_ge_2 }}<span class="matrix-cell-bar__denom">/{{ matrixCellStats.anchors }}</span>
+          </span>
+          <span class="matrix-cell-bar__lbl">可比价(≥2家)</span>
+        </div>
+        <div class="matrix-cell-bar__item matrix-cell-bar__item--blue">
+          <span class="matrix-cell-bar__val">
+            {{ matrixCellStats.quoted_full }}<span class="matrix-cell-bar__denom">/{{ matrixCellStats.anchors }}</span>
+          </span>
+          <span class="matrix-cell-bar__lbl">{{ matrixCellStats.supplier_count }}家齐全</span>
+        </div>
+      </div>
+
+      <!-- ③ Matrix table -->
       <a-card :body-style="{ padding: '0' }" style="margin-top:16px">
         <a-empty v-if="!analyzing && matrixRows.length === 0" description="当前条件下无可比数据" style="padding:40px 0" />
         <BidMatrix
@@ -1630,7 +1753,7 @@ async function runMatrix() {
         </a-button>
       </template>
 
-      <a-button v-else type="primary" :loading="matchRunning || tenderUploading" @click="goNext">
+      <a-button v-else type="primary" :loading="matchRunning || tenderUploading || tenderListConfirming" @click="goNext">
         <template v-if="currentStep === 2">开始匹配</template>
         <template v-else>下一步</template>
         <template #icon><RightOutlined /></template>
@@ -2243,6 +2366,62 @@ async function runMatrix() {
       font-size: 20px;
       color: @primary-color;
     }
+  }
+}
+
+/* ─── Anchor matrix cell-accounting bar (Req4) ──────────────────────── */
+.matrix-cell-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 10px 0;
+  margin-top: 16px;
+  background: #fafafa;
+  border: 1px solid @border-color-split;
+  border-radius: @border-radius-base;
+  flex-wrap: wrap;
+
+  &__item {
+    flex: 1;
+    min-width: 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 12px;
+    border-right: 1px solid @border-color-split;
+
+    &:last-child { border-right: none; }
+    &--ok .matrix-cell-bar__val { color: #52c41a; }
+    &--warn .matrix-cell-bar__val { color: #faad14; }
+    &--grey .matrix-cell-bar__val { color: #8c8c8c; }
+    &--blue .matrix-cell-bar__val { color: #1677ff; }
+  }
+
+  &__val {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+    color: @heading-color;
+  }
+
+  &__denom {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(0, 0, 0, 0.4);
+  }
+
+  &__lbl {
+    font-size: 11px;
+    color: rgba(0, 0, 0, 0.45);
+    margin-top: 1px;
+  }
+
+  &__sep {
+    width: 1px;
+    height: 40px;
+    background: @border-color-base;
+    flex-shrink: 0;
+    margin: 0 4px;
   }
 }
 </style>

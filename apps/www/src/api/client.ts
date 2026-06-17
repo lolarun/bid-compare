@@ -625,13 +625,26 @@ export interface TenderPreviewItem {
   unit: string
   qty: number | null
   profession: string
+  category: string            // 品类识别结果（"" = 待人工确认）
+  category_confidence: number
+  category_reason: string
   canonical: Record<string, string>
 }
 
 export interface TenderPreviewResult {
   items: TenderPreviewItem[]
   detected_category: string
+  category_breakdown: Record<string, number>
+  has_multiple_categories: boolean
+  unknown_count: number
   total: number
+}
+
+export interface TenderListConfirmSession {
+  category: string
+  id: number
+  version: number
+  anchors_total: number
 }
 
 export interface AnchorMatchSummary {
@@ -695,6 +708,7 @@ export interface ReviewCell {
   flags: string[] | null
   is_lowest: boolean
   candidates: ReviewCellCandidate[]
+  missing_reason?: string | null
 }
 
 export interface ReviewRow {

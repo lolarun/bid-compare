@@ -110,3 +110,12 @@ def _ensure_sqlite_schema():
             conn.execute(text(
                 "ALTER TABLE quotes ADD COLUMN extraction_meta_json JSON"
             ))
+
+        # v2.7: persist supplier scope on TenderListSession (prevents historical-supplier fallback)
+        tls_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(tender_list_sessions)")).fetchall()
+        }
+        if "confirmed_supplier_ids" not in tls_columns:
+            conn.execute(text(
+                "ALTER TABLE tender_list_sessions ADD COLUMN confirmed_supplier_ids JSON"
+            ))

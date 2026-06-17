@@ -63,35 +63,6 @@ const pendingCellCount = computed(() =>
   ),
 )
 
-/* ---------- Flag badges ---------- */
-interface FlagBadge { label: string; type: 'success' | 'warning' | 'error' | 'info' }
-
-function parseFlagBadges(flags: string[] | null | undefined): FlagBadge[] {
-  if (!flags?.length) return []
-  const badges: FlagBadge[] = []
-  const hasVerified = flags.includes('ocr_corrected_verified')
-  for (const f of flags) {
-    if (f === 'ocr_corrected_verified') {
-      badges.push({ label: 'OCR纠错已验证', type: 'success' })
-    } else if (f === 'ocr_corrected' && !hasVerified) {
-      badges.push({ label: 'OCR纠错', type: 'info' })
-    } else if (f.startsWith('valve_type_conflict:')) {
-      const vt = f.slice('valve_type_conflict:'.length)
-      badges.push({ label: `阀型冲突:${vt}`, type: 'error' })
-    } else if (f === 'canonical_conflict') {
-      badges.push({ label: '规格冲突', type: 'warning' })
-    } else if (f.startsWith('ac_conflict')) {
-      badges.push({ label: '锚点冲突', type: 'warning' })
-    } else if (f === 'missing_without_evidence') {
-      badges.push({ label: '缺少证据', type: 'warning' })
-    } else if (f.startsWith('risky_candidate')) {
-      badges.push({ label: '候选风险', type: 'warning' })
-    } else if (f.startsWith('dup_qids')) {
-      badges.push({ label: '重复报价', type: 'warning' })
-    }
-  }
-  return badges.slice(0, 3)  // cap at 3 flags
-}
 
 /* ---------- Cell helpers ---------- */
 function cellClass(cell: SupplierCell): Record<string, boolean> {
@@ -267,21 +238,6 @@ async function handleExport() {
                   >
                     {{ formatDeviation(cell.deviation_pct) }}
                   </span>
-                  <div v-if="cell.total !== null" style="font-size:11px;color:rgba(0,0,0,0.45);margin-top:2px">
-                    合计 ¥{{ cell.total.toLocaleString() }}
-                  </div>
-                  <div v-if="cell.pending_note" style="font-size:10px;color:#faad14;margin-top:2px">
-                    ⚠ {{ cell.pending_note }}
-                  </div>
-                  <div v-if="parseFlagBadges(cell.flags).length" class="bid-matrix__flags">
-                    <span
-                      v-for="b in parseFlagBadges(cell.flags)"
-                      :key="b.label"
-                      class="bid-matrix__flag-badge"
-                      :class="`bid-matrix__flag-badge--${b.type}`"
-                      :title="b.label === 'OCR纠错已验证' && cell.evidence ? cell.evidence : undefined"
-                    >{{ b.label }}</span>
-                  </div>
                 </template>
                 <span v-else class="bid-matrix__no-quote">未报价</span>
               </template>
@@ -290,28 +246,16 @@ async function handleExport() {
               <template v-else-if="cell.cell_status === 'pending'">
                 <div class="bid-matrix__pending-cell">
                   <div class="bid-matrix__price-row">
-                    <span class="bid-matrix__price bid-matrix__price--pending">
+                    <a-tooltip v-if="cell.evidence" :title="cell.evidence">
+                      <span class="bid-matrix__price bid-matrix__price--pending" style="cursor:help">
+                        {{ cell.price != null ? `¥${cell.price.toFixed(2)}` : '—' }}
+                      </span>
+                    </a-tooltip>
+                    <span v-else class="bid-matrix__price bid-matrix__price--pending">
                       {{ cell.price != null ? `¥${cell.price.toFixed(2)}` : '—' }}
                     </span>
                     <span class="bid-matrix__pending-badge">待确认</span>
                   </div>
-                  <div v-if="cell.confidence != null" style="font-size:10px;color:#faad14;margin-top:2px">
-                    置信度 {{ (cell.confidence * 100).toFixed(0) }}%
-                  </div>
-                  <div v-if="parseFlagBadges(cell.flags).length" class="bid-matrix__flags">
-                    <span
-                      v-for="b in parseFlagBadges(cell.flags)"
-                      :key="b.label"
-                      class="bid-matrix__flag-badge"
-                      :class="`bid-matrix__flag-badge--${b.type}`"
-                    >{{ b.label }}</span>
-                  </div>
-                  <!-- LLM evidence (tooltip trigger) -->
-                  <div
-                    v-if="cell.evidence"
-                    class="bid-matrix__evidence"
-                    :title="cell.evidence"
-                  >💬 {{ cell.evidence.length > 36 ? cell.evidence.slice(0, 36) + '…' : cell.evidence }}</div>
                   <!-- Inline confirm buttons (only if parent listens to confirmItem) -->
                   <div v-if="cell.item_id" class="bid-matrix__pending-actions">
                     <a-button
@@ -598,56 +542,6 @@ async function handleExport() {
     display: flex;
     gap: 4px;
     margin-top: 4px;
-  }
-
-  &__evidence {
-    font-size: 9px;
-    color: rgba(0, 0, 0, 0.40);
-    margin-top: 3px;
-    line-height: 1.3;
-    cursor: help;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    max-width: 130px;
-  }
-
-  &__flags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 3px;
-    margin-top: 3px;
-  }
-
-  &__flag-badge {
-    display: inline-block;
-    font-size: 9px;
-    padding: 0 4px;
-    border-radius: 8px;
-    line-height: 16px;
-    white-space: nowrap;
-    font-weight: 500;
-
-    &--success {
-      color: #52c41a;
-      background: rgba(82, 196, 26, 0.10);
-      border: 1px solid rgba(82, 196, 26, 0.30);
-    }
-    &--error {
-      color: #ff4d4f;
-      background: rgba(255, 77, 79, 0.08);
-      border: 1px solid rgba(255, 77, 79, 0.25);
-    }
-    &--warning {
-      color: #d46b08;
-      background: rgba(250, 140, 22, 0.08);
-      border: 1px solid rgba(250, 140, 22, 0.25);
-    }
-    &--info {
-      color: #1890ff;
-      background: rgba(24, 144, 255, 0.08);
-      border: 1px solid rgba(24, 144, 255, 0.25);
-    }
   }
 
   &__deviation-pill {

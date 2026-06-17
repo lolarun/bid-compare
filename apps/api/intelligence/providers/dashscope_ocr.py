@@ -88,10 +88,12 @@ material 字段仍按原文填写；normalized_material 仅在确认为OCR错别
 
 如果该页没有报价明细（如封面、证书等非报价页），返回 {"items": []}"""
 
-_META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件封面/汇总页的OCR HTML内容。
+_META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件封面/汇总页或营业执照/资质证书页的OCR HTML内容。
 请提取元信息，只返回JSON：
 {"supplier_name": "投标单位全称或空字符串", "bid_total": 投标总价数字或null, "bid_total_basis": "tax_included|tax_excluded|unknown", "tax_rate": 税率小数或null}
-若该页没有相关信息，对应字段返回null或空字符串。"""
+提取规则：
+- supplier_name：优先从"投标单位"/"报价单位"/"投标人"字段取；若为营业执照页，从"名称"/"称"字段取公司全名（即使列标题因OCR截断只剩"称"）；不要填经销商授权书中的品牌商名称。
+- 若该页没有相关信息，对应字段返回null或空字符串。"""
 
 # Stage 2 prompt for structured TableGrid JSON input (replaces raw HTML when available)
 _QUOTE_S2_TABLE_PROMPT = """你是机电材料报价单解析助理。以下是 OCR 识别后按页面表格整理的结构化数据（JSON 格式）。

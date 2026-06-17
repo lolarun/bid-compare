@@ -413,17 +413,45 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
 def anchor_review_matrix(
     project_id: int = Query(...),
     category: str = Query(...),
+    supplier_ids: str | None = Query(None),  # 逗号分隔的供应商 ID
     db: Session = Depends(get_db),
 ):
     """采购清单维度对齐复核矩阵 — 一行一个采购锚点，N列供应商。
 
-    替代旧的 /anchor-review (组/项视图)，成为复核主界面数据源。
-    每行对应一个 TenderAnchor，cells 按 str(supplier_id) 索引。
-    Pending cells 包含 candidates 列表（Top-5 候选报价）。
+    supplier_ids: 本次比价的供应商集合（逗号分隔整数）。
+    若不传，尝试从当前 TenderListSession.confirmed_supplier_ids 恢复。
+    两者均为空 → 400，禁止拉历史全量供应商。
     """
     from apps.api.services.bid_matrix import build_anchor_review_matrix
+    from apps.api.models.tender_list_session import TenderListSession as _TLS
+
+    sids: list[int] | None = None
+    if supplier_ids:
+        try:
+            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
+
+    if not sids:
+        # Try recovering from persisted session scope
+        _s = db.query(_TLS).filter(
+            _TLS.project_id == project_id,
+            _TLS.category == category,
+            _TLS.is_current == True,  # noqa: E712
+            _TLS.status == "confirmed",
+        ).first()
+        if _s and _s.confirmed_supplier_ids:
+            sids = [int(x) for x in _s.confirmed_supplier_ids]
+
+    if not sids:
+        raise HTTPException(400, {
+            "error": "missing_supplier_ids",
+            "message": "必须提供本次比价的供应商 ID（supplier_ids），禁止拉历史全量供应商。"
+                       "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。",
+        })
+
     try:
-        result = build_anchor_review_matrix(db, project_id, category)
+        result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return result
@@ -433,12 +461,14 @@ def anchor_review_matrix(
 def anchor_review(
     project_id: int = Query(...),
     category: str = Query(...),
+    supplier_ids: str | None = Query(None),  # 逗号分隔的供应商 ID
     db: Session = Depends(get_db),
 ):
     """人工复核:返回低置信锚点组 + 残差报价,含供应商/物料名称。
 
     低置信 = group.confidence < 0.70。
     残差   = 本项目/品类的报价中未出现在任何对齐组里的条目。
+    supplier_ids: 提供时只统计这些供应商的报价，防历史数据污染。
     """
     import re as _re
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
@@ -448,19 +478,44 @@ def anchor_review(
 
     LOW_CONF = 0.70
 
-    # 所有该 project+category 的已确认锚点组
-    groups = (
-        db.query(BidAlignmentGroup)
-        .filter(
-            BidAlignmentGroup.project_id == project_id,
-            BidAlignmentGroup.category == category,
-            BidAlignmentGroup.status == "confirmed",
-        )
-        .all()
+    sids: list[int] | None = None
+    if supplier_ids:
+        try:
+            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
+
+    # v2.7: resolve supplier scope from session if not provided; hard-block if still empty
+    from apps.api.models.tender_list_session import TenderListSession as _TLSA
+    _cur_session = db.query(_TLSA).filter(
+        _TLSA.project_id == project_id,
+        _TLSA.category == category,
+        _TLSA.is_current == True,  # noqa: E712
+        _TLSA.status == "confirmed",
+    ).first()
+    if not sids and _cur_session and _cur_session.confirmed_supplier_ids:
+        sids = [int(x) for x in _cur_session.confirmed_supplier_ids]
+    if not sids:
+        raise HTTPException(400, {
+            "error": "missing_supplier_ids",
+            "message": "必须提供本次比价的供应商 ID，请先完成上传匹配后再查看复核数据。",
+        })
+    _cur_session_id = _cur_session.id if _cur_session else None
+
+    # 只拉当前 TenderListSession 的已确认锚点组（防历史数据污染）
+    _grp_q = db.query(BidAlignmentGroup).filter(
+        BidAlignmentGroup.project_id == project_id,
+        BidAlignmentGroup.category == category,
+        BidAlignmentGroup.status == "confirmed",
     )
+    if _cur_session_id:
+        _grp_q = _grp_q.filter(
+            BidAlignmentGroup.tender_list_session_id == _cur_session_id
+        )
+    groups = _grp_q.all()
 
     # 构建 quote_id → (quote, material, supplier) 映射
-    all_rows = (
+    q_base = (
         db.query(QuoteModel, MaterialModel, SupplierModel)
         .join(MaterialModel, QuoteModel.material_id == MaterialModel.id)
         .outerjoin(SupplierModel, QuoteModel.supplier_id == SupplierModel.id)
@@ -468,8 +523,10 @@ def anchor_review(
             QuoteModel.project_id == project_id,
             MaterialModel.category == category,
         )
-        .all()
     )
+    if sids:
+        q_base = q_base.filter(QuoteModel.supplier_id.in_(sids))
+    all_rows = q_base.all()
     quote_map = {qt.id: (qt, mat, sup) for qt, mat, sup in all_rows}
 
     # 已匹配 quote_id 集合
@@ -601,8 +658,18 @@ async def tender_list_preview(
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    items = [
-        {
+    from apps.api.services.category_classify import classify_category
+
+    items = []
+    breakdown: dict[str, int] = {}
+    unknown_count = 0
+    for a in anchors:
+        g = classify_category(a.name, a.spec, a.pressure, a.material_text())
+        if g.is_unknown:
+            unknown_count += 1
+        else:
+            breakdown[g.category] = breakdown.get(g.category, 0) + 1
+        items.append({
             "seq": str(a.seq),
             "name": a.name,
             "spec": a.spec,
@@ -611,14 +678,23 @@ async def tender_list_preview(
             "materials": a.materials,   # dict {col_name: material_text}
             "unit": a.unit,
             "qty": a.qty,
-            "profession": a.profession,
+            "profession": a.profession,   # 专业(展示用，不再用于品类识别)
+            "category": g.category,       # 品类识别结果("" = 待人工确认)
+            "category_confidence": round(g.confidence, 2),
+            "category_reason": g.reason,
             "canonical": a.canonical,   # pre-computed valve canonical key
-        }
-        for a in anchors
-    ]
-    professions = [a.profession for a in anchors if a.profession]
-    detected_category = professions[0] if professions else ""
-    return {"items": items, "detected_category": detected_category, "total": len(items)}
+        })
+
+    # detected_category = 多数派品类(基于品名/规格识别，非专业列)
+    detected_category = max(breakdown, key=lambda k: breakdown[k]) if breakdown else ""
+    return {
+        "items": items,
+        "detected_category": detected_category,
+        "category_breakdown": breakdown,
+        "has_multiple_categories": len(breakdown) > 1,
+        "unknown_count": unknown_count,
+        "total": len(items),
+    }
 
 
 class _AnchorConfirmBody(BaseModel):
@@ -714,8 +790,12 @@ async def tender_list_match(
     if content is None and session is not None:
         _tls_id = session.id
     elif content is not None:
-        # File upload path: try to find current session for this project/category
+        # File upload path: find current session, else auto-create from the file
+        # (closes the gap where match ran but no session was persisted → matrix 409).
         from apps.api.models.tender_list_session import TenderListSession as _TLS
+        from apps.api.services.tender_list import (
+            parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
+        )
         _s = db.query(_TLS).filter(
             _TLS.project_id == project_id,
             _TLS.category == category,
@@ -723,6 +803,41 @@ async def tender_list_match(
         ).first()
         if _s:
             _tls_id = _s.id
+            # 用该品类 session 的锚点匹配(避免重解析整份多品类文件跨品类误配)
+            if _s.anchors_json:
+                prebuilt_anchors = rebuild_anchors(_s)
+        else:
+            # 自动落 session：解析文件 → 按品类分组 → 每个品类建 confirmed session。
+            parsed = parse_tender_xlsx(content)
+            groups = group_anchors_by_category(parsed, default_category=category)
+
+            # 校验：请求的 category 必须在检测到的品类列表里，防止跨品类污染。
+            available = list(groups.keys())
+            if available and category not in available:
+                raise HTTPException(400, {
+                    "error": "category_not_in_file",
+                    "message": f"本清单未检测到品类「{category}」，"
+                               f"请从以下品类中选择后重试",
+                    "available_categories": available,
+                })
+
+            file_name = (file.filename or "") if file is not None else ""
+            for cat, anchors_json in groups.items():
+                s = _save_tender_session(
+                    db, project_id, cat, file_name, anchors_json, confirmed_by=None,
+                )
+                db.flush()
+                if cat == category:
+                    _tls_id = s.id
+            db.commit()
+            # 用本品类锚点匹配(避免拿全清单跨品类误配)
+            cur = db.query(_TLS).filter(
+                _TLS.project_id == project_id,
+                _TLS.category == category,
+                _TLS.is_current.is_(True),
+            ).first()
+            if cur:
+                prebuilt_anchors = rebuild_anchors(cur)
 
     try:
         summary, per_supplier = import_and_match(
@@ -781,6 +896,16 @@ async def tender_list_match(
         dm = doc_meta_by_sid.get(sid)
         r = assess_readiness(sid, sup_name, stats, doc_meta=dm)
         readiness_list.append(r.as_dict())
+
+    # v2.7: persist supplier scope on current TenderListSession so downstream
+    # endpoints (anchor-review/matrix, llm-fill, bid-matrix) never fall back to
+    # scanning all historical suppliers for this project+category.
+    if _tls_id and sids:
+        from apps.api.models.tender_list_session import TenderListSession as _TLSup
+        _tls_obj = db.get(_TLSup, _tls_id)
+        if _tls_obj:
+            _tls_obj.confirmed_supplier_ids = sorted(set(sids))
+            db.commit()
 
     result = summary.as_dict()
     result["readiness_list"] = readiness_list
@@ -901,11 +1026,6 @@ def _persist_llm_fill(db, project_id, category, session_id, results, seq_to_anch
             if persist_qid is None:
                 continue
             note = f"LLM cos={cell.confidence:.2f}"
-            if cell.flags:
-                note += " " + ",".join(cell.flags)
-            others = [q for q in (cell.aggregated_quote_ids or []) if q != cell.quote_id]
-            if others:
-                note += f" aggregated={others}"
             db.add(BidAlignmentItem(
                 group_id=group.id, quote_id=persist_qid, supplier_id=qsid,
                 action=cell.action, spec_note=note.strip()[:500],
@@ -1339,30 +1459,30 @@ class _TenderListConfirmBody(BaseModel):
     anchors_json: list = []
     anchors_total: int = 0
     confirmed_by: str = ""
+    force: bool = False  # 显式强制：unknown 项归入默认品类并写入审计标记
 
 
-@router.post("/tender-list/confirm")
-def tender_list_confirm(
-    body: _TenderListConfirmBody,
-    db: Session = Depends(get_db),
+def _save_tender_session(
+    db, project_id, category, file_name, anchors_json, confirmed_by,
 ):
-    """保存 TenderListSession，旧版 is_current 设为 False。"""
+    """新建一个 confirmed TenderListSession，旧的同 (project,category) 版本设为非当前。
+
+    返回新建的 session(未 commit；由调用方统一 commit)。
+    """
     from apps.api.models.tender_list_session import TenderListSession
     from datetime import datetime as _dt
 
-    # 将旧版标记为非当前版本
     db.query(TenderListSession).filter(
-        TenderListSession.project_id == body.project_id,
-        TenderListSession.category == body.category,
+        TenderListSession.project_id == project_id,
+        TenderListSession.category == category,
         TenderListSession.is_current.is_(True),
     ).update({"is_current": False, "superseded_at": _dt.utcnow()})
 
-    # 计算新版本号
     last = (
         db.query(TenderListSession)
         .filter(
-            TenderListSession.project_id == body.project_id,
-            TenderListSession.category == body.category,
+            TenderListSession.project_id == project_id,
+            TenderListSession.category == category,
         )
         .order_by(TenderListSession.version.desc())
         .first()
@@ -1370,21 +1490,90 @@ def tender_list_confirm(
     new_version = (last.version + 1) if last else 1
 
     session = TenderListSession(
-        project_id=body.project_id,
-        category=body.category,
-        file_name=body.file_name,
-        anchors_total=body.anchors_total,
-        anchors_json=body.anchors_json,
+        project_id=project_id,
+        category=category,
+        file_name=file_name,
+        anchors_total=len(anchors_json),
+        anchors_json=anchors_json,
         version=new_version,
         is_current=True,
         status="confirmed",
-        confirmed_by=body.confirmed_by or None,
+        confirmed_by=confirmed_by or None,
         confirmed_at=_dt.utcnow(),
     )
     db.add(session)
+    return session
+
+
+@router.post("/tender-list/confirm")
+def tender_list_confirm(
+    body: _TenderListConfirmBody,
+    db: Session = Depends(get_db),
+):
+    """保存 TenderListSession。按 anchor.category 拆分：单品类1个、多品类N个。
+
+    每个 anchor 的品类取自 anchors_json[].category(preview 识别结果)；
+    缺失/空(unknown)项：force=False 时 400 拦截，force=True 时归入 body.category 并标记 _category_forced=True。
+    """
+    # unknown 品类强制拦截
+    unknown_items = [
+        (a.get("name", "") if isinstance(a, dict) else "")
+        for a in (body.anchors_json or [])
+        if isinstance(a, dict) and not a.get("category")
+    ]
+    if unknown_items and not body.force:
+        raise HTTPException(400, {
+            "error": "unknown_categories",
+            "message": f"有 {len(unknown_items)} 项采购品类未识别，请核对后重试，"
+                       "或勾选「强制归入默认品类」后再确认",
+            "unknown_count": len(unknown_items),
+            "unknown_items": unknown_items[:10],
+        })
+
+    # 按品类分组 anchors
+    groups: dict[str, list] = {}
+    for a in (body.anchors_json or []):
+        if isinstance(a, dict):
+            cat = a.get("category") or ""
+            if not cat:
+                cat = body.category
+                a = {**a, "_category_forced": True}  # 审计标记
+        else:
+            cat = body.category
+        if not cat:
+            raise HTTPException(
+                400, "存在未识别品类的采购项，且未提供默认品类(category)，无法保存。"
+            )
+        groups.setdefault(cat, []).append(a)
+
+    if not groups:
+        # 空清单：保留旧行为，按 body.category 建空 session
+        if not body.category:
+            raise HTTPException(400, "category 不能为空")
+        groups[body.category] = []
+
+    sessions_out = []
+    for cat, anchors in groups.items():
+        s = _save_tender_session(
+            db, body.project_id, cat, body.file_name, anchors, body.confirmed_by,
+        )
+        db.flush()  # 拿到 id
+        sessions_out.append({
+            "category": cat, "id": s.id, "version": s.version,
+            "anchors_total": len(anchors),
+        })
+
     db.commit()
-    db.refresh(session)
-    return {"ok": True, "id": session.id, "version": session.version}
+
+    # 主 session = 锚点最多的品类(向后兼容旧前端读 id/version)
+    primary = max(sessions_out, key=lambda x: x["anchors_total"])
+    return {
+        "ok": True,
+        "id": primary["id"],
+        "version": primary["version"],
+        "sessions": sessions_out,
+        "multi_category": len(sessions_out) > 1,
+    }
 
 
 @router.get("/tender-list/current")

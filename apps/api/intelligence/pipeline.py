@@ -226,7 +226,7 @@ class ExtractionPipeline:
         for idx, (cls, html) in enumerate(page_roles_html):
             if cls.primary_role in (PageRole.QUOTE_TABLE, PageRole.UNKNOWN) and len(quote_pages) < MAX_QUOTE_TABLE_PAGES:
                 quote_pages.append((idx, images[idx], html))
-            elif (cls.primary_role in (PageRole.COVER, PageRole.SUMMARY)
+            elif (cls.primary_role in (PageRole.COVER, PageRole.SUMMARY, PageRole.OTHER)
                   and len(meta_htmls) < MAX_META_PAGES):
                 meta_htmls.append(html)
 

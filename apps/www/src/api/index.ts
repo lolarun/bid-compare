@@ -15,6 +15,7 @@ import type {
   AlignmentGroupOut,
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
+  TenderListConfirmSession,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -176,9 +177,9 @@ export const analysisApi = {
     tender_list_session_id?: number | null; k?: number; mode?: string; model?: string | null
   }) =>
     api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
-  anchorReviewMatrix: (params: { project_id: number; category: string }) =>
+  anchorReviewMatrix: (params: { project_id: number; category: string; supplier_ids?: string }) =>
     api.get<AnchorReviewMatrixResult>('/analysis/anchor-review/matrix', { params }),
-  anchorReview: (params: { project_id: number; category: string }) =>
+  anchorReview: (params: { project_id: number; category: string; supplier_ids?: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
   anchorReviewConfirm: (data: { group_id: number; action: 'confirm' | 'reject' }) =>
     api.post('/analysis/anchor-review/confirm', data),
@@ -191,9 +192,9 @@ export const analysisApi = {
   }) =>
     api.post<{ ok: boolean; id: number; status: string; group_ids_count: number; pending_at_finalize: number }>('/analysis/anchor-review/finalize', data),
   tenderListConfirm: (data: {
-    project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string
+    project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string; force?: boolean
   }) =>
-    api.post<{ ok: boolean; id: number; version: number }>('/analysis/tender-list/confirm', data),
+    api.post<{ ok: boolean; id: number; version: number; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
   bidMatrixSave: (data: {
     project_id?: number; category: string; alignment_finalization_id: number;
     tender_list_session_id?: number; matrix_json?: object; readiness_json?: unknown[];
