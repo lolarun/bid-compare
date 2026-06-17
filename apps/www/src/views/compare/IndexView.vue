@@ -220,6 +220,9 @@ function onTenderJobDone(job: ExtractionJob) {
   tenderBrandRequirement.value = r.brand_requirement || []
   tenderSupplierBrands.value = r.supplier_brands || []
   tenderDetectedPages.value = r.detected_pages || null
+  showPageOverride.value = false
+  showQualityDetails.value = false
+  excelOnlyItemActions.value = {}
   const bl = r.detected_pages?.bidlist || []
   if (bl.length) {
     overrideBidlistPages.value = bl.length > 1 ? `${bl[0]}-${bl[bl.length - 1]}` : String(bl[0])
@@ -275,6 +278,71 @@ function pct(n: number | undefined | null): string {
 // Computed shorthand so template stays readable
 const pdfQm = computed((): PdfQualityMetrics | null => pdfSupplement.value?.quality_metrics ?? null)
 const pdfDiagnostics = computed((): PageDiagnostic[] => pdfSupplement.value?.page_diagnostics ?? [])
+
+// ── Step 2 UI state ───────────────────────────────────────────────────────
+const showPageOverride = ref(false)
+const showQualityDetails = ref(false)
+const excelOnlyItemActions = ref<Record<string, 'ignore' | 'add' | 'pending'>>({})
+
+interface ExcelDiffItem {
+  seq: string | number
+  name?: string
+  spec?: string
+  unit?: string
+  qty?: number | null
+  [key: string]: unknown
+}
+
+const excelOnlyItems = computed((): ExcelDiffItem[] => {
+  const seqs = reconcileResult.value?.only_in_excel_reference ?? []
+  if (!seqs.length || !tenderPreview.value) return []
+  const seqSet = new Set(seqs.map(String))
+  return (tenderPreview.value.items as unknown as ExcelDiffItem[]).filter(
+    item => seqSet.has(String(item.seq))
+  )
+})
+
+const pdfConclusionStatus = computed((): 'ok' | 'warning' | 'error' => {
+  if (!pdfSupplement.value) return 'ok'
+  const qm = pdfQm.value
+  if (qm && (qm.seq_missing.length > 5 || (qm.qty_parse_success_rate != null && qm.qty_parse_success_rate < 0.5))) return 'error'
+  if ((qm?.seq_missing.length ?? 0) > 0 || (qm?.seq_duplicate.length ?? 0) > 0) return 'warning'
+  if ((reconcileResult.value?.only_in_excel_reference ?? []).length > 0) return 'warning'
+  if ((reconcileResult.value?.field_mismatches ?? []).length > 0) return 'warning'
+  return 'ok'
+})
+
+const pdfConclusionTitle = computed((): string => {
+  if (!pdfSupplement.value) return ''
+  if (pdfConclusionStatus.value === 'error') return 'PDF识别质量较低，建议检查后重新上传'
+  const excelOnly = (reconcileResult.value?.only_in_excel_reference ?? []).length
+  if (excelOnly > 0) return 'PDF主清单已识别，发现Excel参考差异'
+  if ((pdfQm.value?.seq_missing.length ?? 0) > 0) return 'PDF主清单已识别，部分序号待核查'
+  return 'PDF主清单已识别，可继续'
+})
+
+const pdfConclusionDesc = computed((): string => {
+  const r = pdfSupplement.value
+  if (!r) return ''
+  return `${r.row_count} 项采购项 · 清单页 ${overrideBidlistPages.value || '?'} · 品牌表第 ${tenderDetectedPages.value?.brand ?? '?'} 页`
+})
+
+const pdfDiffSummary = computed((): string => {
+  const excelOnly = (reconcileResult.value?.only_in_excel_reference ?? []).length
+  const mismatches = (reconcileResult.value?.field_mismatches ?? []).length
+  if (!excelOnly && !mismatches) return ''
+  const parts: string[] = []
+  if (excelOnly) parts.push(`${excelOnly} 项仅在采购清单Excel中`)
+  if (mismatches) parts.push(`${mismatches} 处字段存在差异`)
+  return parts.join(' · ') + '，不影响PDF主清单比价'
+})
+
+function setExcelItemAction(seq: string, action: 'ignore' | 'add' | 'pending') {
+  excelOnlyItemActions.value[seq] = action
+}
+function clearExcelItemAction(seq: string) {
+  delete excelOnlyItemActions.value[seq]
+}
 
 // ─── Step 3: Alignment finalization gate ─────────────────────────────────
 const alignmentFinalizing = ref(false)
@@ -1226,173 +1294,216 @@ async function runMatrix() {
       </a-form>
     </a-card>
 
-    <!-- Step 2: Upload Procurement List (PDF primary + optional Excel reference) -->
+    <!-- Step 2: 采购清单 (PDF主清单 + Excel对照参考) -->
     <a-card v-else-if="currentStep === 1" :body-style="{ padding: '20px' }">
 
-      <!-- ── Section A: PDF 招标文件（主清单）──────────────────────── -->
-      <div style="margin-bottom:14px">
-        <h3 style="margin:0 0 4px;font-size:15px;font-weight:600">
+      <!-- ── A: 招标文件 PDF（主清单）──────────────────────────────── -->
+      <div style="margin-bottom:16px">
+        <h3 style="margin:0 0 3px;font-size:15px;font-weight:600">
           <FilePdfOutlined style="color:#cf1322;margin-right:6px" />招标文件 PDF（主清单）
         </h3>
-        <div style="font-size:12px;color:rgba(0,0,0,0.45)">上传招标文件 PDF，自动识别投标清单页与品牌要求表，作为比价基础清单</div>
+        <div style="font-size:12px;color:rgba(0,0,0,0.45)">上传招标文件 PDF，系统自动识别投标清单页与品牌要求表，作为比价基础清单</div>
       </div>
 
-      <!-- PDF not yet uploaded -->
-      <div v-if="!pdfSupplement">
+      <!-- A1: 未上传 -->
+      <div v-if="!pdfSupplement && !tenderPreviewing">
         <a-upload-dragger
           accept=".pdf"
           :show-upload-list="false"
-          :disabled="tenderPreviewing"
           :before-upload="(f: File) => { uploadTenderPdf(f); return false; }"
           style="margin-bottom:12px"
         >
-          <p class="ant-upload-drag-icon">
-            <FilePdfOutlined style="color:#cf1322;font-size:36px" />
-          </p>
+          <p class="ant-upload-drag-icon"><FilePdfOutlined style="color:#cf1322;font-size:36px" /></p>
           <p class="ant-upload-text">点击或拖入招标文件 PDF</p>
-          <p class="ant-upload-hint">系统自动识别投标清单页与招标情况表（品牌要求/供应商品牌），OCR 通常 30~90 秒</p>
+          <p class="ant-upload-hint">自动识别投标清单页与品牌要求表，通常 30~90 秒完成</p>
         </a-upload-dragger>
-        <div v-if="tenderPreviewing" style="padding:8px 0">
-          <a-progress :percent="tenderJobPct" :status="tenderJobError ? 'exception' : 'active'" />
-          <div style="margin-top:6px;text-align:center;color:#666;font-size:12px">{{ tenderJobStage || '识别中...' }}（OCR 通常 30~90 秒）</div>
+        <a-alert v-if="tenderJobError" type="error" show-icon :message="tenderJobError" />
+      </div>
+
+      <!-- A2: 识别中（仅 PDF 尚未识别完成时显示） -->
+      <div v-else-if="!pdfSupplement && tenderPreviewing"
+        style="padding:16px;border:1px dashed #d9d9d9;border-radius:6px">
+        <div style="margin-bottom:10px;font-size:13px;color:#555">
+          <LoadingOutlined spin style="margin-right:6px;color:#1677ff" />{{ tenderJobStage || '识别中...' }}（通常 30~90 秒）
         </div>
+        <a-progress :percent="tenderJobPct" :status="tenderJobError ? 'exception' : 'active'" />
         <a-alert v-if="tenderJobError" type="error" show-icon style="margin-top:8px" :message="tenderJobError" />
       </div>
 
-      <!-- PDF uploaded -->
-      <div v-else>
-        <!-- PDF source header -->
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;background:#fff7e6;border-radius:6px;flex-wrap:wrap;font-size:12px">
-          <FilePdfOutlined style="color:#cf1322" />
-          <span style="font-weight:600">{{ tenderPdfFile?.name }}</span>
-          <span style="color:rgba(0,0,0,0.45)">主清单 · {{ pdfSupplement.row_count }} 条 · 清单页 {{ overrideBidlistPages }} · 品牌表第 {{ tenderDetectedPages?.brand ?? '?' }} 页</span>
-          <a-button size="small" type="link" style="padding:0"
-            @click="pdfSupplement = null; tenderBrandRequirement = []; tenderSupplierBrands = []; reconcileResult = null; reconcileConfirmed = false">
+      <!-- A3: 已识别 -->
+      <template v-else-if="pdfSupplement">
+
+        <!-- 结论卡片 -->
+        <div :style="{
+          background: pdfConclusionStatus === 'ok' ? '#f6ffed' : pdfConclusionStatus === 'warning' ? '#fffbe6' : '#fff2f0',
+          border: `1px solid ${pdfConclusionStatus === 'ok' ? '#b7eb8f' : pdfConclusionStatus === 'warning' ? '#ffe58f' : '#ffa39e'}`,
+          borderRadius: '8px', padding: '14px 16px', marginBottom: '16px',
+          display: 'flex', alignItems: 'flex-start', gap: '12px'
+        }">
+          <CheckCircleOutlined v-if="pdfConclusionStatus === 'ok'" style="color:#52c41a;font-size:22px;flex-shrink:0;margin-top:2px" />
+          <WarningOutlined v-else-if="pdfConclusionStatus === 'warning'" style="color:#fa8c16;font-size:22px;flex-shrink:0;margin-top:2px" />
+          <CloseCircleOutlined v-else style="color:#ff4d4f;font-size:22px;flex-shrink:0;margin-top:2px" />
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:15px;color:#1a1a1a">{{ pdfConclusionTitle }}</div>
+            <div style="font-size:13px;color:rgba(0,0,0,0.55);margin-top:3px">{{ pdfConclusionDesc }}</div>
+            <div v-if="pdfDiffSummary" style="font-size:12px;color:#d46b08;margin-top:4px">{{ pdfDiffSummary }}</div>
+            <div v-if="reconcileLoading" style="font-size:12px;color:#666;margin-top:4px">
+              <LoadingOutlined spin style="margin-right:4px" />正在与Excel对账...
+            </div>
+          </div>
+          <a-button size="small" type="text" style="flex-shrink:0"
+            @click="pdfSupplement = null; tenderBrandRequirement = []; tenderSupplierBrands = []; reconcileResult = null; reconcileConfirmed = false; tenderJobError = ''; showPageOverride = false; showQualityDetails = false; excelOnlyItemActions = {}">
             重新上传
           </a-button>
         </div>
 
-        <!-- Page range override -->
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;font-size:12px">
-          <span style="color:rgba(0,0,0,0.55)">页范围有误？</span>
-          <span>清单页</span>
-          <a-input v-model:value="overrideBidlistPages" size="small" style="width:100px" placeholder="如 14-18" />
-          <span>品牌页</span>
-          <a-input v-model:value="overrideBrandPage" size="small" style="width:60px" placeholder="如 13" />
-          <a-button size="small" :loading="tenderPreviewing" @click="reExtractTenderPdf">按指定页重新识别</a-button>
-        </div>
-
-        <!-- Brand requirement card -->
+        <!-- 招标品牌要求 -->
         <div v-if="tenderBrandRequirement.length || tenderSupplierBrands.length"
-          style="margin-bottom:10px;padding:10px 12px;border:1px solid #e6f4ff;background:#f0f8ff;border-radius:6px">
-          <div style="font-size:12px;font-weight:600;margin-bottom:5px;color:#0958d9">招标品牌约束（第 {{ tenderDetectedPages?.brand ?? '?' }} 页）</div>
-          <div v-if="tenderBrandRequirement.length" style="font-size:12px;margin-bottom:4px">
-            <span style="color:rgba(0,0,0,0.55)">业主品牌要求：</span>
-            <a-tag v-for="b in tenderBrandRequirement" :key="b.brand_en" color="blue">{{ b.brand_en }} {{ b.brand_cn }}</a-tag>
+          style="margin-bottom:14px;padding:14px 16px;border:1px solid #bae0ff;background:#e6f4ff;border-radius:8px">
+          <div style="font-size:13px;font-weight:600;color:#0958d9;margin-bottom:12px">
+            招标品牌要求
+            <span style="font-weight:400;color:rgba(0,0,0,0.35);font-size:12px;margin-left:6px">第 {{ tenderDetectedPages?.brand ?? '?' }} 页</span>
           </div>
-          <div v-if="tenderSupplierBrands.length" style="font-size:12px">
-            <span style="color:rgba(0,0,0,0.55)">投标单位参与品牌：</span>
-            <span v-for="(s, i) in tenderSupplierBrands" :key="i" style="margin-right:10px">
-              {{ s.supplier_name }} →
-              <a-tag color="cyan" style="margin-left:2px">{{ s.brand }}</a-tag>
-              <a-tooltip v-if="s.supplier_id == null" title="未能匹配到已选供应商，匹配时将按公司名兜底">
-                <WarningOutlined style="color:#fa8c16" />
-              </a-tooltip>
-            </span>
+
+          <div v-if="tenderBrandRequirement.length" style="margin-bottom:12px">
+            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">业主指定品牌</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <div v-for="b in tenderBrandRequirement" :key="b.brand_en"
+                style="padding:5px 14px;background:#fff;border:1px solid #91caff;border-radius:6px;font-size:13px;font-weight:600;color:#003eb3">
+                {{ b.brand_en }}&nbsp;<span style="font-weight:400;color:#555">{{ b.brand_cn }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="tenderSupplierBrands.length">
+            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:8px">各投标方参与品牌</div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div v-for="(s, i) in tenderSupplierBrands" :key="i"
+                style="display:flex;align-items:center;gap:8px;font-size:13px">
+                <span style="color:#1a1a1a;min-width:88px;font-weight:500">{{ s.supplier_name }}</span>
+                <RightOutlined style="color:rgba(0,0,0,0.25);font-size:10px;flex-shrink:0" />
+                <span style="background:#e6fffb;border:1px solid #87e8de;padding:3px 12px;border-radius:5px;color:#00695c;font-weight:600">{{ s.brand }}</span>
+                <a-tooltip v-if="s.supplier_id == null"
+                  title="系统未找到与此供应商名称精确匹配的记录，比价时将按名称模糊对应，请确认供应商名称无误">
+                  <span style="display:inline-flex;align-items:center;gap:3px;cursor:help;padding:2px 6px;background:#fff7e6;border-radius:4px;border:1px solid #ffe58f">
+                    <WarningOutlined style="color:#fa8c16;font-size:12px" />
+                    <span style="font-size:12px;color:#d46b08">供应商待确认</span>
+                  </span>
+                </a-tooltip>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- PDF quality metrics -->
-        <div v-if="pdfQm" style="margin-bottom:10px;padding:10px 12px;border:1px solid #e8e8e8;background:#fafafa;border-radius:6px">
-          <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#555">PDF 清单识别质量</div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px">
-            <span>行数：<strong>{{ pdfSupplement!.row_count }}</strong></span>
+        <!-- 质量摘要 -->
+        <div v-if="pdfQm" style="margin-bottom:10px;padding:10px 14px;background:#fafafa;border-radius:6px">
+          <div style="display:flex;flex-wrap:wrap;gap:6px 20px;font-size:12px;color:rgba(0,0,0,0.65)">
+            <span>采购项：<strong style="color:#1a1a1a">{{ pdfSupplement!.row_count }}</strong></span>
             <span>材质覆盖：<strong :style="{ color: pdfQm.material_columns_filled_rate < 0.4 ? '#cf1322' : '#389e0d' }">{{ pct(pdfQm.material_columns_filled_rate) }}</strong></span>
-            <span>品牌覆盖：<strong>{{ pct(pdfQm.brand_filled_rate) }}</strong></span>
             <span>来源追踪：<strong :style="{ color: pdfQm.source_ref_coverage < 1.0 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.source_ref_coverage) }}</strong></span>
             <span>数量解析：<strong :style="{ color: pdfQm.qty_parse_success_rate < 0.8 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.qty_parse_success_rate) }}</strong></span>
+            <span v-if="pdfQm.table_grid_pages.length || pdfQm.html_fallback_pages.length" style="color:rgba(0,0,0,0.45)">
+              识别路径：<template v-if="pdfQm.table_grid_pages.length">{{ pdfQm.table_grid_pages.length }}页标准解析</template><template v-if="pdfQm.html_fallback_pages.length">{{ pdfQm.table_grid_pages.length ? ' · ' : '' }}{{ pdfQm.html_fallback_pages.length }}页OCR增强解析</template>
+            </span>
           </div>
-          <div v-if="pdfQm.seq_missing.length || pdfQm.seq_duplicate.length" style="margin-top:6px;font-size:12px">
-            <span v-if="pdfQm.seq_missing.length" style="color:#cf1322;margin-right:10px">序号缺失（{{ pdfQm.seq_missing.length }}）：{{ pdfQm.seq_missing.slice(0, 8).join(', ') }}{{ pdfQm.seq_missing.length > 8 ? '…' : '' }}</span>
-            <span v-if="pdfQm.seq_duplicate.length" style="color:#d46b08">序号重复：{{ pdfQm.seq_duplicate.join(', ') }}</span>
+          <div v-if="pdfQm.seq_missing.length || pdfQm.seq_duplicate.length" style="margin-top:6px;font-size:12px;color:#d46b08">
+            <span v-if="pdfQm.seq_missing.length">序号缺失 {{ pdfQm.seq_missing.length }} 项（{{ pdfQm.seq_missing.slice(0, 5).join(', ') }}{{ pdfQm.seq_missing.length > 5 ? '…' : '' }}）</span>
+            <span v-if="pdfQm.seq_duplicate.length" style="margin-left:10px">序号重复：{{ pdfQm.seq_duplicate.join(', ') }}</span>
           </div>
-          <div v-if="pdfDiagnostics.length" style="margin-top:8px">
-            <div style="font-size:12px;color:rgba(0,0,0,0.45);margin-bottom:4px">识别路径（TableGrid={{ pdfQm.table_grid_pages.length }}页 / html_fallback={{ pdfQm.html_fallback_pages.length }}页）：</div>
+          <a-button type="link" size="small"
+            style="padding:0;height:auto;margin-top:6px;font-size:12px;color:rgba(0,0,0,0.35)"
+            @click="showQualityDetails = !showQualityDetails">
+            {{ showQualityDetails ? '收起识别详情 ↑' : '识别详情 ↓' }}
+          </a-button>
+          <div v-if="showQualityDetails && pdfDiagnostics.length" style="margin-top:8px">
             <div style="display:flex;flex-wrap:wrap;gap:4px">
               <a-tooltip v-for="d in pdfDiagnostics" :key="d.page"
-                :title="`第${d.page}页 · ${d.input_mode}${d.fallback_reason ? ' [' + d.fallback_reason + ']' : ''} · 预期${d.expected_rows}行 · 实取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
+                :title="`第${d.page}页 · ${d.input_mode === 'table_grid' ? '标准解析' : 'OCR增强解析'}${d.fallback_reason ? '（原因：' + d.fallback_reason + '）' : ''} · 预计${d.expected_rows}行 · 提取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
                 <a-tag :color="d.input_mode === 'table_grid' ? 'green' : 'orange'"
-                  style="cursor:default;font-size:11px;padding:0 5px;line-height:20px">
-                  P{{ d.page }}<span v-if="d.fallback_reason" style="font-size:9px;margin-left:2px">!</span>
+                  style="cursor:default;font-size:11px;padding:0 6px;line-height:20px">
+                  第{{ d.page }}页<template v-if="d.fallback_reason"> ⚠</template>
                 </a-tag>
               </a-tooltip>
             </div>
-            <div style="margin-top:4px;font-size:11px;color:rgba(0,0,0,0.35)">绿色=TableGrid解析 · 橙色=HTML回退（hover查看原因）</div>
+            <div style="margin-top:4px;font-size:11px;color:rgba(0,0,0,0.35)">绿色=标准解析 · 橙色=OCR增强解析（hover查看详情）</div>
           </div>
         </div>
 
-        <!-- Reconcile result (only when Excel also loaded) -->
-        <div v-if="reconcileLoading" style="padding:8px 0;font-size:12px;color:#666">
-          <LoadingOutlined spin style="margin-right:4px" />正在对账 Excel vs PDF...
-        </div>
-        <div v-else-if="reconcileResult">
-          <!-- ① 完全一致 -->
-          <a-alert v-if="reconcileResult.recommended_source === 'both_consistent'" type="success" show-icon style="margin-bottom:8px"
-            :message="`PDF（${reconcileResult.pdf_count} 条）与 Excel（${reconcileResult.xlsx_count} 条）清单行项目一致，无差异`" />
-          <!-- ② pdf_primary：PDF 为主，Excel 仅参考 -->
-          <div v-else-if="reconcileResult.recommended_source === 'pdf'">
-            <a-alert type="info" show-icon style="margin-bottom:8px"
-              :message="`PDF 为主清单（${reconcileResult.pdf_count} 条），Excel 存在参考差异`" />
-            <div v-if="(reconcileResult.only_in_excel_reference ?? []).length" style="font-size:12px;margin-bottom:4px;color:#595959">
-              Excel 参考清单独有、不进入 PDF 主清单比价（{{ (reconcileResult.only_in_excel_reference ?? []).length }} 条）：{{ (reconcileResult.only_in_excel_reference ?? []).join(', ') }}
-            </div>
-            <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="font-size:12px;margin-bottom:4px;color:#595959">
-              PDF 独有序号（正常进入主清单）（{{ reconcileResult.seq_missing_in_xlsx.length }} 条）：{{ reconcileResult.seq_missing_in_xlsx.join(', ') }}
-            </div>
-            <a-table v-if="reconcileResult.field_mismatches.length"
-              :data-source="reconcileResult.field_mismatches"
-              :row-key="(_r: Record<string,unknown>, i: number) => i"
-              size="small" :pagination="{ pageSize: 5, size: 'small' }" style="margin-bottom:8px"
-              :columns="[
-                { title: '序号', dataIndex: 'seq', width: 56 },
-                { title: '字段', dataIndex: 'field', width: 60 },
-                { title: 'Excel 参考值', dataIndex: 'xlsx_value', ellipsis: true },
-                { title: 'PDF 主清单值', dataIndex: 'pdf_value', ellipsis: true },
-              ]" />
-            <div style="font-size:11px;color:rgba(0,0,0,0.35)">以上差异仅供参考，以 PDF 主清单为准，无需手动确认</div>
-          </div>
-          <!-- ③ excel_primary：Excel 为主，差异须确认 -->
-          <div v-else>
-            <a-alert type="warning" show-icon style="margin-bottom:8px"
-              :message="`招标文件 PDF 与 Excel 清单存在差异（Excel ${reconcileResult.xlsx_count} 条 vs PDF ${reconcileResult.pdf_count} 条），继续前请确认`" />
-            <div v-if="reconcileResult.seq_missing_in_pdf.length" style="font-size:12px;margin-bottom:4px;color:#d46b08">
-              Excel 有、PDF 缺失的序号（{{ reconcileResult.seq_missing_in_pdf.length }} 条）：{{ reconcileResult.seq_missing_in_pdf.join(', ') }}
-            </div>
-            <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="font-size:12px;margin-bottom:4px;color:#d46b08">
-              PDF 有、Excel 缺失的序号（{{ reconcileResult.seq_missing_in_xlsx.length }} 条）：{{ reconcileResult.seq_missing_in_xlsx.join(', ') }}
-            </div>
-            <a-table v-if="reconcileResult.field_mismatches.length"
-              :data-source="reconcileResult.field_mismatches"
-              :row-key="(_r: Record<string,unknown>, i: number) => i"
-              size="small" :pagination="{ pageSize: 5, size: 'small' }" style="margin-bottom:8px"
-              :columns="[
-                { title: '序号', dataIndex: 'seq', width: 56 },
-                { title: '字段', dataIndex: 'field', width: 60 },
-                { title: 'Excel 值', dataIndex: 'xlsx_value', ellipsis: true },
-                { title: 'PDF 值', dataIndex: 'pdf_value', ellipsis: true },
-              ]" />
-            <a-checkbox v-model:checked="reconcileConfirmed" style="font-size:12px">
-              已确认差异，以 Excel 行项目为准，PDF 仅提供品牌/材质补充（继续后不可撤回）
-            </a-checkbox>
+        <!-- 页码修正（折叠） -->
+        <div style="margin-bottom:6px">
+          <a-button type="link" size="small"
+            style="padding:0;height:auto;font-size:12px;color:rgba(0,0,0,0.35)"
+            @click="showPageOverride = !showPageOverride">
+            页码识别有误？点击修正
+          </a-button>
+          <div v-if="showPageOverride"
+            style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;font-size:12px">
+            <span style="color:#555">清单页</span>
+            <a-input v-model:value="overrideBidlistPages" size="small" style="width:100px" placeholder="如 14-18" />
+            <span style="color:#555">品牌页</span>
+            <a-input v-model:value="overrideBrandPage" size="small" style="width:60px" placeholder="如 13" />
+            <a-button size="small" :loading="tenderPreviewing" @click="reExtractTenderPdf">按指定页重新识别</a-button>
           </div>
         </div>
-      </div>
 
-      <!-- ── Section B: Excel 对照参考（可选）──────────────────────── -->
+      </template>
+
+      <!-- ── B: Excel参考差异（PDF+Excel均已加载且有独有项时显示）───── -->
+      <template v-if="pdfSupplement && tenderPreview && excelOnlyItems.length > 0">
+        <a-divider style="margin:16px 0 12px" />
+        <div style="padding:14px 16px;background:#fffbe6;border:1px solid #ffe58f;border-radius:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+            <div style="font-size:13px;font-weight:600;color:#874d00">
+              <WarningOutlined style="margin-right:6px" />采购清单Excel参考差异（{{ excelOnlyItems.length }} 项）
+            </div>
+            <div style="font-size:12px;color:rgba(0,0,0,0.45)">以下项仅在Excel中，不在PDF主清单内，请逐项处理</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <div v-for="item in excelOnlyItems" :key="String(item.seq)"
+              :style="{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '8px 10px', borderRadius: '6px', fontSize: '12px',
+                background: excelOnlyItemActions[String(item.seq)] === 'add' ? '#f6ffed'
+                          : excelOnlyItemActions[String(item.seq)] === 'ignore' ? '#f5f5f5' : '#fff',
+                border: `1px solid ${excelOnlyItemActions[String(item.seq)] === 'add' ? '#b7eb8f'
+                        : excelOnlyItemActions[String(item.seq)] === 'ignore' ? '#e0e0e0' : '#ffd666'}`,
+                opacity: excelOnlyItemActions[String(item.seq)] === 'ignore' ? '0.55' : '1',
+              }"
+            >
+              <span style="color:rgba(0,0,0,0.4);flex-shrink:0;width:32px;text-align:center">{{ item.seq }}</span>
+              <span style="flex:1;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                :style="{ textDecoration: excelOnlyItemActions[String(item.seq)] === 'ignore' ? 'line-through' : 'none' }">
+                {{ item.name || '—' }}
+              </span>
+              <span style="color:rgba(0,0,0,0.5);width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">{{ item.spec || '—' }}</span>
+              <span style="color:rgba(0,0,0,0.5);width:36px;text-align:center;flex-shrink:0">{{ item.unit || '—' }}</span>
+              <span style="color:rgba(0,0,0,0.5);width:40px;text-align:right;flex-shrink:0">{{ item.qty ?? '—' }}</span>
+              <span style="color:rgba(0,0,0,0.35);flex-shrink:0;font-size:11px;width:80px;text-align:right">Excel参考独有</span>
+              <div style="flex-shrink:0;display:flex;gap:2px" v-if="!excelOnlyItemActions[String(item.seq)]">
+                <a-button size="small" type="text" style="color:rgba(0,0,0,0.4);font-size:11px"
+                  @click="setExcelItemAction(String(item.seq), 'ignore')">忽略</a-button>
+                <a-button size="small" type="link" style="padding:0 4px;font-size:11px"
+                  @click="setExcelItemAction(String(item.seq), 'add')">加入主清单</a-button>
+                <a-button size="small" type="text" style="color:#d46b08;font-size:11px"
+                  @click="setExcelItemAction(String(item.seq), 'pending')">标记待确认</a-button>
+              </div>
+              <div style="flex-shrink:0;display:flex;align-items:center;gap:4px" v-else>
+                <a-tag v-if="excelOnlyItemActions[String(item.seq)] === 'add'" color="success" style="margin:0">已加入主清单</a-tag>
+                <a-tag v-else-if="excelOnlyItemActions[String(item.seq)] === 'ignore'" color="default" style="margin:0">已忽略</a-tag>
+                <a-tag v-else-if="excelOnlyItemActions[String(item.seq)] === 'pending'" color="warning" style="margin:0">待确认</a-tag>
+                <a-button size="small" type="text" style="color:rgba(0,0,0,0.3);font-size:11px;padding:0 4px"
+                  @click="clearExcelItemAction(String(item.seq))">撤销</a-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ── C: 采购清单 Excel（对照参考，可选）──────────────────── -->
       <a-divider style="margin:16px 0 12px" />
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <div style="font-size:13px;font-weight:600;color:#555">
-          <FileExcelOutlined style="color:#52c41a;margin-right:6px" />可选：上传采购清单 Excel（对照参考）
+          <FileExcelOutlined style="color:#52c41a;margin-right:6px" />采购清单 Excel（对照参考）
         </div>
         <a-button size="small" type="link" @click="showExcelPanel = !showExcelPanel">
           {{ showExcelPanel ? '收起' : '展开' }}
@@ -1409,7 +1520,7 @@ async function runMatrix() {
           >
             <p class="ant-upload-drag-icon"><InboxOutlined style="color:#52c41a;font-size:30px" /></p>
             <p class="ant-upload-text" style="font-size:13px">点击或拖入采购清单 Excel</p>
-            <p class="ant-upload-hint">支持 .xlsx / .xls · 作为参考对照，与 PDF 清单自动对账</p>
+            <p class="ant-upload-hint">支持 .xlsx / .xls · 上传后自动与 PDF 主清单对账</p>
           </a-upload-dragger>
           <div v-if="tenderPreviewing" style="padding:8px 0;text-align:center;color:#666;font-size:12px">
             <LoadingOutlined spin style="margin-right:6px" />解析中...
@@ -1421,10 +1532,13 @@ async function runMatrix() {
             <div style="flex:1">
               <div style="font-weight:600;font-size:14px">{{ tenderFile?.name }}</div>
               <div style="font-size:12px;color:rgba(0,0,0,0.45);margin-top:2px">
-                参考清单 · Excel · 共 {{ tenderPreview.total }} 条<template v-if="tenderCategory"> · 品类：{{ tenderCategory }}</template>
+                参考清单 · {{ tenderPreview.total }} 条<template v-if="tenderCategory"> · {{ tenderCategory }}</template>
               </div>
             </div>
-            <a-button size="small" type="link" @click="tenderPreview = null; tenderFile = null; reconcileResult = null; reconcileConfirmed = false">重新上传</a-button>
+            <a-button size="small" type="link"
+              @click="tenderPreview = null; tenderFile = null; reconcileResult = null; reconcileConfirmed = false; excelOnlyItemActions = {}">
+              重新上传
+            </a-button>
           </div>
           <a-table
             :data-source="tenderPreview.items"
@@ -1451,6 +1565,23 @@ async function runMatrix() {
               强制归入默认品类「{{ tenderCategory || taskConfig.category }}」（{{ tenderPreview.unknown_count }} 项未识别将写入审计标记）
             </a-checkbox>
           </div>
+          <!-- 字段差异摘要（reconcile 已完成时显示） -->
+          <div v-if="reconcileResult && reconcileResult.field_mismatches.length" style="margin-top:12px">
+            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">
+              字段差异（{{ reconcileResult.field_mismatches.length }} 处）—— 以PDF主清单值为准
+            </div>
+            <a-table
+              :data-source="reconcileResult.field_mismatches"
+              :row-key="(_r: Record<string,unknown>, i: number) => i"
+              size="small" :pagination="{ pageSize: 5, size: 'small' }"
+              :columns="[
+                { title: '序号', dataIndex: 'seq', width: 56 },
+                { title: '字段', dataIndex: 'field', width: 60 },
+                { title: 'Excel参考值', dataIndex: 'xlsx_value', ellipsis: true },
+                { title: 'PDF主清单值', dataIndex: 'pdf_value', ellipsis: true },
+              ]"
+            />
+          </div>
         </div>
       </div>
     </a-card>
@@ -1458,12 +1589,18 @@ async function runMatrix() {
     <!-- Step 2: Upload Supplier Quotes -->
     <a-card v-else-if="currentStep === 2" :body-style="{ padding: '20px' }">
       <!-- Context bar -->
-      <div style="margin-bottom:16px;padding:10px 12px;background:#f6f8fa;border-radius:6px;display:flex;gap:10px;align-items:center;font-size:12px;color:rgba(0,0,0,0.55)">
-        <FileExcelOutlined style="color:#52c41a" />
-        <span>基础清单（Excel）：<strong>{{ tenderFile?.name }}</strong>（{{ tenderPreview?.total ?? 0 }} 项）</span>
-        <span v-if="tenderCategory" style="margin-left:4px">· 品类：<strong>{{ tenderCategory }}</strong></span>
+      <div style="margin-bottom:16px;padding:10px 12px;background:#f6f8fa;border-radius:6px;display:flex;gap:10px;align-items:center;font-size:12px;color:rgba(0,0,0,0.55);flex-wrap:wrap">
+        <template v-if="pdfSupplement">
+          <FilePdfOutlined style="color:#cf1322" />
+          <span>招标文件PDF（主清单）：<strong style="color:#1a1a1a">{{ tenderPdfFile?.name }}</strong>（{{ pdfSupplement.row_count }} 项）</span>
+        </template>
+        <template v-else>
+          <FileExcelOutlined style="color:#52c41a" />
+          <span>基础清单（Excel）：<strong style="color:#1a1a1a">{{ tenderFile?.name }}</strong>（{{ tenderPreview?.total ?? 0 }} 项）</span>
+        </template>
+        <span v-if="tenderCategory">· 品类：<strong>{{ tenderCategory }}</strong></span>
         <template v-if="tenderBrandRequirement.length">
-          <span>· 品牌补充：</span>
+          <span>· 品牌要求：</span>
           <a-tag v-for="b in tenderBrandRequirement" :key="b.brand_en" color="blue" style="margin:0 2px">{{ b.brand_cn }}</a-tag>
         </template>
       </div>
