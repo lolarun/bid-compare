@@ -27,6 +27,7 @@ import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
 import StatCard from '@/components/StatCard.vue'
 import BidMatrix from './components/BidMatrix.vue'
+import AnchorReviewMatrix from './components/AnchorReviewMatrix.vue'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { asQuoteShape } from '@/utils/extraction'
 
@@ -179,7 +180,12 @@ const pendingGroupLoading = ref<Record<number, boolean>>({})
 const pendingItemLoading = ref<Record<number, boolean>>({})
 const matchRunning = ref(false)
 
+// Pending count is now owned by AnchorReviewMatrix component
+const reviewPendingCount = ref<number | null>(null)
+
 const allPendingActioned = computed(() => {
+  // Use new matrix count if available, fall back to legacy
+  if (reviewPendingCount.value !== null) return reviewPendingCount.value === 0
   if (!anchorReviewResult.value) return false
   return (anchorReviewResult.value.pending_items_total ?? anchorReviewResult.value.low_conf_groups.length) === 0
 })
@@ -1321,176 +1327,13 @@ async function runMatrix() {
           </a-table>
         </div>
 
-        <!-- ② 待确认组（门禁）-->
-        <div v-if="anchorReviewResult.low_conf_groups.length > 0" style="margin-top:20px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-            <WarningOutlined style="color:#faad14;font-size:15px" />
-            <h4 style="margin:0;font-size:14px;font-weight:600">
-              待确认（{{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }} 条）
-            </h4>
-            <a-tag color="orange">逐条处理后才能生成矩阵</a-tag>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">置信度 &lt; 70%，请判断是否纳入比价</span>
-          </div>
-          <div class="pending-gate-list">
-            <div
-              v-for="g in anchorReviewResult.low_conf_groups"
-              :key="g.group_id"
-              class="pending-gate-item"
-            >
-              <!-- Group header -->
-              <div class="pending-gate-item__head">
-                <a-tag :color="(g.confidence ?? 0) < 0.65 ? 'red' : 'orange'" style="flex-shrink:0">
-                  {{ ((g.confidence ?? 0) * 100).toFixed(0) }}%
-                </a-tag>
-                <div class="pending-gate-item__desc">
-                  <span class="pending-gate-item__anchor">
-                    采购项：<strong>{{ g.anchor_name }}</strong> {{ g.anchor_spec }}
-                  </span>
-                  <span style="font-size:11px;color:rgba(0,0,0,0.4);margin-left:8px">
-                    {{ g.pending_count }} 条待确认 / {{ g.align_count }} 条已纳入
-                  </span>
-                </div>
-                <!-- Group-level bulk (secondary) -->
-                <a-space style="flex-shrink:0">
-                  <a-button
-                    size="small"
-                    :loading="pendingGroupLoading[g.group_id]"
-                    @click="confirmPendingGroup(g.group_id, 'confirm')"
-                  >
-                    批量确认整组
-                  </a-button>
-                  <a-button
-                    danger size="small"
-                    :loading="pendingGroupLoading[g.group_id]"
-                    @click="confirmPendingGroup(g.group_id, 'reject')"
-                  >
-                    移除整组
-                  </a-button>
-                </a-space>
-              </div>
-              <!-- Item-level rows -->
-              <div style="margin-top:8px;padding-left:16px">
-                <div
-                  v-for="it in g.items"
-                  :key="it.item_id"
-                  style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f0f0f0"
-                >
-                  <a-tag
-                    :color="it.action === 'pending' ? 'orange' : it.action === 'align' ? 'green' : 'default'"
-                    style="font-size:10px;min-width:44px;text-align:center"
-                  >
-                    {{ it.action === 'pending' ? '待确认' : it.action === 'align' ? '已纳入' : '已排除' }}
-                  </a-tag>
-                  <a-tag
-                    :color="(it.cosine ?? 0) >= 0.7 ? 'green' : (it.cosine ?? 0) >= 0.6 ? 'orange' : 'red'"
-                    style="font-size:10px"
-                  >
-                    {{ it.cosine != null ? (it.cosine * 100).toFixed(0) + '%' : '-' }}
-                  </a-tag>
-                  <span style="flex:1;font-size:12px">
-                    <strong>{{ it.supplier_name || `供应商#${it.supplier_id}` }}</strong>
-                    → {{ it.material_name }}
-                    <span v-if="it.spec" style="color:rgba(0,0,0,0.4)"> {{ it.spec }}</span>
-                  </span>
-                  <a-space v-if="it.action === 'pending'" style="flex-shrink:0">
-                    <a-button
-                      type="primary" size="small"
-                      :loading="pendingItemLoading[it.item_id]"
-                      @click="confirmPendingItem(it.item_id, 'align')"
-                    >
-                      纳入
-                    </a-button>
-                    <a-button
-                      danger size="small"
-                      :loading="pendingItemLoading[it.item_id]"
-                      @click="confirmPendingItem(it.item_id, 'exclude')"
-                    >
-                      排除
-                    </a-button>
-                  </a-space>
-                  <span v-else style="font-size:11px;color:rgba(0,0,0,0.3);flex-shrink:0">已处理</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <a-alert
-          v-else
-          type="success"
-          show-icon
-          message="所有待确认项已处理，可生成比价矩阵"
-          style="margin-top:16px"
+        <!-- ② 采购清单对齐复核矩阵 -->
+        <AnchorReviewMatrix
+          v-if="taskConfig.projectId"
+          :project-id="taskConfig.projectId"
+          :category="tenderCategory || taskConfig.category"
+          @pending-count="reviewPendingCount = $event"
         />
-
-        <!-- ③ 已确认匹配组 -->
-        <div style="margin-top:20px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <CheckCircleOutlined style="color:#52c41a;font-size:15px" />
-            <h4 style="margin:0;font-size:14px;font-weight:600">
-              已匹配（{{ anchorReviewResult.confirmed_groups?.length ?? 0 }} 组）
-            </h4>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">置信度 ≥ 0.70，自动归一；可展开查看明细</span>
-          </div>
-          <a-collapse ghost>
-            <a-collapse-panel
-              v-for="g in (anchorReviewResult.confirmed_groups ?? [])"
-              :key="g.group_id"
-            >
-              <template #header>
-                <div class="lc-group-header">
-                  <a-tag
-                    :color="g.confidence >= 0.90 ? 'green' : 'cyan'"
-                    style="font-size:12px;padding:0 6px"
-                  >{{ (g.confidence * 100).toFixed(0) }}%</a-tag>
-                  <span class="lc-group-name">{{ g.anchor_name }}</span>
-                  <span class="lc-group-spec">{{ g.anchor_spec }}</span>
-                  <a-tag style="margin-left:auto;font-size:11px" color="default">{{ g.items.length }} 家</a-tag>
-                </div>
-              </template>
-              <a-table
-                :data-source="g.items"
-                :row-key="(r: Record<string,unknown>) => String(r.quote_id)"
-                size="small"
-                :pagination="false"
-                :columns="[
-                  { title: '供应商', dataIndex: 'supplier_name', width: 180,
-                    customRender: ({ text, record }: { text: string; record: Record<string,unknown> }) =>
-                      text || `供应商#${record.supplier_id}` },
-                  { title: '物料名', dataIndex: 'material_name', ellipsis: true },
-                  { title: '规格', dataIndex: 'spec', width: 160 },
-                  { title: '相似度', dataIndex: 'cosine', width: 80,
-                    customRender: ({ text }: { text: number }) => `${(text * 100).toFixed(0)}%` },
-                ]"
-              />
-            </a-collapse-panel>
-          </a-collapse>
-        </div>
-
-        <!-- ④ 清单外报价 -->
-        <div v-if="anchorReviewResult.residue_quotes.length > 0" style="margin-top:20px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <h4 style="margin:0;font-size:14px;font-weight:600;color:rgba(0,0,0,0.55)">
-              清单外报价（{{ anchorReviewResult.residue_quotes.length }} 条）
-            </h4>
-            <span style="font-size:12px;color:rgba(0,0,0,0.4)">未找到对应采购项，不参与比价矩阵</span>
-          </div>
-          <a-table
-            :data-source="anchorReviewResult.residue_quotes"
-            :row-key="(r: Record<string,unknown>) => String(r.quote_id)"
-            size="small"
-            :pagination="{ pageSize: 5, size: 'small' }"
-            :columns="[
-              { title: '供应商', dataIndex: 'supplier_name', width: 180,
-                customRender: ({ text, record }: { text: string; record: Record<string,unknown> }) =>
-                  text || `供应商#${record.supplier_id}` },
-              { title: '物料名', dataIndex: 'material_name', ellipsis: true },
-              { title: '规格', dataIndex: 'spec', width: 160 },
-              { title: '单价', dataIndex: 'unit_price', width: 100,
-                customRender: ({ text }: { text: number | null }) =>
-                  text != null ? `¥${text.toLocaleString()}` : '—' },
-            ]"
-          />
-        </div>
       </template>
 
       <div v-else-if="!matchRunning && !tenderUploading && !anchorReviewLoading" style="text-align:center;padding:48px 0;color:#999">
@@ -1762,8 +1605,8 @@ async function runMatrix() {
 
       <!-- Step 3: gate button -->
       <template v-if="currentStep === 3">
-        <span v-if="!allPendingActioned && anchorReviewResult" style="font-size:12px;color:#faad14;margin-right:4px">
-          还有 {{ anchorReviewResult.pending_items_total ?? anchorReviewResult.low_conf_groups.length }} 条待确认
+        <span v-if="!allPendingActioned && reviewPendingCount !== null && reviewPendingCount > 0" style="font-size:12px;color:#faad14;margin-right:4px">
+          还有 {{ reviewPendingCount }} 条待确认
         </span>
         <!-- finalize: still requires pending=0 (backend hard gate) -->
         <a-button

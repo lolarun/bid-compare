@@ -87,8 +87,10 @@ class ExtractionPipeline:
             from apps.api.intelligence.document_loader import MAX_PAGES_UNLIMITED
             images = DocumentLoader.to_images(file_path, max_pages=MAX_PAGES_UNLIMITED)
             _notify(progress_cb, "单次OCR+页面分类", 15)
-            page_roles_html = self.provider.ocr_pages_with_roles(images)
+            page_roles_html, ocr_failures = self.provider.ocr_pages_with_roles(images)
             resp = self._run_with_roles(images, page_roles_html, progress_cb)
+            if ocr_failures:
+                resp.metadata.setdefault("failed_ocr_pages", []).extend(ocr_failures)
         else:
             images = DocumentLoader.to_images(file_path)  # default MAX_PAGES=12
             resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
@@ -475,6 +477,10 @@ class ExtractionPipeline:
                 continue
             material = (it.get("material") or "").strip()
             if not material:
+                continue
+            # Rows flagged by _assign_source_ref_from_grids as not a quote_line
+            # (grand_total, subtotal, etc.) must not enter as regular quote items
+            if it.get("source_ref_invalid"):
                 continue
             price = _coerce_num(it.get("unit_price"))
             qty = _coerce_num(it.get("qty"))

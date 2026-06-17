@@ -14,7 +14,7 @@ import type {
   AlignmentApplyGroup, AlignmentApplyFieldFix, AlignmentApplyResult,
   AlignmentGroupOut,
   EnhanceResponse,
-  AnchorMatchSummary, AnchorReviewResult, TenderPreviewResult, LlmFillResult,
+  AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -176,6 +176,8 @@ export const analysisApi = {
     tender_list_session_id?: number | null; k?: number; mode?: string; model?: string | null
   }) =>
     api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
+  anchorReviewMatrix: (params: { project_id: number; category: string }) =>
+    api.get<AnchorReviewMatrixResult>('/analysis/anchor-review/matrix', { params }),
   anchorReview: (params: { project_id: number; category: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
   anchorReviewConfirm: (data: { group_id: number; action: 'confirm' | 'reject' }) =>

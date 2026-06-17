@@ -93,6 +93,13 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
         else:
             not_finalized_warning = "对齐审核尚未完成，矩阵使用当前所有已确认组（未锁定快照）"
 
+    # Guard: project_id without category makes no sense in the new anchor flow
+    if body.project_id and not body.category:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id 指定时必须同时提供 category（品类）。",
+        )
+
     # v2.5: prefer anchor-full-axis matrix when TenderListSession exists
     result = None
     if body.project_id and body.category:
@@ -121,8 +128,18 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                 category=body.category,
                 allowed_group_ids=allowed_group_ids,
             )
+        else:
+            # project_id + category present but no confirmed TenderListSession → refuse
+            # silently falling back to legacy mode would show 449 rows of all-history quotes
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"项目 {body.project_id} / 品类 {body.category} 尚无已确认采购清单"
+                    "（TenderListSession）。请先完成采购清单上传和确认步骤。"
+                ),
+            )
 
-    # Fallback to legacy quote-driven matrix
+    # Fallback: no project_id or no category — legacy quote-driven mode
     if result is None:
         result = build_bid_matrix(
             db,
@@ -132,6 +149,7 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
             category=body.category,
             allowed_group_ids=allowed_group_ids,
         )
+        result["anchor_matrix"] = False
 
     if not_finalized_warning:
         result["not_finalized_warning"] = not_finalized_warning
@@ -389,6 +407,26 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     db.delete(group)
     db.commit()
     return {"status": "ok", "deleted_group_id": group_id}
+
+
+@router.get("/anchor-review/matrix")
+def anchor_review_matrix(
+    project_id: int = Query(...),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """采购清单维度对齐复核矩阵 — 一行一个采购锚点，N列供应商。
+
+    替代旧的 /anchor-review (组/项视图)，成为复核主界面数据源。
+    每行对应一个 TenderAnchor，cells 按 str(supplier_id) 索引。
+    Pending cells 包含 candidates 列表（Top-5 候选报价）。
+    """
+    from apps.api.services.bid_matrix import build_anchor_review_matrix
+    try:
+        result = build_anchor_review_matrix(db, project_id, category)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return result
 
 
 @router.get("/anchor-review")

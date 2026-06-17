@@ -672,6 +672,63 @@ export interface LlmFillResult {
   matrix_distribution?: MatrixDistribution
 }
 
+// ─── Anchor Review Matrix ────────────────────────────────────────────────────
+
+export interface ReviewCellCandidate {
+  item_id: number
+  quote_id: number
+  material_name: string
+  spec: string
+  unit_price: number | null
+  confidence: number | null
+  flags: string[] | null
+}
+
+export interface ReviewCell {
+  cell_status: 'quoted' | 'aggregated' | 'pending' | 'excluded' | 'missing'
+  item_id: number | null
+  quote_id: number | null
+  unit_price: number | null
+  total_price: number | null
+  confidence: number | null
+  evidence: string | null
+  flags: string[] | null
+  is_lowest: boolean
+  candidates: ReviewCellCandidate[]
+}
+
+export interface ReviewRow {
+  anchor_seq: string
+  anchor_name: string
+  anchor_spec: string
+  unit: string
+  quantity: number | null
+  row_status: 'ok' | 'partial' | 'pending' | 'missing'
+  quoted_count: number
+  covered_count: number
+  cells: Record<string, ReviewCell>   // keyed by str(supplier_id)
+}
+
+export interface ReviewSupplier {
+  supplier_id: number
+  supplier_name: string
+  checksum_status: string | null
+  declared_total: number | null
+  checksum_delta_pct: number | null
+}
+
+export interface AnchorReviewMatrixResult {
+  anchors_total: number
+  supplier_count: number
+  pending_cells: number
+  missing_cells: number
+  quoted_ge_2_count: number
+  quoted_full_count: number
+  suppliers: ReviewSupplier[]
+  matrix_distribution?: MatrixDistribution
+  rows: ReviewRow[]
+}
+
 export interface AnchorGroupItem {
   item_id: number
   action: 'align' | 'pending' | 'exclude'

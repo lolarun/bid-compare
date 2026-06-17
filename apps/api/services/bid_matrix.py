@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, Project, BrandTier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.models.extraction_job import ExtractionJob
 from apps.api.services.comparison import (
     compute_reasonable_low,
     compute_baseline,
@@ -19,6 +20,23 @@ CELL_AGGREGATED = "aggregated"  # aggregated multi-row align item
 CELL_PENDING = "pending"      # pending item — show price in orange, exclude from calcs
 CELL_EXCLUDED = "excluded"    # explicitly excluded
 CELL_MISSING = "missing"      # no item at all (supplier didn't quote)
+
+
+def _get_supplier_checksum(db: Session, supplier_id: int, project_id: int | None) -> dict:
+    """Return checksum dict from the most recent ExtractionJob for this supplier+project."""
+    q = db.query(Quote.batch_id).filter(Quote.supplier_id == supplier_id)
+    if project_id:
+        q = q.filter(Quote.project_id == project_id)
+    batch_ids = [r[0] for r in q.distinct().all() if r[0]]
+    if not batch_ids:
+        return {}
+    job = (
+        db.query(ExtractionJob)
+        .filter(ExtractionJob.id.in_(batch_ids))
+        .order_by(ExtractionJob.created_at.desc())
+        .first()
+    )
+    return ((job.result or {}).get("_checksum") or {}) if job else {}
 
 
 def _detect_brand_tier_filter(
@@ -392,12 +410,16 @@ def build_bid_matrix(
     for sid in supplier_ids:
         data = supplier_totals[sid]
         avg_dev = sum(data["devs"]) / len(data["devs"]) if data["devs"] else 0.0
+        cs = _get_supplier_checksum(db, sid, project_id)
         totals.append({
             "supplier_id": sid,
             "total": round(data["total"], 2),
             "avg_deviation": round(avg_dev, 4),
             "quoted_count": data["quoted"],
             "anomaly_count": data["anomalies"],
+            "declared_total": cs.get("declared"),
+            "checksum_delta_pct": cs.get("delta_pct"),
+            "checksum_status": cs.get("status"),
         })
 
     return {
@@ -688,12 +710,16 @@ def build_anchor_matrix(
     for sid in supplier_ids:
         data = supplier_totals[sid]
         avg_dev = sum(data["devs"]) / len(data["devs"]) if data["devs"] else 0.0
+        cs = _get_supplier_checksum(db, sid, project_id)
         totals.append({
             "supplier_id": sid,
             "total": round(data["total"], 2),
             "avg_deviation": round(avg_dev, 4),
             "quoted_count": data["quoted"],
             "anomaly_count": data["anomalies"],
+            "declared_total": cs.get("declared"),
+            "checksum_delta_pct": cs.get("delta_pct"),
+            "checksum_status": cs.get("status"),
         })
 
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
@@ -707,4 +733,286 @@ def build_anchor_matrix(
         "brand_tier_filter": tier_filter,
         "anchor_matrix": True,  # flag for frontend to know it's anchor-driven
         "matrix_distribution": matrix_distribution,
+    }
+
+
+# ─── Anchor Review Matrix ──────────────────────────────────────────────────────
+
+def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> dict:
+    """Build a review cell for the anchor-review matrix UI.
+
+    Simpler than _build_cell_for_supplier: no deviation/alert, but adds candidates.
+    """
+    align_items = [i for i in items if i.action == "align"]
+    pending_items = [i for i in items if i.action == "pending"]
+    excluded_items = [i for i in items if i.action == "exclude"]
+
+    base: dict = {
+        "cell_status": CELL_MISSING,
+        "item_id": None,
+        "quote_id": None,
+        "unit_price": None,
+        "total_price": None,
+        "confidence": None,
+        "evidence": None,
+        "flags": None,
+        "is_lowest": False,
+        "candidates": [],
+    }
+
+    def _get_prices(item: BidAlignmentItem) -> tuple:
+        qt = db.get(Quote, item.quote_id)
+        if not qt:
+            return None, None, None
+        if item.agg_total is not None and item.agg_qty:
+            price = round(item.agg_total / item.agg_qty, 4)
+            total = round(item.agg_total, 2)
+        else:
+            price = qt.unit_price
+            total = round(price * (qt.quantity or 1), 2) if price else None
+        return price, total, qt.id
+
+    def _build_candidates(plist: list) -> list:
+        out = []
+        for item in sorted(plist, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0, reverse=True)[:5]:
+            qt = db.get(Quote, item.quote_id)
+            if not qt:
+                continue
+            mat = db.get(Material, qt.material_id)
+            out.append({
+                "item_id": item.id,
+                "quote_id": item.quote_id,
+                "material_name": mat.standard_name if mat else "",
+                "spec": (mat.spec or "") if mat else "",
+                "unit_price": qt.unit_price,
+                "confidence": _parse_cosine_from_note(item.spec_note),
+                "flags": _parse_flags_from_note(item.spec_note) or None,
+            })
+        return out
+
+    if align_items:
+        def _eff(i: BidAlignmentItem) -> float:
+            if i.agg_total is not None and i.agg_qty:
+                return i.agg_total / i.agg_qty
+            qt = db.get(Quote, i.quote_id)
+            return (qt.unit_price or float("inf")) if qt else float("inf")
+
+        best = min(align_items, key=_eff)
+        price, total, quote_id = _get_prices(best)
+        base.update({
+            "cell_status": CELL_AGGREGATED if best.agg_total is not None else CELL_QUOTED,
+            "item_id": best.id,
+            "quote_id": quote_id,
+            "unit_price": price,
+            "total_price": total,
+            "evidence": best.name_note or None,
+            "flags": _parse_flags_from_note(best.spec_note) or None,
+            "candidates": _build_candidates(pending_items),
+        })
+        return base
+
+    if pending_items:
+        best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
+        price, total, quote_id = _get_prices(best)
+        base.update({
+            "cell_status": CELL_PENDING,
+            "item_id": best.id,
+            "quote_id": quote_id,
+            "unit_price": price,
+            "total_price": total,
+            "confidence": _parse_cosine_from_note(best.spec_note),
+            "evidence": best.name_note or None,
+            "flags": _parse_flags_from_note(best.spec_note) or None,
+            "candidates": _build_candidates(pending_items),
+        })
+        return base
+
+    if excluded_items:
+        base["cell_status"] = CELL_EXCLUDED
+        return base
+
+    return base  # missing
+
+
+def build_anchor_review_matrix(db: Session, project_id: int, category: str) -> dict:
+    """Anchor-first review matrix for the pre-review UI.
+
+    Returns one row per TenderAnchor with cells dict keyed by str(supplier_id).
+    Includes candidates list for pending cells. Does not compute deviations or
+    alert levels (those are for the final bid matrix).
+    """
+    from apps.api.models.tender_list_session import TenderListSession
+    from apps.api.services.tender_list import rebuild_anchors
+
+    session = (
+        db.query(TenderListSession)
+        .filter(
+            TenderListSession.project_id == project_id,
+            TenderListSession.category == category,
+            TenderListSession.is_current == True,  # noqa: E712
+            TenderListSession.status == "confirmed",
+        )
+        .first()
+    )
+    if not session:
+        raise ValueError(f"No current TenderListSession for project {project_id} / {category}")
+
+    anchors = rebuild_anchors(session)
+
+    # Discover suppliers from quotes in this project+category
+    raw = (
+        db.query(Quote.supplier_id)
+        .join(Material, Quote.material_id == Material.id)
+        .filter(
+            Quote.project_id == project_id,
+            Material.category == category,
+            Quote.supplier_id.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    supplier_ids = sorted({sid for (sid,) in raw})
+
+    # Supplier info + checksum
+    suppliers_info = []
+    for sid in supplier_ids:
+        sup = db.get(Supplier, sid)
+        if not sup:
+            continue
+        cs = _get_supplier_checksum(db, sid, project_id)
+        suppliers_info.append({
+            "supplier_id": sid,
+            "supplier_name": sup.name,
+            "checksum_status": cs.get("status"),
+            "declared_total": cs.get("declared"),
+            "checksum_delta_pct": cs.get("delta_pct"),
+        })
+
+    # Load confirmed groups → seq → group map
+    all_groups = (
+        db.query(BidAlignmentGroup)
+        .filter(
+            BidAlignmentGroup.project_id == project_id,
+            BidAlignmentGroup.category == category,
+            BidAlignmentGroup.status == "confirmed",
+        )
+        .all()
+    )
+    seq_to_group: dict[str, BidAlignmentGroup] = {}
+    for g in all_groups:
+        if g.anchor_seq is None:
+            continue
+        seq = str(g.anchor_seq)
+        if seq not in seq_to_group or g.tender_list_session_id == session.id:
+            seq_to_group[seq] = g
+
+    # Build rows
+    rows = []
+    pending_cells = 0
+    missing_cells = 0
+    quoted_ge_2 = 0
+    quoted_full = 0
+    n = len(supplier_ids)
+
+    for anchor in anchors:
+        seq_key = str(anchor.seq)
+        group = seq_to_group.get(seq_key)
+
+        cells: dict[str, dict] = {}
+        quoted_count = 0
+        covered_count = 0
+        prices_this_row: dict[int, float] = {}
+
+        for sid in supplier_ids:
+            if group is None:
+                cell: dict = {
+                    "cell_status": CELL_MISSING,
+                    "item_id": None,
+                    "quote_id": None,
+                    "unit_price": None,
+                    "total_price": None,
+                    "confidence": None,
+                    "evidence": None,
+                    "flags": None,
+                    "is_lowest": False,
+                    "candidates": [],
+                }
+                missing_cells += 1
+            else:
+                sid_items = [i for i in group.items if i.supplier_id == sid]
+                cell = _build_review_cell(db, sid_items, sid)
+                status = cell["cell_status"]
+                if status == CELL_MISSING:
+                    missing_cells += 1
+                elif status == CELL_PENDING:
+                    pending_cells += 1
+                if status in (CELL_QUOTED, CELL_AGGREGATED) and cell["unit_price"]:
+                    prices_this_row[sid] = cell["unit_price"]
+
+            if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED):
+                quoted_count += 1
+            if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING):
+                covered_count += 1
+
+            cells[str(sid)] = cell
+
+        # Mark lowest among confirmed cells
+        if prices_this_row:
+            min_sid = min(prices_this_row, key=prices_this_row.__getitem__)
+            cells[str(min_sid)]["is_lowest"] = True
+
+        # Row status
+        if n == 0 or quoted_count == n:
+            row_status = "ok"
+        elif quoted_count >= 2:
+            row_status = "partial"
+        elif covered_count >= 2:
+            row_status = "pending"
+        else:
+            row_status = "missing"
+
+        if quoted_count >= 2:
+            quoted_ge_2 += 1
+        if n > 0 and quoted_count == n:
+            quoted_full += 1
+
+        rows.append({
+            "anchor_seq": seq_key,
+            "anchor_name": anchor.name,
+            "anchor_spec": anchor.spec or "",
+            "unit": anchor.unit or "",
+            "quantity": anchor.qty,
+            "row_status": row_status,
+            "quoted_count": quoted_count,
+            "covered_count": covered_count,
+            "cells": cells,
+        })
+
+    # Compute matrix_distribution — convert to format expected by helper
+    from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
+    fake_rows = [
+        {
+            "suppliers": [
+                {
+                    "supplier_id": sid,
+                    "cell_status": row["cells"].get(str(sid), {}).get("cell_status", CELL_MISSING),
+                    "price": row["cells"].get(str(sid), {}).get("unit_price"),
+                }
+                for sid in supplier_ids
+            ]
+        }
+        for row in rows
+    ]
+    matrix_distribution = build_matrix_distribution_from_rows(fake_rows, supplier_ids)
+
+    return {
+        "anchors_total": len(anchors),
+        "supplier_count": n,
+        "pending_cells": pending_cells,
+        "missing_cells": missing_cells,
+        "quoted_ge_2_count": quoted_ge_2,
+        "quoted_full_count": quoted_full,
+        "suppliers": suppliers_info,
+        "matrix_distribution": matrix_distribution,
+        "rows": rows,
     }

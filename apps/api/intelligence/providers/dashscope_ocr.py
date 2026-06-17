@@ -207,20 +207,39 @@ class DashScopeOCRProvider(LLMProvider):
 
     def ocr_pages_with_roles(
         self, images: list[bytes],
-    ) -> list[tuple["PageClassification", str]]:
+    ) -> tuple[list[tuple["PageClassification", str]], list[dict]]:
         """Stage 1 for all pages: OCR → HTML → classify role.
 
-        Returns a list of (PageClassification, html) tuples in page order.
-        HTML is cached here so the caller can pass it back to extract() without
-        re-OCRing.
+        Returns:
+            (page_roles, failed_pages)
+            - page_roles: list of (PageClassification, html) in page order
+            - failed_pages: list of {"page": 1-based, "error": str} for failed OCR calls
         """
-        from apps.api.intelligence.page_classifier import classify_page, PageClassification
-        results: list[tuple[PageClassification, str]] = []
-        for image in images:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from apps.api.intelligence.page_classifier import classify_page, PageClassification, PageRole
+
+        n = len(images)
+        out: list[tuple[PageClassification, str] | None] = [None] * n
+        failures: list[dict] = []
+        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), n)
+
+        def _ocr_one(idx: int, image: bytes):
             html, _ = self._ocr_page(image)
-            cls = classify_page(html)
-            results.append((cls, html))
-        return results
+            return idx, (classify_page(html), html), None
+
+        with ThreadPoolExecutor(max_workers=workers) as exc:
+            futs = {exc.submit(_ocr_one, i, img): i for i, img in enumerate(images)}
+            for fut in as_completed(futs):
+                idx = futs[fut]
+                try:
+                    idx, result, _ = fut.result()
+                    out[idx] = result
+                except Exception as e:
+                    log.warning("OCR page %d failed: %s", idx + 1, e)
+                    out[idx] = (PageClassification(primary_role=PageRole.UNKNOWN), "")
+                    failures.append({"page": idx + 1, "error": str(e)})
+
+        return out, failures  # type: ignore[return-value]
 
     # ─── public API (called per-page by pipeline) ─────────────────────────
 
@@ -349,53 +368,65 @@ class DashScopeOCRProvider(LLMProvider):
     ) -> str:
         """Fallback: scan the front pages for the bidder (投标人) company name.
 
-        Called by the pipeline when supplier_name is still empty after aggregation.
-        The bidder name is sometimes buried deep (e.g. on the stamped 投标单位名称
-        page, not the cover — the cover often shows only the 招标人/buyer). So we
-        scan up to *max_pages* front pages and early-stop at the first confident
-        bidder name. The prompt is instructed to exclude the 招标人/buyer.
-
-        Returns a non-empty company name or "" if nothing found.
+        Runs all candidate pages in parallel, returns the result from the
+        earliest page that yields a confident bidder name.
         """
-        from apps.api.intelligence.aggregator import _pick_supplier_name  # avoid circular at module level
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from apps.api.intelligence.aggregator import _pick_supplier_name
 
-        for page_bytes in cover_images[:max_pages]:
-            html, _ = self._ocr_page(page_bytes)
-            if not html.strip():
-                continue
+        pages = cover_images[:max_pages]
+        if not pages:
+            return ""
 
-            key = self._next_key()
-            client = self._get_client(key)
-            sem = self._per_key_sem[key]
-            sem.acquire()
+        def _try_page(idx: int, page_bytes: bytes) -> tuple[int, str]:
             try:
-                resp = client.chat.completions.create(
-                    model=self.llm_model,
-                    messages=[
-                        {"role": "system", "content": _SUPPLIER_NAME_PROMPT},
-                        {"role": "user", "content": html},
-                    ],
-                    temperature=0.0,
-                    max_tokens=100,
-                    extra_body={"enable_thinking": False},
-                )
+                html, _ = self._ocr_page(page_bytes)
+                if not html.strip():
+                    return idx, ""
+                key = self._next_key()
+                client = self._get_client(key)
+                sem = self._per_key_sem[key]
+                sem.acquire()
+                try:
+                    resp = client.chat.completions.create(
+                        model=self.llm_model,
+                        messages=[
+                            {"role": "system", "content": _SUPPLIER_NAME_PROMPT},
+                            {"role": "user", "content": html},
+                        ],
+                        temperature=0.0,
+                        max_tokens=100,
+                        extra_body={"enable_thinking": False},
+                    )
+                finally:
+                    sem.release()
+                name = (resp.choices[0].message.content or "").strip()
+                if "</think>" in name:
+                    name = name.split("</think>")[-1].strip()
+                name = name.strip('"').strip("'").strip()
+                if name and name not in {"无", "找不到", "null", "None", ""}:
+                    return idx, _pick_supplier_name([name], set()) or ""
             except Exception as e:
-                sem.release()
-                log.warning("Supplier name cover fallback error: %s", e)
-                continue
-            sem.release()
+                log.warning("Supplier name cover fallback error (page %d): %s", idx + 1, e)
+            return idx, ""
 
-            name = (resp.choices[0].message.content or "").strip()
-            if "</think>" in name:
-                name = name.split("</think>")[-1].strip()
-            name = name.strip('"').strip("'").strip()
+        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), len(pages))
+        found: dict[int, str] = {}
+        with ThreadPoolExecutor(max_workers=workers) as exc:
+            futs = {exc.submit(_try_page, i, img): i for i, img in enumerate(pages)}
+            for fut in as_completed(futs):
+                try:
+                    idx, name = fut.result()
+                    if name:
+                        found[idx] = name
+                except Exception:
+                    pass
 
-            if name and name not in {"无", "找不到", "null", "None", ""}:
-                result = _pick_supplier_name([name], set())
-                if result:
-                    log.info("Supplier name recovered from cover: %r", result)
-                    return result
-
+        # Return earliest-page confident result
+        for i in range(len(pages)):
+            if found.get(i):
+                log.info("Supplier name recovered from cover page %d: %r", i + 1, found[i])
+                return found[i]
         return ""
 
     # ─── Stage 1: OCR ─────────────────────────────────────────────────────
@@ -444,6 +475,12 @@ class DashScopeOCRProvider(LLMProvider):
                 raise ProviderError(f"OCR 429 after {_MAX_RETRIES} retries")
 
             if resp.status_code != 200:
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _RETRY_DELAY * (attempt + 1)
+                    log.warning("OCR %d error (attempt %d/%d), retry in %ds: %s",
+                                resp.status_code, attempt + 1, _MAX_RETRIES, wait, resp.message)
+                    time.sleep(wait)
+                    continue
                 raise ProviderError(f"OCR error {resp.status_code}: {resp.message}")
 
             text = ""

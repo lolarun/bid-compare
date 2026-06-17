@@ -11,6 +11,7 @@ We render PDF pages at 2x scale for OCR quality, capped at MAX_PAGES.
 from __future__ import annotations
 
 import io
+import os
 import threading
 from pathlib import Path
 
@@ -19,14 +20,17 @@ from PIL import Image
 
 from apps.api.core.config import get_settings
 
-# pypdfium2/pdfium is not fully thread-safe for concurrent page rendering
-_pdfium_lock = threading.Lock()
-
 MAX_PAGES = 12          # default cap for _run_batched (old path); role-aware path ignores this
 MAX_PAGES_UNLIMITED = 200  # high ceiling for role-aware path that classifies all pages
 # Layer 0: render quality is env-driven (OCR_RENDER_SCALE / OCR_MAX_EDGE_PX).
 RENDER_SCALE = get_settings().OCR_RENDER_SCALE   # PDF render DPI multiplier
 MAX_EDGE_PX = get_settings().OCR_MAX_EDGE_PX      # downscale cap to stay within token limits
+
+# Limit concurrent PDF renders to avoid saturating CPU when N files arrive together.
+# Each render is CPU-bound (pypdfium2 page rasterisation); 2 is safe on a 4-core host.
+_PDF_RENDER_SEM = threading.Semaphore(
+    max(1, int(os.getenv("PDF_RENDER_CONCURRENCY", "2")))
+)
 
 
 class DocumentLoader:
@@ -54,7 +58,7 @@ class DocumentLoader:
 
     @staticmethod
     def _pdf_to_images(path: Path, max_pages: int = MAX_PAGES) -> list[bytes]:
-        with _pdfium_lock:
+        with _PDF_RENDER_SEM:
             pdf = pdfium.PdfDocument(str(path))
             try:
                 pages = min(len(pdf), max_pages)
@@ -87,5 +91,5 @@ class DocumentLoader:
             scale = MAX_EDGE_PX / longest
             img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
         buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
+        img.save(buf, format="PNG", compress_level=1)
         return buf.getvalue()

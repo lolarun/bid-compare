@@ -105,6 +105,66 @@ class CategoryDetailStats(BaseModel):
     sub_categories: list[SubCategoryStat]
 
 
+# ─── Anchor Review Matrix (pre-review UI) ─────────────────────────────────────
+
+class ReviewCellCandidate(BaseModel):
+    item_id: int
+    quote_id: int
+    material_name: str
+    spec: str
+    unit_price: float | None
+    confidence: float | None
+    flags: list[str] | None = None
+
+
+class ReviewCell(BaseModel):
+    cell_status: str  # quoted|aggregated|pending|excluded|missing
+    item_id: int | None = None
+    quote_id: int | None = None
+    unit_price: float | None = None
+    total_price: float | None = None
+    confidence: float | None = None
+    evidence: str | None = None
+    flags: list[str] | None = None
+    is_lowest: bool = False
+    candidates: list[ReviewCellCandidate] = []
+    model_config = {"extra": "ignore"}
+
+
+class ReviewRow(BaseModel):
+    anchor_seq: str
+    anchor_name: str
+    anchor_spec: str
+    unit: str
+    quantity: float | None
+    row_status: str  # ok|partial|pending|missing
+    quoted_count: int
+    covered_count: int
+    cells: dict[str, ReviewCell]  # keyed by str(supplier_id)
+    model_config = {"extra": "ignore"}
+
+
+class ReviewSupplier(BaseModel):
+    supplier_id: int
+    supplier_name: str
+    checksum_status: str | None = None
+    declared_total: float | None = None
+    checksum_delta_pct: float | None = None
+
+
+class AnchorReviewMatrixResult(BaseModel):
+    anchors_total: int
+    supplier_count: int
+    pending_cells: int
+    missing_cells: int
+    quoted_ge_2_count: int
+    quoted_full_count: int
+    suppliers: list[ReviewSupplier]
+    matrix_distribution: "MatrixDistribution | None" = None
+    rows: list[ReviewRow]
+    model_config = {"extra": "ignore"}
+
+
 # ─── Bid Matrix ───────────────────────────────────────────────────────────────
 
 class SupplierCell(BaseModel):
@@ -158,6 +218,9 @@ class MatrixTotal(BaseModel):
     avg_deviation: float
     quoted_count: int
     anomaly_count: int
+    declared_total: float | None = None
+    checksum_delta_pct: float | None = None
+    checksum_status: str | None = None  # "pass" / "fail" / "unknown"
 
 
 class BidMatrixRequest(BaseModel):

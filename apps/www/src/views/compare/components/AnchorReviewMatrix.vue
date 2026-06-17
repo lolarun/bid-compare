@@ -1,0 +1,485 @@
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import { message } from 'ant-design-vue'
+import {
+  CheckCircleOutlined, WarningOutlined, QuestionCircleOutlined,
+  MinusCircleOutlined, SearchOutlined, ReloadOutlined,
+} from '@ant-design/icons-vue'
+import { analysisApi } from '@/api'
+import type { AnchorReviewMatrixResult, ReviewRow, ReviewCell, ReviewSupplier } from '@/api/client'
+
+const props = defineProps<{
+  projectId: number
+  category: string
+}>()
+
+const emit = defineEmits<{
+  (e: 'pending-count', count: number): void
+}>()
+
+// ─── Data ────────────────────────────────────────────────────────────────────
+const result = ref<AnchorReviewMatrixResult | null>(null)
+const loading = ref(false)
+const confirmLoading = ref<Record<number, boolean>>({})
+const expandedCells = ref<Record<string, boolean>>({})   // key: `${anchor_seq}_${supplier_id}`
+
+async function load() {
+  if (!props.projectId || !props.category) return
+  loading.value = true
+  try {
+    const { data } = await analysisApi.anchorReviewMatrix({
+      project_id: props.projectId,
+      category: props.category,
+    })
+    result.value = data
+    emit('pending-count', data.pending_cells)
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    message.error(detail ?? '加载复核矩阵失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+watch(() => [props.projectId, props.category], load, { immediate: true })
+
+// ─── Filter ───────────────────────────────────────────────────────────────────
+type FilterKey = 'needs_action' | 'all' | 'pending' | 'missing' | 'low'
+const activeFilter = ref<FilterKey>('needs_action')
+const searchText = ref('')
+
+function rowNeedsAction(row: ReviewRow): boolean {
+  if (row.quoted_count < 2) return true
+  const cells = Object.values(row.cells)
+  return cells.some(c => c.cell_status === 'pending' || c.cell_status === 'missing')
+}
+
+const filteredRows = computed(() => {
+  if (!result.value) return []
+  let rows = result.value.rows
+
+  // Text search
+  const q = searchText.value.trim().toLowerCase()
+  if (q) {
+    rows = rows.filter(r =>
+      r.anchor_name.toLowerCase().includes(q) ||
+      r.anchor_spec.toLowerCase().includes(q) ||
+      r.anchor_seq.toLowerCase().includes(q)
+    )
+  }
+
+  // Status filter
+  if (activeFilter.value === 'needs_action') {
+    rows = rows.filter(rowNeedsAction)
+  } else if (activeFilter.value === 'pending') {
+    rows = rows.filter(r => Object.values(r.cells).some(c => c.cell_status === 'pending'))
+  } else if (activeFilter.value === 'missing') {
+    rows = rows.filter(r => Object.values(r.cells).some(c => c.cell_status === 'missing'))
+  } else if (activeFilter.value === 'low') {
+    rows = rows.filter(r => r.quoted_count < 2)
+  }
+
+  return rows
+})
+
+// Filter counts
+const needsActionCount = computed(() => result.value?.rows.filter(rowNeedsAction).length ?? 0)
+const pendingRowCount = computed(() => result.value?.rows.filter(r =>
+  Object.values(r.cells).some(c => c.cell_status === 'pending')
+).length ?? 0)
+const missingRowCount = computed(() => result.value?.rows.filter(r =>
+  Object.values(r.cells).some(c => c.cell_status === 'missing')
+).length ?? 0)
+const lowCovCount = computed(() => result.value?.rows.filter(r => r.quoted_count < 2).length ?? 0)
+
+// ─── Table columns ────────────────────────────────────────────────────────────
+const columns = computed(() => {
+  if (!result.value) return []
+  const base = [
+    { title: '序', dataIndex: 'anchor_seq', key: 'seq', width: 52, fixed: 'left' as const },
+    { title: '采购项名称', dataIndex: 'anchor_name', key: 'name', width: 180, fixed: 'left' as const, ellipsis: true },
+    { title: '规格型号', dataIndex: 'anchor_spec', key: 'spec', width: 160, ellipsis: true },
+    { title: '单位', dataIndex: 'unit', key: 'unit', width: 52 },
+    { title: '数量', dataIndex: 'quantity', key: 'qty', width: 60 },
+  ]
+  const supCols = result.value.suppliers.map((s: ReviewSupplier) => ({
+    title: s.supplier_name,
+    key: `sup_${s.supplier_id}`,
+    dataIndex: `sup_${s.supplier_id}`,
+    width: 170,
+    customCell: () => ({ style: 'padding: 4px 6px;' }),
+  }))
+  const tail = [
+    { title: '覆盖', key: 'coverage', width: 64 },
+  ]
+  return [...base, ...supCols, ...tail]
+})
+
+// ─── Cell helpers ─────────────────────────────────────────────────────────────
+function cellBg(cell: ReviewCell | undefined): string {
+  if (!cell) return ''
+  switch (cell.cell_status) {
+    case 'quoted':
+    case 'aggregated':
+      return cell.is_lowest ? 'background:#f6ffed' : ''
+    case 'pending': return 'background:#fff7e6'
+    case 'missing': return 'background:#fafafa'
+    case 'excluded': return 'background:#f5f5f5'
+    default: return ''
+  }
+}
+
+function fmtPrice(v: number | null | undefined): string {
+  if (v == null) return '—'
+  return '¥' + v.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+
+function fmtConf(v: number | null | undefined): string {
+  if (v == null) return ''
+  return (v * 100).toFixed(0) + '%'
+}
+
+// ─── Actions ─────────────────────────────────────────────────────────────────
+async function confirmItem(itemId: number | null | undefined, action: 'align' | 'exclude') {
+  if (!itemId) return
+  confirmLoading.value[itemId] = true
+  try {
+    await analysisApi.anchorReviewItemConfirm({ item_id: itemId, action })
+    message.success(action === 'align' ? '已纳入矩阵' : '已排除')
+    await load()
+  } catch {
+    message.error('操作失败，请重试')
+  } finally {
+    delete confirmLoading.value[itemId]
+  }
+}
+
+async function confirmCandidate(candidateItemId: number, action: 'align' | 'exclude') {
+  await confirmItem(candidateItemId, action)
+}
+
+function toggleExpand(anchorSeq: string, supplierId: number) {
+  const key = `${anchorSeq}_${supplierId}`
+  expandedCells.value[key] = !expandedCells.value[key]
+}
+
+function isExpanded(anchorSeq: string, supplierId: number): boolean {
+  return !!expandedCells.value[`${anchorSeq}_${supplierId}`]
+}
+</script>
+
+<template>
+  <div class="arm">
+    <!-- ── Loading ── -->
+    <div v-if="loading && !result" style="text-align:center;padding:48px 0">
+      <a-spin size="large" />
+      <div style="margin-top:12px;color:#666">加载复核矩阵...</div>
+    </div>
+
+    <template v-else-if="result">
+      <!-- ── Summary bar ── -->
+      <div class="arm__summary">
+        <div class="arm__stat">
+          <span class="arm__stat-val">{{ result.anchors_total }}</span>
+          <span class="arm__stat-lbl">采购项</span>
+        </div>
+        <div class="arm__stat">
+          <span class="arm__stat-val">{{ result.supplier_count }}</span>
+          <span class="arm__stat-lbl">供应商</span>
+        </div>
+        <div class="arm__stat" :class="result.pending_cells > 0 ? 'arm__stat--warn' : 'arm__stat--ok'">
+          <span class="arm__stat-val">{{ result.pending_cells }}</span>
+          <span class="arm__stat-lbl">待确认</span>
+        </div>
+        <div class="arm__stat" :class="result.missing_cells > 0 ? 'arm__stat--grey' : 'arm__stat--ok'">
+          <span class="arm__stat-val">{{ result.missing_cells }}</span>
+          <span class="arm__stat-lbl">缺报</span>
+        </div>
+        <div class="arm__stat arm__stat--blue">
+          <span class="arm__stat-val">{{ result.quoted_ge_2_count }}<span style="font-size:12px;font-weight:400">/{{ result.anchors_total }}</span></span>
+          <span class="arm__stat-lbl">可比价(≥2家)</span>
+        </div>
+        <div class="arm__stat arm__stat--blue">
+          <span class="arm__stat-val">{{ result.quoted_full_count }}<span style="font-size:12px;font-weight:400">/{{ result.anchors_total }}</span></span>
+          <span class="arm__stat-lbl">全供应商</span>
+        </div>
+        <!-- checksum warnings -->
+        <template v-for="sup in result.suppliers" :key="sup.supplier_id">
+          <a-tag v-if="sup.checksum_status === 'fail'" color="orange" style="font-size:11px">
+            {{ sup.supplier_name }} 核价异常
+          </a-tag>
+        </template>
+        <a-button size="small" :loading="loading" @click="load" style="margin-left:auto">
+          <template #icon><ReloadOutlined /></template>
+          刷新
+        </a-button>
+      </div>
+
+      <!-- ── Filter bar ── -->
+      <div class="arm__filter">
+        <a-radio-group v-model:value="activeFilter" button-style="solid" size="small">
+          <a-radio-button value="needs_action">需处理 ({{ needsActionCount }})</a-radio-button>
+          <a-radio-button value="pending">待确认 ({{ pendingRowCount }})</a-radio-button>
+          <a-radio-button value="missing">缺报 ({{ missingRowCount }})</a-radio-button>
+          <a-radio-button value="low">可比不足 ({{ lowCovCount }})</a-radio-button>
+          <a-radio-button value="all">全部 ({{ result.anchors_total }})</a-radio-button>
+        </a-radio-group>
+        <a-input
+          v-model:value="searchText"
+          placeholder="搜索采购项..."
+          style="width:200px"
+          allow-clear
+        >
+          <template #prefix><SearchOutlined /></template>
+        </a-input>
+      </div>
+
+      <!-- ── Matrix table ── -->
+      <div class="arm__table-wrap">
+        <a-table
+          :columns="columns"
+          :data-source="filteredRows"
+          :row-key="(r: ReviewRow) => r.anchor_seq"
+          :scroll="{ x: 'max-content', y: 520 }"
+          :pagination="{ pageSize: 60, size: 'small', showTotal: (t: number) => `共 ${t} 条` }"
+          size="small"
+          :loading="loading"
+          class="arm__table"
+        >
+          <template #bodyCell="{ column, record }: { column: { key: string }, record: ReviewRow }">
+
+            <!-- Spec (ellipsis tooltip) -->
+            <template v-if="column.key === 'spec'">
+              <a-tooltip :title="record.anchor_spec">
+                <span style="font-size:11px;color:#555">{{ record.anchor_spec || '—' }}</span>
+              </a-tooltip>
+            </template>
+
+            <!-- Quantity -->
+            <template v-else-if="column.key === 'qty'">
+              <span style="font-size:12px">{{ record.quantity ?? '—' }}</span>
+            </template>
+
+            <!-- Coverage column -->
+            <template v-else-if="column.key === 'coverage'">
+              <a-tag
+                :color="record.quoted_count >= 2 ? (record.quoted_count === result!.supplier_count ? 'green' : 'blue') : 'orange'"
+                style="font-size:11px;padding:0 4px"
+              >
+                {{ record.quoted_count }}/{{ result!.supplier_count }}
+              </a-tag>
+            </template>
+
+            <!-- Supplier cell -->
+            <template v-else-if="column.key.startsWith('sup_')">
+              <div
+                v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key)"
+                :key="sup.supplier_id"
+              >
+                <div
+                  :style="cellBg(record.cells[String(sup.supplier_id)])"
+                  style="border-radius:4px;padding:4px 6px;min-height:36px"
+                >
+                  <template v-if="!record.cells[String(sup.supplier_id)] || record.cells[String(sup.supplier_id)].cell_status === 'missing'">
+                    <span style="color:#bbb;font-size:12px">未报价</span>
+                  </template>
+
+                  <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'excluded'">
+                    <span style="color:#bbb;font-size:12px;text-decoration:line-through">已排除</span>
+                  </template>
+
+                  <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'pending'">
+                    <!-- Pending cell -->
+                    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+                      <a-tag color="orange" style="font-size:10px;padding:0 4px;margin:0">待确认</a-tag>
+                      <span style="font-size:12px;color:#d46b08;font-weight:600">
+                        {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                      </span>
+                      <span v-if="record.cells[String(sup.supplier_id)].confidence != null"
+                        style="font-size:10px;color:#999">
+                        {{ fmtConf(record.cells[String(sup.supplier_id)].confidence) }}
+                      </span>
+                    </div>
+                    <!-- Evidence hint -->
+                    <div v-if="record.cells[String(sup.supplier_id)].evidence"
+                      style="font-size:10px;color:#888;margin-top:2px;line-height:1.3">
+                      {{ record.cells[String(sup.supplier_id)].evidence }}
+                    </div>
+                    <!-- Action buttons -->
+                    <div style="display:flex;gap:4px;margin-top:4px;align-items:center">
+                      <a-button
+                        type="primary" size="small"
+                        style="font-size:11px;padding:0 6px;height:20px"
+                        :loading="confirmLoading[record.cells[String(sup.supplier_id)].item_id!]"
+                        @click.stop="confirmItem(record.cells[String(sup.supplier_id)].item_id, 'align')"
+                      >✓ 纳入</a-button>
+                      <a-button
+                        danger size="small"
+                        style="font-size:11px;padding:0 6px;height:20px"
+                        :loading="confirmLoading[record.cells[String(sup.supplier_id)].item_id!]"
+                        @click.stop="confirmItem(record.cells[String(sup.supplier_id)].item_id, 'exclude')"
+                      >✗ 排除</a-button>
+                      <a-button
+                        v-if="record.cells[String(sup.supplier_id)].candidates?.length > 1"
+                        size="small"
+                        style="font-size:10px;padding:0 4px;height:20px"
+                        @click.stop="toggleExpand(record.anchor_seq, sup.supplier_id)"
+                      >换候选</a-button>
+                    </div>
+                    <!-- Candidates expand -->
+                    <div v-if="isExpanded(record.anchor_seq, sup.supplier_id)"
+                      style="margin-top:6px;border-top:1px solid #ffe7ba;padding-top:4px">
+                      <div
+                        v-for="cand in record.cells[String(sup.supplier_id)].candidates"
+                        :key="cand.item_id"
+                        style="display:flex;align-items:center;gap:4px;padding:2px 0;font-size:11px"
+                        :style="cand.item_id === record.cells[String(sup.supplier_id)].item_id ? 'background:#fff7e6;border-radius:2px;padding:2px 4px' : ''"
+                      >
+                        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                          {{ cand.material_name }}
+                          <span style="color:#999"> {{ cand.spec }}</span>
+                        </span>
+                        <span style="color:#d46b08;white-space:nowrap">{{ fmtPrice(cand.unit_price) }}</span>
+                        <span style="color:#bbb;white-space:nowrap">{{ fmtConf(cand.confidence) }}</span>
+                        <a-button
+                          type="link" size="small"
+                          style="font-size:10px;padding:0;height:16px"
+                          :loading="confirmLoading[cand.item_id]"
+                          @click.stop="confirmCandidate(cand.item_id, 'align')"
+                        >选此条</a-button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <template v-else>
+                    <!-- Quoted / aggregated cell -->
+                    <div style="display:flex;align-items:center;gap:4px">
+                      <CheckCircleOutlined v-if="record.cells[String(sup.supplier_id)].cell_status === 'quoted'"
+                        style="color:#52c41a;font-size:11px" />
+                      <a-tag v-else color="cyan" style="font-size:10px;padding:0 4px;margin:0">聚合</a-tag>
+                      <span
+                        style="font-size:13px;font-weight:600"
+                        :style="record.cells[String(sup.supplier_id)].is_lowest ? 'color:#389e0d' : ''"
+                      >
+                        {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                      </span>
+                      <span v-if="record.cells[String(sup.supplier_id)].is_lowest"
+                        style="font-size:10px;color:#389e0d">最低</span>
+                    </div>
+                    <div v-if="record.cells[String(sup.supplier_id)].flags?.length"
+                      style="margin-top:2px">
+                      <a-tag
+                        v-for="f in record.cells[String(sup.supplier_id)].flags"
+                        :key="f"
+                        color="red"
+                        style="font-size:10px;padding:0 3px;margin:0 2px 0 0"
+                      >{{ f }}</a-tag>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+          </template>
+
+          <!-- Supplier column header -->
+          <template #headerCell="{ column }: { column: { key: string; title: string } }">
+            <template v-if="column.key.startsWith('sup_')">
+              <div>
+                {{ column.title }}
+                <a-tag
+                  v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key && s.checksum_status === 'fail')"
+                  :key="sup.supplier_id"
+                  color="orange"
+                  style="font-size:10px;padding:0 3px;margin-left:4px"
+                >核价待查</a-tag>
+              </div>
+            </template>
+          </template>
+
+        </a-table>
+      </div>
+
+      <!-- ── Empty state ── -->
+      <div v-if="!loading && filteredRows.length === 0" style="text-align:center;padding:24px;color:#999">
+        <a-empty description="当前筛选条件下无数据" />
+      </div>
+
+    </template>
+
+    <div v-else-if="!loading" style="text-align:center;padding:48px 0;color:#bbb">
+      加载中...
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.arm {
+  margin-top: 16px;
+}
+
+.arm__summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #fafafa;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.arm__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 56px;
+}
+
+.arm__stat-val {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.arm__stat-lbl {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.45);
+  margin-top: 1px;
+}
+
+.arm__stat--warn .arm__stat-val { color: #fa8c16; }
+.arm__stat--ok .arm__stat-val { color: #52c41a; }
+.arm__stat--grey .arm__stat-val { color: #8c8c8c; }
+.arm__stat--blue .arm__stat-val { color: #1677ff; }
+
+.arm__filter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.arm__table-wrap {
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid #f0f0f0;
+}
+
+.arm__table :deep(.ant-table-cell) {
+  vertical-align: top;
+  padding: 4px 6px !important;
+}
+
+.arm__table :deep(.ant-table-thead .ant-table-cell) {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: #fafafa;
+}
+
+.arm__table :deep(.ant-table-row:hover .ant-table-cell) {
+  background: inherit !important;
+}
+</style>
