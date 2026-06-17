@@ -420,9 +420,9 @@ def export_bid_matrix(
     is_anchor = result.get("anchor_matrix", False)
     suppliers = result["suppliers"]
 
-    # Header row — anchor mode adds seq column
+    # Header row — anchor mode adds seq + 材质/品牌 columns
     if is_anchor:
-        header = ["序号", "材料", "规格", "历史均价", "合理史低"]
+        header = ["序号", "材料", "规格", "材质", "品牌要求", "历史均价", "合理史低"]
     else:
         header = ["材料", "规格", "历史均价", "合理史低"]
     for s in suppliers:
@@ -477,10 +477,12 @@ def export_bid_matrix(
                 row.get("anchor_seq", ""),
                 row["material_name"],
                 row.get("spec", ""),
+                row.get("materials", ""),
+                row.get("brand", ""),
                 row["historical_avg"]["price"] if row.get("historical_avg") else "",
                 row["reasonable_low"]["price"] if row.get("reasonable_low") else "",
             ]
-            col_offset = 5
+            col_offset = 7
         else:
             data = [
                 row["material_name"],
@@ -545,8 +547,8 @@ def export_bid_matrix(
                     if fill:
                         ws.cell(row=row_idx, column=status_col).fill = fill
 
-    # Totals row (quoted-only — same as backend)
-    totals_data = (["汇总", "", "", "", ""] if is_anchor else ["汇总", "", "", ""])
+    # Totals row (quoted-only — same as backend); leading blanks match col_offset
+    totals_data = (["汇总", "", "", "", "", "", ""] if is_anchor else ["汇总", "", "", ""])
     totals_map = {t["supplier_id"]: t for t in result["totals"]}
     for s in suppliers:
         t = totals_map.get(s["id"])

@@ -507,7 +507,13 @@ class DashScopeOCRProvider(LLMProvider):
         s2_prompt = _QUOTE_S2_PROMPT if doc_type == "quote" else _TENDER_S2_PROMPT
         return self._llm_call_json(s2_prompt, html)
 
-    def _llm_call_json(self, system_prompt: str, user_content: str) -> tuple[dict, str, int]:
+    def _llm_call_json(
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        enable_thinking: bool = False,
+    ) -> tuple[dict, str, int]:
         """Call the text LLM with retry; return (parsed_dict, raw_text, tokens)."""
         for attempt in range(_MAX_RETRIES):
             key = self._next_key()
@@ -523,7 +529,7 @@ class DashScopeOCRProvider(LLMProvider):
                     ],
                     temperature=0.0,  # 降低抽取非确定性(召回波动);见 design/05 §9.1
                     max_tokens=8192,
-                    extra_body={"enable_thinking": False},
+                    extra_body={"enable_thinking": enable_thinking},
                 )
             except openai.RateLimitError as e:
                 sem.release()

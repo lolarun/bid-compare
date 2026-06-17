@@ -39,3 +39,14 @@ apps/www/dist/
 .coverage
 htmlcov/
 docs/antdv-pro/
+
+# Generated test outputs
+outputs/
+
+# Local temp test artifacts
+_*.json
+_*.txt
+_*.xlsx
+e2e_*.log
+e2e_out*.txt
+*.log

@@ -119,3 +119,18 @@ def _ensure_sqlite_schema():
             conn.execute(text(
                 "ALTER TABLE tender_list_sessions ADD COLUMN confirmed_supplier_ids JSON"
             ))
+
+        # v2.8: PDF 招标清单来源 — source_type + 第13页品牌要求/供应商品牌映射
+        if "source_type" not in tls_columns:
+            conn.execute(text(
+                "ALTER TABLE tender_list_sessions "
+                "ADD COLUMN source_type VARCHAR(20) NOT NULL DEFAULT 'excel'"
+            ))
+        if "brand_requirement" not in tls_columns:
+            conn.execute(text(
+                "ALTER TABLE tender_list_sessions ADD COLUMN brand_requirement JSON"
+            ))
+        if "supplier_brand_map" not in tls_columns:
+            conn.execute(text(
+                "ALTER TABLE tender_list_sessions ADD COLUMN supplier_brand_map JSON"
+            ))

@@ -446,19 +446,50 @@ def import_and_match(
     supplier_ids: list[int] | None = None,
     anchors: list[TenderAnchor] | None = None,
     tender_list_session_id: int | None = None,
+    brand_ctx: tuple[set, dict] | None = None,
 ) -> tuple[MatchSummary, dict]:
     """解析清单 + 嵌入匹配 + 落 BidAlignmentGroup。幂等:先清同 (project,category) 旧组。
 
     xlsx_bytes: raw xlsx content; ignored when anchors is provided.
     anchors: pre-built TenderAnchor list (from TenderListSession); takes priority.
+    brand_ctx: (allowed_aliases, supplier_expected_aliases) 来自招标文件第13页，
+        用于品牌硬信号校验（冲突→pending）。None 时跳过品牌校验。
 
     Returns:
         (MatchSummary, per_supplier_stats)
         per_supplier_stats: {supplier_id: {quote_rows, matched_rows, pending_rows,
                                            residue_rows, aggregated_rows}}
     """
+    from apps.api.services.brand_match import check_brand
+
     if anchors is None:
         anchors = parse_tender_xlsx(xlsx_bytes)
+
+    allowed_aliases, supplier_expected = brand_ctx or (set(), {})
+
+    def _apply_brand(qt, sid: int, action: str, note: str) -> tuple[str, str]:
+        """品牌硬信号：conflict→降级 pending；match/allowed→附加证据标记（不提升）。
+
+        设计约束（不可违反）：
+        - brand match 只是 evidence，不能覆盖 DN/规格/材质/名称冲突。
+          canonical 硬过滤（c_score==0.0）发生在 _score_anchors_for_quote，
+          brand match 在此之后，因此无法救回被 canonical 拒绝的候选。
+        - conflict 只降级 pending，不 reject。别名表可能不全，宁可保守。
+        """
+        if not allowed_aliases:
+            return action, note
+        verdict = check_brand(
+            getattr(qt, "brand", "") or "",
+            allowed_aliases,
+            supplier_expected.get(sid),
+        )
+        if verdict == "conflict":
+            return "pending", (note + " brand_conflict").strip()
+        if verdict == "match":
+            return action, (note + " brand✓").strip()
+        if verdict == "allowed":
+            return action, (note + " brand~").strip()
+        return action, note
 
     # 载入报价
     q = (
@@ -592,6 +623,7 @@ def import_and_match(
                 note = f"cos={cos:.2f}"
                 if canon_snap.get("valve_type"):
                     note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
+                item_action, note = _apply_brand(qt, sid, item_action, note)
                 db.add(BidAlignmentItem(
                     group_id=group.id,
                     quote_id=qt.id,
@@ -659,6 +691,7 @@ def import_and_match(
                             note += f" aggregated={agg_ids}"
                             per_supplier_stats[sid]["aggregated_rows"] += len(agg_ids)
 
+                    item_action, note = _apply_brand(qt, sid, item_action, note)
                     db.add(BidAlignmentItem(
                         group_id=group.id,
                         quote_id=qt.id,

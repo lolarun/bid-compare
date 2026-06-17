@@ -233,6 +233,13 @@ const cellAccountingDetail = computed(() => {
           <span class="arm__stat-val">{{ result.quoted_full_count }}<span style="font-size:12px;font-weight:400">/{{ result.anchors_total }}</span></span>
           <span class="arm__stat-lbl">全供应商</span>
         </div>
+        <!-- 业主品牌要求 -->
+        <div v-if="result.brand_requirement?.length" style="display:flex;align-items:center;gap:4px;font-size:11px">
+          <span style="color:rgba(0,0,0,0.45)">品牌要求：</span>
+          <a-tag v-for="b in result.brand_requirement" :key="b.brand_en" color="blue" style="font-size:11px;margin:0">
+            {{ b.brand_en }} {{ b.brand_cn }}
+          </a-tag>
+        </div>
         <!-- checksum warnings -->
         <template v-for="sup in result.suppliers" :key="sup.supplier_id">
           <a-tag v-if="sup.checksum_status === 'fail'" color="orange" style="font-size:11px">
@@ -288,10 +295,17 @@ const cellAccountingDetail = computed(() => {
         >
           <template #bodyCell="{ column, record }: { column: { key: string }, record: ReviewRow }">
 
-            <!-- Spec (ellipsis tooltip) -->
+            <!-- Spec (ellipsis tooltip) + 材质/品牌要求 -->
             <template v-if="column.key === 'spec'">
-              <a-tooltip :title="record.anchor_spec">
-                <span style="font-size:11px;color:#555">{{ record.anchor_spec || '—' }}</span>
+              <a-tooltip :title="[record.anchor_spec, record.anchor_pressure, record.anchor_materials].filter(Boolean).join(' · ')">
+                <div style="font-size:11px;color:#555">
+                  {{ record.anchor_spec || '—' }}
+                  <span v-if="record.anchor_pressure" style="color:#999"> {{ record.anchor_pressure }}</span>
+                </div>
+                <div v-if="record.anchor_materials" style="font-size:10px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  材质：{{ record.anchor_materials }}
+                </div>
+                <a-tag v-if="record.anchor_brand" color="cyan" style="font-size:10px;padding:0 4px;margin-top:1px">{{ record.anchor_brand }}</a-tag>
               </a-tooltip>
             </template>
 
@@ -440,14 +454,18 @@ const cellAccountingDetail = computed(() => {
           <!-- Supplier column header -->
           <template #headerCell="{ column }: { column: { key: string; title: string } }">
             <template v-if="column.key.startsWith('sup_')">
-              <div>
-                {{ column.title }}
-                <a-tag
-                  v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key && s.checksum_status === 'fail')"
-                  :key="sup.supplier_id"
-                  color="orange"
-                  style="font-size:10px;padding:0 3px;margin-left:4px"
-                >核价待查</a-tag>
+              <div v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key)" :key="sup.supplier_id">
+                <div>
+                  {{ sup.supplier_name }}
+                  <a-tag
+                    v-if="sup.checksum_status === 'fail'"
+                    color="orange"
+                    style="font-size:10px;padding:0 3px;margin-left:4px"
+                  >核价待查</a-tag>
+                </div>
+                <a-tag v-if="sup.brand" color="cyan" style="font-size:10px;padding:0 4px;margin:2px 0 0;font-weight:400">
+                  品牌：{{ sup.brand }}
+                </a-tag>
               </div>
             </template>
           </template>

@@ -78,6 +78,7 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
 class IngestionType(str, enum.Enum):
     TENDER = "tender"
     QUOTE = "quote"
+    TENDER_BIDLIST = "tender_bidlist"  # 招标文件 PDF → 投标清单锚点 + 品牌映射
 
 
 class JobStatus(str, enum.Enum):
@@ -207,6 +208,15 @@ class DocumentIngestionService:
                     from apps.api.services.tabular_ingestion import extract_quote_tabular
                     result = extract_quote_tabular(job.file_path, job.context or {})
                     update_progress("确定性解析完成", 90)
+                elif job.type == IngestionType.TENDER_BIDLIST.value:
+                    # 招标文件 PDF → 投标清单锚点 + 品牌映射（返回 dict，自带 items/brand_*）
+                    ctx = job.context or {}
+                    result = self.pipeline.extract_tender_bidlist(
+                        job.file_path,
+                        progress_cb=update_progress,
+                        bidlist_pages=ctx.get("bidlist_pages"),
+                        brand_page=ctx.get("brand_page"),
+                    )
                 elif job.type == IngestionType.TENDER.value:
                     resp = self.pipeline.extract_tender(
                         job.file_path,

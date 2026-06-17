@@ -315,8 +315,61 @@ export interface BidMatrixResult {
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
 
-export type IngestionType = 'tender' | 'quote'
+export type IngestionType = 'tender' | 'quote' | 'tender_bidlist'
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
+
+// 招标文件 PDF 投标清单抽取结果（ExtractionJob.result for type=tender_bidlist）
+export interface TenderBrandReq { brand_en: string; brand_cn: string }
+export interface TenderSupplierBrand { supplier_name: string; brand: string; supplier_id?: number | null }
+
+export interface PageDiagnostic {
+  page: number
+  input_mode: 'table_grid' | 'html_fallback'
+  fallback_reason: string
+  expected_rows: number
+  extracted_rows: number
+  thinking_retry: boolean
+}
+
+export interface PdfQualityMetrics {
+  seq_missing: number[]
+  seq_duplicate: number[]
+  material_columns_filled_rate: number
+  brand_filled_rate: number
+  source_ref_coverage: number
+  qty_parse_success_rate: number
+  row_count_by_page: Record<string, number>
+  table_grid_pages: number[]
+  html_fallback_pages: Array<{ page: number; fallback_reason: string }>
+}
+
+export interface TenderBidlistResult {
+  items: Array<Record<string, unknown>>
+  brand_requirement: TenderBrandReq[]
+  supplier_brands: TenderSupplierBrand[]
+  material_class: string
+  detected_pages: { bidlist: number[]; brand: number | null }
+  row_count: number
+  source_type: string
+  quality_metrics?: PdfQualityMetrics | null
+  page_diagnostics?: PageDiagnostic[] | null
+}
+
+// Excel vs PDF 对账结果
+export interface SourceReconcileMismatch {
+  seq: string
+  field: string
+  xlsx_value: string
+  pdf_value: string
+}
+export interface SourceReconcileResult {
+  xlsx_count: number
+  pdf_count: number
+  seq_missing_in_pdf: string[]
+  seq_missing_in_xlsx: string[]
+  field_mismatches: SourceReconcileMismatch[]
+  recommended_source: 'both_consistent' | 'excel'
+}
 
 export interface ExtractionJob {
   id: string
@@ -624,11 +677,14 @@ export interface TenderPreviewItem {
   materials: Record<string, string>
   unit: string
   qty: number | null
+  brand?: string              // PDF 清单要求品牌（可空）
   profession: string
+  remark?: string
   category: string            // 品类识别结果（"" = 待人工确认）
   category_confidence: number
   category_reason: string
   canonical: Record<string, string>
+  source_ref?: Record<string, unknown>
 }
 
 export interface TenderPreviewResult {
@@ -715,6 +771,9 @@ export interface ReviewRow {
   anchor_seq: string
   anchor_name: string
   anchor_spec: string
+  anchor_pressure?: string
+  anchor_materials?: string
+  anchor_brand?: string
   unit: string
   quantity: number | null
   row_status: 'ok' | 'partial' | 'pending' | 'missing'
@@ -726,6 +785,7 @@ export interface ReviewRow {
 export interface ReviewSupplier {
   supplier_id: number
   supplier_name: string
+  brand?: string                       // 参与品牌（招标第13页，供应商属性）
   checksum_status: string | null
   declared_total: number | null
   checksum_delta_pct: number | null
@@ -739,6 +799,7 @@ export interface AnchorReviewMatrixResult {
   quoted_ge_2_count: number
   quoted_full_count: number
   suppliers: ReviewSupplier[]
+  brand_requirement?: { brand_en: string; brand_cn: string }[]
   matrix_distribution?: MatrixDistribution
   rows: ReviewRow[]
 }

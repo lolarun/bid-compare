@@ -21,8 +21,13 @@ class TenderListSession(Base):
     category = Column(String(50), default="", nullable=False)
 
     file_name = Column(String(500), default="")
+    source_type = Column(String(20), default="excel")  # excel | pdf — 基础清单来源
     anchors_total = Column(Integer, default=0)
     anchors_json = Column(JSON, nullable=True)   # list[dict] — TenderAnchor 序列化
+
+    # PDF 招标文件第 13 页：业主品牌要求 + 投标单位参与品牌映射（PDF 来源时填充）
+    brand_requirement = Column(JSON, nullable=True)   # list[{brand_en, brand_cn}]
+    supplier_brand_map = Column(JSON, nullable=True)  # {supplier_name 或 supplier_id: brand}
 
     version = Column(Integer, default=1)         # 同 (project_id, category) 下自增
     is_current = Column(Boolean, default=True)   # 每次 confirm 时将旧版置 False

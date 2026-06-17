@@ -697,6 +697,22 @@ async def tender_list_preview(
     }
 
 
+class _ReconcileBody(BaseModel):
+    xlsx_items: list  # TenderPreviewItem JSON list
+    pdf_items: list   # TenderBidlistResult items JSON list
+
+
+@router.post("/tender-list/reconcile")
+def tender_list_reconcile(body: _ReconcileBody):
+    """Excel 清单 vs PDF 投标清单对账。
+
+    返回差异报告：seq 缺失、字段不一致等。
+    差异必须经前端人工确认后才允许继续，不允许静默替换。
+    """
+    from apps.api.services.source_reconcile import reconcile_anchors
+    return reconcile_anchors(body.xlsx_items, body.pdf_items)
+
+
 class _AnchorConfirmBody(BaseModel):
     group_id: int
     action: str  # "confirm" or "reject"
@@ -839,11 +855,23 @@ async def tender_list_match(
             if cur:
                 prebuilt_anchors = rebuild_anchors(cur)
 
+    # 品牌硬信号上下文（招标文件第13页）：allowed_aliases + 供应商应投品牌
+    brand_ctx = None
+    if _tls_id:
+        from apps.api.models.tender_list_session import TenderListSession as _TLSb
+        from apps.api.services.brand_match import build_brand_context
+        _tls_b = db.get(_TLSb, _tls_id)
+        if _tls_b and (_tls_b.brand_requirement or _tls_b.supplier_brand_map):
+            brand_ctx = build_brand_context(
+                _tls_b.brand_requirement, _tls_b.supplier_brand_map
+            )
+
     try:
         summary, per_supplier = import_and_match(
             db, content, project_id, category, sids,
             anchors=prebuilt_anchors,
             tender_list_session_id=_tls_id,
+            brand_ctx=brand_ctx,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1460,10 +1488,46 @@ class _TenderListConfirmBody(BaseModel):
     anchors_total: int = 0
     confirmed_by: str = ""
     force: bool = False  # 显式强制：unknown 项归入默认品类并写入审计标记
+    source_type: str = "excel"  # excel | pdf — 基础清单来源
+    brand_requirement: list | None = None   # PDF 第13页业主品牌要求
+    supplier_brands: list | None = None      # PDF 第13页投标单位参与品牌 [{supplier_name, brand}]
+
+
+def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
+    """把第13页 [{supplier_name, brand}] 解析到 supplier_id（按公司名模糊匹配）。
+
+    匹配不上保留 supplier_id=None（不静默丢弃），匹配上则附加 supplier_id。
+    """
+    if not supplier_brands:
+        return supplier_brands
+    from apps.api.models import Supplier
+
+    suppliers = db.query(Supplier).all()
+    resolved: list[dict] = []
+    for sb in supplier_brands:
+        if not isinstance(sb, dict):
+            continue
+        name = str(sb.get("supplier_name") or "").strip()
+        brand = str(sb.get("brand") or "").strip()
+        sid = None
+        if name:
+            # 双向包含匹配：处理「上海绵存机电设备有限公司」vs「上海绵存」简称
+            for sup in suppliers:
+                sn = (sup.name or "").strip()
+                if not sn:
+                    continue
+                if sn == name or sn in name or name in sn or (sup.short_name and sup.short_name in name):
+                    sid = sup.id
+                    break
+        if sid is None and name:
+            log.warning("supplier_brand_map: 未能匹配供应商 '%s'(品牌 %s) 到现有供应商", name, brand)
+        resolved.append({"supplier_name": name, "brand": brand, "supplier_id": sid})
+    return resolved
 
 
 def _save_tender_session(
     db, project_id, category, file_name, anchors_json, confirmed_by,
+    source_type="excel", brand_requirement=None, supplier_brand_map=None,
 ):
     """新建一个 confirmed TenderListSession，旧的同 (project,category) 版本设为非当前。
 
@@ -1493,8 +1557,11 @@ def _save_tender_session(
         project_id=project_id,
         category=category,
         file_name=file_name,
+        source_type=source_type,
         anchors_total=len(anchors_json),
         anchors_json=anchors_json,
+        brand_requirement=brand_requirement,
+        supplier_brand_map=supplier_brand_map,
         version=new_version,
         is_current=True,
         status="confirmed",
@@ -1552,10 +1619,16 @@ def tender_list_confirm(
             raise HTTPException(400, "category 不能为空")
         groups[body.category] = []
 
+    # PDF 来源：解析第13页供应商-品牌映射到 supplier_id（所有品类共享）
+    supplier_brand_map = _resolve_supplier_brands(db, body.supplier_brands)
+
     sessions_out = []
     for cat, anchors in groups.items():
         s = _save_tender_session(
             db, body.project_id, cat, body.file_name, anchors, body.confirmed_by,
+            source_type=body.source_type,
+            brand_requirement=body.brand_requirement,
+            supplier_brand_map=supplier_brand_map,
         )
         db.flush()  # 拿到 id
         sessions_out.append({

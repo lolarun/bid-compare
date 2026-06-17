@@ -75,6 +75,23 @@ class ExtractionPipeline:
         self._log_extraction("tender", file_path, images, resp, t_start)
         return resp
 
+    def extract_tender_bidlist(
+        self,
+        file_path: str,
+        progress_cb: ProgressCallback | None = None,
+        bidlist_pages: list[int] | None = None,
+        brand_page: int | None = None,
+    ) -> dict[str, Any]:
+        """招标文件 PDF → 投标清单锚点 + 品牌映射（返回 dict，非 ExtractionResponse）。
+
+        委托给 services.tender_pdf；复用本 pipeline 的 provider（OCR 能力）。
+        """
+        from apps.api.services.tender_pdf import extract_bidlist
+        return extract_bidlist(
+            file_path, self.provider, progress_cb=progress_cb,
+            bidlist_pages=bidlist_pages, brand_page=brand_page,
+        )
+
     def extract_quote(
         self,
         file_path: str,

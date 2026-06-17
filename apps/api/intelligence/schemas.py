@@ -127,7 +127,81 @@ META_SCHEMA: dict = {
 }
 
 
+# ── 招标投标清单（PDF）逐行抽取 ────────────────────────────────────────────
+# 用于「阀门投标清单」(招标文件第 14-18 页)。字段对齐 TenderAnchor，含材质五子列。
+# 价格列(单价/合价/税率/税额)不抽取——招标清单只提供锚点/数量/材质/品牌约束。
+TENDER_BIDLIST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "description": "投标清单逐行明细",
+            "items": {
+                "type": "object",
+                "required": ["seq", "name"],
+                "properties": {
+                    "seq": {"type": ["integer", "string"], "description": "序号（原值）"},
+                    "profession": {"type": "string", "description": "专业（如给排水），合并单元格向下填充"},
+                    "name": {"type": "string", "description": "项目名称，合并单元格向下填充"},
+                    "spec": {"type": "string", "description": "规格（含 DN）"},
+                    "model": {"type": "string", "description": "型号"},
+                    "pressure": {"type": "string", "description": "工作压力（如 1.6Mpa），合并单元格向下填充"},
+                    "materials": {
+                        "type": "object",
+                        "description": "材质五子列，缺省留空字符串",
+                        "properties": {
+                            "阀体": {"type": "string"},
+                            "阀芯": {"type": "string"},
+                            "阀板": {"type": "string"},
+                            "阀杆": {"type": "string"},
+                            "密封圈": {"type": "string"},
+                        },
+                    },
+                    "unit": {"type": "string", "description": "单位"},
+                    "qty": {"type": ["number", "null"], "description": "数量"},
+                    "brand": {"type": "string", "description": "品牌（清单要求品牌，可空）"},
+                    "remark": {"type": "string", "description": "备注"},
+                },
+            },
+        },
+    },
+}
+
+
+# ── 招标情况表（PDF 第 13 页）品牌要求 + 供应商参与品牌映射 ───────────────────
+TENDER_BRANDTABLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "material_class": {"type": "string", "description": "材料类别（如 水阀门）"},
+        "brand_requirement": {
+            "type": "array",
+            "description": "业主招标品牌要求",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "brand_en": {"type": "string", "description": "品牌英文/拼音，如 KITZ"},
+                    "brand_cn": {"type": "string", "description": "品牌中文，如 开滋"},
+                },
+            },
+        },
+        "supplier_brands": {
+            "type": "array",
+            "description": "投标单位及其参与品牌",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "supplier_name": {"type": "string", "description": "投标单位公司全称"},
+                    "brand": {"type": "string", "description": "该单位参与品牌（中文）"},
+                },
+            },
+        },
+    },
+}
+
+
 SCHEMAS_BY_TYPE: dict[str, dict[str, Any]] = {
     "tender": TENDER_SCHEMA,
     "quote": QUOTE_SCHEMA,
+    "tender_bidlist": TENDER_BIDLIST_SCHEMA,
 }

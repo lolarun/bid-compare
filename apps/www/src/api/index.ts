@@ -15,7 +15,7 @@ import type {
   AlignmentGroupOut,
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
-  TenderListConfirmSession,
+  TenderListConfirmSession, SourceReconcileResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -192,9 +192,12 @@ export const analysisApi = {
   }) =>
     api.post<{ ok: boolean; id: number; status: string; group_ids_count: number; pending_at_finalize: number }>('/analysis/anchor-review/finalize', data),
   tenderListConfirm: (data: {
-    project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string; force?: boolean
+    project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string; force?: boolean;
+    source_type?: string; brand_requirement?: unknown[]; supplier_brands?: unknown[]
   }) =>
     api.post<{ ok: boolean; id: number; version: number; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
+  tenderListReconcile: (data: { xlsx_items: unknown[]; pdf_items: unknown[] }) =>
+    api.post<SourceReconcileResult>('/analysis/tender-list/reconcile', data),
   bidMatrixSave: (data: {
     project_id?: number; category: string; alignment_finalization_id: number;
     tender_list_session_id?: number; matrix_json?: object; readiness_json?: unknown[];

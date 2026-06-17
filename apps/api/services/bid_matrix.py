@@ -697,6 +697,8 @@ def build_anchor_matrix(
             "material_id": ref_material_id,
             "material_name": anchor.name,
             "spec": getattr(anchor, "spec", "") or "",
+            "materials": anchor.material_text() if hasattr(anchor, "material_text") else "",
+            "brand": getattr(anchor, "brand", "") or "",
             "anchor_seq": str(anchor.seq),
             "historical_avg": historical_avg,
             "reasonable_low": reasonable_low_info,
@@ -873,6 +875,12 @@ def build_anchor_review_matrix(
         )
     supplier_ids = sorted(set(supplier_ids))
 
+    # 供应商参与品牌（招标文件第13页）：supplier_id → brand（品牌作为供应商属性展示，绝不替代供应商列）
+    supplier_brand: dict[int, str] = {}
+    for sb in (session.supplier_brand_map or []):
+        if isinstance(sb, dict) and sb.get("supplier_id") is not None and sb.get("brand"):
+            supplier_brand[int(sb["supplier_id"])] = str(sb["brand"])
+
     # Supplier info + checksum
     suppliers_info = []
     for sid in supplier_ids:
@@ -883,6 +891,7 @@ def build_anchor_review_matrix(
         suppliers_info.append({
             "supplier_id": sid,
             "supplier_name": sup.name,
+            "brand": supplier_brand.get(sid, ""),
             "checksum_status": cs.get("status"),
             "declared_total": cs.get("declared"),
             "checksum_delta_pct": cs.get("delta_pct"),
@@ -983,6 +992,9 @@ def build_anchor_review_matrix(
             "anchor_seq": seq_key,
             "anchor_name": anchor.name,
             "anchor_spec": anchor.spec or "",
+            "anchor_pressure": anchor.pressure or "",
+            "anchor_materials": anchor.material_text(),
+            "anchor_brand": anchor.brand or "",
             "unit": anchor.unit or "",
             "quantity": anchor.qty,
             "row_status": row_status,
@@ -1016,6 +1028,7 @@ def build_anchor_review_matrix(
         "quoted_ge_2_count": quoted_ge_2,
         "quoted_full_count": quoted_full,
         "suppliers": suppliers_info,
+        "brand_requirement": session.brand_requirement or [],
         "matrix_distribution": matrix_distribution,
         "rows": rows,
     }

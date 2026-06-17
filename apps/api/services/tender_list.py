@@ -63,6 +63,7 @@ class TenderAnchor:
     remark: str = ""
     row_index: int = -1                  # 源行号(0-based),便于回溯
     raw: dict[str, str] = field(default_factory=dict)        # 未识别列的 freeform
+    source_ref: dict = field(default_factory=dict)           # PDF 来源 {page, row} 便于追溯
 
     canonical: dict = field(default_factory=dict)  # valve canonical key for hard-filter matching
 
@@ -90,7 +91,10 @@ def rebuild_anchors(session) -> list[TenderAnchor]:
             materials=dict(a.get("materials") or {}),
             unit=str(a.get("unit") or ""),
             qty=float(a.get("qty") or 0) or None,
+            brand=str(a.get("brand") or ""),
             profession=str(a.get("profession") or ""),
+            remark=str(a.get("remark") or ""),
+            source_ref=dict(a.get("source_ref") or {}),
         )
         stored_canon = a.get("canonical")
         if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
@@ -122,9 +126,12 @@ def anchor_to_json(anchor: "TenderAnchor", category: str | None = None) -> dict:
         "materials": anchor.materials,
         "unit": anchor.unit,
         "qty": anchor.qty,
+        "brand": anchor.brand,
         "profession": anchor.profession,
+        "remark": anchor.remark,
         "category": category,
         "canonical": anchor.canonical,
+        "source_ref": anchor.source_ref,
     }
 
 
