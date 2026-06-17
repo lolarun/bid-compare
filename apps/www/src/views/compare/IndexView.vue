@@ -73,8 +73,8 @@ const forceUnknownCategory = ref(false)  // 用户显式确认强制归入
 const tenderListConfirming = ref(false)
 const tenderListSessionId = ref<number | null>(null)
 
-// ─── Step 1 (PDF 品牌补充)：异步抽取 + 品牌映射 + 页范围 ───────────────────
-// Excel 是清单主来源，PDF 是品牌/材质/供应商品牌映射的补充来源
+// ─── Step 1 (招标 PDF)：异步抽取 + 品牌映射 + 页范围 + 对账 ────────────────
+// PDF 招标清单是比价主来源，Excel 仅作对照参考
 const tenderPdfFile = ref<File | null>(null)
 const tenderBrandRequirement = ref<TenderBrandReq[]>([])
 const tenderSupplierBrands = ref<TenderSupplierBrand[]>([])
@@ -215,7 +215,7 @@ function onTenderJobDone(job: ExtractionJob) {
     message.error(tenderJobError.value)
     return
   }
-  // PDF 是补充来源 — 只更新品牌/材质映射，不覆盖 Excel 主清单
+  // PDF 是主来源 — 更新品牌/材质映射；Excel 仅作对照参考
   pdfSupplement.value = r
   tenderBrandRequirement.value = r.brand_requirement || []
   tenderSupplierBrands.value = r.supplier_brands || []
@@ -241,10 +241,15 @@ async function runReconcile() {
     const { data } = await analysisApi.tenderListReconcile({
       xlsx_items: tenderPreview.value.items as unknown[],
       pdf_items: pdfSupplement.value.items as unknown[],
+      source_type: pdfSupplement.value.source_type ?? 'excel_primary',
     })
     reconcileResult.value = data
     if (data.recommended_source === 'both_consistent') {
-      message.success('Excel 与 PDF 清单行项目一致')
+      message.success('PDF 与 Excel 清单行项目一致')
+    } else if (data.recommended_source === 'pdf') {
+      const excelOnly = (data.only_in_excel_reference ?? []).length
+      const mismatches = data.field_mismatches.length
+      message.info(`PDF 主清单（${data.pdf_count} 条），Excel 参考差异：${excelOnly} 条独有行，${mismatches} 处字段不符`)
     } else {
       const missing = data.seq_missing_in_pdf.length + data.seq_missing_in_xlsx.length
       const mismatches = data.field_mismatches.length
@@ -766,10 +771,10 @@ async function goNext() {
       message.warning('请确认品类')
       return
     }
-    // 有 PDF 补充且对账发现差异 → 必须人工确认后才能继续
+    // excel_primary 模式下差异须人工确认；pdf_primary 模式只提示，不阻断
     if (
       pdfSupplement.value && reconcileResult.value
-      && reconcileResult.value.recommended_source !== 'both_consistent'
+      && reconcileResult.value.recommended_source === 'excel'
       && !reconcileConfirmed.value
     ) {
       message.warning('招标文件 PDF 与 Excel 清单存在差异，请勾选「已确认差异」后继续')
@@ -1139,7 +1144,7 @@ async function runMatrix() {
     <!-- Steps indicator -->
     <a-steps :current="currentStep" style="margin-bottom:20px">
       <a-step title="配置任务" description="选项目 + 供应商" />
-      <a-step title="采购清单" description="Excel 主清单 + 可选 PDF 品牌补充" />
+      <a-step title="采购清单" description="招标 PDF 主清单 + Excel 对照参考" />
       <a-step title="供应商报价" description="PDF / Excel 批量上传" />
       <a-step title="对齐核查" description="确认低置信匹配项" />
       <a-step title="比价矩阵" :description="isSingleSupplierMode ? '报价 vs 历史价格' : '横向对比 + 推荐'" />
@@ -1428,13 +1433,45 @@ async function runMatrix() {
               <LoadingOutlined spin style="margin-right:4px" />正在对账 Excel vs PDF...
             </div>
             <div v-else-if="reconcileResult">
+              <!-- ① 完全一致 -->
               <a-alert
                 v-if="reconcileResult.recommended_source === 'both_consistent'"
                 type="success"
                 show-icon
                 style="margin-bottom:8px"
-                :message="`Excel（${reconcileResult.xlsx_count} 条）与 PDF（${reconcileResult.pdf_count} 条）清单行项目一致，无差异`"
+                :message="`PDF（${reconcileResult.pdf_count} 条）与 Excel（${reconcileResult.xlsx_count} 条）清单行项目一致，无差异`"
               />
+              <!-- ② pdf_primary：PDF 为主，Excel 仅参考 -->
+              <div v-else-if="reconcileResult.recommended_source === 'pdf'">
+                <a-alert
+                  type="info"
+                  show-icon
+                  style="margin-bottom:8px"
+                  :message="`PDF 为主清单（${reconcileResult.pdf_count} 条），Excel 存在参考差异`"
+                />
+                <div v-if="(reconcileResult.only_in_excel_reference ?? []).length" style="font-size:12px;margin-bottom:4px;color:#595959">
+                  Excel 参考清单独有、不进入 PDF 主清单比价（{{ (reconcileResult.only_in_excel_reference ?? []).length }} 条）：{{ (reconcileResult.only_in_excel_reference ?? []).join(', ') }}
+                </div>
+                <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="font-size:12px;margin-bottom:4px;color:#595959">
+                  PDF 独有序号（正常进入主清单）（{{ reconcileResult.seq_missing_in_xlsx.length }} 条）：{{ reconcileResult.seq_missing_in_xlsx.join(', ') }}
+                </div>
+                <a-table
+                  v-if="reconcileResult.field_mismatches.length"
+                  :data-source="reconcileResult.field_mismatches"
+                  :row-key="(_r: Record<string,unknown>, i: number) => i"
+                  size="small"
+                  :pagination="{ pageSize: 5, size: 'small' }"
+                  style="margin-bottom:8px"
+                  :columns="[
+                    { title: '序号', dataIndex: 'seq', width: 56 },
+                    { title: '字段', dataIndex: 'field', width: 60 },
+                    { title: 'Excel 参考值', dataIndex: 'xlsx_value', ellipsis: true },
+                    { title: 'PDF 主清单值', dataIndex: 'pdf_value', ellipsis: true },
+                  ]"
+                />
+                <div style="font-size:11px;color:rgba(0,0,0,0.35)">以上差异仅供参考，以 PDF 主清单为准，无需手动确认</div>
+              </div>
+              <!-- ③ excel_primary：Excel 为主，差异须确认 -->
               <div v-else>
                 <a-alert
                   type="warning"
@@ -1442,14 +1479,12 @@ async function runMatrix() {
                   style="margin-bottom:8px"
                   :message="`招标文件 PDF 与 Excel 清单存在差异（Excel ${reconcileResult.xlsx_count} 条 vs PDF ${reconcileResult.pdf_count} 条），继续前请确认`"
                 />
-                <!-- Seq missing summary -->
                 <div v-if="reconcileResult.seq_missing_in_pdf.length" style="font-size:12px;margin-bottom:4px;color:#d46b08">
                   Excel 有、PDF 缺失的序号（{{ reconcileResult.seq_missing_in_pdf.length }} 条）：{{ reconcileResult.seq_missing_in_pdf.join(', ') }}
                 </div>
                 <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="font-size:12px;margin-bottom:4px;color:#d46b08">
                   PDF 有、Excel 缺失的序号（{{ reconcileResult.seq_missing_in_xlsx.length }} 条）：{{ reconcileResult.seq_missing_in_xlsx.join(', ') }}
                 </div>
-                <!-- Field mismatches table -->
                 <a-table
                   v-if="reconcileResult.field_mismatches.length"
                   :data-source="reconcileResult.field_mismatches"
@@ -1464,7 +1499,6 @@ async function runMatrix() {
                     { title: 'PDF 值', dataIndex: 'pdf_value', ellipsis: true },
                   ]"
                 />
-                <!-- Confirm diff checkbox -->
                 <a-checkbox v-model:checked="reconcileConfirmed" style="font-size:12px">
                   已确认差异，以 Excel 行项目为准，PDF 仅提供品牌/材质补充（继续后不可撤回）
                 </a-checkbox>

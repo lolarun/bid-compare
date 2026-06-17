@@ -700,17 +700,18 @@ async def tender_list_preview(
 class _ReconcileBody(BaseModel):
     xlsx_items: list  # TenderPreviewItem JSON list
     pdf_items: list   # TenderBidlistResult items JSON list
+    source_type: str = "excel_primary"  # "excel_primary" | "pdf_primary"
 
 
 @router.post("/tender-list/reconcile")
 def tender_list_reconcile(body: _ReconcileBody):
     """Excel 清单 vs PDF 投标清单对账。
 
-    返回差异报告：seq 缺失、字段不一致等。
-    差异必须经前端人工确认后才允许继续，不允许静默替换。
+    source_type="excel_primary"（默认）：Excel 为主，差异须人工确认。
+    source_type="pdf_primary"：PDF 为主，Excel 仅参考，差异不阻断流程。
     """
     from apps.api.services.source_reconcile import reconcile_anchors
-    return reconcile_anchors(body.xlsx_items, body.pdf_items)
+    return reconcile_anchors(body.xlsx_items, body.pdf_items, source_type=body.source_type)
 
 
 class _AnchorConfirmBody(BaseModel):

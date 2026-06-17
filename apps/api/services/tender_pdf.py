@@ -424,7 +424,7 @@ def extract_bidlist(
                 }
                 for a in xlsx_anchors
             ]
-            reconcile_result = reconcile_anchors(xlsx_items, items_out)
+            reconcile_result = reconcile_anchors(xlsx_items, items_out, source_type="pdf_primary")
             if reconcile_result["recommended_source"] != "both_consistent":
                 log.warning(
                     "tender_pdf: reconcile mismatch — missing_in_pdf=%d missing_in_xlsx=%d "
@@ -444,7 +444,7 @@ def extract_bidlist(
         "material_class": material_class,
         "detected_pages": {"bidlist": bidlist_pages, "brand": brand_page},
         "row_count": len(items_out),
-        "source_type": "pdf",
+        "source_type": "pdf_primary",
         "page_diagnostics": page_diagnostics,
         "quality_metrics": quality_metrics,
         "reconcile": reconcile_result,

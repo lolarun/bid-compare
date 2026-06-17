@@ -366,9 +366,10 @@ export interface SourceReconcileResult {
   xlsx_count: number
   pdf_count: number
   seq_missing_in_pdf: string[]
+  only_in_excel_reference?: string[]   // pdf_primary 时：Excel 独有行（不进主清单）
   seq_missing_in_xlsx: string[]
   field_mismatches: SourceReconcileMismatch[]
-  recommended_source: 'both_consistent' | 'excel'
+  recommended_source: 'both_consistent' | 'excel' | 'pdf'
 }
 
 export interface ExtractionJob {

@@ -196,7 +196,7 @@ export const analysisApi = {
     source_type?: string; brand_requirement?: unknown[]; supplier_brands?: unknown[]
   }) =>
     api.post<{ ok: boolean; id: number; version: number; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
-  tenderListReconcile: (data: { xlsx_items: unknown[]; pdf_items: unknown[] }) =>
+  tenderListReconcile: (data: { xlsx_items: unknown[]; pdf_items: unknown[]; source_type?: string }) =>
     api.post<SourceReconcileResult>('/analysis/tender-list/reconcile', data),
   bidMatrixSave: (data: {
     project_id?: number; category: string; alignment_finalization_id: number;

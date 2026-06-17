@@ -1,12 +1,14 @@
 """Excel 清单 vs PDF 投标清单对账。
 
-业务背景：Excel 招标清单（结构化行项目）与 PDF 招标文件投标清单是同一份标书的两种表达，
-可能存在行数差异或字段不一致。投产前须对账确认，差异必须经人工确认，不允许静默替换。
+两种口径由 source_type 控制：
 
-默认口径：
-- Excel = 结构化行项目主来源（确认的锚点序列）
-- PDF  = 品牌/材质/供应商品牌映射补充来源
-- 只有没有 Excel 或人工明确选择 PDF 时，PDF 才作为清单主来源
+  "excel_primary"（默认）：Excel 是锚点主来源，PDF 是品牌/材质补充。
+      差异时 recommended_source='excel'，前端须人工确认后才能继续。
+
+  "pdf_primary"：PDF 招标清单是比价主来源，Excel 仅作参考对照。
+      recommended_source 始终为 'pdf'，不阻断流程。
+      Excel 独有行 → only_in_excel_reference（不进入主清单）。
+      差异只作提示，无需人工确认。
 """
 
 from __future__ import annotations
@@ -35,23 +37,30 @@ _COMPARE_FIELDS = [
 ]
 
 
-def reconcile_anchors(xlsx_items: list[dict], pdf_items: list[dict]) -> dict:
+def reconcile_anchors(
+    xlsx_items: list[dict],
+    pdf_items: list[dict],
+    source_type: str = "excel_primary",
+) -> dict:
     """逐序号对账 Excel 锚点 vs PDF 锚点，返回差异报告。
 
     Args:
-        xlsx_items: TenderPreviewItem JSON list（来自 /tender-list/preview）。
-        pdf_items:  TenderBidlistResult.items JSON list（来自 OCR 抽取结果）。
+        xlsx_items:  TenderPreviewItem JSON list（来自 /tender-list/preview）。
+        pdf_items:   TenderBidlistResult.items JSON list（来自 OCR 抽取结果）。
+        source_type: "excel_primary"（默认）| "pdf_primary"
 
-    Returns:
-        {
-            xlsx_count, pdf_count,
-            seq_missing_in_pdf,    # Excel 有、PDF 没有
-            seq_missing_in_xlsx,   # PDF 有、Excel 没有
-            field_mismatches: [    # 同序号下字段值不一致
-                {seq, field, xlsx_value, pdf_value}
-            ],
-            recommended_source: 'both_consistent' | 'excel'
-        }
+    Returns (excel_primary):
+        { xlsx_count, pdf_count,
+          seq_missing_in_pdf, seq_missing_in_xlsx, field_mismatches,
+          recommended_source: 'both_consistent' | 'excel' }
+
+    Returns (pdf_primary):
+        { xlsx_count, pdf_count,
+          only_in_excel_reference,    # Excel 独有行，不进入 PDF 主清单
+          seq_missing_in_pdf,         # 同上（向后兼容别名）
+          seq_missing_in_xlsx,        # PDF 独有行（正常进入主清单）
+          field_mismatches,           # 同序号字段差异（仅提示）
+          recommended_source: 'pdf' }
     """
     def _seq(it: dict) -> str:
         return _norm_str(it.get("seq", ""))
@@ -89,6 +98,17 @@ def reconcile_anchors(xlsx_items: list[dict], pdf_items: list[dict]) -> dict:
                 "pdf_value": pv,
             })
 
+    if source_type == "pdf_primary":
+        return {
+            "xlsx_count": len(xlsx_items),
+            "pdf_count":  len(pdf_items),
+            "only_in_excel_reference": seq_missing_in_pdf,  # Excel 独有，参考用
+            "seq_missing_in_pdf":      seq_missing_in_pdf,  # compat alias
+            "seq_missing_in_xlsx":     seq_missing_in_xlsx,
+            "field_mismatches":        field_mismatches,
+            "recommended_source":      "pdf",
+        }
+
     is_consistent = (
         not seq_missing_in_pdf
         and not seq_missing_in_xlsx
@@ -96,9 +116,9 @@ def reconcile_anchors(xlsx_items: list[dict], pdf_items: list[dict]) -> dict:
     )
     return {
         "xlsx_count": len(xlsx_items),
-        "pdf_count": len(pdf_items),
+        "pdf_count":  len(pdf_items),
         "seq_missing_in_pdf":  seq_missing_in_pdf,
         "seq_missing_in_xlsx": seq_missing_in_xlsx,
-        "field_mismatches": field_mismatches,
-        "recommended_source": "both_consistent" if is_consistent else "excel",
+        "field_mismatches":    field_mismatches,
+        "recommended_source":  "both_consistent" if is_consistent else "excel",
     }
