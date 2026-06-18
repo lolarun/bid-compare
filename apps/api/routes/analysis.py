@@ -1708,7 +1708,10 @@ def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
                     sid = sup.id
                     break
         if sid is None and name:
-            log.warning("supplier_brand_map: 未能匹配供应商 '%s'(品牌 %s) 到现有供应商", name, brand)
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "supplier_brand_map: 未能匹配供应商 '%s'(品牌 %s) 到现有供应商", name, brand
+            )
         resolved.append({"supplier_name": name, "brand": brand, "supplier_id": sid})
     return resolved
 
