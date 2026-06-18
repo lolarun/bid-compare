@@ -2,6 +2,7 @@
 
 import re as _re
 import string
+from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, Project, BrandTier
@@ -13,6 +14,62 @@ from apps.api.services.comparison import (
     determine_alert,
     get_category_thresholds,
 )
+
+
+@dataclass
+class _ItemData:
+    """从 BidAlignmentItem 读取价格/物料数据的统一表示。
+
+    兼容两条路径：
+      bid_quote_line_id IS NOT NULL → 从 BidQuoteLine 读取（新路径）
+      quote_id IS NOT NULL          → 从 Quote + Material 读取（旧路径）
+    """
+    unit_price: float | None
+    quantity: float | None
+    total_price: float | None
+    material_id: int | None
+    source_quote_id: int | None      # 旧路径: Quote.id；新路径: None
+    bid_quote_line_id: int | None    # 新路径: BidQuoteLine.id；旧路径: None
+    standard_name: str = ""
+    spec: str = ""
+
+
+def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
+    """从 BidAlignmentItem 读取价格数据，自动选择新/旧路径。
+
+    新路径（bid_quote_line_id IS NOT NULL）：读 BidQuoteLine（独立字段，无需 Material 连接）。
+    旧路径（quote_id IS NOT NULL）：读 Quote + Material。
+    """
+    if item.bid_quote_line_id is not None:
+        from apps.api.models.bid_submission import BidQuoteLine
+        bql = db.get(BidQuoteLine, item.bid_quote_line_id)
+        if bql is None:
+            return None
+        return _ItemData(
+            unit_price=bql.unit_price,
+            quantity=bql.qty,
+            total_price=bql.total_price,
+            material_id=bql.material_id,
+            source_quote_id=None,
+            bid_quote_line_id=bql.id,
+            standard_name=bql.standard_name,
+            spec=bql.spec or "",
+        )
+    else:
+        qt = db.get(Quote, item.quote_id)
+        if qt is None:
+            return None
+        mat = db.get(Material, qt.material_id) if qt.material_id else None
+        return _ItemData(
+            unit_price=qt.unit_price,
+            quantity=qt.quantity,
+            total_price=qt.total_price,
+            material_id=qt.material_id,
+            source_quote_id=qt.id,
+            bid_quote_line_id=None,
+            standard_name=mat.standard_name if mat else "",
+            spec=(mat.spec or "") if mat else "",
+        )
 
 # Cell status constants
 CELL_QUOTED = "quoted"        # confirmed align item with price
@@ -36,6 +93,12 @@ def _get_supplier_checksum(db: Session, supplier_id: int, project_id: int | None
         .order_by(ExtractionJob.created_at.desc())
         .first()
     )
+    return ((job.result or {}).get("_checksum") or {}) if job else {}
+
+
+def _get_submission_checksum(db: Session, sub) -> dict:
+    """Return checksum dict from the ExtractionJob linked to a BidSubmission."""
+    job = db.get(ExtractionJob, sub.job_id) if sub.job_id else None
     return ((job.result or {}).get("_checksum") or {}) if job else {}
 
 
@@ -221,24 +284,24 @@ def _build_alignment_row(
     letter_map: dict[int, str],
 ) -> dict | None:
     """Build a matrix row from an alignment group (AI-confirmed grouping)."""
-    # Build lookup: supplier_id → (item, Quote) — item carries agg_total/agg_qty
+    # Build lookup: supplier_id → (item, _ItemData)
     item_by_supplier: dict[int, tuple] = {}
     for item in ag.items:
         if item.action != "align":
             continue
-        qt = db.get(Quote, item.quote_id)
-        if qt and qt.unit_price and qt.unit_price > 0:
+        data = _get_item_data(db, item)
+        if data and data.unit_price and data.unit_price > 0:
             sid = item.supplier_id
             existing = item_by_supplier.get(sid)
-            if existing is None or qt.unit_price < existing[1].unit_price:
-                item_by_supplier[sid] = (item, qt)
+            if existing is None or data.unit_price < existing[1].unit_price:
+                item_by_supplier[sid] = (item, data)
 
     if not item_by_supplier:
         return None
 
-    # Use the first aligned quote's material for baseline lookups
-    first_qt = next(iter(item_by_supplier.values()))[1]
-    mat = db.get(Material, first_qt.material_id)
+    # Use the first aligned item's material for baseline lookups
+    first_data = next(iter(item_by_supplier.values()))[1]
+    mat = db.get(Material, first_data.material_id) if first_data.material_id else None
     mat_category = mat.category if mat else ag.category
 
     historical_avg, reasonable_low_info = _compute_row_baselines(
@@ -366,7 +429,7 @@ def build_bid_matrix(
         alignment_groups = q.all()
         for ag in alignment_groups:
             for item in ag.items:
-                if item.action == "align":
+                if item.action == "align" and item.quote_id is not None:
                     aligned_quote_ids.add(item.quote_id)
 
     # ── 3. 按物料构建矩阵行 ───────────────────────────────────────────────
@@ -478,29 +541,31 @@ def _build_cell_for_supplier(
         "item_id": None,
         "confidence": None,
         "source_quote_id": None,
+        "bid_quote_line_id": None,
         "pending_note": None,
         "flags": None,
         "evidence": None,
     }
 
-    def _price_from_item(item: BidAlignmentItem) -> tuple[float | None, float | None]:
-        """Return (unit_price, total) — uses agg when available."""
-        qt = db.get(Quote, item.quote_id)
-        if not qt:
-            return None, None
+    def _price_from_item(item: BidAlignmentItem) -> tuple[float | None, float | None, int | None, int | None]:
+        """Return (unit_price, total, source_quote_id, bid_quote_line_id)."""
+        data = _get_item_data(db, item)
+        if not data:
+            return None, None, None, None
         if item.agg_total is not None and item.agg_qty:
             price = round(item.agg_total / item.agg_qty, 4)
             total = round(item.agg_total, 2)
         else:
-            price = qt.unit_price
-            total = round(price * (qt.quantity or 1), 2) if price else None
-        return price, total
+            price = data.unit_price
+            total = round(price * (data.quantity or 1), 2) if price else None
+        return price, total, data.source_quote_id, data.bid_quote_line_id
 
     def _fill_price(cell: dict, price: float | None, total: float | None,
-                    source_qid: int | None) -> None:
+                    source_qid: int | None, bql_id: int | None = None) -> None:
         cell["price"] = price
         cell["total"] = total
         cell["source_quote_id"] = source_qid
+        cell["bid_quote_line_id"] = bql_id
         if price and reasonable_low_price:
             dev = round((price - reasonable_low_price) / reasonable_low_price, 4)
             cell["deviation_pct"] = dev
@@ -511,13 +576,12 @@ def _build_cell_for_supplier(
         def _effective_price(i: BidAlignmentItem) -> float:
             if i.agg_total is not None and i.agg_qty:
                 return i.agg_total / i.agg_qty
-            qt = db.get(Quote, i.quote_id)
-            return (qt.unit_price or float("inf")) if qt else float("inf")
+            data = _get_item_data(db, i)
+            return (data.unit_price or float("inf")) if data else float("inf")
 
         best = min(align_items, key=_effective_price)
-        price, total = _price_from_item(best)
-        qt = db.get(Quote, best.quote_id)
-        _fill_price(base, price, total, qt.id if qt else None)
+        price, total, source_qid, bql_id = _price_from_item(best)
+        _fill_price(base, price, total, source_qid, bql_id)
         # Use AGGREGATED if agg columns are set, else QUOTED
         base["cell_status"] = CELL_AGGREGATED if (best.agg_total is not None) else CELL_QUOTED
         base["flags"] = _parse_flags_from_note(best.spec_note) or None
@@ -530,13 +594,11 @@ def _build_cell_for_supplier(
     if pending_items:
         # Show reference price in orange; don't count in totals
         best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
-        price, total = _price_from_item(best)
-        qt = db.get(Quote, best.quote_id)
-        _fill_price(base, price, total, qt.id if qt else None)
+        price, total, source_qid, bql_id = _price_from_item(best)
+        _fill_price(base, price, total, source_qid, bql_id)
         base["cell_status"] = CELL_PENDING
         base["item_id"] = best.id
         base["confidence"] = _parse_cosine_from_note(best.spec_note)
-        base["source_quote_id"] = qt.id if qt else None
         base["flags"] = _parse_flags_from_note(best.spec_note) or None
         base["evidence"] = best.name_note or None
         return base
@@ -557,6 +619,8 @@ def build_anchor_matrix(
     project_id: int | None,
     category: str,
     allowed_group_ids: set[int] | None = None,
+    used_submission_ids: list[int] | None = None,
+    submission_ids: list[int] | None = None,
 ) -> dict:
     """Build the bid matrix anchored to ALL tender list items (v2.5).
 
@@ -567,19 +631,74 @@ def build_anchor_matrix(
       - supplier total price
       - avg_deviation
       - recommended supplier
+
+    Column mode (v4.0):
+    - When used_submission_ids or submission_ids is non-empty: columns keyed by BidSubmission.id.
+      Supports unknown suppliers (supplier_id nullable). Column "id" = submission_id.
+    - Otherwise: fallback to supplier_id columns (backward compat for LLM fill internal call).
     """
-    # ── Supplier labels ──────────────────────────────────────────────────────
+    from apps.api.models.bid_submission import BidSubmission
+
     letters = list(string.ascii_uppercase)
-    supplier_labels = []
-    for i, sid in enumerate(supplier_ids):
-        sup = db.get(Supplier, sid)
-        if sup:
+
+    # ── Determine column basis: submission-based or supplier-based ────────────
+    _all_sub_ids = list(
+        dict.fromkeys((used_submission_ids or []) + (submission_ids or []))
+    )
+    use_submission_mode = bool(_all_sub_ids)
+
+    if use_submission_mode:
+        # Load BidSubmission records in the given order, dedup by id
+        subs: list[BidSubmission] = []
+        seen_sub_ids: set[int] = set()
+        for sub_id in _all_sub_ids:
+            if sub_id not in seen_sub_ids:
+                sub = db.get(BidSubmission, sub_id)
+                if sub:
+                    subs.append(sub)
+                    seen_sub_ids.add(sub_id)
+
+        supplier_labels = []
+        for i, sub in enumerate(subs):
+            # Display name: linked Supplier.name if available, else raw name from submission
+            if sub.supplier_id:
+                sup = db.get(Supplier, sub.supplier_id)
+                display_name = sup.name if sup else sub.supplier_raw_name
+            else:
+                display_name = sub.supplier_raw_name
             supplier_labels.append({
-                "id": sid,
+                "id": sub.id,          # column key = submission_id
                 "letter": letters[i] if i < len(letters) else str(i + 1),
-                "name": sup.name,
+                "name": display_name,
+                "supplier_id": sub.supplier_id,  # actual FK (may be None)
             })
-    letter_map = {sl["id"]: sl["letter"] for sl in supplier_labels}
+        # col_ids is submission_ids; letter_map keyed by submission_id
+        col_ids = [s.id for s in subs]
+        letter_map = {sl["id"]: sl["letter"] for sl in supplier_labels}
+        # Build item filter: prefer submission_id match, fallback to supplier_id for old items
+        def _items_for_col(items, col_id: int, actual_supplier_id):
+            return [
+                i for i in items
+                if i.submission_id == col_id
+                or (i.submission_id is None and actual_supplier_id and i.supplier_id == actual_supplier_id)
+            ]
+        sub_actual_sids = {sub.id: sub.supplier_id for sub in subs}
+    else:
+        # Legacy supplier-id columns
+        supplier_labels = []
+        for i, sid in enumerate(supplier_ids):
+            sup = db.get(Supplier, sid)
+            if sup:
+                supplier_labels.append({
+                    "id": sid,
+                    "letter": letters[i] if i < len(letters) else str(i + 1),
+                    "name": sup.name,
+                })
+        col_ids = [sl["id"] for sl in supplier_labels]
+        letter_map = {sl["id"]: sl["letter"] for sl in supplier_labels}
+        def _items_for_col(items, col_id: int, actual_supplier_id):
+            return [i for i in items if i.supplier_id == col_id]
+        sub_actual_sids = {}
 
     # ── Load all groups for this project/category ────────────────────────────
     q = db.query(BidAlignmentGroup).filter(
@@ -609,8 +728,8 @@ def build_anchor_matrix(
     # ── Build one row per anchor ─────────────────────────────────────────────
     rows = []
     supplier_totals: dict[int, dict] = {
-        sid: {"total": 0.0, "devs": [], "quoted": 0, "anomalies": 0}
-        for sid in supplier_ids
+        col_id: {"total": 0.0, "devs": [], "quoted": 0, "anomalies": 0}
+        for col_id in col_ids
     }
 
     for anchor in anchors:
@@ -623,10 +742,12 @@ def build_anchor_matrix(
             first_align = next(
                 (i for i in group.items if i.action == "align"), None
             )
-            ref_mat = db.get(Material, first_align.quote_id) if first_align else None
             if first_align:
-                ref_qt = db.get(Quote, first_align.quote_id)
-                ref_mat = db.get(Material, ref_qt.material_id) if ref_qt else None
+                _align_data = _get_item_data(db, first_align)
+                _mid = _align_data.material_id if _align_data else None
+                ref_mat = db.get(Material, _mid) if _mid else None
+            else:
+                ref_mat = None
             mat_category = ref_mat.category if ref_mat else category
             sub_cat = ref_mat.sub_category if ref_mat else None
         else:
@@ -639,15 +760,16 @@ def build_anchor_matrix(
         thresholds = get_category_thresholds(db, mat_category)
         reasonable_low_price = reasonable_low_info["price"] if reasonable_low_info else None
 
-        # ── Build cells for each supplier ─────────────────────────────────
+        # ── Build cells for each column (submission or supplier) ──────────
         supplier_cells: list[dict] = []
         prices_this_row: list[tuple] = []  # only quoted/aggregated
 
-        for sid in supplier_ids:
+        for col_id in col_ids:
+            actual_sid = sub_actual_sids.get(col_id, col_id) if use_submission_mode else col_id
             if group is None:
                 # No match at all — missing for all suppliers
                 cell = {
-                    "supplier_id": sid,
+                    "supplier_id": col_id,
                     "price": None,
                     "total": None,
                     "deviation_pct": None,
@@ -657,13 +779,13 @@ def build_anchor_matrix(
                     "item_id": None,
                     "confidence": None,
                     "source_quote_id": None,
+                    "bid_quote_line_id": None,
                     "pending_note": None,
                 }
             else:
-                # Filter items belonging to this supplier
-                sid_items = [i for i in group.items if i.supplier_id == sid]
+                col_items = _items_for_col(group.items, col_id, actual_sid)
                 cell = _build_cell_for_supplier(
-                    db, sid_items, sid,
+                    db, col_items, col_id,
                     reasonable_low_price, thresholds, letter_map,
                 )
 
@@ -671,26 +793,26 @@ def build_anchor_matrix(
 
             # Only confirmed cells participate in lowest/totals
             if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED) and cell["price"] is not None:
-                prices_this_row.append((sid, cell["price"], cell.get("deviation_pct")))
-                supplier_totals[sid]["quoted"] += 1
+                prices_this_row.append((col_id, cell["price"], cell.get("deviation_pct")))
+                supplier_totals[col_id]["quoted"] += 1
                 if cell["total"] is not None:
-                    supplier_totals[sid]["total"] += cell["total"]
+                    supplier_totals[col_id]["total"] += cell["total"]
                 if cell["deviation_pct"] is not None:
-                    supplier_totals[sid]["devs"].append(cell["deviation_pct"])
+                    supplier_totals[col_id]["devs"].append(cell["deviation_pct"])
             if cell.get("alert_level") == "red":
-                supplier_totals[sid]["anomalies"] += 1
+                supplier_totals[col_id]["anomalies"] += 1
 
         # Mark lowest price (among quoted/aggregated only)
         min_deviation, recommended = _finalize_row(supplier_cells, prices_this_row, letter_map)
 
-        # Use first confirmed quote's material_id as row reference
+        # Use first confirmed item's material_id as row reference
         ref_material_id: int | None = None
         if group:
             for it in group.items:
                 if it.action == "align":
-                    qt = db.get(Quote, it.quote_id)
-                    if qt:
-                        ref_material_id = qt.material_id
+                    _ref_data = _get_item_data(db, it)
+                    if _ref_data:
+                        ref_material_id = _ref_data.material_id
                         break
 
         rows.append({
@@ -709,12 +831,16 @@ def build_anchor_matrix(
 
     # ── Totals (quoted-only cells) ────────────────────────────────────────────
     totals = []
-    for sid in supplier_ids:
-        data = supplier_totals[sid]
+    for col_id in col_ids:
+        data = supplier_totals[col_id]
         avg_dev = sum(data["devs"]) / len(data["devs"]) if data["devs"] else 0.0
-        cs = _get_supplier_checksum(db, sid, project_id)
+        if use_submission_mode:
+            sub = db.get(BidSubmission, col_id)
+            cs = _get_submission_checksum(db, sub) if sub else {}
+        else:
+            cs = _get_supplier_checksum(db, col_id, project_id)
         totals.append({
-            "supplier_id": sid,
+            "supplier_id": col_id,
             "total": round(data["total"], 2),
             "avg_deviation": round(avg_dev, 4),
             "quoted_count": data["quoted"],
@@ -725,7 +851,7 @@ def build_anchor_matrix(
         })
 
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
-    matrix_distribution = build_matrix_distribution_from_rows(rows, supplier_ids)
+    matrix_distribution = build_matrix_distribution_from_rows(rows, col_ids)
 
     return {
         "project_id": project_id,
@@ -753,6 +879,7 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
         "cell_status": CELL_MISSING,
         "item_id": None,
         "quote_id": None,
+        "bid_quote_line_id": None,
         "unit_price": None,
         "total_price": None,
         "confidence": None,
@@ -763,30 +890,31 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
     }
 
     def _get_prices(item: BidAlignmentItem) -> tuple:
-        qt = db.get(Quote, item.quote_id)
-        if not qt:
-            return None, None, None
+        """Return (unit_price, total, source_quote_id, bid_quote_line_id)."""
+        data = _get_item_data(db, item)
+        if not data:
+            return None, None, None, None
         if item.agg_total is not None and item.agg_qty:
             price = round(item.agg_total / item.agg_qty, 4)
             total = round(item.agg_total, 2)
         else:
-            price = qt.unit_price
-            total = round(price * (qt.quantity or 1), 2) if price else None
-        return price, total, qt.id
+            price = data.unit_price
+            total = round(price * (data.quantity or 1), 2) if price else None
+        return price, total, data.source_quote_id, data.bid_quote_line_id
 
     def _build_candidates(plist: list) -> list:
         out = []
         for item in sorted(plist, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0, reverse=True)[:5]:
-            qt = db.get(Quote, item.quote_id)
-            if not qt:
+            data = _get_item_data(db, item)
+            if not data:
                 continue
-            mat = db.get(Material, qt.material_id)
             out.append({
                 "item_id": item.id,
-                "quote_id": item.quote_id,
-                "material_name": mat.standard_name if mat else "",
-                "spec": (mat.spec or "") if mat else "",
-                "unit_price": qt.unit_price,
+                "quote_id": data.source_quote_id,
+                "bid_quote_line_id": data.bid_quote_line_id,
+                "material_name": data.standard_name,
+                "spec": data.spec,
+                "unit_price": data.unit_price,
                 "confidence": _parse_cosine_from_note(item.spec_note),
                 "flags": _parse_flags_from_note(item.spec_note) or None,
             })
@@ -796,15 +924,16 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
         def _eff(i: BidAlignmentItem) -> float:
             if i.agg_total is not None and i.agg_qty:
                 return i.agg_total / i.agg_qty
-            qt = db.get(Quote, i.quote_id)
-            return (qt.unit_price or float("inf")) if qt else float("inf")
+            data = _get_item_data(db, i)
+            return (data.unit_price or float("inf")) if data else float("inf")
 
         best = min(align_items, key=_eff)
-        price, total, quote_id = _get_prices(best)
+        price, total, source_qid, bql_id = _get_prices(best)
         base.update({
             "cell_status": CELL_AGGREGATED if best.agg_total is not None else CELL_QUOTED,
             "item_id": best.id,
-            "quote_id": quote_id,
+            "quote_id": source_qid,
+            "bid_quote_line_id": bql_id,
             "unit_price": price,
             "total_price": total,
             "evidence": best.name_note or None,
@@ -815,11 +944,12 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
 
     if pending_items:
         best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
-        price, total, quote_id = _get_prices(best)
+        price, total, source_qid, bql_id = _get_prices(best)
         base.update({
             "cell_status": CELL_PENDING,
             "item_id": best.id,
-            "quote_id": quote_id,
+            "quote_id": source_qid,
+            "bid_quote_line_id": bql_id,
             "unit_price": price,
             "total_price": total,
             "confidence": _parse_cosine_from_note(best.spec_note),

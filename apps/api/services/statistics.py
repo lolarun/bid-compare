@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from apps.api.models import Material, Quote, Supplier, Project
 from apps.api.core.config import PROFESSION_MAP
 from apps.api.services.comparison import compute_baseline
+from apps.api.services.quote_filters import valid_quote_filters
 
 
 def get_dashboard_summary(db: Session) -> dict:
@@ -21,21 +22,37 @@ def get_dashboard_summary(db: Session) -> dict:
     for (cat,) in categories:
         profession = PROFESSION_MAP.get(cat, "未分类")
         mat_count = db.query(func.count(Material.id)).filter(Material.category == cat).scalar() or 0
-        quote_count = db.query(func.count(Quote.id)).join(Material).filter(
-            Material.category == cat
-        ).scalar() or 0
+        quote_count = (
+            db.query(func.count(Quote.id))
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Material.category == cat, *valid_quote_filters())
+            .scalar() or 0
+        )
 
-        avg_price_row = db.query(func.avg(Quote.unit_price)).join(Material).filter(
-            Material.category == cat, Quote.unit_price > 0,
-        ).scalar()
+        avg_price_row = (
+            db.query(func.avg(Quote.unit_price))
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Material.category == cat, Quote.unit_price > 0, *valid_quote_filters())
+            .scalar()
+        )
 
-        supplier_count = db.query(func.count(func.distinct(Quote.supplier_id))).join(Material).filter(
-            Material.category == cat
-        ).scalar() or 0
+        supplier_count = (
+            db.query(func.count(func.distinct(Quote.supplier_id)))
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Material.category == cat, *valid_quote_filters())
+            .scalar() or 0
+        )
 
-        project_count = db.query(func.count(func.distinct(Quote.project_id))).join(Material).filter(
-            Material.category == cat
-        ).scalar() or 0
+        project_count = (
+            db.query(func.count(func.distinct(Quote.project_id)))
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Material.category == cat, *valid_quote_filters())
+            .scalar() or 0
+        )
 
         baseline = compute_baseline(db, cat)
         cv = baseline.get("cv") if baseline.get("count", 0) > 0 else None
@@ -68,9 +85,13 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
         Material.category == category
     ).scalar() or 0
 
-    valid_prices = db.query(func.count(Quote.id)).join(Material).filter(
-        Material.category == category, Quote.unit_price > 0,
-    ).scalar() or 0
+    valid_prices = (
+        db.query(func.count(Quote.id))
+        .join(Material)
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(Material.category == category, Quote.unit_price > 0, *valid_quote_filters())
+        .scalar() or 0
+    )
 
     sub_cats = db.query(Material.sub_category).filter(
         Material.category == category
@@ -81,10 +102,16 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
         if not sub_cat:
             sub_cat = "未分类"
 
-        prices_q = db.query(Quote.unit_price).join(Material).filter(
-            Material.category == category,
-            Material.sub_category == sub_cat,
-            Quote.unit_price > 0,
+        prices_q = (
+            db.query(Quote.unit_price)
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(
+                Material.category == category,
+                Material.sub_category == sub_cat,
+                Quote.unit_price > 0,
+                *valid_quote_filters(),
+            )
         )
         prices = [r[0] for r in prices_q.all()]
         if not prices:
@@ -128,8 +155,10 @@ def refresh_material_baselines(db: Session, category: str | None = None):
         q = q.filter(Material.category == category)
 
     for mat in q.all():
-        prices_q = db.query(Quote.unit_price).filter(
-            Quote.material_id == mat.id, Quote.unit_price > 0,
+        prices_q = (
+            db.query(Quote.unit_price)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Quote.material_id == mat.id, Quote.unit_price > 0, *valid_quote_filters())
         )
         prices = [r[0] for r in prices_q.all()]
         if not prices:

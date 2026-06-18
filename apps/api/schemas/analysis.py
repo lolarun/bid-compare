@@ -1,5 +1,5 @@
 """Analysis & comparison Pydantic schemas."""
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class PriceCompareRequest(BaseModel):
@@ -109,7 +109,8 @@ class CategoryDetailStats(BaseModel):
 
 class ReviewCellCandidate(BaseModel):
     item_id: int
-    quote_id: int
+    quote_id: int | None = None
+    bid_quote_line_id: int | None = None
     material_name: str
     spec: str
     unit_price: float | None
@@ -121,6 +122,7 @@ class ReviewCell(BaseModel):
     cell_status: str  # quoted|aggregated|pending|excluded|missing
     item_id: int | None = None
     quote_id: int | None = None
+    bid_quote_line_id: int | None = None
     unit_price: float | None = None
     total_price: float | None = None
     confidence: float | None = None
@@ -178,7 +180,8 @@ class SupplierCell(BaseModel):
     cell_status: str | None = None          # quoted|aggregated|pending|excluded|missing
     item_id: int | None = None              # pending cell: BidAlignmentItem.id
     confidence: float | None = None         # pending cell: cosine similarity
-    source_quote_id: int | None = None
+    source_quote_id: int | None = None      # old path: Quote.id
+    bid_quote_line_id: int | None = None    # new path: BidQuoteLine.id
     pending_note: str | None = None         # "另有 N 条待确认" when align+pending coexist
     flags: list[str] | None = None          # validator flags: ocr_corrected_verified, valve_type_conflict, etc.
     evidence: str | None = None             # LLM fill reasoning/evidence stored in name_note
@@ -226,6 +229,7 @@ class MatrixTotal(BaseModel):
 class BidMatrixRequest(BaseModel):
     project_id: int | None = None
     supplier_ids: list[int]
+    submission_ids: list[int] = []
     material_ids: list[int] | None = None
     category: str | None = None
 
@@ -335,11 +339,21 @@ class AlignmentSuggestResult(BaseModel):
 
 
 class AlignmentApplyGroupItem(BaseModel):
-    quote_id: int
+    # 两路径互斥：quote_id（旧路径）或 bid_quote_line_id（新路径），必须且只有一个非空
+    quote_id: int | None = None
+    bid_quote_line_id: int | None = None
     supplier_id: int
     action: str = "align"
     spec_note: str = ""
     name_note: str = ""
+
+    @model_validator(mode='after')
+    def check_exactly_one(self) -> 'AlignmentApplyGroupItem':
+        has_quote = self.quote_id is not None
+        has_bql = self.bid_quote_line_id is not None
+        if has_quote == has_bql:
+            raise ValueError("Exactly one of quote_id or bid_quote_line_id must be set")
+        return self
 
 
 class AlignmentApplyGroup(BaseModel):

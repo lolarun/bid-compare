@@ -134,3 +134,239 @@ def _ensure_sqlite_schema():
             conn.execute(text(
                 "ALTER TABLE tender_list_sessions ADD COLUMN supplier_brand_map JSON"
             ))
+
+        # v3.0: P0 — Supplier 清洗状态字段
+        supplier_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(suppliers)")).fetchall()
+        }
+        if "merge_status" not in supplier_columns:
+            conn.execute(text(
+                "ALTER TABLE suppliers "
+                "ADD COLUMN merge_status VARCHAR(20) NOT NULL DEFAULT 'active'"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_suppliers_merge_status ON suppliers(merge_status)"
+            ))
+        if "merged_into_supplier_id" not in supplier_columns:
+            conn.execute(text(
+                "ALTER TABLE suppliers "
+                "ADD COLUMN merged_into_supplier_id INTEGER REFERENCES suppliers(id)"
+            ))
+
+        # v3.0: P0 — bid_alignment_items 12步重建
+        #
+        # 目标：添加 bid_quote_line_id 列 + CHECK 约束（两列只能一个非空）。
+        # SQLite 不支持 ALTER COLUMN / ADD CONSTRAINT，必须全表重建。
+        #
+        # 触发条件：bid_quote_line_id 列不在现有表中。
+        # 新库路径：create_all() 已建正确 schema（含 bid_quote_line_id），仅需创建偏部唯一索引。
+        # 注意：PRAGMA foreign_keys = OFF 在事务内可能无效，但 DDL 操作本身不触发 FK 校验，
+        #       故仍可安全执行；INSERT...SELECT 只复制已存在的合法数据，不会违反 FK 约束。
+        p0_item_cols = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(bid_alignment_items)")).fetchall()
+        }
+        needs_rebuild = "bid_quote_line_id" not in p0_item_cols
+
+        if needs_rebuild:
+            n_before = conn.execute(text("SELECT COUNT(*) FROM bid_alignment_items")).scalar()
+
+            conn.execute(text("PRAGMA foreign_keys = OFF"))
+            try:
+                conn.execute(text("""
+                    CREATE TABLE bid_alignment_items_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        group_id INTEGER NOT NULL
+                            REFERENCES bid_alignment_groups(id) ON DELETE CASCADE,
+                        quote_id INTEGER REFERENCES quotes(id),
+                        bid_quote_line_id INTEGER REFERENCES bid_quote_lines(id),
+                        supplier_id INTEGER REFERENCES suppliers(id),
+                        action VARCHAR(20) DEFAULT 'align',
+                        spec_note VARCHAR(500) DEFAULT '',
+                        agg_total REAL,
+                        agg_qty REAL,
+                        name_note VARCHAR(500) DEFAULT '',
+                        created_at DATETIME,
+                        CHECK (
+                            (quote_id IS NOT NULL AND bid_quote_line_id IS NULL) OR
+                            (quote_id IS NULL AND bid_quote_line_id IS NOT NULL)
+                        )
+                    )
+                """))
+
+                # 动态列集：兼容旧库中 name_note / created_at 可能不存在的情况
+                base_cols = ["id", "group_id", "quote_id", "supplier_id", "action", "spec_note"]
+                opt_cols = [c for c in ("agg_total", "agg_qty", "name_note", "created_at")
+                            if c in p0_item_cols]
+                src_cols = base_cols + opt_cols
+                col_list = ", ".join(src_cols + ["bid_quote_line_id"])
+                sel_list = ", ".join(src_cols + ["NULL AS bid_quote_line_id"])
+
+                conn.execute(text(
+                    f"INSERT INTO bid_alignment_items_new ({col_list}) "
+                    f"SELECT {sel_list} FROM bid_alignment_items"
+                ))
+
+                n_copy = conn.execute(
+                    text("SELECT COUNT(*) FROM bid_alignment_items_new")
+                ).scalar()
+                if n_copy != n_before:
+                    raise RuntimeError(
+                        f"bid_alignment_items rebuild 行数不一致: "
+                        f"预期 {n_before}，实际复制 {n_copy}"
+                    )
+
+                conn.execute(text("DROP TABLE bid_alignment_items"))
+                conn.execute(text(
+                    "ALTER TABLE bid_alignment_items_new RENAME TO bid_alignment_items"
+                ))
+
+                # 偏部唯一索引（两路径互斥）
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX ix_align_item_group_quote "
+                    "ON bid_alignment_items(group_id, quote_id) WHERE quote_id IS NOT NULL"
+                ))
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX ix_align_item_group_bql "
+                    "ON bid_alignment_items(group_id, bid_quote_line_id) "
+                    "WHERE bid_quote_line_id IS NOT NULL"
+                ))
+                # 普通查询索引
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bai_group_id ON bid_alignment_items(group_id)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bai_quote_id ON bid_alignment_items(quote_id)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bai_bql_id "
+                    "ON bid_alignment_items(bid_quote_line_id)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bai_supplier_id "
+                    "ON bid_alignment_items(supplier_id)"
+                ))
+            finally:
+                conn.execute(text("PRAGMA foreign_keys = ON"))
+
+            # 步骤11: FK 完整性校验
+            violations = conn.execute(
+                text("PRAGMA foreign_key_check(bid_alignment_items)")
+            ).fetchall()
+            if violations:
+                raise RuntimeError(
+                    f"bid_alignment_items 重建后存在 FK 违规: {violations[:5]}"
+                )
+
+            # 步骤12: 最终行数守恒校验
+            n_final = conn.execute(text("SELECT COUNT(*) FROM bid_alignment_items")).scalar()
+            if n_final != n_before:
+                raise RuntimeError(
+                    f"bid_alignment_items 行数守恒失败: {n_before} → {n_final}"
+                )
+
+        else:
+            # 新库 / 已完成迁移的库：确保偏部唯一索引存在
+            # （create_all() 不会为偏部索引执行 CREATE INDEX，需在此补建）
+            idx_names = {
+                row[0] for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='index'")
+                ).fetchall()
+            }
+            if "ix_align_item_group_quote" not in idx_names:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX ix_align_item_group_quote "
+                    "ON bid_alignment_items(group_id, quote_id) WHERE quote_id IS NOT NULL"
+                ))
+            if "ix_align_item_group_bql" not in idx_names:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX ix_align_item_group_bql "
+                    "ON bid_alignment_items(group_id, bid_quote_line_id) "
+                    "WHERE bid_quote_line_id IS NOT NULL"
+                ))
+
+        # v3.1: used_submission_ids on TenderListSession — shared batch reference
+        tls_cols_v31 = {
+            row[1] for row in conn.execute(
+                text("PRAGMA table_info(tender_list_sessions)")
+            ).fetchall()
+        }
+        if "used_submission_ids" not in tls_cols_v31:
+            conn.execute(text(
+                "ALTER TABLE tender_list_sessions ADD COLUMN used_submission_ids JSON"
+            ))
+
+        # v4.0: 弱关联 — bid_submissions.supplier_id 改为 nullable（移除 NOT NULL 约束）
+        # SQLite 不支持 ALTER COLUMN，需全表重建。
+        bs_cols_info = conn.execute(text("PRAGMA table_info(bid_submissions)")).fetchall()
+        bs_cols = {row[1] for row in bs_cols_info}
+        # Detect: if supplier_id has notnull=1, rebuild is needed
+        bs_sid_notnull = next(
+            (row[3] for row in bs_cols_info if row[1] == "supplier_id"), 1
+        )
+        if bs_sid_notnull:  # 1 = NOT NULL; 0 = NULL ok
+            n_bs_before = conn.execute(text("SELECT COUNT(*) FROM bid_submissions")).scalar()
+            conn.execute(text("PRAGMA foreign_keys = OFF"))
+            try:
+                conn.execute(text("""
+                    CREATE TABLE bid_submissions_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id VARCHAR(36) NOT NULL REFERENCES extraction_jobs(id),
+                        supplier_id INTEGER REFERENCES suppliers(id),
+                        supplier_raw_name VARCHAR(200) NOT NULL DEFAULT '',
+                        project_id INTEGER REFERENCES projects(id),
+                        batch_id VARCHAR(100) NOT NULL UNIQUE,
+                        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+                        bid_status VARCHAR(30) NOT NULL DEFAULT '',
+                        created_at DATETIME,
+                        updated_at DATETIME
+                    )
+                """))
+                opt_bs_cols = [c for c in ("bid_status",) if c in bs_cols]
+                base_bs = ["id", "job_id", "supplier_id", "supplier_raw_name",
+                           "project_id", "batch_id", "status", "created_at", "updated_at"]
+                all_bs = base_bs + [c for c in opt_bs_cols if c not in base_bs]
+                col_list = ", ".join(all_bs)
+                conn.execute(text(
+                    f"INSERT INTO bid_submissions_new ({col_list}) "
+                    f"SELECT {col_list} FROM bid_submissions"
+                ))
+                n_bs_after = conn.execute(
+                    text("SELECT COUNT(*) FROM bid_submissions_new")
+                ).scalar()
+                if n_bs_after != n_bs_before:
+                    raise RuntimeError(
+                        f"bid_submissions 重建行数不一致: {n_bs_before} → {n_bs_after}"
+                    )
+                conn.execute(text("DROP TABLE bid_submissions"))
+                conn.execute(text(
+                    "ALTER TABLE bid_submissions_new RENAME TO bid_submissions"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bid_submissions_job_id "
+                    "ON bid_submissions(job_id)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bid_submissions_supplier_id "
+                    "ON bid_submissions(supplier_id)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_bid_submissions_project_id "
+                    "ON bid_submissions(project_id)"
+                ))
+            finally:
+                conn.execute(text("PRAGMA foreign_keys = ON"))
+
+        # v4.0: submission_id column on bid_alignment_items
+        bai_cols_v40 = {
+            row[1] for row in conn.execute(
+                text("PRAGMA table_info(bid_alignment_items)")
+            ).fetchall()
+        }
+        if "submission_id" not in bai_cols_v40:
+            conn.execute(text(
+                "ALTER TABLE bid_alignment_items ADD COLUMN submission_id INTEGER"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_bai_submission_id "
+                "ON bid_alignment_items(submission_id)"
+            ))

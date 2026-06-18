@@ -5,6 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, AnalysisConfig, DEFAULT_SCORING_WEIGHTS
+from apps.api.services.quote_filters import valid_quote_filters
 
 
 def get_scoring_weights(db: Session) -> dict:
@@ -27,7 +28,11 @@ def score_supplier(
     weights = weights or get_scoring_weights(db)
 
     # ── 1. Price competitiveness (使用合理史低而非中位价) ─────────────────
-    q = db.query(Quote).filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0)
+    q = (
+        db.query(Quote)
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
+    )
     if category:
         q = q.join(Material).filter(Material.category == category)
     supplier_quotes = q.all()
@@ -68,12 +73,18 @@ def score_supplier(
         history_score = 40.0
 
     # ── 3. Quote completeness ─────────────────────────────────────────────
-    total_quotes = db.query(func.count(Quote.id)).filter(
-        Quote.supplier_id == supplier_id
-    ).scalar() or 0
-    valid_quotes = db.query(func.count(Quote.id)).filter(
-        Quote.supplier_id == supplier_id, Quote.unit_price > 0,
-    ).scalar() or 0
+    total_quotes = (
+        db.query(func.count(Quote.id))
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(Quote.supplier_id == supplier_id, *valid_quote_filters())
+        .scalar() or 0
+    )
+    valid_quotes = (
+        db.query(func.count(Quote.id))
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
+        .scalar() or 0
+    )
     completeness_score = min(100.0, (valid_quotes / total_quotes) * 100) if total_quotes > 0 else 50.0
 
     # ── 4. Commercial terms ───────────────────────────────────────────────
@@ -115,20 +126,30 @@ def compare_multiple_suppliers(
         if not supplier:
             continue
 
-        q = db.query(Quote).join(Material).filter(
-            Quote.supplier_id == sid,
-            Material.category == category,
-            Quote.unit_price > 0,
+        q = (
+            db.query(Quote)
+            .join(Material)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Quote.supplier_id == sid, Material.category == category,
+                    Quote.unit_price > 0, *valid_quote_filters())
         )
         if project_id:
             q = q.filter(Quote.project_id == project_id)
         quotes = q.all()
 
         avg_price = float(np.mean([qt.unit_price for qt in quotes])) if quotes else None
-        total_q = db.query(func.count(Quote.id)).filter(Quote.supplier_id == sid).scalar() or 0
-        valid_q = db.query(func.count(Quote.id)).filter(
-            Quote.supplier_id == sid, Quote.unit_price > 0,
-        ).scalar() or 0
+        total_q = (
+            db.query(func.count(Quote.id))
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Quote.supplier_id == sid, *valid_quote_filters())
+            .scalar() or 0
+        )
+        valid_q = (
+            db.query(func.count(Quote.id))
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Quote.supplier_id == sid, Quote.unit_price > 0, *valid_quote_filters())
+            .scalar() or 0
+        )
         completeness = valid_q / total_q if total_q > 0 else 0.0
 
         score = score_supplier(db, sid, category, weights=weights)

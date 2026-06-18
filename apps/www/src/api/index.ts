@@ -140,7 +140,7 @@ export const analysisApi = {
     api.post<SupplierScore>('/analysis/supplier-score', data),
   multiCompare: (data: { supplier_ids: number[]; category: string; project_id?: number }) =>
     api.post<MultiCompareResult>('/analysis/multi-compare', data),
-  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; material_ids?: number[]; category?: string }) =>
+  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; submission_ids?: number[]; material_ids?: number[]; category?: string }) =>
     api.post<BidMatrixResult>('/analysis/bid-matrix', data),
   bidInsight: (data: BidMatrixResult) =>
     api.post<BidInsight>('/analysis/bid-insight', data, { timeout: 60000 }),

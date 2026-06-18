@@ -228,9 +228,9 @@ function onTenderJobDone(job: ExtractionJob) {
     overrideBidlistPages.value = bl.length > 1 ? `${bl[0]}-${bl[bl.length - 1]}` : String(bl[0])
   }
   if (r.detected_pages?.brand) overrideBrandPage.value = String(r.detected_pages.brand)
-  // 从 material_class 推断品类（PDF-only 时 Excel 未设置）
-  if (!tenderCategory.value && r.material_class) {
-    tenderCategory.value = r.material_class
+  // 自动识别品类（PDF 是主来源，始终覆盖）
+  if (r.detected_category) {
+    tenderCategory.value = r.detected_category
   }
   message.success(`招标 PDF 已解析：${r.row_count} 行主清单，第 ${r.detected_pages?.brand ?? '?'} 页品牌表`)
   // 如果 Excel 已加载，自动对账
@@ -367,7 +367,7 @@ async function confirmTenderListVersion() {
   try {
     const { data } = await analysisApi.tenderListConfirm({
       project_id: taskConfig.projectId,
-      category: tenderCategory.value || (isPdfPrimary ? pdfSupplement.value!.material_class : '') || taskConfig.category,
+      category: tenderCategory.value || taskConfig.category,
       file_name: isPdfPrimary ? (tenderPdfFile.value?.name ?? '') : (tenderFile.value?.name ?? ''),
       anchors_total: isPdfPrimary ? pdfSupplement.value!.row_count : tenderPreview.value!.total,
       anchors_json: isPdfPrimary ? pdfSupplement.value!.items : tenderPreview.value!.items,
@@ -510,7 +510,8 @@ interface BatchFileEntry {
   detectedSupplierName: string
   matchedSupplierId: number | null  // auto-matched
   items: QuoteExtractionItem[]
-  confirmedSupplierId: number | null
+  confirmedSupplierId: number | null    // null for unknown suppliers
+  confirmedSubmissionId: number | null  // always set on confirm success
   confirmed: boolean
   error: string
   pollTimer: ReturnType<typeof setInterval> | null
@@ -719,10 +720,17 @@ async function runTenderMatch(): Promise<boolean> {
   if (cat) form.append('category', cat)
   const sids = effectiveSupplierIds.value
   if (sids.length) form.append('supplier_ids', sids.join(','))
+  const subIds = effectiveSubmissionIds.value
+  if (subIds.length) form.append('submission_ids', subIds.join(','))
   try {
     const { data } = await analysisApi.tenderListMatch(form)
     tenderMatchSummary.value = data
-    if (cat && !taskConfig.category) taskConfig.category = cat
+    // 后端可能从 TLS session 推导了 category，回写到前端状态
+    const resolvedCat = data.category || cat
+    if (resolvedCat) {
+      if (!tenderCategory.value) tenderCategory.value = resolvedCat
+      if (!taskConfig.category) taskConfig.category = resolvedCat
+    }
     return true
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '招标清单匹配失败'
@@ -753,7 +761,8 @@ async function loadAnchorReview() {
 
 async function runTenderMatchAndReview() {
   const sids = effectiveSupplierIds.value
-  if (sids.length === 0) {
+  const subIds = effectiveSubmissionIds.value
+  if (sids.length === 0 && subIds.length === 0) {
     message.error('请先完成供应商报价上传并「校对入库」，至少需要 1 家供应商的报价文件')
     return
   }
@@ -768,15 +777,26 @@ async function runTenderMatchAndReview() {
   matchRunning.value = false
 }
 
-// Single-supplier mode: compare against history instead of across suppliers
-const isSingleSupplierMode = computed(() => effectiveSupplierIds.value.length === 1)
+// All confirmed submission IDs (both known and unknown suppliers)
+const effectiveSubmissionIds = computed((): number[] => {
+  if (!useBatchMode.value) return []
+  return batchFiles.value
+    .filter(f => f.confirmed && f.confirmedSubmissionId != null)
+    .map(f => f.confirmedSubmissionId!)
+})
 
-// Effective supplier IDs for BidMatrix export
-const effectiveSupplierIds = computed(() => {
+// Known-supplier IDs only (for backward compat with non-batch mode)
+const effectiveSupplierIds = computed((): number[] => {
   if (useBatchMode.value) {
     return [...new Set(batchFiles.value.filter(f => f.confirmed && f.confirmedSupplierId).map(f => f.confirmedSupplierId!))]
   }
   return taskConfig.supplierIds
+})
+
+// Single-supplier mode: compare against history instead of across suppliers
+const isSingleSupplierMode = computed(() => {
+  const cols = useBatchMode.value ? effectiveSubmissionIds.value.length : effectiveSupplierIds.value.length
+  return cols === 1
 })
 
 // ─── Data fetching ───────────────────────────────────────────────────────
@@ -841,8 +861,15 @@ async function goNext() {
       message.warning('请先上传招标文件 PDF')
       return
     }
+    // 自动补填品类（优先顺序：PDF识别结果 > 第1步配置）
     if (!tenderCategory.value) {
-      message.warning('请确认品类')
+      tenderCategory.value = pdfSupplement.value?.detected_category || taskConfig.category || ''
+    }
+    // PDF 主清单模式：items 内含 category，confirm 时会按 item 自身分组，无需 top-level category
+    // Excel 模式：必须有品类才能归档
+    const isPdfPrimary = !!pdfSupplement.value
+    if (!isPdfPrimary && !tenderCategory.value) {
+      message.warning('品类未识别，请重新上传招标文件')
       return
     }
     // excel_primary 模式下差异须人工确认；pdf_primary 模式只提示，不阻断
@@ -866,7 +893,10 @@ async function goNext() {
       message.warning('请为每家供应商点击「校对入库」')
       return
     }
-    if (effectiveSupplierIds.value.length === 0) {
+    const hasEntries = useBatchMode.value
+      ? effectiveSubmissionIds.value.length > 0
+      : effectiveSupplierIds.value.length > 0
+    if (!hasEntries) {
       message.error('未检测到已入库的供应商报价，请先完成「校对入库」')
       return
     }
@@ -927,7 +957,7 @@ async function confirmSupplier(supplierId: number) {
     const result = data as BatchConfirmResult
     slot.confirmed = true
     slot.batch_id = result.batch_id
-    message.success(`已入库 ${result.created} 条报价`)
+    message.success(`已入库 ${result.line_count} 条报价`)
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? '入库失败'
@@ -971,6 +1001,7 @@ function handleBatchFile(file: File) {
       matchedSupplierId: null,
       items: [],
       confirmedSupplierId: null,
+      confirmedSubmissionId: null,
       confirmed: false,
       error: '',
       pollTimer: null,
@@ -1107,7 +1138,6 @@ function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
     const match = allSuppliers.value.find(
       (s) => s.name.replace(/\s/g, '').toLowerCase() === name
         || s.name.includes(entry.detectedSupplierName)
-        || entry.detectedSupplierName.includes(s.name)
     )
     if (match) {
       entry.matchedSupplierId = match.id
@@ -1125,9 +1155,23 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
     return
   }
   try {
+    // 若未自动匹配到 id，按名称在已知列表中二次查找（未匹配则作陌生供应商处理）
+    let supplierId = entry.matchedSupplierId ?? undefined
+    if (!supplierId) {
+      const norm = (s: string) => s.replace(/\s/g, '').toLowerCase()
+      const sn = norm(supplierName)
+      const match = allSuppliers.value.find(s =>
+        norm(s.name) === sn || s.name.includes(supplierName)
+      )
+      if (match) {
+        supplierId = match.id
+        entry.matchedSupplierId = match.id
+      }
+      // 未匹配 = 陌生供应商，supplierId 保持 undefined，后端弱关联处理
+    }
     const { data } = await quoteApi.batchConfirm({
       job_id: entry.jobId,
-      supplier_id: entry.matchedSupplierId ?? undefined,
+      supplier_id: supplierId,
       supplier_name: supplierName,
       project_id: taskConfig.projectId,
       category: taskConfig.category,
@@ -1136,7 +1180,9 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
     })
     entry.confirmed = true
     entry.confirmedSupplierId = data.supplier_id ?? null
-    message.success(`${supplierName}：已入库 ${data.created} 条报价`)
+    entry.confirmedSubmissionId = data.submission_id ?? null
+    const unknownNote = supplierId ? '' : '（陌生供应商，仅用于本次比价）'
+    message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价`)
   } catch (e: unknown) {
     const resp = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
     if (resp && typeof resp === 'object' && (resp as Record<string, unknown>).error === 'supplier_alias_conflict') {
@@ -1173,11 +1219,9 @@ onBeforeUnmount(() => {
 
 // ─── Step 4: run bid-matrix ──────────────────────────────────────────────
 async function runMatrix() {
-  // Gather supplier IDs: from pre-selected OR from batch confirmed entries
-  const sids = useBatchMode.value
-    ? [...new Set(batchFiles.value.filter((f) => f.confirmed && f.confirmedSupplierId).map((f) => f.confirmedSupplierId!))]
-    : taskConfig.supplierIds
-  if (sids.length < 1) {
+  const sids = useBatchMode.value ? effectiveSupplierIds.value : taskConfig.supplierIds
+  const subIds = effectiveSubmissionIds.value  // all confirmed submissions (batch mode only)
+  if (useBatchMode.value ? subIds.length < 1 : sids.length < 1) {
     message.warning('至少需要 1 家供应商的报价才能比价')
     return
   }
@@ -1187,6 +1231,7 @@ async function runMatrix() {
     const { data } = await analysisApi.bidMatrix({
       project_id: taskConfig.projectId,
       supplier_ids: sids,
+      submission_ids: subIds.length ? subIds : undefined,
       category: tenderCategory.value || taskConfig.category || undefined,
     })
     matrixResult.value = data

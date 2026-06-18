@@ -9,7 +9,8 @@ Key changes vs v1:
 import numpy as np
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Quote, Project, AnalysisConfig, DEFAULT_THRESHOLDS
+from apps.api.models import Material, Quote, Project, Supplier, AnalysisConfig, DEFAULT_THRESHOLDS
+from apps.api.services.quote_filters import valid_quote_filters
 
 
 def get_config_value(db: Session, key: str, default=None):
@@ -41,10 +42,16 @@ def compute_baseline(db: Session, category: str, sub_category: str | None = None
 
     brand_tier: if set, only include quotes with matching brand_tier (e.g. '合资').
     """
-    q = db.query(Quote.unit_price).join(Material).filter(
-        Material.category == category,
-        Quote.unit_price.isnot(None),
-        Quote.unit_price > 0,
+    q = (
+        db.query(Quote.unit_price)
+        .join(Material)
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(
+            Material.category == category,
+            Quote.unit_price.isnot(None),
+            Quote.unit_price > 0,
+            *valid_quote_filters(),
+        )
     )
     if sub_category:
         q = q.filter(Material.sub_category == sub_category)
@@ -102,10 +109,12 @@ def compute_reasonable_low(
     q = (
         db.query(Quote.unit_price, Quote.quote_date, Quote.project_id)
         .join(Material)
+        .join(Supplier, Quote.supplier_id == Supplier.id)
         .filter(
             Material.category == category,
             Quote.unit_price.isnot(None),
             Quote.unit_price > 0,
+            *valid_quote_filters(),
         )
     )
     if sub_category:

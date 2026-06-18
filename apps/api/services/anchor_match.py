@@ -25,9 +25,33 @@ from sqlalchemy.orm import Session
 from apps.api.core.config import get_settings
 from apps.api.models import Material, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.models.supplier import Supplier
 from apps.api.services.canonical import canonical_match_score, extract_valve_canonical
 from apps.api.services.tender_list import TenderAnchor, parse_tender_xlsx
+
+
+@dataclass
+class _BQLProxy:
+    """Thin wrapper so BidQuoteLine rows slot into the Quote-indexed match lists."""
+    id: int                          # bql.id — stored as bid_quote_line_id in BidAlignmentItem
+    supplier_id: int                 # group key: sub.id (submission_id)
+    submission_id: int = 0           # sub.id — written to BidAlignmentItem.submission_id
+    actual_supplier_id: int | None = None  # sub.supplier_id (soft-ref, can be None)
+    total_price: float | None = None
+    quantity: float | None = None    # = bql.qty
+    brand: str = ""
+    canonical: dict | None = None    # from bql.canonical; used for canonical matching
+    is_bql: bool = True
+
+
+@dataclass
+class _BQLMatProxy:
+    """Material-compatible proxy for BQL rows (no DB-backed extended_attrs)."""
+    standard_name: str
+    spec: str
+    unit: str
+    extended_attrs: dict | None = None
 
 # 余弦低于此视为无可信锚点(与测量脚本一致)
 SIM_THRESHOLD = 0.50
@@ -444,6 +468,7 @@ def import_and_match(
     project_id: int,
     category: str,
     supplier_ids: list[int] | None = None,
+    submission_ids: list[int] | None = None,
     anchors: list[TenderAnchor] | None = None,
     tender_list_session_id: int | None = None,
     brand_ctx: tuple[set, dict] | None = None,
@@ -478,10 +503,14 @@ def import_and_match(
         """
         if not allowed_aliases:
             return action, note
+        # For brand lookup, use actual supplier_id (not submission_id group key)
+        brand_sid = getattr(qt, "actual_supplier_id", None) or (
+            qt.supplier_id if not hasattr(qt, "actual_supplier_id") else None
+        )
         verdict = check_brand(
             getattr(qt, "brand", "") or "",
             allowed_aliases,
-            supplier_expected.get(sid),
+            supplier_expected.get(brand_sid),
         )
         if verdict == "conflict":
             return "pending", (note + " brand_conflict").strip()
@@ -491,36 +520,105 @@ def import_and_match(
             return action, (note + " brand~").strip()
         return action, note
 
-    # 载入报价
-    q = (
+    # ── 分离：哪些供应商已提交 BidSubmission（新路径），哪些走旧 Quote 路径 ──────
+    # resolve_active_submissions now returns {submission_id → BidSubmission}
+    from apps.api.services.bid_submission_resolve import resolve_active_submissions
+    _active_subs = resolve_active_submissions(
+        db, project_id, category,
+        supplier_ids=supplier_ids,
+        submission_ids=submission_ids,
+    )
+    # submission_ids of active BQL submissions
+    bql_submission_ids: list[int] = list(_active_subs.keys())
+    # supplier_ids that have BidSubmissions (for legacy exclusion)
+    bql_supplier_ids: set[int] = {
+        sub.supplier_id for sub in _active_subs.values() if sub.supplier_id
+    }
+
+    # ── 新路径：载入 BidQuoteLine（分品类） ───────────────────────────────────
+    quotes: list = []
+    materials: list = []
+    is_bql_flags: list[bool] = []
+
+    if bql_submission_ids:
+        _bql_q = (
+            db.query(BidQuoteLine, BidSubmission)
+            .join(BidSubmission, BidQuoteLine.submission_id == BidSubmission.id)
+            .filter(BidQuoteLine.submission_id.in_(bql_submission_ids))
+        )
+        if category:
+            _bql_q = _bql_q.filter(BidQuoteLine.category == category)
+        for bql, sub in _bql_q.all():
+            quotes.append(_BQLProxy(
+                id=bql.id,
+                supplier_id=sub.id,          # group key = submission_id
+                submission_id=sub.id,         # written to BidAlignmentItem.submission_id
+                actual_supplier_id=sub.supplier_id,  # soft-ref to Supplier (can be None)
+                total_price=bql.total_price,
+                quantity=bql.qty,
+                brand=bql.brand,
+                canonical=bql.canonical,
+            ))
+            materials.append(_BQLMatProxy(
+                standard_name=bql.standard_name,
+                spec=bql.spec,
+                unit=bql.unit,
+            ))
+            is_bql_flags.append(True)
+
+    # ── 旧路径：载入 Quote（仅限无 BidSubmission 的供应商） ───────────────────
+    bql_sup_ids = bql_supplier_ids
+    _qt_q = (
         db.query(Quote, Material)
         .join(Material, Quote.material_id == Material.id)
         .filter(Quote.project_id == project_id)
     )
     if category:
-        q = q.filter(Material.category == category)
+        _qt_q = _qt_q.filter(Material.category == category)
     if supplier_ids:
-        q = q.filter(Quote.supplier_id.in_(supplier_ids))
-    rows = q.all()
-    quotes = [qt for qt, _ in rows]
-    materials = [m for _, m in rows]
+        legacy_sids = [sid for sid in supplier_ids if sid not in bql_sup_ids]
+        if not legacy_sids:
+            # All requested suppliers have BidSubmissions — skip Quote query
+            rows = []
+        else:
+            _qt_q = _qt_q.filter(Quote.supplier_id.in_(legacy_sids))
+            rows = _qt_q.all()
+    elif bql_sup_ids:
+        # No supplier filter but some have BidSubmissions — exclude them from Quote
+        _qt_q = _qt_q.filter(~Quote.supplier_id.in_(bql_sup_ids))
+        rows = _qt_q.all()
+    else:
+        rows = _qt_q.all()
+
+    for qt, m in rows:
+        quotes.append(qt)
+        materials.append(m)
+        is_bql_flags.append(False)
+
     quote_texts = [f"{m.standard_name} {m.spec or ''}".strip() for m in materials]
     quote_dns = [_dn_of(m.spec) or _dn_of(m.standard_name) for m in materials]
 
-    # Compute/load canonical per quote (cache hit from extended_attrs, else code extract)
+    # Compute/load canonical per item (cache hit from extended_attrs or bql.canonical)
     quote_canonicals: list[dict] = []
-    for m in materials:
-        ext = m.extended_attrs or {}
-        canon = ext.get("canonical")
-        if not canon:
-            canon = extract_valve_canonical(m.standard_name or "", m.spec or "")
-        quote_canonicals.append(canon or {})
+    for i, m in enumerate(materials):
+        if is_bql_flags[i]:
+            bql_proxy = quotes[i]  # _BQLProxy
+            bql_canon = bql_proxy.canonical or extract_valve_canonical(m.standard_name or "", m.spec or "")
+            quote_canonicals.append(bql_canon or {})
+        else:
+            ext = (m.extended_attrs or {})
+            canon = ext.get("canonical")
+            if not canon:
+                canon = extract_valve_canonical(m.standard_name or "", m.spec or "")
+            quote_canonicals.append(canon or {})
 
     matches = match_anchors(anchors, quotes, quote_texts, quote_dns,
                             quote_canonicals=quote_canonicals)
 
-    # Persist canonical to Material.extended_attrs (cache only; don't overwrite)
+    # Persist canonical to Material.extended_attrs (cache only; don't overwrite; skip BQL proxies)
     for mi, m in enumerate(materials):
+        if is_bql_flags[mi]:
+            continue  # _BQLMatProxy has no DB-backed extended_attrs
         canon = quote_canonicals[mi]
         if canon.get("valve_type"):
             ext = dict(m.extended_attrs or {})
@@ -618,16 +716,21 @@ def import_and_match(
                     low_conf += 1
                 item_action = "align" if cos >= LOW_CONF else "pending"
                 qt = quotes[qi]
-                qsid = qt.supplier_id if qt.supplier_id in valid_sids else None
+                _actual_sid = getattr(qt, "actual_supplier_id", qt.supplier_id)
+                qsid = _actual_sid if _actual_sid in valid_sids else None
                 canon_snap = quote_canonicals[qi] if qi < len(quote_canonicals) else {}
                 note = f"cos={cos:.2f}"
                 if canon_snap.get("valve_type"):
                     note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
                 item_action, note = _apply_brand(qt, sid, item_action, note)
+                _qi_bql = is_bql_flags[qi]
+                _sub_id = qt.submission_id if _qi_bql else None
                 db.add(BidAlignmentItem(
                     group_id=group.id,
-                    quote_id=qt.id,
+                    quote_id=None if _qi_bql else qt.id,
+                    bid_quote_line_id=qt.id if _qi_bql else None,
                     supplier_id=qsid,
+                    submission_id=_sub_id,
                     action=item_action,
                     spec_note=note.strip(),
                 ))
@@ -666,7 +769,8 @@ def import_and_match(
                         item_action = "align"
 
                     qt = quotes[best_qi]
-                    qsid = qt.supplier_id if qt.supplier_id in valid_sids else None
+                    _actual_sid2 = getattr(qt, "actual_supplier_id", qt.supplier_id)
+                    qsid = _actual_sid2 if _actual_sid2 in valid_sids else None
                     canon_snap = quote_canonicals[best_qi] if best_qi < len(quote_canonicals) else {}
                     note = f"cos={best_cos:.2f}"
                     if canon_snap.get("valve_type"):
@@ -692,10 +796,14 @@ def import_and_match(
                             per_supplier_stats[sid]["aggregated_rows"] += len(agg_ids)
 
                     item_action, note = _apply_brand(qt, sid, item_action, note)
+                    _best_bql = is_bql_flags[best_qi]
+                    _best_sub_id = qt.submission_id if _best_bql else None
                     db.add(BidAlignmentItem(
                         group_id=group.id,
-                        quote_id=qt.id,
+                        quote_id=None if _best_bql else qt.id,
+                        bid_quote_line_id=qt.id if _best_bql else None,
                         supplier_id=qsid,
+                        submission_id=_best_sub_id,
                         action=item_action,
                         spec_note=note.strip(),
                         agg_total=agg_total_val,

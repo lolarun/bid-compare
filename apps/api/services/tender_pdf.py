@@ -407,6 +407,12 @@ def extract_bidlist(
     items_out = [anchor_to_json(a, default_category) for a in anchors]
     quality_metrics = _compute_quality_metrics(items_out, page_diagnostics)
 
+    from collections import Counter
+    _cat_counts = Counter(
+        item["category"] for item in items_out if item.get("category")
+    )
+    detected_category = _cat_counts.most_common(1)[0][0] if _cat_counts else ""
+
     # ── 可选：与 Excel 对账 ─────────────────────────────────────────────
     reconcile_result: dict | None = None
     if xlsx_path:
@@ -442,6 +448,7 @@ def extract_bidlist(
         "brand_requirement": brand_requirement,
         "supplier_brands": supplier_brands,
         "material_class": material_class,
+        "detected_category": detected_category,
         "detected_pages": {"bidlist": bidlist_pages, "brand": brand_page},
         "row_count": len(items_out),
         "source_type": "pdf_primary",

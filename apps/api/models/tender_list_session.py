@@ -40,6 +40,11 @@ class TenderListSession(Base):
     # supplier_ids confirmed for this bid-comparison session (persisted on tender-list/match)
     confirmed_supplier_ids = Column(JSON, nullable=True)  # list[int]
 
+    # submission_ids used during the most recent tender-list/match call
+    # All downstream endpoints (anchor-review, residue, llm-fill) read from here
+    # so they always operate on the same batch — no self-guessing.
+    used_submission_ids = Column(JSON, nullable=True)  # list[int]
+
     created_at = Column(DateTime, default=_now)
 
     __table_args__ = (

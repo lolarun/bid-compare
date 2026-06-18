@@ -73,6 +73,7 @@ class SupplierQuoteRow:
     canonical: dict = field(default_factory=dict)
     topk: list[tuple[int, float]] = field(default_factory=list)  # [(anchor_seq, cos), ...]
     candidates: list = field(default_factory=list)  # list[AnchorCandidate] from match_anchors_wide
+    bid_quote_line_id: int | None = None  # set when row comes from BidQuoteLine (not archived Quote)
 
     def best_cos(self) -> float:
         if self.candidates:

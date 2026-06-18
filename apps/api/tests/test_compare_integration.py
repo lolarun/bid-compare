@@ -91,7 +91,7 @@ class _CycleProvider(MockProvider):
         self._responses = list(responses)
         self._idx = 0
 
-    def extract(self, images, schema, prompt, timeout=90):
+    def extract(self, images, schema, prompt, timeout=90, **kwargs):
         canned = self._responses[self._idx % len(self._responses)]
         self._idx += 1
         from apps.api.intelligence.base import ExtractionResponse
@@ -119,6 +119,8 @@ def compare_client(temp_db, monkeypatch, tmp_path):
         lambda: ExtractionPipeline(cycle_provider),
     )
     from apps.api.main import app
+    from apps.api.routes.auth import get_current_user
+    app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
 
     with TestClient(app) as c:
         yield c
@@ -154,11 +156,27 @@ class TestPhase3CompareFlow:
             body = r.json()
             assert body["status"] == "done", body
 
-        # ── 4. batch-confirm for both suppliers ──
+        # ── 4. Pre-create suppliers (P0: supplier_id must be explicit) ──
+        rs_a = compare_client.post(
+            "/api/suppliers",
+            json={"name": "供应商A", "categories": ["阀门"]},
+        )
+        assert rs_a.status_code == 201, rs_a.text
+        supplier_a_id = rs_a.json()["id"]
+
+        rs_b = compare_client.post(
+            "/api/suppliers",
+            json={"name": "供应商B", "categories": ["阀门"]},
+        )
+        assert rs_b.status_code == 201, rs_b.text
+        supplier_b_id = rs_b.json()["id"]
+
+        # ── 5. batch-confirm for both suppliers — new P0 contract ──
         r = compare_client.post(
             "/api/quotes/batch-confirm",
             json={
                 "job_id": job_a,
+                "supplier_id": supplier_a_id,
                 "supplier_name": "供应商A",
                 "project_name": "Phase3 测试比价项目",
                 "category": "阀门",
@@ -166,14 +184,15 @@ class TestPhase3CompareFlow:
         )
         assert r.status_code == 200, r.text
         a = r.json()
-        assert a["created"] == 2
-        assert a["supplier_id"]
+        assert a["line_count"] == 2, a
+        assert a["supplier_id"] == supplier_a_id
         assert a["project_id"]
 
         r = compare_client.post(
             "/api/quotes/batch-confirm",
             json={
                 "job_id": job_b,
+                "supplier_id": supplier_b_id,
                 "supplier_name": "供应商B",
                 "project_id": a["project_id"],  # link to same project
                 "category": "阀门",
@@ -181,13 +200,29 @@ class TestPhase3CompareFlow:
         )
         assert r.status_code == 200, r.text
         b = r.json()
-        assert b["created"] == 2
+        assert b["line_count"] == 2, b
 
-        supplier_a_id = a["supplier_id"]
-        supplier_b_id = b["supplier_id"]
         project_id = a["project_id"]
 
-        # ── 5. bid-matrix returns non-empty rows + totals + recommended ──
+        # ── 5.5. Create TenderListSession (required before bid-matrix with category) ──
+        anchor_items = [
+            {"seq": "1", "name": "DN100 闸阀", "spec": "Z45X-16Q", "unit": "个", "qty": 10, "category": "阀门"},
+            {"seq": "2", "name": "DN50 闸阀", "spec": "Z45X-16Q", "unit": "个", "qty": 20, "category": "阀门"},
+        ]
+        r = compare_client.post(
+            "/api/analysis/tender-list/confirm",
+            json={
+                "project_id": project_id,
+                "category": "阀门",
+                "file_name": "test.xlsx",
+                "anchors_json": anchor_items,
+                "anchors_total": len(anchor_items),
+                "source_type": "excel",
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        # ── 6. bid-matrix returns non-empty rows + totals + recommended ──
         r = compare_client.post(
             "/api/analysis/bid-matrix",
             json={
@@ -223,14 +258,23 @@ class TestPhase3CompareFlow:
         )
         tender_job = r.json()["id"]
 
+        # supplier_id=1 is fake but job-type check fires before supplier lookup
         r2 = compare_client.post(
             "/api/quotes/batch-confirm",
-            json={"job_id": tender_job, "category": "阀门", "supplier_name": "X"},
+            json={"job_id": tender_job, "supplier_id": 1, "category": "阀门", "supplier_name": "X"},
         )
         assert r2.status_code == 400
         assert "must be 'quote'" in r2.json()["detail"]
 
     def test_batch_confirm_unknown_brands_reported(self, compare_client):
+        # Create a supplier so supplier_id can be provided (P0 requirement)
+        rs = compare_client.post(
+            "/api/suppliers",
+            json={"name": "TestSupplierBrands", "categories": ["阀门"]},
+        )
+        assert rs.status_code == 201, rs.text
+        supplier_id = rs.json()["id"]
+
         r = compare_client.post(
             "/api/intake/upload",
             data={"type": "quote", "category": "阀门"},
@@ -241,11 +285,12 @@ class TestPhase3CompareFlow:
             "/api/quotes/batch-confirm",
             json={
                 "job_id": job_id,
-                "supplier_name": "TestSupplier",
+                "supplier_id": supplier_id,
+                "supplier_name": "TestSupplierBrands",
                 "category": "阀门",
             },
         )
-        assert r2.status_code == 200
+        assert r2.status_code == 200, r2.text
         body = r2.json()
         # Canned response has brands 良工/正丰; neither is in seeded brand_tiers
         assert len(body["unknown_brands"]) > 0

@@ -44,26 +44,36 @@ class BidAlignmentGroup(Base):
 
 
 class BidAlignmentItem(Base):
-    """Maps a single quote_id into an alignment group."""
+    """Maps a single quote or bid_quote_line into an alignment group.
+
+    两种路径，必须且只能有一个非空（由 _ensure_sqlite_schema 的 CHECK 约束保证）：
+      quote_id          — 旧路径，兼容历史矩阵（旧数据保留，新比价不再写入）
+      bid_quote_line_id — 新路径，新版比价全程使用
+
+    查询规则：优先读 bid_quote_line_id；bid_quote_line_id IS NULL 时 fallback 到 quote_id。
+    部分唯一索引由 _ensure_sqlite_schema() 创建（SQLite partial index 无法在 __table_args__ 跨方言定义）。
+    """
 
     __tablename__ = "bid_alignment_items"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    group_id = Column(Integer, ForeignKey("bid_alignment_groups.id", ondelete="CASCADE"), nullable=False, index=True)
-    quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=False, index=True)
+    group_id = Column(
+        Integer, ForeignKey("bid_alignment_groups.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=True, index=True)
+    bid_quote_line_id = Column(
+        Integer, ForeignKey("bid_quote_lines.id"), nullable=True, index=True,
+    )
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    submission_id = Column(Integer, nullable=True, index=True)  # BidSubmission.id; set for BQL path
 
     action = Column(String(20), default="align")  # align / pending / exclude
     spec_note = Column(String(500), default="")
-    # Aggregated pricing for multi-row same-anchor same-canonical items
-    agg_total = Column(Float, nullable=True)  # Σ total_price
-    agg_qty = Column(Float, nullable=True)    # Σ quantity
+    agg_total = Column(Float, nullable=True)   # Σ total_price
+    agg_qty = Column(Float, nullable=True)     # Σ quantity
     name_note = Column(String(500), default="")
 
     created_at = Column(DateTime, default=_now)
 
     group = relationship("BidAlignmentGroup", back_populates="items")
-
-    __table_args__ = (
-        Index("ix_align_item_group_quote", "group_id", "quote_id", unique=True),
-    )

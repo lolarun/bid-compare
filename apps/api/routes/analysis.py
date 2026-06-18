@@ -123,7 +123,9 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                 db,
                 anchors=anchors,
                 tender_list_session_id=session.id,
+                used_submission_ids=session.used_submission_ids or [],
                 supplier_ids=body.supplier_ids,
+                submission_ids=getattr(body, "submission_ids", []) or [],
                 project_id=body.project_id,
                 category=body.category,
                 allowed_group_ids=allowed_group_ids,
@@ -243,11 +245,12 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
         ROW_CAP = 75
         per_supplier = max(ROW_CAP // len(body.supplier_ids), 20)
 
+        from apps.api.services.quote_filters import valid_quote_filters as _vqf
         base_q = db.query(Quote, Material, Supplier).join(
             Material, Quote.material_id == Material.id
         ).join(
             Supplier, Quote.supplier_id == Supplier.id
-        ).filter(Quote.unit_price > 0)
+        ).filter(Quote.unit_price > 0, *_vqf())
         if body.project_id:
             base_q = base_q.filter(Quote.project_id == body.project_id)
         if body.category:
@@ -317,19 +320,36 @@ def bid_alignment_apply(body: AlignmentApplyRequest, db: Session = Depends(get_d
         )
         db.add(group)
         db.flush()  # get group.id
-        seen_quotes: set[int] = set()  # dedupe: (group, quote_id) is UNIQUE; LLM may repeat a quote
+        # dedupe：同一 (group, quote_id) 或 (group, bid_quote_line_id) 不能重复
+        seen_quote_ids: set[int] = set()
+        seen_bql_ids: set[int] = set()
         for item in g.items:
-            if item.quote_id in seen_quotes:
-                continue  # same quote listed twice in one group — skip the duplicate
-            seen_quotes.add(item.quote_id)
-            ai = BidAlignmentItem(
-                group_id=group.id,
-                quote_id=item.quote_id,
-                supplier_id=item.supplier_id,
-                action=item.action,
-                spec_note=item.spec_note,
-                name_note=item.name_note,
-            )
+            if item.bid_quote_line_id is not None:
+                if item.bid_quote_line_id in seen_bql_ids:
+                    continue
+                seen_bql_ids.add(item.bid_quote_line_id)
+                ai = BidAlignmentItem(
+                    group_id=group.id,
+                    bid_quote_line_id=item.bid_quote_line_id,
+                    quote_id=None,
+                    supplier_id=item.supplier_id,
+                    action=item.action,
+                    spec_note=item.spec_note,
+                    name_note=item.name_note,
+                )
+            else:
+                if item.quote_id in seen_quote_ids:
+                    continue
+                seen_quote_ids.add(item.quote_id)
+                ai = BidAlignmentItem(
+                    group_id=group.id,
+                    quote_id=item.quote_id,
+                    bid_quote_line_id=None,
+                    supplier_id=item.supplier_id,
+                    action=item.action,
+                    spec_note=item.spec_note,
+                    name_note=item.name_note,
+                )
             db.add(ai)
             items_saved += 1
         groups_saved += 1
@@ -374,6 +394,7 @@ def bid_alignment_groups(
         items = [
             {
                 "quote_id": it.quote_id,
+                "bid_quote_line_id": it.bid_quote_line_id,
                 "supplier_id": it.supplier_id,
                 "action": it.action,
                 "spec_note": it.spec_note,
@@ -514,7 +535,7 @@ def anchor_review(
         )
     groups = _grp_q.all()
 
-    # 构建 quote_id → (quote, material, supplier) 映射
+    # 构建 quote_id → (quote, material, supplier) 映射（旧路径）
     q_base = (
         db.query(QuoteModel, MaterialModel, SupplierModel)
         .join(MaterialModel, QuoteModel.material_id == MaterialModel.id)
@@ -529,18 +550,41 @@ def anchor_review(
     all_rows = q_base.all()
     quote_map = {qt.id: (qt, mat, sup) for qt, mat, sup in all_rows}
 
-    # 已匹配 quote_id 集合
-    matched_ids: set[int] = set()
+    # 构建 bid_quote_line_id → (bql, supplier) 映射（新路径）
+    from apps.api.models.bid_submission import BidQuoteLine as _BQL, BidSubmission as _BidSub
+    _all_bql_ids: set[int] = set()
     for g in groups:
         for item in g.items:
-            matched_ids.add(item.quote_id)
+            if item.bid_quote_line_id is not None:
+                _all_bql_ids.add(item.bid_quote_line_id)
+    bql_map: dict = {}
+    if _all_bql_ids:
+        _bql_rows = (
+            db.query(_BQL, SupplierModel)
+            .join(_BidSub, _BQL.submission_id == _BidSub.id)
+            .join(SupplierModel, _BidSub.supplier_id == SupplierModel.id)
+            .filter(_BQL.id.in_(_all_bql_ids))
+            .all()
+        )
+        bql_map = {bql.id: (bql, sup) for bql, sup in _bql_rows}
 
-    # 残差:未匹配的报价
+    # 已匹配集合（两条路径分开追踪）
+    matched_quote_ids: set[int] = set()
+    matched_bql_ids: set[int] = set()
+    for g in groups:
+        for item in g.items:
+            if item.bid_quote_line_id is not None:
+                matched_bql_ids.add(item.bid_quote_line_id)
+            elif item.quote_id is not None:
+                matched_quote_ids.add(item.quote_id)
+
+    # 残差:未匹配的旧路径报价
     residue_quotes = []
     for qt, mat, sup in all_rows:
-        if qt.id not in matched_ids:
+        if qt.id not in matched_quote_ids:
             residue_quotes.append({
                 "quote_id": qt.id,
+                "bid_quote_line_id": None,
                 "supplier_id": qt.supplier_id,
                 "supplier_name": sup.name if sup else "",
                 "material_name": mat.standard_name,
@@ -548,27 +592,71 @@ def anchor_review(
                 "unit_price": qt.unit_price,
             })
 
-    def _item_detail(item, quote_map, re_mod):
-        if item.quote_id not in quote_map:
-            return None
-        qt, mat, sup = quote_map[item.quote_id]
+    # 残差:未匹配的新路径 BidQuoteLine 行
+    _unmatched_bql_q = (
+        db.query(_BQL, SupplierModel)
+        .join(_BidSub, _BQL.submission_id == _BidSub.id)
+        .join(SupplierModel, _BidSub.supplier_id == SupplierModel.id)
+        .filter(
+            _BidSub.project_id == project_id,
+            _BQL.category == category,
+        )
+    )
+    if sids:
+        _unmatched_bql_q = _unmatched_bql_q.filter(_BidSub.supplier_id.in_(sids))
+    if matched_bql_ids:
+        _unmatched_bql_q = _unmatched_bql_q.filter(~_BQL.id.in_(matched_bql_ids))
+    for bql, sup in _unmatched_bql_q.all():
+        residue_quotes.append({
+            "quote_id": None,
+            "bid_quote_line_id": bql.id,
+            "supplier_id": sup.id if sup else None,
+            "supplier_name": sup.name if sup else "",
+            "material_name": bql.standard_name,
+            "spec": bql.spec or "",
+            "unit_price": bql.unit_price,
+        })
+
+    def _item_detail(item, quote_map, bql_map, re_mod):
         cosine = None
         if item.spec_note:
             m = re_mod.search(r"cos=(\d+\.?\d*)", item.spec_note)
             if m:
                 cosine = float(m.group(1))
-        return {
-            "item_id": item.id,
-            "action": item.action,
-            "quote_id": item.quote_id,
-            "supplier_id": item.supplier_id or qt.supplier_id,
-            "supplier_name": sup.name if sup else "",
-            "material_name": mat.standard_name,
-            "spec": mat.spec or "",
-            "unit_price": qt.unit_price,
-            "cosine": cosine,
-            "spec_note": item.spec_note or "",
-        }
+        if item.bid_quote_line_id is not None:
+            if item.bid_quote_line_id not in bql_map:
+                return None
+            bql, sup = bql_map[item.bid_quote_line_id]
+            return {
+                "item_id": item.id,
+                "action": item.action,
+                "quote_id": None,
+                "bid_quote_line_id": item.bid_quote_line_id,
+                "supplier_id": item.supplier_id,
+                "supplier_name": sup.name if sup else "",
+                "material_name": bql.standard_name,
+                "spec": bql.spec or "",
+                "unit_price": bql.unit_price,
+                "cosine": cosine,
+                "spec_note": item.spec_note or "",
+            }
+        else:
+            if item.quote_id not in quote_map:
+                return None
+            qt, mat, sup = quote_map[item.quote_id]
+            return {
+                "item_id": item.id,
+                "action": item.action,
+                "quote_id": item.quote_id,
+                "bid_quote_line_id": None,
+                "supplier_id": item.supplier_id or qt.supplier_id,
+                "supplier_name": sup.name if sup else "",
+                "material_name": mat.standard_name,
+                "spec": mat.spec or "",
+                "unit_price": qt.unit_price,
+                "cosine": cosine,
+                "spec_note": item.spec_note or "",
+            }
 
     # Groups with ANY pending items → need review (item-level)
     # Groups fully confirmed → show in confirmed_groups
@@ -576,7 +664,7 @@ def anchor_review(
     confirmed_groups = []
 
     for g in groups:
-        all_items = [_item_detail(it, quote_map, _re) for it in g.items]
+        all_items = [_item_detail(it, quote_map, bql_map, _re) for it in g.items]
         all_items = [x for x in all_items if x is not None]
         pending_items = [x for x in all_items if x["action"] == "pending"]
         align_items = [x for x in all_items if x["action"] == "align"]
@@ -753,8 +841,9 @@ def anchor_review_confirm(
 async def tender_list_match(
     file: UploadFile | None = File(None),
     project_id: int = Form(...),
-    category: str = Form(...),
+    category: str | None = Form(None),
     supplier_ids: str | None = Form(None),
+    submission_ids: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """锚点模式：解析招标清单 → 嵌入匹配供应商报价 → 落对齐组。
@@ -780,26 +869,33 @@ async def tender_list_match(
         except ValueError:
             raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
 
+    sub_ids = None
+    if submission_ids:
+        try:
+            sub_ids = [int(x) for x in submission_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "submission_ids 须为逗号分隔的整数")
+
     # If no file provided, reconstruct anchors from current TenderListSession (issue 6)
     prebuilt_anchors = None
     if content is None:
         from apps.api.models.tender_list_session import TenderListSession
         from apps.api.services.tender_list import rebuild_anchors
-        session = (
-            db.query(TenderListSession)
-            .filter(
-                TenderListSession.project_id == project_id,
-                TenderListSession.category == category,
-                TenderListSession.is_current.is_(True),
-            )
-            .first()
+        tls_q = db.query(TenderListSession).filter(
+            TenderListSession.project_id == project_id,
+            TenderListSession.is_current.is_(True),
         )
+        if category:
+            tls_q = tls_q.filter(TenderListSession.category == category)
+        session = tls_q.order_by(TenderListSession.id.desc()).first()
         if not session:
             raise HTTPException(
                 400,
                 "未提供招标清单文件，且未找到已确认的采购清单 (TenderListSession)。"
                 "请先上传并确认招标清单，或直接上传 xlsx 文件。"
             )
+        if not category:
+            category = session.category
         prebuilt_anchors = rebuild_anchors(session)
 
     # Resolve tender_list_session_id so groups are linked to the session
@@ -809,6 +905,8 @@ async def tender_list_match(
     elif content is not None:
         # File upload path: find current session, else auto-create from the file
         # (closes the gap where match ran but no session was persisted → matrix 409).
+        if not category:
+            raise HTTPException(400, "上传招标清单时必须指定 category（品类）")
         from apps.api.models.tender_list_session import TenderListSession as _TLS
         from apps.api.services.tender_list import (
             parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
@@ -870,6 +968,7 @@ async def tender_list_match(
     try:
         summary, per_supplier = import_and_match(
             db, content, project_id, category, sids,
+            submission_ids=sub_ids,
             anchors=prebuilt_anchors,
             tender_list_session_id=_tls_id,
             brand_ctx=brand_ctx,
@@ -881,64 +980,64 @@ async def tender_list_match(
         logging.error("tender-list/match error: %s\n%s", e, traceback.format_exc())
         raise HTTPException(500, f"招标清单匹配失败：{type(e).__name__}: {e}")
 
-    # Enrich per_supplier with doc_meta from latest completed job per supplier
+    # Enrich per_supplier (now keyed by submission_id) with names and doc_meta
     from apps.api.models import ExtractionJob, Supplier as SupplierModel
+    from apps.api.models.bid_submission import BidSubmission as _BSSub
     from apps.api.services.quote_readiness import assess_readiness
 
-    # Load supplier names
-    sup_names: dict[int, str] = {}
-    for sup in db.query(SupplierModel).filter(
-        SupplierModel.id.in_(per_supplier.keys())
-    ).all():
-        sup_names[sup.id] = sup.name
+    # Load BidSubmission records for submission-keyed stats
+    sub_ids_for_lookup = [sid for sid in per_supplier.keys() if isinstance(sid, int) and sid > 0]
+    sub_records: dict[int, _BSSub] = {}
+    for sub in db.query(_BSSub).filter(_BSSub.id.in_(sub_ids_for_lookup)).all():
+        sub_records[sub.id] = sub
 
-    # Load latest completed quote job per supplier (context.supplier_id or fallback by name)
-    # Jobs store project_id in context; match by project_id and supplier_id
-    job_rows = db.execute(
-        __import__("sqlalchemy").text(
-            "SELECT j.result, json_extract(j.context, '$.supplier_id') as sid "
-            "FROM extraction_jobs j "
-            "WHERE j.status='done' AND j.type='quote' "
-            "AND json_extract(j.context, '$.project_id')=:pid "
-            "ORDER BY j.created_at DESC"
-        ),
-        {"pid": project_id},
-    ).fetchall()
+    # Build display name: prefer Supplier.name if supplier_id set, else supplier_raw_name
+    sub_display_names: dict[int, str] = {}
+    for sub_id, sub in sub_records.items():
+        if sub.supplier_id:
+            sup = db.get(SupplierModel, sub.supplier_id)
+            sub_display_names[sub_id] = sup.name if sup else sub.supplier_raw_name
+        else:
+            sub_display_names[sub_id] = sub.supplier_raw_name
 
-    doc_meta_by_sid: dict[int, dict] = {}
-    for row in job_rows:
-        try:
-            import json as _json
-            result_dict = row[0] if isinstance(row[0], dict) else (_json.loads(row[0]) if row[0] else {})
-            dm = result_dict.get("_doc_meta")
-            sid_str = row[1]
-            if dm and sid_str is not None:
-                sid_val = int(sid_str)
-                if sid_val not in doc_meta_by_sid:
-                    doc_meta_by_sid[sid_val] = dm
-        except Exception:
-            continue
+    # Also include legacy supplier_id-keyed entries (old data)
+    legacy_sids = [sid for sid in per_supplier.keys() if sid not in sub_records]
+    for sup in db.query(SupplierModel).filter(SupplierModel.id.in_(legacy_sids)).all():
+        sub_display_names[sup.id] = sup.name
+
+    # Load doc_meta from each submission's extraction job
+    doc_meta_by_sub: dict[int, dict] = {}
+    for sub_id, sub in sub_records.items():
+        job = db.get(ExtractionJob, sub.job_id)
+        if job and job.result:
+            dm = job.result.get("_doc_meta")
+            if dm:
+                doc_meta_by_sub[sub_id] = dm
 
     readiness_list = []
-    for sid, stats in per_supplier.items():
-        sup_name = sup_names.get(sid, f"supplier_{sid}")
-        dm = doc_meta_by_sid.get(sid)
-        r = assess_readiness(sid, sup_name, stats, doc_meta=dm)
+    for stat_key, stats in per_supplier.items():
+        sup_name = sub_display_names.get(stat_key, f"supplier_{stat_key}")
+        dm = doc_meta_by_sub.get(stat_key)
+        r = assess_readiness(stat_key, sup_name, stats, doc_meta=dm)
         readiness_list.append(r.as_dict())
 
-    # v2.7: persist supplier scope on current TenderListSession so downstream
-    # endpoints (anchor-review/matrix, llm-fill, bid-matrix) never fall back to
-    # scanning all historical suppliers for this project+category.
-    if _tls_id and sids:
+    # v2.7+: persist used_submission_ids on TenderListSession
+    if _tls_id:
         from apps.api.models.tender_list_session import TenderListSession as _TLSup
         _tls_obj = db.get(_TLSup, _tls_id)
         if _tls_obj:
-            _tls_obj.confirmed_supplier_ids = sorted(set(sids))
+            if sids:
+                _tls_obj.confirmed_supplier_ids = sorted(set(sids))
+            # per_supplier is now keyed by submission_id — persist those IDs directly
+            _tls_obj.used_submission_ids = sorted(
+                k for k in per_supplier.keys() if k in sub_records
+            )
             db.commit()
 
     result = summary.as_dict()
     result["readiness_list"] = readiness_list
     result["per_supplier_stats"] = per_supplier
+    result["category"] = category  # 回传品类（category 为 None 时已从 session 推导）
     return result
 
 
@@ -958,15 +1057,58 @@ class _LlmFillBody(BaseModel):
 
 
 def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: int):
-    """路由主线程读 DB → 纯数据 SupplierQuoteRow(worker 不碰 DB)。"""
+    """路由主线程读 DB → 纯数据 SupplierQuoteRow(worker 不碰 DB)。
+
+    BQL 优先：如果该供应商有 active BidSubmission，从 BidQuoteLine 读行数据，
+    不从 Quote 读（因为 archive 可能尚未执行）。无 BidSubmission 则退回 Quote 路径。
+    """
     from apps.api.models import Quote, Material
     from apps.api.services.supplier_fill_llm import SupplierQuoteRow
     from apps.api.services.canonical import extract_valve_canonical
+    from apps.api.services.bid_submission_resolve import resolve_active_submissions
 
+    # ── BQL 路径（优先）──────────────────────────────────────────────────────
+    active_subs = resolve_active_submissions(db, project_id, category, [supplier_id])
+    matching_sub = next((s for s in active_subs.values() if s.supplier_id == supplier_id), None)
+    if matching_sub:
+        from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
+        sub = matching_sub
+        bql_rows = (
+            db.query(BidQuoteLine)
+            .filter(
+                BidQuoteLine.submission_id == sub.id,
+                BidQuoteLine.category == category,
+            )
+            .all()
+        )
+        out = []
+        for bql in bql_rows:
+            canon = bql.canonical or extract_valve_canonical(bql.standard_name or "", bql.spec or "")
+            out.append(SupplierQuoteRow(
+                quote_id=bql.id,           # used as row identifier by LLM worker
+                bid_quote_line_id=bql.id,  # signals BQL path to _persist_llm_fill
+                supplier_id=supplier_id,
+                raw_material=bql.standard_name or "",
+                raw_spec=bql.spec or "",
+                raw_unit=bql.unit or "",
+                material=bql.standard_name or "",
+                spec=bql.spec or "",
+                unit=bql.unit or "",
+                qty=bql.qty,
+                unit_price=bql.unit_price,
+                total_price=bql.total_price,
+                canonical=canon or {},
+            ))
+        return out
+
+    # ── Quote 路径（旧数据 / 已归档）──────────────────────────────────────────
+    from apps.api.models.supplier import Supplier as _Sup
+    from apps.api.services.quote_filters import valid_quote_filters as _vqf2
     q = (
         db.query(Quote, Material)
         .join(Material, Quote.material_id == Material.id)
-        .filter(Quote.project_id == project_id, Quote.supplier_id == supplier_id)
+        .join(_Sup, Quote.supplier_id == _Sup.id)
+        .filter(Quote.project_id == project_id, Quote.supplier_id == supplier_id, *_vqf2())
     )
     if category:
         q = q.filter(Material.category == category)
@@ -974,13 +1116,11 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
     for qt, m in q.all():
         ext = m.extended_attrs or {}
         meta = qt.extraction_meta_json or {}
-        # Quote-level canonical (row-specific OCR) takes priority over material master
         meta_canon = meta.get("canonical") or {}
         mat_canon = ext.get("canonical") or extract_valve_canonical(
             m.standard_name or "", m.spec or "", material=m.material_type or ""
         )
         canon = meta_canon if meta_canon.get("valve_type") or meta_canon.get("dn") else mat_canon
-        # Layer 1 OCR correction fields (written to meta by batch-confirm)
         norm_mat = str(meta.get("normalized_material") or ext.get("normalized_material") or "").strip()
         ocr_reason = str(meta.get("ocr_correction_reason") or ext.get("ocr_correction_reason") or "").strip()
         out.append(SupplierQuoteRow(
@@ -1004,12 +1144,21 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
     return out
 
 
-def _persist_llm_fill(db, project_id, category, session_id, results, seq_to_anchor, valid_sids):
+def _persist_llm_fill(
+    db, project_id, category, session_id, results, seq_to_anchor, valid_sids,
+    bql_supplier_ids: set | None = None,
+    bql_supplier_to_submission: dict | None = None,
+):
     """单写者一次性落库：软删旧组（superseded）→ 按 anchor_seq 建组 → 每 cell 一 item。
 
     软删而非物理删，保留历史可追溯；bid_matrix 只读 status='confirmed' 故不受影响。
+    bql_supplier_ids: supplier_ids whose rows came from BidQuoteLine (cell.quote_id is
+    actually a BidQuoteLine.id — must be written to bid_quote_line_id, not quote_id).
+    bql_supplier_to_submission: supplier_id → submission_id mapping for BQL path.
     """
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+
+    bql_sids: set = bql_supplier_ids or set()
 
     # replace 语义：将该 project/category 下所有旧 confirmed 组标为 superseded（软删）
     old_confirmed = db.query(BidAlignmentGroup).filter(
@@ -1049,18 +1198,38 @@ def _persist_llm_fill(db, project_id, category, session_id, results, seq_to_anch
         db.flush()
         for cell in cells:
             qsid = cell.supplier_id if cell.supplier_id in valid_sids else None
-            persist_qid = cell.quote_id if cell.quote_id else None
-            # pending with no quote ref can't satisfy NOT NULL FK — skip DB row,
+            is_bql = cell.supplier_id in bql_sids
+            row_id = cell.quote_id if cell.quote_id else None
+            # pending with no row ref can't satisfy NOT NULL FK — skip DB row,
             # but the cell is still returned in the API response.
-            if persist_qid is None:
+            if row_id is None:
                 continue
             note = f"LLM cos={cell.confidence:.2f}"
-            db.add(BidAlignmentItem(
-                group_id=group.id, quote_id=persist_qid, supplier_id=qsid,
-                action=cell.action, spec_note=note.strip()[:500],
-                name_note=(cell.reason or "")[:500],
-                agg_total=cell.agg_total, agg_qty=cell.agg_qty,
-            ))
+            _submission_id = (
+                (bql_supplier_to_submission or {}).get(cell.supplier_id) if is_bql else None
+            )
+            if is_bql:
+                db.add(BidAlignmentItem(
+                    group_id=group.id,
+                    bid_quote_line_id=row_id,
+                    quote_id=None,
+                    supplier_id=qsid,
+                    submission_id=_submission_id,
+                    action=cell.action, spec_note=note.strip()[:500],
+                    name_note=(cell.reason or "")[:500],
+                    agg_total=cell.agg_total, agg_qty=cell.agg_qty,
+                ))
+            else:
+                db.add(BidAlignmentItem(
+                    group_id=group.id,
+                    quote_id=row_id,
+                    bid_quote_line_id=None,
+                    supplier_id=qsid,
+                    submission_id=None,
+                    action=cell.action, spec_note=note.strip()[:500],
+                    name_note=(cell.reason or "")[:500],
+                    agg_total=cell.agg_total, agg_qty=cell.agg_qty,
+                ))
 
 
 # ─── Dynamic suspect anchor selection ────────────────────────────────────────
@@ -1164,10 +1333,12 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     # 2. 解析供应商集合
     sids = list(body.supplier_ids)
     if not sids:
+        from apps.api.services.quote_filters import valid_quote_filters as _vqf3
         q = (
             db.query(Quote.supplier_id)
             .join(Material, Quote.material_id == Material.id)
-            .filter(Quote.project_id == body.project_id, Material.category == body.category)
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(Quote.project_id == body.project_id, Material.category == body.category, *_vqf3())
             .distinct()
         )
         sids = [r[0] for r in q.all() if r[0]]
@@ -1179,7 +1350,18 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     }
     valid_sids = {row[0] for row in db.query(Supplier.id).all()}
 
-    # 3. 主线程读：每家 supplier rows(纯数据)
+    # 3. 主线程读：每家 supplier rows(纯数据)；顺带记录哪些走 BQL 路径
+    from apps.api.services.bid_submission_resolve import resolve_active_submissions as _ras_fill
+    _fill_active_subs = _ras_fill(db, body.project_id, body.category, sids)
+    # _fill_active_subs is keyed by submission_id; derive supplier-based lookups for LLM fill path
+    _bql_actual_supplier_ids: set[int] = {
+        sub.supplier_id for sub in _fill_active_subs.values() if sub.supplier_id
+    }
+    _bql_supplier_to_submission: dict[int, int] = {
+        sub.supplier_id: sub_id
+        for sub_id, sub in _fill_active_subs.items()
+        if sub.supplier_id
+    }
     rows_by_sid = {sid: _load_supplier_fill_rows(db, body.project_id, body.category, sid)
                    for sid in sids}
 
@@ -1306,7 +1488,9 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
 
     # 6b. 单写者落库 + 失效旧 finalization(replace 闭环)
     _persist_llm_fill(db, body.project_id, body.category, session.id,
-                      results, seq_to_anchor, valid_sids)
+                      results, seq_to_anchor, valid_sids,
+                      bql_supplier_ids=_bql_actual_supplier_ids,
+                      bql_supplier_to_submission=_bql_supplier_to_submission)
     n_fin = db.query(AlignmentFinalization).filter(
         AlignmentFinalization.project_id == body.project_id,
         AlignmentFinalization.category == body.category,
@@ -1317,7 +1501,10 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     # 8. matrix_distribution：基于落库后矩阵，与 /bid-matrix 同源
     from apps.api.services.bid_matrix import build_anchor_matrix as _bam_fn
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
-    _bam_result = _bam_fn(db, tender_anchors, session.id, sids, body.project_id, body.category)
+    _bam_result = _bam_fn(
+        db, tender_anchors, session.id, sids, body.project_id, body.category,
+        used_submission_ids=[], submission_ids=[],
+    )
     matrix_distribution = _mdr_fn(_bam_result["rows"], sids)
 
     # 7. 指标：新验收标准 quoted/pending≥2 + quoted≥2 + embedding 基线

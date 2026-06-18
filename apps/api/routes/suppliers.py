@@ -17,9 +17,12 @@ def list_suppliers(
     page_size: int = Query(20, ge=1, le=100),
     keyword: str | None = None,
     category: str | None = None,
+    merge_status: str = Query("active", description="active|merged|inactive|all"),
     db: Session = Depends(get_db),
 ):
     q = db.query(Supplier)
+    if merge_status != "all":
+        q = q.filter(Supplier.merge_status == merge_status)
     if keyword:
         q = q.filter(Supplier.name.contains(keyword) | Supplier.short_name.contains(keyword))
     if category:
@@ -33,6 +36,52 @@ def list_suppliers(
         "page_size": page_size,
         "items": [SupplierOut.model_validate(i).model_dump() for i in items],
     }
+
+
+@router.get("/search", response_model=list)
+def search_suppliers(
+    q: str = Query(..., min_length=1, description="供应商名称（支持别名/模糊搜索）"),
+    limit: int = Query(10, ge=1, le=50),
+    active_only: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    """供应商名称搜索（用于 batch-confirm 时的供应商选择下拉）。
+
+    支持 Supplier.name / short_name 模糊匹配 + SupplierAlias 精确规范化匹配。
+    """
+    from apps.api.services.supplier_resolve import search_suppliers_by_name
+    return search_suppliers_by_name(db, q, limit=limit, active_only=active_only)
+
+
+@router.get("/resolve", response_model=dict)
+def resolve_supplier_by_name(
+    name: str = Query(..., min_length=1, description="供应商原始名称（来自 OCR 或文件名）"),
+    db: Session = Depends(get_db),
+):
+    """7层供应商解析 — 将原始名称映射到 canonical supplier_id。
+
+    返回：
+      {matched: true, supplier: {...}}          精确命中一个
+      {matched: false, ambiguous: true, candidates: [...]}  歧义（多个候选）
+      {matched: false, ambiguous: false}        未找到
+    """
+    from apps.api.services.supplier_resolve import resolve_supplier
+    result = resolve_supplier(db, name)
+    if result.supplier:
+        sup = result.supplier
+        return {
+            "matched": True,
+            "layer": result.matched_layer,
+            "supplier": {"id": sup.id, "name": sup.name, "short_name": sup.short_name or ""},
+        }
+    if result.candidates:
+        return {
+            "matched": False,
+            "ambiguous": True,
+            "candidates": result.candidates,
+            "normalized": result.normalized,
+        }
+    return {"matched": False, "ambiguous": False, "normalized": result.normalized}
 
 
 @router.get("/{supplier_id}", response_model=SupplierOut)

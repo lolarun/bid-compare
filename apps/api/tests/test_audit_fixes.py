@@ -112,10 +112,20 @@ class TestBatchConfirmIdempotency:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
     def test_double_click_does_not_create_duplicates(self, client):
+        # 0. Create supplier (P0: supplier_id must be explicit)
+        rs = client.post(
+            "/api/suppliers",
+            json={"name": "Alpha Corp", "categories": ["桥架"]},
+        )
+        assert rs.status_code == 201, rs.text
+        supplier_id = rs.json()["id"]
+
         # 1. Upload
         r = client.post(
             "/api/intake/upload",
@@ -124,31 +134,43 @@ class TestBatchConfirmIdempotency:
         )
         job_id = r.json()["id"]
 
-        # 2. First confirm
+        # 2. First confirm — P0 new contract: line_count, submission_id (no quote_ids/created)
         r1 = client.post(
             "/api/quotes/batch-confirm",
-            json={"job_id": job_id, "supplier_name": "Alpha", "category": "桥架"},
+            json={
+                "job_id": job_id,
+                "supplier_id": supplier_id,
+                "supplier_name": "Alpha Corp",
+                "category": "桥架",
+            },
         )
-        assert r1.status_code == 200
+        assert r1.status_code == 200, r1.text
         body1 = r1.json()
-        assert body1["created"] == 2
-        first_ids = set(body1["quote_ids"])
-        assert len(first_ids) == 2
+        assert body1["line_count"] == 2, body1
+        first_submission_id = body1["submission_id"]
+        assert first_submission_id is not None
 
         # 3. Second confirm (simulating double-click) — MUST be idempotent
         r2 = client.post(
             "/api/quotes/batch-confirm",
-            json={"job_id": job_id, "supplier_name": "Alpha", "category": "桥架"},
+            json={
+                "job_id": job_id,
+                "supplier_id": supplier_id,
+                "supplier_name": "Alpha Corp",
+                "category": "桥架",
+            },
         )
-        assert r2.status_code == 200
+        assert r2.status_code == 200, r2.text
         body2 = r2.json()
-        assert body2["created"] == 0, (
-            "Re-confirm must not create new rows. "
-            f"Got created={body2['created']}; "
-            "previously the lack of batch_id check caused duplicate quotes."
+        assert body2["line_count"] == 2, (
+            "Re-confirm must return same line_count. "
+            f"Got line_count={body2['line_count']}; "
+            "idempotent hit should replay original count."
         )
         assert body2.get("idempotent") is True
-        assert set(body2["quote_ids"]) == first_ids
+        assert body2["submission_id"] == first_submission_id, (
+            "Idempotent re-confirm must return the SAME submission_id"
+        )
 
 
 # ─── Backend audit-fix B: malformed result shape ───────────────────────────
@@ -178,6 +200,8 @@ class TestBatchConfirmShapeGuard:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -212,6 +236,14 @@ class TestBatchConfirmShapeGuard:
         (which could happen if an LLM produces malformed JSON that
         somehow passes our pipeline post-processing), we report each as
         an error rather than crashing on .get()."""
+        # Pre-create supplier (P0 requirement: supplier_id must be explicit)
+        rs = client.post(
+            "/api/suppliers",
+            json={"name": "ShapeGuardSupplier", "categories": ["阀门"]},
+        )
+        assert rs.status_code == 201, rs.text
+        supplier_id = rs.json()["id"]
+
         # Create a successful job via the API first
         r = client.post(
             "/api/intake/upload",
@@ -244,11 +276,16 @@ class TestBatchConfirmShapeGuard:
 
         r2 = client.post(
             "/api/quotes/batch-confirm",
-            json={"job_id": job_id, "supplier_name": "S", "category": "阀门"},
+            json={
+                "job_id": job_id,
+                "supplier_id": supplier_id,
+                "supplier_name": "ShapeGuardSupplier",
+                "category": "阀门",
+            },
         )
         assert r2.status_code == 200, r2.text
         body = r2.json()
-        assert body["created"] == 2
+        assert body["line_count"] == 2
         shape_err_count = sum(
             1 for e in body["errors"] if "object" in (e.get("reason") or "").lower()
         )
@@ -316,6 +353,8 @@ class TestInviteSaveValidation:
             lambda: ExtractionPipeline(MockProvider()),
         )
         from apps.api.main import app
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -361,10 +400,19 @@ class TestOrphanProjectGuard:
             lambda: ExtractionPipeline(MockProvider(canned=canned)),
         )
         from apps.api.main import app
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
     def test_explicit_project_id_404_fails_loudly(self, client):
+        rs = client.post(
+            "/api/suppliers",
+            json={"name": "OrphanGuardSup", "categories": ["桥架"]},
+        )
+        assert rs.status_code == 201, rs.text
+        supplier_id = rs.json()["id"]
+
         r = client.post(
             "/api/intake/upload",
             data={"type": "quote", "category": "桥架"},
@@ -376,7 +424,8 @@ class TestOrphanProjectGuard:
             "/api/quotes/batch-confirm",
             json={
                 "job_id": job_id,
-                "supplier_name": "S",
+                "supplier_id": supplier_id,
+                "supplier_name": "OrphanGuardSup",
                 "project_id": 99999,  # non-existent
                 "category": "桥架",
             },
@@ -387,6 +436,13 @@ class TestOrphanProjectGuard:
 
     def test_context_project_id_404_fails_loudly(self, client, temp_db):
         """When the job context says project_id=X but X is gone."""
+        rs = client.post(
+            "/api/suppliers",
+            json={"name": "OrphanContextSup", "categories": ["桥架"]},
+        )
+        assert rs.status_code == 201, rs.text
+        supplier_id = rs.json()["id"]
+
         r = client.post(
             "/api/intake/upload",
             data={"type": "quote", "category": "桥架", "project_id": 12345},
@@ -397,7 +453,12 @@ class TestOrphanProjectGuard:
 
         r2 = client.post(
             "/api/quotes/batch-confirm",
-            json={"job_id": job_id, "supplier_name": "S", "category": "桥架"},
+            json={
+                "job_id": job_id,
+                "supplier_id": supplier_id,
+                "supplier_name": "OrphanContextSup",
+                "category": "桥架",
+            },
         )
         assert r2.status_code == 400
         assert "context" in r2.json()["detail"]
@@ -421,6 +482,7 @@ class TestPeriodicStuckJobSweep:
         from apps.api.services.document_ingestion import JobStatus
 
         monkeypatch.setattr("apps.api.main.STUCK_JOB_SWEEP_S", 0.05)
+        monkeypatch.setattr("apps.api.main.STUCK_JOB_MAX_AGE_MINUTES", 5)
 
         _, SessionLocal = temp_db
         db = SessionLocal()
@@ -465,6 +527,8 @@ class TestSupplierDeletionGuard:
     @pytest.fixture
     def client(self, temp_db):
         from apps.api.main import app
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -685,15 +749,20 @@ class TestConcurrentInviteSave:
 
         # Step 3: call the route — it will try to add a duplicate, hit
         # IntegrityError, recover, and return the pre-existing row.
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/invite/save",
-                json={
-                    "tender_id": tender_id,
-                    "items": [],
-                    "supplier_ids": [sid],
-                },
-            )
+        from apps.api.routes.auth import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
+        try:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/api/invite/save",
+                    json={
+                        "tender_id": tender_id,
+                        "items": [],
+                        "supplier_ids": [sid],
+                    },
+                )
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
 
         assert r.status_code == 200, r.text
         body = r.json()

@@ -348,6 +348,7 @@ export interface TenderBidlistResult {
   brand_requirement: TenderBrandReq[]
   supplier_brands: TenderSupplierBrand[]
   material_class: string
+  detected_category?: string
   detected_pages: { bidlist: number[]; brand: number | null }
   row_count: number
   source_type: string
@@ -454,14 +455,15 @@ export interface RecommendResponse {
 
 export interface BatchConfirmResult {
   status: string
-  created: number
-  skipped: number
+  submission_id: number
+  line_count: number
+  skipped_count: number
   errors: Array<{ row: number; reason: string }>
   unknown_brands: string[]
-  quote_ids: number[]
   supplier_id: number | null
   project_id: number | null
   batch_id: string
+  idempotent?: boolean
 }
 
 export interface SavedInvitation {
@@ -597,7 +599,8 @@ export interface AlignmentRowInput {
 }
 
 export interface AlignmentGroupItem {
-  quote_id: number
+  quote_id?: number | null
+  bid_quote_line_id?: number | null
   supplier_id: number
   action: string
   spec_note?: string
@@ -713,6 +716,7 @@ export interface AnchorMatchSummary {
   total_quotes: number
   low_conf: number
   residue: number
+  category?: string
 }
 
 export interface SupplierFillSummary {

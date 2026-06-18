@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, PROFESSION_MAP
 from apps.api.services import scoring
+from apps.api.services.quote_filters import valid_quote_filters
 
 log = logging.getLogger(__name__)
 
@@ -163,9 +164,11 @@ def _aggregate_supplier_stats(
             func.count(fallback_dev).label("dev_count"),
         )
         .join(Material, Material.id == Quote.material_id)
+        .join(Supplier, Supplier.id == Quote.supplier_id)
         .filter(
             Quote.supplier_id.isnot(None),
             Quote.unit_price > 0,
+            *valid_quote_filters(),
         )
     )
     if categories:
@@ -190,9 +193,11 @@ def _aggregate_supplier_stats(
             quote_dates = (
                 db.query(Quote.created_at)
                 .join(Material, Material.id == Quote.material_id)
+                .join(Supplier, Supplier.id == Quote.supplier_id)
                 .filter(
                     Quote.supplier_id == sid,
                     Quote.unit_price > 0,
+                    *valid_quote_filters(),
                 )
             )
             if categories:
@@ -286,10 +291,12 @@ def _per_category_breakdown(
     rows = (
         db.query(Material.category, func.count(Quote.id))
         .join(Quote, Quote.material_id == Material.id)
+        .join(Supplier, Supplier.id == Quote.supplier_id)
         .filter(
             Quote.supplier_id == supplier_id,
             Material.category.in_(categories),
             Quote.unit_price > 0,
+            *valid_quote_filters(),
         )
         .group_by(Material.category)
         .all()

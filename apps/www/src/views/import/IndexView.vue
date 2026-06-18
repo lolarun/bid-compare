@@ -284,10 +284,10 @@ async function onOcrConfirm(rows: unknown[]) {
       category: '',  // per-item category comes from enhanced items
       overrides: rows as Array<Record<string, unknown>>,
     })
-    if (data.created > 0) {
-      message.success(`入库成功：新增 ${data.created} 条，跳过 ${data.skipped} 条`)
+    if (data.line_count > 0) {
+      message.success(`入库成功：新增 ${data.line_count} 条，跳过 ${data.skipped_count} 条`)
     } else {
-      message.warning(`未新增任何报价（跳过 ${data.skipped} 条，错误 ${data.errors?.length ?? 0} 条）`)
+      message.warning(`未新增任何报价（跳过 ${data.skipped_count} 条，错误 ${data.errors?.length ?? 0} 条）`)
     }
     if (data.errors && data.errors.length > 0) {
       const errMsg = data.errors.slice(0, 3).map((e) => `第${e.row}行: ${e.reason}`).join('；')

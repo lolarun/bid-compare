@@ -17,10 +17,10 @@ pip install -r requirements.txt
 cp .env.example .env   # 填写 DASHSCOPE_API_KEY 等
 ```
 
-- 端口：**8002**（固定，不要改）
+- 端口：**8000**（固定，不要改）
 - 禁用 `--reload`（保持与生产行为一致）
-- 启动：`python -m uvicorn apps.api.main:app --port 8002`（在 repo 根目录运行）
-- 端口冲突先 kill 再重启：`netstat -ano | findstr :8002` → `taskkill /PID <pid> /F`
+- 启动：`python -m uvicorn apps.api.main:app --port 8000`（在 repo 根目录运行）
+- 端口冲突先 kill 再重启：`netstat -ano | findstr :8000` → `taskkill /PID <pid> /F`
 
 ### 前端
 

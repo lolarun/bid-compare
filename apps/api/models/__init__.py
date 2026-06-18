@@ -2,6 +2,7 @@
 
 from apps.api.models.material import Material
 from apps.api.models.supplier import Supplier
+from apps.api.models.supplier_alias import SupplierAlias
 from apps.api.models.project import Project
 from apps.api.models.quote import Quote
 from apps.api.models.analysis_config import AnalysisConfig
@@ -12,6 +13,7 @@ from apps.api.models.bid_invitation import BidInvitation
 from apps.api.models.user import User
 from apps.api.models.operation_log import OperationLog
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.models.alignment_finalization import AlignmentFinalization
 from apps.api.models.bid_matrix_version import BidMatrixVersion
@@ -22,9 +24,11 @@ from apps.api.core.config import (
 )
 
 __all__ = [
-    "Material", "Supplier", "Project", "Quote", "AnalysisConfig", "BrandTier",
+    "Material", "Supplier", "SupplierAlias", "Project", "Quote",
+    "AnalysisConfig", "BrandTier",
     "ExtractionJob", "TenderDocument", "BidInvitation", "User", "OperationLog",
     "BidAlignmentGroup", "BidAlignmentItem",
+    "BidSubmission", "BidQuoteLine",
     "TenderListSession", "AlignmentFinalization", "BidMatrixVersion",
     "PROFESSION_ABBR", "CATEGORY_ABBR", "PROFESSION_MAP",
     "DEFAULT_SCORING_WEIGHTS", "DEFAULT_THRESHOLDS",

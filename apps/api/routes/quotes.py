@@ -26,6 +26,8 @@ from apps.api.models import (
     Project,
     Quote,
     Supplier,
+    BidSubmission,
+    BidQuoteLine,
 )
 from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
 from apps.api.services.import_service import import_csv_data, _gen_code
@@ -35,15 +37,23 @@ router = APIRouter(prefix="/api/quotes", tags=["quotes"])
 
 
 class BatchConfirmRequest(BaseModel):
-    """Materialise a DONE extraction job's items into Quote records."""
+    """暂存一次 OCR 提取的报价 → BidSubmission + BidQuoteLine（弱关联版）。
+
+    弱关联规则：
+    - supplier_id 可选；有则作为软引用（须为 active Supplier）；无则陌生供应商直接暂存。
+    - supplier_name 必填：作为比价时的显示名（写入 supplier_raw_name）。
+    - batch_id = BID-{job.id}：一个 job 最多产生一条 BidSubmission（幂等）。
+    - Material 未找到时 material_id=NULL，仍写入 BidQuoteLine（禁止自动创建 Material）。
+    - 归档到 Quote 须调用 archive-prices，且 supplier_id 必须非空。
+    """
 
     job_id: str
-    supplier_id: int | None = None
-    supplier_name: str = ""  # used to create a new supplier if no id provided
+    supplier_id: int | None = None            # 可选：软引用已知供应商
+    supplier_name: str = ""                   # 必填：比价显示名（unknown supplier 时为 OCR 原始名）
     project_id: int | None = None
-    project_name: str = ""
-    category: str = ""  # required if items don't carry their own
-    overrides: list[dict[str, Any]] | None = None  # user-edited items, if any
+    project_name: str = ""                    # 查找现有 project（不自动创建）
+    category: str = ""
+    overrides: list[dict[str, Any]] | None = None
     bid_status: str = ""
 
 
@@ -302,22 +312,16 @@ async def import_file(
     return result
 
 
-# ─── Batch confirm: convert ExtractionJob.result → Quote rows ──────────────
+# ─── Batch confirm (P0 新版): ExtractionJob.result → BidSubmission + BidQuoteLine ──
 @router.post("/batch-confirm", response_model=dict)
 def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(get_db)):
-    """Materialise an extracted quote job into Material + Quote DB records.
+    """将 OCR 提取结果暂存为 BidSubmission + BidQuoteLine（P0 新版）。
 
-    Flow:
-    - Look up job; must be DONE and type=quote.
-    - Resolve supplier (by id, or by name → get-or-create).
-    - Resolve project (by id, or by name → get-or-create).
-    - For each item (either job.result.items or `overrides` if provided):
-        - Standardise material name
-        - Get or create Material (by category, standard_name, spec)
-        - Compute deviation + alert_level vs ref_price_reasonable_low/median
-        - Create Quote linked to material+supplier+project
-        - Collect unknown brands (no entry in brand_tiers table)
-    - Returns {created, skipped, errors, unknown_brands, quote_ids}
+    关键约束（P0）：
+    - supplier_id 必须由前端明确传入，禁止自动创建 Supplier。
+    - Material 未找到时 material_id=NULL，仍写入 BidQuoteLine（禁止创建 Material）。
+    - 本函数不再写入 Quote / Material / Supplier 历史表。
+    - 归档到 Quote 须显式调用 POST /api/quotes/archive-prices。
     """
     job = db.get(ExtractionJob, body.job_id)
     if not job:
@@ -327,71 +331,34 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     if job.status != "done":
         raise HTTPException(400, f"Job status is {job.status}; must be 'done'")
 
-    # ── Resolve supplier ────────────────────────────────────────────────────
-    def _fuzzy_supplier_candidates(db, name: str, threshold: float = 0.75) -> list[dict]:
-        """返回相似度超过 threshold 的已有供应商列表，用于人工确认去重。"""
-        from difflib import SequenceMatcher
-        all_sups = db.query(Supplier).all()
-        candidates = []
-        for s in all_sups:
-            ratio = SequenceMatcher(None, name, s.name).ratio()
-            if ratio >= threshold:
-                candidates.append({"id": s.id, "name": s.name, "similarity": round(ratio, 3)})
-        return sorted(candidates, key=lambda x: -x["similarity"])
-
+    # ── Supplier 验证（弱关联：supplier_id 可选，有则校验状态）──────────────────
     supplier: Supplier | None = None
-    if body.supplier_id:
+    if body.supplier_id is not None:
         supplier = db.get(Supplier, body.supplier_id)
         if not supplier:
             raise HTTPException(404, f"Supplier {body.supplier_id} not found")
-    elif body.supplier_name.strip():
-        name = body.supplier_name.strip()
-        supplier = db.query(Supplier).filter_by(name=name).first()
-        if not supplier:
-            # 模糊去重：相似度≥0.75 时要求人工确认，禁止静默新建
-            candidates = _fuzzy_supplier_candidates(db, name)
-            if candidates:
-                raise HTTPException(409, {
-                    "error": "supplier_alias_conflict",
-                    "message": f"供应商「{name}」与已有记录高度相似，请确认是否为同一家",
-                    "input_name": name,
-                    "candidates": candidates[:5],
-                })
-            supplier = Supplier(name=name)
-            db.add(supplier)
-            db.flush()
+        if supplier.merge_status != "active":
+            raise HTTPException(
+                400,
+                f"Supplier {supplier.name!r} merge_status={supplier.merge_status}，"
+                "只允许选择 active 供应商",
+            )
     else:
-        # Try from job result or context
-        sname = (job.result or {}).get("supplier_name") or (job.context or {}).get("supplier_name")
-        if sname:
-            supplier = db.query(Supplier).filter_by(name=sname).first()
-            if not supplier:
-                candidates = _fuzzy_supplier_candidates(db, sname)
-                if candidates:
-                    raise HTTPException(409, {
-                        "error": "supplier_alias_conflict",
-                        "message": f"OCR 识别供应商「{sname}」与已有记录高度相似，请确认后再入库",
-                        "input_name": sname,
-                        "candidates": candidates[:5],
-                    })
-                supplier = Supplier(name=sname)
-                db.add(supplier)
-                db.flush()
+        # 陌生供应商：supplier_name 必填
+        if not body.supplier_name.strip():
+            raise HTTPException(422, "陌生供应商必须提供 supplier_name")
 
-    # ── Resolve project ────────────────────────────────────────────────────
-    # AUDIT-FIX M2: when a project_id comes through (body or job context),
-    # missing-target should be a 400, NOT silently null. Otherwise the user
-    # uploads with a specific project and the quote lands unattached.
+    # ── Project（仍允许按名查找或创建，project 不是污染来源）────────────────────
     project: Project | None = None
     if body.project_id:
         project = db.get(Project, body.project_id)
         if not project:
             raise HTTPException(404, f"Project {body.project_id} not found")
     elif body.project_name.strip():
-        name = body.project_name.strip()
-        project = db.query(Project).filter_by(name=name).first()
+        pname = body.project_name.strip()
+        project = db.query(Project).filter_by(name=pname).first()
         if not project:
-            project = Project(name=name)
+            project = Project(name=pname)
             db.add(project)
             db.flush()
     elif (job.context or {}).get("project_id"):
@@ -404,22 +371,16 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "specify project_name or project_id to proceed.",
             )
 
-    # ── Determine category ─────────────────────────────────────────────────
-    # Category can now come from three sources (highest to lowest priority):
-    #   1. Per-item "category" field (from AI enhance step)
-    #   2. Job context "category"
-    #   3. Top-level body.category
-    # If all items carry their own category, the top-level is optional.
+    # ── 默认 category ──────────────────────────────────────────────────────────
     default_category = (
         body.category.strip()
         or (job.context or {}).get("category", "")
         or ""
     )
-    # Validate default if provided (but don't require it)
     if default_category and default_category not in PROFESSION_MAP:
         raise HTTPException(400, f"Unknown category: {default_category}")
 
-    # ── Resolve item list (validate shape) ─────────────────────────────────
+    # ── Item list ──────────────────────────────────────────────────────────────
     raw_items: Any = (
         body.overrides
         if body.overrides is not None
@@ -428,187 +389,154 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     if raw_items is None:
         raw_items = []
     if not isinstance(raw_items, list):
-        raise HTTPException(
-            422, detail=f"Expected items to be a list, got {type(raw_items).__name__}"
-        )
+        raise HTTPException(422, f"Expected items list, got {type(raw_items).__name__}")
+
     items: list[dict[str, Any]] = []
     shape_errors: list[dict] = []
     for idx, item in enumerate(raw_items):
         if isinstance(item, dict):
             items.append(item)
         else:
-            shape_errors.append({
-                "row": idx + 1,
-                "reason": f"row is not an object: {type(item).__name__}",
-            })
+            shape_errors.append({"row": idx + 1, "reason": f"not an object: {type(item).__name__}"})
 
-    # ── Idempotency: batch_id derived from (job_id, supplier_id) so a
-    # double-click on Confirm cannot create duplicate Quote rows. ────────────
-    batch_id = f"OCR-{job.id[:8]}-{supplier.id if supplier else 'nos'}"
-    prior = (
-        db.query(Quote)
-        .filter(Quote.batch_id == batch_id)
-        .order_by(Quote.id.asc())
-        .all()
+    # ── 幂等：BidSubmission.batch_id 检查（一个 job 最多一条 BidSubmission）────────
+    batch_id = f"BID-{job.id}"
+    prior_submission = (
+        db.query(BidSubmission).filter_by(batch_id=batch_id).first()
     )
-    if prior:
+    if prior_submission:
+        line_count = db.query(BidQuoteLine).filter_by(
+            submission_id=prior_submission.id
+        ).count()
         log.info(
-            "batch_confirm: idempotent hit, returning %d prior quotes for batch %s",
-            len(prior),
-            batch_id,
+            "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
+            prior_submission.id, batch_id, line_count,
         )
         return {
             "status": "ok",
-            "created": 0,
-            "skipped": len(items),
-            "errors": shape_errors,
+            "submission_id": prior_submission.id,
+            "line_count": line_count,
+            "skipped_count": 0,
+            "errors": [],
             "unknown_brands": [],
-            "quote_ids": [q.id for q in prior],
-            "supplier_id": supplier.id if supplier else None,
+            "supplier_id": prior_submission.supplier_id,
             "project_id": project.id if project else None,
             "batch_id": batch_id,
             "idempotent": True,
         }
 
+    # ── 创建 BidSubmission ─────────────────────────────────────────────────────
+    display_name = (
+        body.supplier_name.strip()
+        or (supplier.name if supplier else "")
+        or (job.result or {}).get("supplier_name", "")
+    )
+    submission = BidSubmission(
+        job_id=job.id,
+        supplier_id=supplier.id if supplier else None,
+        supplier_raw_name=display_name,
+        project_id=project.id if project else None,
+        batch_id=batch_id,
+        status="pending",
+        bid_status=body.bid_status,
+    )
+    db.add(submission)
+    db.flush()
+
     if not items:
+        db.commit()
         return {
             "status": "ok",
-            "created": 0,
-            "skipped": 0,
+            "submission_id": submission.id,
+            "line_count": 0,
+            "skipped_count": 0,
             "errors": shape_errors,
             "unknown_brands": [],
-            "quote_ids": [],
-            "supplier_id": supplier.id if supplier else None,
+            "supplier_id": submission.supplier_id,
             "project_id": project.id if project else None,
             "batch_id": batch_id,
         }
 
-    # ── Iterate & create ───────────────────────────────────────────────────
+    # ── 逐行处理 → BidQuoteLine（P0：Material 未找到时 material_id=NULL，不创建）──
     from apps.api.services.comparison import get_category_thresholds, determine_alert
 
-    thresholds_cache: dict[str, dict] = {}  # cache per category
-    created = 0
-    skipped = 0
+    thresholds_cache: dict[str, dict] = {}
+    line_count = 0
+    skipped_count = 0
     errors: list[dict] = list(shape_errors)
     unknown_brands: set[str] = set()
-    quote_ids: list[int] = []
     line_total_sum: float = 0.0
 
     for idx, item in enumerate(items):
         try:
             raw_name = str(item.get("material") or "").strip()
             if not raw_name:
-                skipped += 1
+                skipped_count += 1
                 continue
-
-            # Block grand_total/subtotal rows from entering DB as regular quotes
             if _GRAND_TOTAL_NAME_RE.search(raw_name):
-                log.info("batch_confirm: skipping aggregate row '%s'", raw_name)
-                skipped += 1
+                log.info("batch_confirm: skipping aggregate row %r", raw_name)
+                skipped_count += 1
                 continue
 
-            # Per-item category: item.category > default_category
             item_category = str(item.get("category") or "").strip() or default_category
             if not item_category or item_category not in PROFESSION_MAP:
-                errors.append({"row": idx + 1, "reason": f"Missing or invalid category: '{item_category}'"})
-                skipped += 1
+                errors.append({"row": idx + 1, "reason": f"invalid category: {item_category!r}"})
+                skipped_count += 1
                 continue
-            item_profession = PROFESSION_MAP[item_category]
 
-            # Use AI standard_name if provided, else rule-based standardization
-            ai_standard_name = str(item.get("standard_name") or "").strip()
-            if ai_standard_name:
-                standard_name = ai_standard_name
+            ai_std_name = str(item.get("standard_name") or "").strip()
+            if ai_std_name:
+                standard_name = ai_std_name
             else:
-                std_result = standardize_name(raw_name, item_category)
-                standard_name = std_result["standardized"]
+                standard_name = standardize_name(raw_name, item_category)["standardized"]
 
-            # Use AI standard_spec if provided, else original spec
             spec = str(item.get("standard_spec") or item.get("spec") or "").strip()
 
-            # Try matched_material_id first (from AI enhance)
-            mat = None
+            # Material 查找（P0：仅查找，不创建）
+            mat: Material | None = None
             matched_mid = item.get("matched_material_id")
             if matched_mid is not None:
                 try:
                     mat = db.get(Material, int(matched_mid))
                 except (ValueError, TypeError):
                     pass
-
             if not mat:
                 mat = (
                     db.query(Material)
                     .filter_by(category=item_category, standard_name=standard_name, spec=spec)
                     .first()
                 )
-            if not mat:
-                mat = Material(
-                    material_code=_gen_code(db, item_profession, item_category),
-                    standard_name=standard_name,
-                    profession=item_profession,
-                    category=item_category,
-                    sub_category="",
-                    spec=spec,
-                    material_type=str(item.get("material_type") or "").strip(),
-                    unit=str(item.get("unit") or ""),
-                    brand=str(item.get("brand") or ""),
-                )
-                db.add(mat)
-                db.flush()
+            # 未找到 → material_id=NULL（不创建 Material，不报错）
 
-            # Persist canonical, validation_warning, and OCR-correction fields
-            canonical = item.get("canonical")
-            validation_warning = item.get("validation_warning") or ""
-            norm_mat = str(item.get("normalized_material") or "").strip()
-            ocr_reason = str(item.get("ocr_correction_reason") or "").strip()
-            if canonical or validation_warning or norm_mat or ocr_reason:
-                ext = dict(mat.extended_attrs or {})
-                if canonical and "canonical" not in ext:
-                    ext["canonical"] = canonical
-                if validation_warning:
-                    ext["validation_warning"] = validation_warning
-                if norm_mat and "normalized_material" not in ext:
-                    ext["normalized_material"] = norm_mat
-                if ocr_reason and "ocr_correction_reason" not in ext:
-                    ext["ocr_correction_reason"] = ocr_reason
-                mat.extended_attrs = ext
-
-            # Brand-tier lookup (track unknowns)
+            # 品牌等级
             brand = str(item.get("brand") or "").strip()
             brand_tier = ""
             if brand:
-                bt = (
-                    db.query(BrandTier)
-                    .filter(BrandTier.brand_name == brand)
-                    .first()
-                )
+                bt = db.query(BrandTier).filter_by(brand_name=brand).first()
                 if bt:
                     brand_tier = bt.tier
                 else:
                     unknown_brands.add(brand)
 
-            price = item.get("unit_price")
-            price = float(price) if price is not None else None
-            qty = item.get("qty")
-            qty = float(qty) if qty is not None else None
+            price = float(p) if (p := item.get("unit_price")) is not None else None
+            qty = float(q) if (q := item.get("qty")) is not None else None
             total = item.get("total_price")
             if total is None and price is not None and qty is not None:
                 total = round(price * qty, 4)
+            if total is not None:
+                total = float(total)
 
-            # Deviation + alert (cache thresholds per category)
-            if item_category not in thresholds_cache:
-                thresholds_cache[item_category] = get_category_thresholds(db, item_category)
-            thresholds = thresholds_cache[item_category]
-            ref = mat.ref_price_reasonable_low or mat.ref_price_median
-            deviation = None
-            alert = ""
-            if price and ref and ref > 0:
-                deviation = round((price - ref) / ref, 4)
-                alert = determine_alert(deviation, thresholds)
+            # 偏差计算（仅当 material 找到且有参考价时）
+            deviation: float | None = None
+            alert: str = ""
+            if mat and price:
+                ref = mat.ref_price_reasonable_low or mat.ref_price_median
+                if ref and ref > 0:
+                    if item_category not in thresholds_cache:
+                        thresholds_cache[item_category] = get_category_thresholds(db, item_category)
+                    deviation = round((price - ref) / ref, 4)
+                    alert = determine_alert(deviation, thresholds_cache[item_category])
 
-            # Row-level extraction evidence: preserve the supplier's ORIGINAL
-            # expression (pre-standardization) so the LLM supplier-fill agent can
-            # judge "like a human reading the quote" rather than the normalized name.
             extraction_meta = {
                 "extraction_job_id": body.job_id,
                 "source_ref": item.get("source_ref"),
@@ -623,43 +551,46 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "ocr_correction_reason": str(item.get("ocr_correction_reason") or "").strip(),
             }
 
-            q = Quote(
-                material_id=mat.id,
-                supplier_id=supplier.id if supplier else None,
-                project_id=project.id if project else None,
+            line = BidQuoteLine(
+                submission_id=submission.id,
+                material_id=mat.id if mat else None,
+                raw_name=raw_name,
+                standard_name=standard_name,
+                category=item_category,
+                spec=spec,
+                unit=str(item.get("unit") or ""),
+                qty=qty,
                 unit_price=price,
-                unit_price_excl_tax=item.get("unit_price_excl_tax"),
-                quantity=qty,
+                unit_price_excl_tax=(
+                    float(v) if (v := item.get("unit_price_excl_tax")) is not None else None
+                ),
+                tax_rate=(float(v) if (v := item.get("tax_rate")) is not None else None),
                 total_price=total,
-                tax_rate=item.get("tax_rate"),
                 brand=brand,
                 brand_tier=brand_tier,
                 remark=str(item.get("remark") or "")[:500],
                 quote_date=str(item.get("quote_date") or ""),
-                batch_id=batch_id,
-                bid_status=body.bid_status,
+                canonical=item.get("canonical"),
+                extraction_meta=extraction_meta,
                 deviation_pct=deviation,
                 alert_level=alert,
-                extraction_meta_json=extraction_meta,
             )
-            db.add(q)
-            db.flush()
-            quote_ids.append(q.id)
-            created += 1
+            db.add(line)
+            line_count += 1
             if total is not None:
                 line_total_sum += total
-        except Exception as e:  # pragma: no cover — per-row resilience
+
+        except Exception as e:
             errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
-            skipped += 1
+            skipped_count += 1
 
     db.commit()
 
-    # Compute checksum: declared total (from PDF cover) vs sum of created quote lines.
-    # Stored in job.result["_checksum"] so bid_matrix can flag OCR-unreliable suppliers.
+    # ── checksum 回写到 job.result（供 bid_matrix 展示核查信息）────────────────
     try:
         doc_meta = (job.result or {}).get("_doc_meta") or {}
         declared = doc_meta.get("bid_total")
-        if declared and float(declared) > 0 and created > 0:
+        if declared and float(declared) > 0 and line_count > 0:
             delta_pct = abs(line_total_sum - float(declared)) / float(declared) * 100
             cs_status = "pass" if delta_pct <= 5 else "fail"
         else:
@@ -674,28 +605,134 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "status": cs_status,
             },
         }
+        ctx = dict(job.context or {})
+        if submission.supplier_id and ctx.get("supplier_id") != submission.supplier_id:
+            ctx["supplier_id"] = submission.supplier_id
+            job.context = ctx
         db.add(job)
         db.commit()
     except Exception:
-        log.exception("batch_confirm: checksum calculation failed for job %s", body.job_id)
-
-    # Write supplier_id back to ExtractionJob.context so doc_meta lookup can find it
-    if supplier:
-        ctx = dict(job.context or {})
-        if ctx.get("supplier_id") != supplier.id:
-            ctx["supplier_id"] = supplier.id
-            job.context = ctx
-            db.add(job)
-            db.commit()
+        log.exception("batch_confirm: checksum write failed for job %s", body.job_id)
 
     return {
         "status": "ok",
-        "created": created,
-        "skipped": skipped,
+        "submission_id": submission.id,
+        "line_count": line_count,
+        "skipped_count": skipped_count,
         "errors": errors,
         "unknown_brands": sorted(unknown_brands),
-        "quote_ids": quote_ids,
-        "supplier_id": supplier.id if supplier else None,
+        "supplier_id": submission.supplier_id,
         "project_id": project.id if project else None,
         "batch_id": batch_id,
+    }
+
+
+# ─── Archive prices: BidSubmission → Quote（显式归档）────────────────────────
+class ArchivePricesRequest(BaseModel):
+    """将 BidSubmission 中 material_id 非空的行归档为 Quote 历史价格记录。"""
+
+    submission_id: int
+    project_id: int | None = None  # 覆盖 BidSubmission.project_id（可选）
+
+
+@router.post("/archive-prices", response_model=dict)
+def archive_prices(body: ArchivePricesRequest, db: Session = Depends(get_db)):
+    """将 BidSubmission 中 material_id 非空的 BidQuoteLine 归档为 Quote。
+
+    归档规则（P0）：
+    - material_id IS NULL 的行静默跳过（不报错，不创建 Material）。
+    - archived_quote_id 非空的行（已归档）跳过。
+    - 只创建 Quote，不创建 Material / Supplier。
+    - 成功归档后回填 BidQuoteLine.archived_quote_id。
+    - 返回三态 status: archived / partially_archived / no_eligible。
+    """
+    submission = db.get(BidSubmission, body.submission_id)
+    if not submission:
+        raise HTTPException(404, f"BidSubmission {body.submission_id} not found")
+    if submission.status == "archived":
+        raise HTTPException(409, f"Submission {body.submission_id} is already fully archived")
+    if submission.supplier_id is None:
+        raise HTTPException(
+            422,
+            "归档需要绑定正式供应商 (supplier_id)。"
+            "请先在供应商管理中创建该供应商并重新入库。",
+        )
+
+    lines = (
+        db.query(BidQuoteLine).filter_by(submission_id=submission.id).all()
+    )
+
+    # Null-material lines can never be archived — include in skipped_lines with reason
+    null_material_lines = [ln for ln in lines if ln.material_id is None]
+    null_skipped: list[dict] = [
+        {"line_id": ln.id, "reason": "material_id is NULL — cannot archive without material link"}
+        for ln in null_material_lines
+    ]
+
+    eligible = [
+        ln for ln in lines
+        if ln.material_id is not None and ln.archived_quote_id is None
+    ]
+    already_archived_count = sum(
+        1 for ln in lines
+        if ln.material_id is not None and ln.archived_quote_id is not None
+    )
+    eligible_count = len(eligible)
+
+    project_id = body.project_id or submission.project_id
+    archived_count = 0
+    error_skipped: list[dict] = []
+
+    for line in eligible:
+        try:
+            q = Quote(
+                material_id=line.material_id,
+                supplier_id=submission.supplier_id,
+                project_id=project_id,
+                unit_price=line.unit_price,
+                unit_price_excl_tax=line.unit_price_excl_tax,
+                quantity=line.qty,
+                total_price=line.total_price,
+                tax_rate=line.tax_rate,
+                brand=line.brand,
+                brand_tier=line.brand_tier,
+                remark=line.remark,
+                quote_date=line.quote_date,
+                batch_id=f"ARCH-{submission.id}-{line.id}",
+                bid_status=submission.bid_status,
+                extraction_meta_json=line.extraction_meta,
+                deviation_pct=line.deviation_pct,
+                alert_level=line.alert_level,
+            )
+            db.add(q)
+            db.flush()
+            line.archived_quote_id = q.id
+            archived_count += 1
+        except Exception as e:
+            error_skipped.append({"line_id": line.id, "reason": f"{type(e).__name__}: {e}"})
+
+    skipped_lines = null_skipped + error_skipped
+
+    # Status is based on ALL submission lines:
+    # "no_eligible"        — eligible_count=0 AND no previously archived lines
+    # "archived"           — zero null-material lines AND all eligible archived without error
+    # "partially_archived" — any other case (null lines, errors, or partial archival)
+    if eligible_count == 0 and already_archived_count == 0:
+        status = "no_eligible"
+    elif not null_skipped and not error_skipped and archived_count == eligible_count:
+        status = "archived"
+    else:
+        status = "partially_archived"
+
+    submission.status = status
+    db.commit()
+
+    return {
+        "status": status,
+        "submission_id": submission.id,
+        "eligible_count": eligible_count,
+        "archived_count": archived_count,
+        "skipped_count": len(skipped_lines),
+        "already_archived_count": already_archived_count,
+        "skipped_lines": skipped_lines,
     }
