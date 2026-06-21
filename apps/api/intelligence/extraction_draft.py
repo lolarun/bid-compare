@@ -1,0 +1,446 @@
+"""extraction_draft.py — 表格识别输出契约（识别草稿，未确认）。
+
+识别链路只产出 ExtractionDraft；映射到领域对象（TenderAnchor / BidQuoteLine）
+在用户核对确认后由各侧 adapter 完成，不在识别内进行。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ─── Source evidence ─────────────────────────────────────────────────────────
+
+@dataclass
+class SourceRef:
+    page: int
+    table: int = 0
+    row: int = 0
+    bbox: tuple[float, float, float, float] | None = None   # x0,y0,x1,y1 in page pixels
+    tile_bbox: tuple[float, float, float, float] | None = None  # fraction of page if tiled
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {"page": self.page, "table": self.table, "row": self.row}
+        if self.bbox is not None:
+            d["bbox"] = list(self.bbox)
+        if self.tile_bbox is not None:
+            d["tile_bbox"] = list(self.tile_bbox)
+        return d
+
+
+# ─── Single extracted row ─────────────────────────────────────────────────────
+
+@dataclass
+class DraftRow:
+    """One row as the recognizer sees it — raw cells preserved, fields standardised."""
+    row_index: int
+    row_type: str           # quote_line|subtotal|grand_total|section_header|remark|invalid
+    raw_cells: dict         # original OCR header→value mapping (never modified)
+    fields: dict            # standardised fields (§4 superset; missing keys = None/"")
+    source_ref: SourceRef
+    corrections: list = field(default_factory=list)      # [{field,raw,fixed,reason}]
+    validation_flags: list = field(default_factory=list) # [arithmetic_mismatch, ...]
+    field_sources: dict = field(default_factory=dict)    # field → direct_cell|missing|derived|llm
+    extra_fields: dict = field(default_factory=dict)     # unmapped columns: header_text → raw_value
+    # parser_mode lives in fields["parser_mode"] ("llm" | "table_grid_deterministic")
+
+
+# ─── Per-page diagnostics ─────────────────────────────────────────────────────
+
+@dataclass
+class PageMetric:
+    page: int
+    page_index: int                 # 0-based index in full document
+    role: str                       # PageRole value
+    table_count: int = 0            # <table> elements on this page
+    row_count: int = 0              # total <tr> elements on this page
+    input_mode: str = "html_fallback"   # table_grid | html_fallback | tiled
+    fallback_reason: str = ""
+    expected_rows: int = 0
+    extracted_rows: int = 0
+    thinking_retry: bool = False
+    tiled: bool = False
+    tile_count: int = 0
+    rotation_applied: int = 0        # 0|90|180|270 — degrees rotated before re-OCR (orientation correction)
+    shadow_diff: dict | None = None  # Phase B shadow mode: per-page deterministic-vs-LLM comparison
+
+
+# ─── Document quality report (§6) ─────────────────────────────────────────────
+
+@dataclass
+class QualityReport:
+    """PASS / REVIEW / BLOCKED + per-metric breakdown (CLAUDE.md §6)."""
+
+    status: str                     # PASS | REVIEW | BLOCKED
+    blocking_reasons: list = field(default_factory=list)
+
+    # Page coverage
+    total_pages: int = 0
+    rendered_pages: int = 0              # pages successfully rendered from PDF (= len(images))
+    ocr_success_pages: int = 0           # pages where OCR returned non-empty HTML
+    ocr_failed_pages: int = 0            # pages where OCR failed (empty HTML + failure record)
+    ocr_failed_indices: list = field(default_factory=list)  # 1-based page numbers that failed OCR
+    processed_pages: int = 0
+    truncated: bool = False
+    target_pages: list = field(default_factory=list)
+    page_metrics: list = field(default_factory=list)  # list[PageMetric]
+
+    # Row counts
+    quote_line_count: int = 0
+    subtotal_count: int = 0
+    grand_total_count: int = 0
+
+    # Field coverage
+    source_ref_coverage: float = 0.0   # page/table/row present
+    bbox_coverage: float = 0.0         # bbox present
+    qty_parse_rate: float = 0.0
+    price_parse_rate: float = 0.0
+    arithmetic_consistency_rate: float = 0.0  # qty×unit_price ≈ total_price
+
+    # Financial
+    tax_basis_consistency: bool = True
+    declared_total: float | None = None
+    declared_total_diff: float | None = None
+
+    # Sequence
+    seq_missing: list = field(default_factory=list)
+    seq_duplicate: list = field(default_factory=list)
+
+    # Arithmetic mismatch gate (populated by _validate_arithmetic → compute_quality)
+    arithmetic_mismatch_count: int = 0
+    arithmetic_mismatch_amount: float = 0.0
+    arithmetic_mismatch_ratio: float = 0.0
+    arithmetic_mismatch_rows: list = field(default_factory=list)  # list[dict] per-row evidence
+
+    # Failed target pages — target pages that failed processing (exception-level, not under-extracted)
+    # Non-empty → quality BLOCKED; exposes replay cache misses as real test failures.
+    failed_target_pages: list = field(default_factory=list)  # 1-based page numbers
+
+    def to_dict(self) -> dict:
+        """Serialise to plain dict for JSON responses / logging."""
+        return {
+            "status": self.status,
+            "blocking_reasons": self.blocking_reasons,
+            "total_pages": self.total_pages,
+            "rendered_pages": self.rendered_pages,
+            "ocr_success_pages": self.ocr_success_pages,
+            "ocr_failed_pages": self.ocr_failed_pages,
+            "ocr_failed_indices": self.ocr_failed_indices,
+            "processed_pages": self.processed_pages,
+            "truncated": self.truncated,
+            "target_pages": self.target_pages,
+            "quote_line_count": self.quote_line_count,
+            "subtotal_count": self.subtotal_count,
+            "grand_total_count": self.grand_total_count,
+            "source_ref_coverage": self.source_ref_coverage,
+            "bbox_coverage": self.bbox_coverage,
+            "qty_parse_rate": self.qty_parse_rate,
+            "price_parse_rate": self.price_parse_rate,
+            "arithmetic_consistency_rate": self.arithmetic_consistency_rate,
+            "tax_basis_consistency": self.tax_basis_consistency,
+            "declared_total": self.declared_total,
+            "declared_total_diff": self.declared_total_diff,
+            "seq_missing": self.seq_missing,
+            "seq_duplicate": self.seq_duplicate,
+            "arithmetic_mismatch_count": self.arithmetic_mismatch_count,
+            "arithmetic_mismatch_amount": self.arithmetic_mismatch_amount,
+            "arithmetic_mismatch_ratio": self.arithmetic_mismatch_ratio,
+            "arithmetic_mismatch_rows": self.arithmetic_mismatch_rows,
+            "failed_target_pages": self.failed_target_pages,
+        }
+
+
+# ─── Top-level draft ─────────────────────────────────────────────────────────
+
+@dataclass
+class ExtractionDraft:
+    """Full output of the recognizer — to be confirmed by the user before domain mapping."""
+    doc_type: str                   # tender | quote
+    source_file: str
+    page_count: int
+    processed_page_count: int
+    target_pages: list              # 1-based page numbers of target tables
+    rows: list                      # list[DraftRow] — official rows (pass quality gate)
+    meta: dict                      # adapter-specific: brand info | supplier+declared_total
+    quality: QualityReport
+    reconcile: dict | None = None   # populated if xlsx_path provided
+    # 召回页未通过合入门禁的行：隔离在此，**不进 rows / 不进比价 / 不入库**，
+    # 仅供核对 UI 展示供用户人工裁决（§1.1 REVIEW：暴露难度、预填候选，不静默填值）。
+    review_candidates: list = field(default_factory=list)  # list[DraftRow]
+
+
+# ─── Quality gate logic (thresholds centralised here) ────────────────────────
+
+_EXPECTED_ROWS_MIN_RATIO = 0.70     # trigger retry/tiling when extracted < expected * ratio
+_ARITHMETIC_PASS_THRESHOLD = 0.90   # below this → REVIEW
+_DECLARED_TOTAL_DIFF_BLOCKED = 500.0  # yuan; above this → BLOCKED (without human note)
+_DECLARED_TOTAL_DIFF_REVIEW = 50.0   # yuan; above this → REVIEW
+_REVIEW_PAGE_RATIO = 0.30           # if > 30% target pages are under-extracted → BLOCKED
+_ARITH_MISMATCH_BLOCKED_COUNT = 3        # ≥3 flagged rows → BLOCKED
+_ARITH_MISMATCH_BLOCKED_RATIO = 0.02     # >2% of quote lines → BLOCKED
+_ARITH_MISMATCH_BLOCKED_AMOUNT_RATIO = 0.10  # >10% of total amount → BLOCKED
+
+
+def compute_quality(
+    rows: list[DraftRow],
+    page_metrics: list[PageMetric],
+    total_pages: int,
+    target_pages: list[int],
+    declared_total: float | None = None,
+    truncated: bool = False,
+    *,
+    rendered_pages: int = 0,
+    ocr_success_pages: int = 0,
+    ocr_failed_pages: int = 0,
+    ocr_failed_indices: list[int] | None = None,
+    failed_target_pages: list[int] | None = None,
+) -> QualityReport:
+    """Compute QualityReport from draft rows and page metrics."""
+    n = len(rows)
+    blocking: list[str] = []
+    review_hints: list[str] = []
+
+    # — Row type counts —
+    quote_lines = [r for r in rows if r.row_type == "quote_line"]
+    subtotals   = [r for r in rows if r.row_type == "subtotal"]
+    totals      = [r for r in rows if r.row_type == "grand_total"]
+
+    # — Pollution check —
+    # grand_total rows must NOT appear as quote_line
+    # (already filtered by row_type; this is just a sanity assertion)
+
+    # — Source ref coverage —
+    src_ok  = sum(1 for r in rows if r.source_ref.page > 0)
+    bbox_ok = sum(1 for r in rows if r.source_ref.bbox is not None)
+
+    # — Arithmetic consistency —
+    arith_pass = 0
+    arith_total = 0
+    for r in quote_lines:
+        f = r.fields
+        try:
+            qty   = float(f.get("qty") or 0)
+            price = float(f.get("unit_price_excl_tax") or f.get("unit_price") or 0)
+            total = float(f.get("total_price_excl_tax") or f.get("total_price") or 0)
+            if qty > 0 and price > 0 and total > 0:
+                arith_total += 1
+                if abs(qty * price - total) / total < 0.03:
+                    arith_pass += 1
+        except (TypeError, ValueError):
+            pass
+
+    arith_rate = round(arith_pass / arith_total, 3) if arith_total > 0 else 1.0
+
+    # — Tax basis consistency —
+    tax_bases = set()
+    for r in quote_lines:
+        f = r.fields
+        has_incl = f.get("unit_price_incl_tax") or f.get("total_price_incl_tax")
+        has_excl = f.get("unit_price_excl_tax") or f.get("total_price_excl_tax")
+        if has_incl and not has_excl:
+            tax_bases.add("incl_only")
+        elif has_excl and not has_incl:
+            tax_bases.add("excl_only")
+        elif has_incl and has_excl:
+            tax_bases.add("both")
+    tax_consistent = len(tax_bases) <= 1
+
+    # — Declared total diff —
+    declared_diff: float | None = None
+    if declared_total is not None:
+        line_sum = 0.0
+        for r in quote_lines:
+            f = r.fields
+            try:
+                t = float(
+                    f.get("total_price_incl_tax")
+                    or f.get("total_price")
+                    or 0
+                )
+                line_sum += t
+            except (TypeError, ValueError):
+                pass
+        if line_sum > 0:
+            declared_diff = round(abs(line_sum - declared_total), 2)
+
+    # — Sequence gaps —
+    seqs = []
+    for r in quote_lines:
+        s = str(r.fields.get("seq") or "").strip()
+        if s.isdigit():
+            seqs.append(int(s))
+    seq_set = set(seqs)
+    seq_missing: list[str] = []
+    seq_dup: list[str] = []
+    if seqs:
+        full_range = set(range(min(seqs), max(seqs) + 1))
+        seq_missing = sorted(str(s) for s in (full_range - seq_set))
+    seq_counts: dict[int, int] = {}
+    for s in seqs:
+        seq_counts[s] = seq_counts.get(s, 0) + 1
+    seq_dup = [str(s) for s, c in seq_counts.items() if c > 1]
+
+    # — Page under-extraction ratio —
+    under_pages = [
+        m for m in page_metrics
+        if m.expected_rows > 0
+        and m.extracted_rows < m.expected_rows * _EXPECTED_ROWS_MIN_RATIO
+    ]
+
+    # — Arithmetic mismatch gate (rows flagged by _validate_arithmetic) —
+    mismatch_rows_info: list[dict] = []
+    total_line_amount = 0.0
+    for r in quote_lines:
+        try:
+            total_line_amount += float(
+                r.fields.get("total_price_incl_tax") or r.fields.get("total_price") or 0
+            )
+        except (TypeError, ValueError):
+            pass
+    for r in quote_lines:
+        if "qty_arithmetic_mismatch" not in r.validation_flags:
+            continue
+        f = r.fields
+        try:
+            stated = float(f.get("arith_actual_total") or 0)
+        except (TypeError, ValueError):
+            stated = 0.0
+        has_evidence = (
+            r.source_ref.bbox is not None
+            or r.source_ref.table > 0
+            or r.source_ref.row > 0
+        )
+        mismatch_rows_info.append({
+            "page": r.source_ref.page,
+            "table": r.source_ref.table,
+            "row": r.source_ref.row,
+            "seq": f.get("seq"),
+            "qty": f.get("qty"),
+            "unit_price": (
+                f.get("unit_price_incl_tax")
+                or f.get("unit_price_excl_tax")
+                or f.get("unit_price")
+            ),
+            "stated_total": f.get("arith_actual_total"),
+            "calculated_total": f.get("arith_expected_total"),
+            "suggested_qty": f.get("arith_suggested_qty"),
+            "_has_evidence": has_evidence,
+            "_stated_amount": stated,
+        })
+    mismatch_count = len(mismatch_rows_info)
+    mismatch_amount = round(sum(r["_stated_amount"] for r in mismatch_rows_info), 2)
+    mismatch_ratio = round(mismatch_count / len(quote_lines), 4) if quote_lines else 0.0
+    # strip private keys before returning
+    arith_report_rows = [{k: v for k, v in r.items() if not k.startswith("_")}
+                         for r in mismatch_rows_info]
+
+    _failed_target = sorted(failed_target_pages or [])
+
+    # ── Blocking conditions ────────────────────────────────────────────────
+    if _failed_target:
+        # Any target page that raised an exception (e.g. snapshot cache miss) → BLOCKED.
+        # Prevents silently passing tests when pages 5-9 fail in replay mode.
+        blocking.append(f"failed_target_pages={_failed_target}")
+    if truncated:
+        blocking.append("document_truncated")
+    if n > 0 and len(quote_lines) == 0:
+        blocking.append("zero_quote_lines_with_data")
+    if declared_diff is not None and declared_diff > _DECLARED_TOTAL_DIFF_BLOCKED:
+        blocking.append(f"declared_total_diff={declared_diff:.2f}")
+    if target_pages and len(under_pages) / len(target_pages) > _REVIEW_PAGE_RATIO:
+        blocking.append(f"under_extracted_pages={len(under_pages)}/{len(target_pages)}")
+
+    # Arithmetic mismatch: any flagged row → at least REVIEW; BLOCKED if severe
+    if mismatch_count > 0:
+        _no_evidence = any(not r["_has_evidence"] for r in mismatch_rows_info)
+        _high_amount = (
+            total_line_amount > 0
+            and mismatch_amount / total_line_amount > _ARITH_MISMATCH_BLOCKED_AMOUNT_RATIO
+        )
+        _high_count = (
+            mismatch_count >= _ARITH_MISMATCH_BLOCKED_COUNT
+            or mismatch_ratio > _ARITH_MISMATCH_BLOCKED_RATIO
+        )
+        _total_also_bad = (
+            declared_diff is not None and declared_diff > _DECLARED_TOTAL_DIFF_REVIEW
+        )
+        if _no_evidence or _high_amount or _high_count or _total_also_bad:
+            blocking.append(f"qty_arithmetic_mismatch_blocked={mismatch_count}")
+        else:
+            # will fall into review_hints below
+            pass
+
+    # ── Review conditions ─────────────────────────────────────────────────
+    if mismatch_count > 0 and f"qty_arithmetic_mismatch_blocked={mismatch_count}" not in blocking:
+        review_hints.append(f"qty_arithmetic_mismatch={mismatch_count}")
+    if arith_rate < _ARITHMETIC_PASS_THRESHOLD and arith_total > 0:
+        review_hints.append(f"arithmetic_consistency={arith_rate:.2f}")
+    if not tax_consistent:
+        review_hints.append("tax_basis_inconsistent")
+    if declared_diff is not None and declared_diff > _DECLARED_TOTAL_DIFF_REVIEW:
+        review_hints.append(f"declared_total_diff={declared_diff:.2f}")
+    if n > 0 and src_ok / n < 1.0:
+        review_hints.append(f"source_ref_coverage={src_ok/n:.2f}")
+    if seq_missing:
+        review_hints.append(f"seq_missing={seq_missing}")
+    if under_pages:
+        review_hints.append(f"under_extracted_pages={[m.page for m in under_pages]}")
+    # bbox 缺失：§5/§14 要求每条确认行可逐行定位；bbox=0 不得 PASS
+    if len(quote_lines) > 0 and bbox_ok == 0:
+        review_hints.append("bbox_coverage=0 (no row-level localization)")
+    # 无序号行：抽出但无法用序号锚定，需人工核对身份
+    no_seq_count = sum(
+        1 for r in quote_lines
+        if not str(r.fields.get("seq") or "").strip().isdigit()
+    )
+    if no_seq_count > 0:
+        review_hints.append(f"no_seq_rows={no_seq_count}")
+
+    if blocking:
+        status = "BLOCKED"
+        all_reasons = blocking
+    elif review_hints:
+        status = "REVIEW"
+        all_reasons = review_hints
+    else:
+        status = "PASS"
+        all_reasons = []
+
+    return QualityReport(
+        status=status,
+        blocking_reasons=all_reasons,
+        total_pages=total_pages,
+        rendered_pages=rendered_pages,
+        ocr_success_pages=ocr_success_pages,
+        ocr_failed_pages=ocr_failed_pages,
+        ocr_failed_indices=ocr_failed_indices or [],
+        processed_pages=len(page_metrics),
+        truncated=truncated,
+        target_pages=target_pages,
+        page_metrics=page_metrics,
+        quote_line_count=len(quote_lines),
+        subtotal_count=len(subtotals),
+        grand_total_count=len(totals),
+        source_ref_coverage=round(src_ok / n, 3) if n > 0 else 0.0,
+        bbox_coverage=round(bbox_ok / n, 3) if n > 0 else 0.0,
+        qty_parse_rate=round(
+            sum(1 for r in quote_lines if r.fields.get("qty") is not None)
+            / max(1, len(quote_lines)), 3
+        ),
+        price_parse_rate=round(
+            sum(1 for r in quote_lines
+                if r.fields.get("unit_price_excl_tax") or r.fields.get("unit_price"))
+            / max(1, len(quote_lines)), 3
+        ),
+        arithmetic_consistency_rate=arith_rate,
+        tax_basis_consistency=tax_consistent,
+        declared_total=declared_total,
+        declared_total_diff=declared_diff,
+        seq_missing=seq_missing,
+        seq_duplicate=seq_dup,
+        arithmetic_mismatch_count=mismatch_count,
+        arithmetic_mismatch_amount=mismatch_amount,
+        arithmetic_mismatch_ratio=mismatch_ratio,
+        arithmetic_mismatch_rows=arith_report_rows,
+        failed_target_pages=_failed_target,
+    )

@@ -276,7 +276,7 @@ export interface BidMatrixMeta {
 export interface MatrixTotal {
   supplier_id: number
   total: number
-  avg_deviation: number
+  avg_deviation: number | null  // null when quoted_count=0（无报价时不计偏差）
   quoted_count?: number
   anomaly_count?: number
 }
@@ -311,6 +311,9 @@ export interface BidMatrixResult {
   anchor_matrix?: boolean
   not_finalized_warning?: string
   matrix_distribution?: MatrixDistribution
+  // Recommendation gate
+  recommendation_blocked?: boolean
+  recommendation_blocked_reasons?: string[]
 }
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
@@ -412,6 +415,19 @@ export interface QuoteExtractionItem {
   unit_price_excl_tax: number | null
   total_price: number | null
   tax_rate: number | null
+  // 价格口径桥接字段（§4/§9）：必须随 item 完整往返到 batch-confirm，否则含税/不含税
+  // 口径在网页端被裁掉，凯硕/泰科龙会按错误口径入库、绵存部分行变成无价格。
+  unit_price_incl_tax?: number | null
+  total_price_incl_tax?: number | null
+  total_price_excl_tax?: number | null
+  tax_amount?: number | null
+  price_basis?: string
+  effective_unit_price?: number | null
+  effective_total_price?: number | null
+  // 算术校验审计：原 qty 不改，suggested_qty 仅参考
+  validation_flags?: string[]
+  raw_qty?: number | null
+  suggested_qty?: number | null
   material_type?: string
   remark: string
   // hidden fields — never displayed in UI but must round-trip to batch-confirm
@@ -704,6 +720,12 @@ export interface TenderListConfirmSession {
   category: string
   id: number
   version: number
+  anchors_total: number
+}
+
+export interface TenderListCurrentSession {
+  id: number
+  category: string
   anchors_total: number
 }
 

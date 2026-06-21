@@ -15,7 +15,7 @@ import type {
   AlignmentGroupOut,
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
-  TenderListConfirmSession, SourceReconcileResult,
+  TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -195,7 +195,9 @@ export const analysisApi = {
     project_id?: number; category: string; file_name?: string; anchors_json?: unknown[]; anchors_total?: number; confirmed_by?: string; force?: boolean;
     source_type?: string; brand_requirement?: unknown[]; supplier_brands?: unknown[]
   }) =>
-    api.post<{ ok: boolean; id: number; version: number; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
+    api.post<{ ok: boolean; id: number; version: number; primary_category: string; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
+  tenderListCurrentSessions: (params: { project_id: number }) =>
+    api.get<{ sessions: TenderListCurrentSession[]; primary_category: string }>('/analysis/tender-list/current-sessions', { params }),
   tenderListReconcile: (data: { xlsx_items: unknown[]; pdf_items: unknown[]; source_type?: string }) =>
     api.post<SourceReconcileResult>('/analysis/tender-list/reconcile', data),
   bidMatrixSave: (data: {

@@ -1,5 +1,6 @@
 """Analysis and comparison API endpoints — v2."""
 import logging
+import re as _re
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -29,6 +30,19 @@ from apps.api.services.statistics import (
 from apps.api.services.bid_matrix import build_bid_matrix
 from apps.api.services.bid_insight import generate_bid_insight
 from apps.api.core.config import get_settings
+
+# ── Quality gate constants ────────────────────────────────────────────────────
+# Eligible row = raw_name not a summary/header AND at least one numeric field present.
+MATCH_PRICE_COVERAGE_THRESHOLD     = 0.80   # min fraction of eligible rows with unit_price > 0
+MATCH_ARITHMETIC_MAX_ERROR_RATE    = 0.05   # max fraction of evaluable rows with hard arithmetic error
+MATCH_ARITHMETIC_VAT_TOLERANCE     = 0.125  # 11.5% (=13%/113%) + 1% rounding allowance
+MATCH_VAT_MISMATCH_BLOCK_RATE      = 0.20   # systematic VAT mismatch if >20% rows at ~11-12.5% dev
+MATCH_MAX_LINE_CONCENTRATION       = 0.60   # single row total must not exceed 60% of sum of all totals
+MATCH_DECLARED_TOTAL_TOLERANCE     = 0.03   # 3% tolerance when declared_total is available
+
+_SUMMARY_NAME_PAT = _re.compile(
+    r"合计|小计|说明|备注|合计金额|总价|total|subtotal", _re.IGNORECASE
+)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -119,6 +133,56 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
         )
         if session and session.anchors_json:
             anchors = rebuild_anchors(session)
+
+            # ── 硬闸门 v4.2：验证 used_submission_ids 集合完整性
+            # 不扫描项目全部历史 submission（旧 sub 应由修复脚本标记 superseded/rejected）。
+            # 空集 → 有 active submission 存在 → 409（对齐尚未执行）
+            # 非空 → 仅校验 used 集合内各 submission 在本品类有 BQL
+            from apps.api.models.bid_submission import BidSubmission as _BSCheck, BidQuoteLine as _BQLCheck
+            _used_sids = set(session.used_submission_ids or [])
+            if not _used_sids:
+                _any_active_sub = (
+                    db.query(_BSCheck.id)
+                    .filter(
+                        _BSCheck.project_id == body.project_id,
+                        _BSCheck.status.notin_(("rejected", "superseded")),
+                    )
+                    .first()
+                )
+                if _any_active_sub:
+                    raise HTTPException(
+                        409,
+                        "报价确认异常：项目存在 BidSubmission 但当前会话 used_submission_ids 为空。"
+                        "请重新执行「校对入库」→「对齐核查」后再生成矩阵。",
+                    )
+            else:
+                _sids_with_bql: set[int] = {
+                    row[0] for row in (
+                        db.query(_BQLCheck.submission_id)
+                        .filter(
+                            _BQLCheck.submission_id.in_(_used_sids),
+                            _BQLCheck.category == body.category,
+                        )
+                        .distinct()
+                        .all()
+                    )
+                }
+                _missing_bql = sorted(sid for sid in _used_sids if sid not in _sids_with_bql)
+                if _missing_bql:
+                    raise HTTPException(
+                        409,
+                        f"used_submission_ids 中以下 submission 在品类「{body.category}」下无 BQL：{_missing_bql}。"
+                        "请重新执行「校对入库」（确保 category 非空）后再对齐。",
+                    )
+
+            # body.submission_ids 必须与 session.used_submission_ids 完全一致（禁止外部覆盖）
+            _body_sids = set(body.submission_ids or [])
+            if _body_sids and _used_sids and _body_sids != _used_sids:
+                raise HTTPException(
+                    409,
+                    f"body.submission_ids {sorted(_body_sids)} 与会话 used_submission_ids {sorted(_used_sids)} 不一致。"
+                    "矩阵只消费当前会话 used_submission_ids，不支持外部传入覆盖。",
+                )
 
             result = build_anchor_matrix(
                 db,
@@ -966,6 +1030,234 @@ async def tender_list_match(
                 _tls_b.brand_requirement, _tls_b.supplier_brand_map
             )
 
+    # ── 硬闸门 v4.1：submission_ids 显式传入时三重校验 ─────────────────────────
+    # 1. 属于当前项目且 status 非 rejected/superseded
+    # 2. 在当前品类下存在 BQL（防止 category 空导致静默跳过）
+    # 3. 数量必须与传入集合完全一致（防止 resolve 多返）
+    if sub_ids:
+        from apps.api.models.bid_submission import BidSubmission as _BSM, BidQuoteLine as _BQLM
+        _cat_for_check = category or ""
+
+        # 校验 1：归属 + 状态
+        _valid_subs: set[int] = {
+            row[0] for row in (
+                db.query(_BSM.id)
+                .filter(
+                    _BSM.id.in_(sub_ids),
+                    _BSM.project_id == project_id,
+                    _BSM.status.notin_(["rejected", "superseded"]),
+                )
+                .all()
+            )
+        }
+        _invalid = [sid for sid in sub_ids if sid not in _valid_subs]
+        if _invalid:
+            raise HTTPException(
+                409,
+                f"以下 submission 不属于当前项目或已被废弃（rejected/superseded）：{_invalid}。",
+            )
+
+        # 校验 2：BQL 存在
+        _subs_with_bql: set[int] = {
+            row[0] for row in (
+                db.query(_BSM.id)
+                .join(_BQLM, _BSM.id == _BQLM.submission_id)
+                .filter(
+                    _BSM.id.in_(sub_ids),
+                    _BQLM.category == _cat_for_check,
+                )
+                .all()
+            )
+        }
+        _missing_bql = [sid for sid in sub_ids if sid not in _subs_with_bql]
+        if _missing_bql:
+            raise HTTPException(
+                409,
+                f"以下 submission 在品类「{_cat_for_check}」下无 BidQuoteLine "
+                f"（入库时 category 传空被静默跳过）：{_missing_bql}。"
+                "请重新执行「校对入库」（确认品类非空）后再对齐。",
+            )
+
+        # 校验 3：综合数据质量门
+        # 检查项：price_coverage / arithmetic_error_rate / systematic_vat_mismatch /
+        #         line_concentration / declared_total_mismatch / line_exceeds_declared_total
+        from apps.api.models.extraction_job import ExtractionJob as _EJM
+
+        def _is_summary_row(b) -> bool:
+            return bool(
+                _SUMMARY_NAME_PAT.search(b.raw_name or "")
+                or (
+                    not b.unit
+                    and not (b.unit_price or 0) > 0
+                    and not (b.qty or 0) > 0
+                    and not (b.total_price or 0) > 0
+                )
+            )
+
+        _quality_failures = []
+        for _sid in sub_ids:
+            _sub_obj = db.query(_BSM).filter(_BSM.id == _sid).first()
+
+            _all_bqls = (
+                db.query(_BQLM)
+                .filter(
+                    _BQLM.submission_id == _sid,
+                    _BQLM.category == _cat_for_check,
+                )
+                .all()
+            )
+            if not _all_bqls:
+                continue
+
+            _eligible = [b for b in _all_bqls if not _is_summary_row(b)]
+            if not _eligible:
+                _quality_failures.append({
+                    "submission_id": _sid,
+                    "issues": [{"check": "no_eligible_rows", "total": len(_all_bqls)}],
+                })
+                continue
+
+            # ── Declared total from ExtractionJob._doc_meta ───────────────────
+            _declared_total: float | None = None
+            if _sub_obj and _sub_obj.job_id:
+                _job = db.query(_EJM).filter(_EJM.id == _sub_obj.job_id).first()
+                if _job and isinstance(_job.result, dict):
+                    _dmeta = _job.result.get("_doc_meta") or {}
+                    _dt = _dmeta.get("bid_total")
+                    if _dt:
+                        try:
+                            _declared_total = float(_dt)
+                        except (TypeError, ValueError):
+                            pass
+
+            _issues = []
+
+            # ── Check A: price coverage ───────────────────────────────────────
+            _price_ok = sum(1 for b in _eligible if b.unit_price and b.unit_price > 0)
+            _coverage = _price_ok / len(_eligible)
+            if _coverage < MATCH_PRICE_COVERAGE_THRESHOLD:
+                _issues.append({
+                    "check": "price_coverage",
+                    "eligible": len(_eligible),
+                    "price_ok": _price_ok,
+                    "coverage": round(_coverage, 4),
+                    "threshold": MATCH_PRICE_COVERAGE_THRESHOLD,
+                })
+
+            # ── Check B: arithmetic — hard errors and systematic VAT mismatch ─
+            _evaluable = [
+                b for b in _eligible
+                if (b.qty or 0) > 0 and (b.unit_price or 0) > 0 and (b.total_price or 0) > 0
+            ]
+            _hard_errors, _vat_suspects = [], []
+            for _b in _evaluable:
+                _calc = _b.qty * _b.unit_price
+                _denom = max(abs(_b.total_price), abs(_calc))
+                _dev = abs(_b.total_price - _calc) / _denom if _denom else 0.0
+                if _dev > MATCH_ARITHMETIC_VAT_TOLERANCE:
+                    _hard_errors.append({
+                        "bql_id": _b.id,
+                        "raw_name": _b.raw_name,
+                        "qty": _b.qty,
+                        "unit_price": _b.unit_price,
+                        "total_price": _b.total_price,
+                        "calc": round(_calc, 2),
+                        "deviation": round(_dev, 4),
+                    })
+                elif _dev > 0.01:
+                    _vat_suspects.append(_b.id)
+
+            if _evaluable:
+                _arith_err_rate = len(_hard_errors) / len(_evaluable)
+                if _arith_err_rate > MATCH_ARITHMETIC_MAX_ERROR_RATE:
+                    _issues.append({
+                        "check": "arithmetic_error_rate",
+                        "evaluable": len(_evaluable),
+                        "hard_errors": len(_hard_errors),
+                        "error_rate": round(_arith_err_rate, 4),
+                        "threshold": MATCH_ARITHMETIC_MAX_ERROR_RATE,
+                        "error_rows": _hard_errors[:5],
+                    })
+
+                _vat_rate = len(_vat_suspects) / len(_evaluable)
+                if _vat_rate > MATCH_VAT_MISMATCH_BLOCK_RATE:
+                    _issues.append({
+                        "check": "systematic_vat_mismatch",
+                        "evaluable": len(_evaluable),
+                        "vat_suspect_rows": len(_vat_suspects),
+                        "mismatch_rate": round(_vat_rate, 4),
+                        "threshold": MATCH_VAT_MISMATCH_BLOCK_RATE,
+                        "message": (
+                            "检测到系统性含税/不含税列混用：超过20%的行 "
+                            "unit_price 与 total_price 存在约11.5%偏差（13% VAT标志）。"
+                            "请确认原文件价格列含税基准后重新提取。"
+                        ),
+                    })
+
+            # ── Check C: single-line concentration ────────────────────────────
+            _total_sum = sum(b.total_price for b in _eligible if b.total_price)
+            if _total_sum > 0:
+                _max_line_val = max((b.total_price for b in _eligible if b.total_price), default=0)
+                _conc = _max_line_val / _total_sum
+                if _conc > MATCH_MAX_LINE_CONCENTRATION:
+                    _worst_b = next((b for b in _eligible if b.total_price == _max_line_val), None)
+                    _issues.append({
+                        "check": "line_concentration",
+                        "max_line_total": _max_line_val,
+                        "total_sum": round(_total_sum, 2),
+                        "concentration": round(_conc, 4),
+                        "threshold": MATCH_MAX_LINE_CONCENTRATION,
+                        "offending_row": {
+                            "bql_id": _worst_b.id if _worst_b else None,
+                            "raw_name": _worst_b.raw_name if _worst_b else None,
+                        },
+                    })
+
+            # ── Check D: declared_total reconciliation ────────────────────────
+            if _declared_total and _declared_total > 0 and _total_sum > 0:
+                _dt_dev = abs(_total_sum - _declared_total) / _declared_total
+                if _dt_dev > MATCH_DECLARED_TOTAL_TOLERANCE:
+                    _issues.append({
+                        "check": "declared_total_mismatch",
+                        "detail_sum": round(_total_sum, 2),
+                        "declared_total": _declared_total,
+                        "deviation": round(_dt_dev, 4),
+                        "threshold": MATCH_DECLARED_TOTAL_TOLERANCE,
+                    })
+                if _max_line_val > _declared_total:
+                    _worst_b2 = next((b for b in _eligible if b.total_price == _max_line_val), None)
+                    _issues.append({
+                        "check": "line_exceeds_declared_total",
+                        "max_line_total": _max_line_val,
+                        "declared_total": _declared_total,
+                        "offending_row": {
+                            "bql_id": _worst_b2.id if _worst_b2 else None,
+                            "raw_name": _worst_b2.raw_name if _worst_b2 else None,
+                        },
+                    })
+
+            if _issues:
+                _src_ok = sum(
+                    1 for b in _eligible
+                    if b.extraction_meta and b.extraction_meta.get("source_ref")
+                )
+                _quality_failures.append({
+                    "submission_id": _sid,
+                    "issues": _issues,
+                    "source_ref_rate": round(_src_ok / len(_eligible), 4) if _eligible else 0.0,
+                    "vat_suspect_rows": len(_vat_suspects),
+                })
+
+        if _quality_failures:
+            raise HTTPException(
+                409,
+                {
+                    "error": "submission_quality_gate_failed",
+                    "message": "以下 submission 未通过数据质量门，禁止对齐",
+                    "failures": _quality_failures,
+                },
+            )
+
     try:
         summary, per_supplier = import_and_match(
             db, content, project_id, category, sids,
@@ -1029,10 +1321,14 @@ async def tender_list_match(
         if _tls_obj:
             if sids:
                 _tls_obj.confirmed_supplier_ids = sorted(set(sids))
-            # per_supplier is now keyed by submission_id — persist those IDs directly
-            _tls_obj.used_submission_ids = sorted(
-                k for k in per_supplier.keys() if k in sub_records
-            )
+            # submission_ids 显式传入时精确写入，保证 Gate 一致性；
+            # 否则从 per_supplier keys 推导（旧兼容路径）
+            if sub_ids:
+                _tls_obj.used_submission_ids = sorted(sub_ids)
+            else:
+                _tls_obj.used_submission_ids = sorted(
+                    k for k in per_supplier.keys() if k in sub_records
+                )
             db.commit()
 
     result = summary.as_dict()
@@ -1835,8 +2131,43 @@ def tender_list_confirm(
         "ok": True,
         "id": primary["id"],
         "version": primary["version"],
+        "primary_category": primary["category"],
         "sessions": sessions_out,
         "multi_category": len(sessions_out) > 1,
+    }
+
+
+@router.get("/tender-list/current-sessions")
+def tender_list_current_sessions(
+    project_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    """返回项目全部 current TenderListSession + primary_category。
+
+    前端在选择项目或页面刷新时调用，恢复 confirmedCategories、
+    categorySessionMap、tenderCategory、taskConfig.category、tenderListSessionId。
+    无 current session（新项目）时返回 404，前端静默处理。
+    """
+    from apps.api.models.tender_list_session import TenderListSession
+    sessions = (
+        db.query(TenderListSession)
+        .filter(
+            TenderListSession.project_id == project_id,
+            TenderListSession.is_current.is_(True),
+        )
+        .order_by(TenderListSession.id.asc())
+        .all()
+    )
+    if not sessions:
+        raise HTTPException(404, "该项目暂无已确认的采购清单")
+    out = [
+        {"id": s.id, "category": s.category, "anchors_total": s.anchors_total}
+        for s in sessions
+    ]
+    primary = max(out, key=lambda x: x["anchors_total"])
+    return {
+        "sessions": out,
+        "primary_category": primary["category"],
     }
 
 
@@ -1866,6 +2197,7 @@ def tender_list_current(
         "confirmed_by": session.confirmed_by,
         "confirmed_at": session.confirmed_at,
         "created_at": session.created_at,
+        "used_submission_ids": session.used_submission_ids or [],
     }
 
 

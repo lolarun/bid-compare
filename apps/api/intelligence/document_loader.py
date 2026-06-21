@@ -57,6 +57,52 @@ class DocumentLoader:
         )
 
     @staticmethod
+    def to_thumbnails(
+        file_path: str | Path,
+        max_pages: int | None = None,
+        thumb_edge_px: int = 1024,
+    ) -> list[bytes]:
+        """Render all PDF pages as LOW-RES thumbnails for visual page classification.
+
+        Distinct from to_images (full-res for OCR). Thumbnails keep the visual
+        layout (table grid vs prose vs cert) recognisable while staying small/cheap
+        for batched multi-image VL classification.
+
+        Args:
+            thumb_edge_px: longest-edge cap in pixels (default 1024).
+        """
+        path = Path(file_path)
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            cap = max_pages or MAX_PAGES_UNLIMITED
+            with _PDF_RENDER_SEM:
+                pdf = pdfium.PdfDocument(str(path))
+                try:
+                    pages = min(len(pdf), cap)
+                    out: list[bytes] = []
+                    for i in range(pages):
+                        pil = pdf[i].render(scale=1.0).to_pil().convert("RGB")
+                        out.append(DocumentLoader._downscale_png(pil, thumb_edge_px))
+                    return out
+                finally:
+                    pdf.close()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            with Image.open(io.BytesIO(path.read_bytes())) as im:
+                return [DocumentLoader._downscale_png(im.convert("RGB"), thumb_edge_px)]
+        raise ValueError(f"Unsupported file for thumbnails: {suffix}")
+
+    @staticmethod
+    def _downscale_png(img: Image.Image, edge_px: int) -> bytes:
+        w, h = img.size
+        longest = max(w, h)
+        if longest > edge_px:
+            scale = edge_px / longest
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", compress_level=3)
+        return buf.getvalue()
+
+    @staticmethod
     def _pdf_to_images(path: Path, max_pages: int = MAX_PAGES) -> list[bytes]:
         with _PDF_RENDER_SEM:
             pdf = pdfium.PdfDocument(str(path))

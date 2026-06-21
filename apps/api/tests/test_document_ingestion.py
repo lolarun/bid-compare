@@ -136,3 +136,32 @@ class TestStuckJobRecovery:
         assert recovered == 1
         assert old.status == JobStatus.FAILED.value
         assert fresh.status == JobStatus.RUNNING.value
+
+    def test_startup_recovers_all_running_and_pending_regardless_of_age(self, db_session):
+        """启动语义（max_age_minutes=0, include_pending=True）：刚崩溃的孤儿（年龄<阈值）
+        与 PENDING 都必须回收——否则上传幂等把孤儿原样返回，重传也卡死（复现真实 bug）。"""
+        from datetime import datetime, timezone
+
+        fresh_running = ExtractionJob(
+            id="orphan-running", type="quote", status=JobStatus.RUNNING.value,
+            file_path="/dev/null", updated_at=datetime.now(timezone.utc),  # 刚刚，年龄≈0
+        )
+        fresh_pending = ExtractionJob(
+            id="orphan-pending", type="quote", status=JobStatus.PENDING.value,
+            file_path="/dev/null", updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add_all([fresh_running, fresh_pending])
+        db_session.commit()
+
+        # 默认周期清扫（age=5, 不含 pending）不应动这两条
+        assert DocumentIngestionService.recover_stuck_jobs(db_session, 5) == 0
+
+        # 启动语义：全部回收
+        recovered = DocumentIngestionService.recover_stuck_jobs(
+            db_session, 0, include_pending=True
+        )
+        db_session.refresh(fresh_running)
+        db_session.refresh(fresh_pending)
+        assert recovered == 2
+        assert fresh_running.status == JobStatus.FAILED.value
+        assert fresh_pending.status == JobStatus.FAILED.value

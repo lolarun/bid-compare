@@ -515,7 +515,7 @@ class TestPeriodicStuckJobSweep:
             assert job.status == JobStatus.FAILED.value, (
                 f"Periodic sweep failed to recover stuck job (status={job.status})"
             )
-            assert "Stuck" in (job.error or "")
+            assert "识别中断" in (job.error or "") or "孤儿" in (job.error or "")
         finally:
             db.close()
 

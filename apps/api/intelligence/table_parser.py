@@ -27,15 +27,25 @@ log = logging.getLogger(__name__)
 # Order matters: more specific patterns must come before less specific ones.
 # Each entry: (slot_name, [regex_patterns_for_header_text])
 _COL_SLOTS: list[tuple[str, list[str]]] = [
-    ("name",                [r"材料名称", r"物料名称", r"品名", r"货品名称", r"名称$"]),
-    ("spec",                [r"规格型号", r"规格", r"型号"]),
+    # seq must be first; anchored patterns avoid grabbing a "项目序号说明" remark column.
+    ("seq",                 [r"^序号$", r"^序$", r"^编号$", r"^项次$", r"^序\s*号$"]),
+    # name: 材料(设备)/材料(设备)名称 are common procurement form headers for item names
+    ("name",                [r"材料名称", r"物料名称", r"品名", r"货品名称", r"名称$",
+                              r"^材料[（(]"]),
+    ("spec",                [r"规格型号", r"规格"]),
+    ("model",               [r"^型号$", r"^品牌型号$"]),
     ("material_type",       [r"材质", r"牌号"]),
     ("unit",                [r"^单位$", r"计量单位", r"单位$"]),
-    ("qty",                 [r"数量$", r"工程量"]),
+    # qty: 数量(个)/数量(套)/数量（件）are common suffixed forms
+    ("qty",                 [r"数量[（(]", r"数量$", r"工程量"]),
     # unit_price_excl_tax BEFORE unit_price (same lookbehind logic as tabular_ingestion)
     ("unit_price_excl_tax", [r"不含税单价", r"裸价"]),
-    ("unit_price",          [r"(?<!不)含税单价", r"^单价$", r"单价$"]),
-    ("total_price",         [r"价税合计", r"合价", r"总价", r"金额$"]),
+    # unit_price: 单价(元)/单价（元）are common suffixed forms in valve/equipment tables
+    ("unit_price",          [r"(?<!不)含税单价", r"^单价$", r"单价[（(]元[）)]", r"单价$"]),
+    # total_price: 含税合价/含税合计 BEFORE generic 合价 to avoid shadowing the incl-tax column;
+    #              合价(元)/合计(元) with yuan suffix; 合计$ anchored to avoid matching 价税合计 twice
+    ("total_price",         [r"价税合计", r"含税[合总][价计]", r"[合总][价计][（(]元[）)]",
+                              r"合价", r"合计$", r"总价", r"金额$"]),
     ("brand",               [r"品牌", r"厂家", r"制造商"]),
     ("remark",              [r"备注", r"说明$"]),
 ]
@@ -55,6 +65,7 @@ class TableRow:
     row_index: int          # 0-based index in original HTML table rows
     row_type: str           # quote_line / subtotal / grand_total / header / empty / note
     cells: dict[str, str]   # header_text → cell_text
+    raw_values: list[str] = None   # full positional cell list (includes tail beyond header)
 
     def __repr__(self) -> str:
         preview = {k: v for k, v in list(self.cells.items())[:3]}
@@ -68,7 +79,6 @@ class TableGrid:
     header: list[str]       # original header cell texts
     col_map: dict[str, str] # header_text → semantic slot name
     rows: list[TableRow]
-
     def to_llm_dict(self) -> dict:
         """JSON-serialisable dict for LLM prompt (excludes empty/header rows)."""
         return {
@@ -285,11 +295,19 @@ def _classify_row(cells: dict[str, str]) -> str:
 
 # ── public API ────────────────────────────────────────────────────────────
 
-def html_to_table_grids(html: str, page_num: int) -> list[TableGrid]:
+def html_to_table_grids(html: str, page_num: int,
+                        inherited_header: list[str] | None = None) -> list[TableGrid]:
     """Parse OCR HTML string into a list of TableGrid objects.
 
     Returns an empty list if parsing fails or no valid tables are found.
     Designed for DashScope table_parsing HTML output but handles generic HTML.
+
+    ``inherited_header``: optional column header list from the immediately preceding
+    page.  When a table has no detectable header row (continuation page), and the
+    table has the *exact* same number of columns as the inherited header, the
+    inherited header is used in place of a missing header row.  This enables
+    deterministic extraction from headerless continuation pages without LLM
+    re-transcription.
     """
     if not html or not html.strip():
         return []
@@ -318,7 +336,15 @@ def html_to_table_grids(html: str, page_num: int) -> list[TableGrid]:
 
         header, data_start = _detect_header(expanded)
         if not header or len(header) < 3:
-            continue
+            # Try inherited header when column count exactly matches (cross-page continuation)
+            if (inherited_header and len(inherited_header) >= 3
+                    and len(expanded[0]) == len(inherited_header)):
+                header = list(inherited_header)
+                data_start = 0  # all rows are data rows — no header row on this page
+                log.info("Page %d table %d: using inherited header (%d cols)",
+                         page_num, t_idx, len(header))
+            else:
+                continue
 
         col_map = _map_columns(header)
 
@@ -330,6 +356,7 @@ def html_to_table_grids(html: str, page_num: int) -> list[TableGrid]:
                 row_index=r_idx,
                 row_type=row_type,
                 cells={k: v for k, v in cells.items() if k},  # skip empty header keys
+                raw_values=list(row_cells_flat),               # preserve tail beyond header
             ))
 
         grid = TableGrid(

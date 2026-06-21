@@ -32,8 +32,14 @@ from apps.api.models import (
 from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
 from apps.api.services.import_service import import_csv_data, _gen_code
 from apps.api.services.standardize import standardize_name
+from apps.api.intelligence.price_basis import derive_price_basis
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
+
+
+def _num_or_none(v: Any) -> float | None:
+    """Coerce to float, preserving None (used for extraction_meta raw价字段)。"""
+    return float(v) if v is not None else None
 
 
 class BatchConfirmRequest(BaseModel):
@@ -391,6 +397,18 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     if not isinstance(raw_items, list):
         raise HTTPException(422, f"Expected items list, got {type(raw_items).__name__}")
 
+    # ── 早期校验：有 items 但 category 为空 → 立即拒绝，不创建空壳 submission ─────
+    # 注：此时尚未创建 BidSubmission，确保 rollback 不留残留。
+    _has_real_items = any(
+        str(r.get("material") or "").strip() for r in raw_items if isinstance(r, dict)
+    )
+    if _has_real_items and not default_category:
+        raise HTTPException(
+            422,
+            "category 不能为空：无法确定报价品类，入库中止。"
+            "请在前端选择品类（如「阀门」）后重新点击「校对入库」。",
+        )
+
     items: list[dict[str, Any]] = []
     shape_errors: list[dict] = []
     for idx, item in enumerate(raw_items):
@@ -404,44 +422,78 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     prior_submission = (
         db.query(BidSubmission).filter_by(batch_id=batch_id).first()
     )
-    if prior_submission:
-        line_count = db.query(BidQuoteLine).filter_by(
-            submission_id=prior_submission.id
-        ).count()
-        log.info(
-            "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
-            prior_submission.id, batch_id, line_count,
-        )
-        return {
-            "status": "ok",
-            "submission_id": prior_submission.id,
-            "line_count": line_count,
-            "skipped_count": 0,
-            "errors": [],
-            "unknown_brands": [],
-            "supplier_id": prior_submission.supplier_id,
-            "project_id": project.id if project else None,
-            "batch_id": batch_id,
-            "idempotent": True,
-        }
-
-    # ── 创建 BidSubmission ─────────────────────────────────────────────────────
     display_name = (
         body.supplier_name.strip()
         or (supplier.name if supplier else "")
         or (job.result or {}).get("supplier_name", "")
     )
-    submission = BidSubmission(
-        job_id=job.id,
-        supplier_id=supplier.id if supplier else None,
-        supplier_raw_name=display_name,
-        project_id=project.id if project else None,
-        batch_id=batch_id,
-        status="pending",
-        bid_status=body.bid_status,
-    )
-    db.add(submission)
-    db.flush()
+    if prior_submission:
+        # 同一文件 → 同一 job → 同一 batch_id。若历史那条已被 superseded/rejected
+        # （旧轮次或修复脚本废弃），绝不能作为"幂等命中"原样返回——否则前端会拿到一个
+        # 已废弃的 submission_id，下游 match 硬闸门必然 409（"不属于当前项目或已被废弃"）。
+        # 正确语义：用户重新上传并再确认 = 复活该 submission（清旧行、重置 pending、重建）。
+        _stale = prior_submission.status in ("superseded", "rejected")
+        prior_line_count = db.query(BidQuoteLine).filter_by(
+            submission_id=prior_submission.id
+        ).count()
+        if prior_line_count > 0 and not _stale:
+            # 真正的幂等：活跃且已有报价行，直接返回
+            log.info(
+                "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
+                prior_submission.id, batch_id, prior_line_count,
+            )
+            return {
+                "status": "ok",
+                "submission_id": prior_submission.id,
+                "line_count": prior_line_count,
+                "skipped_count": 0,
+                "errors": [],
+                "unknown_brands": [],
+                "supplier_id": prior_submission.supplier_id,
+                "project_id": project.id if project else None,
+                "batch_id": batch_id,
+                "idempotent": True,
+            }
+        if _stale:
+            # 复活废弃 submission：删除旧行后重建，并重置为 pending。
+            deleted = db.query(BidQuoteLine).filter_by(
+                submission_id=prior_submission.id
+            ).delete()
+            log.warning(
+                "batch_confirm: reviving %s submission_id=%d batch=%s "
+                "(cleared %d stale lines → pending)",
+                prior_submission.status, prior_submission.id, batch_id, deleted,
+            )
+            prior_submission.status = "pending"
+            # 复活时同步本次请求的归属（supplier_id/project 可能与废弃时不同）
+            prior_submission.supplier_id = supplier.id if supplier else None
+            if project:
+                prior_submission.project_id = project.id
+        else:
+            # 空壳 submission（活跃但 0 行）：重建。复用现有对象，重新写 BQL。
+            log.warning(
+                "batch_confirm: rebuilding empty shell submission_id=%d batch=%s",
+                prior_submission.id, batch_id,
+            )
+        # 更新供应商名称（可能本次传入了正确的 supplier_raw_name）
+        if display_name:
+            prior_submission.supplier_raw_name = display_name
+        if body.bid_status:
+            prior_submission.bid_status = body.bid_status
+        submission = prior_submission
+    else:
+        # ── 创建 BidSubmission ─────────────────────────────────────────────────
+        submission = BidSubmission(
+            job_id=job.id,
+            supplier_id=supplier.id if supplier else None,
+            supplier_raw_name=display_name,
+            project_id=project.id if project else None,
+            batch_id=batch_id,
+            status="pending",
+            bid_status=body.bid_status,
+        )
+        db.add(submission)
+        db.flush()
 
     if not items:
         db.commit()
@@ -518,9 +570,28 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 else:
                     unknown_brands.add(brand)
 
-            price = float(p) if (p := item.get("unit_price")) is not None else None
             qty = float(q) if (q := item.get("qty")) is not None else None
-            total = item.get("total_price")
+
+            # ── 价格口径桥接（§4/§9）：判定 price_basis + effective 价格 ──────────────
+            # batch-confirm 现场 re-derive，使前端编辑过的原始价格字段生效。
+            # 不信任客户端回传的 price_basis（可能因人工编辑而陈旧）——一律以现场重算为准。
+            basis_info = derive_price_basis(item)
+            price_basis = basis_info["price_basis"]
+            # 人工确认优先：前端"含税单价/总价(原文)"列编辑值落在 unit_price/total_price，
+            # 若非空即视为人工确认，优先于自动 effective；否则采用桥接 effective。
+            confirmed_unit = float(cu) if (cu := item.get("unit_price")) is not None else None
+            confirmed_total = float(ct) if (ct := item.get("total_price")) is not None else None
+            price = (
+                confirmed_unit
+                if confirmed_unit is not None
+                else basis_info["effective_unit_price"]
+            )
+            total = (
+                confirmed_total
+                if confirmed_total is not None
+                else basis_info["effective_total_price"]
+            )
+            # effective 合价缺失但有 effective 单价×数量 → 同口径相乘补全（非 ×1.13 推导）
             if total is None and price is not None and qty is not None:
                 total = round(price * qty, 4)
             if total is not None:
@@ -549,6 +620,22 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "validation_warning": item.get("validation_warning") or "",
                 "normalized_material": str(item.get("normalized_material") or "").strip(),
                 "ocr_correction_reason": str(item.get("ocr_correction_reason") or "").strip(),
+                # ── 价格口径桥接审计（§4/§9）：basis + 全部原始税价字段，原值不改 ──
+                "price_basis": price_basis,
+                "effective_unit_price": basis_info["effective_unit_price"],
+                "effective_total_price": basis_info["effective_total_price"],
+                "raw_unit_price": _num_or_none(item.get("unit_price")),
+                "raw_unit_price_incl_tax": _num_or_none(item.get("unit_price_incl_tax")),
+                "raw_unit_price_excl_tax": _num_or_none(item.get("unit_price_excl_tax")),
+                "raw_total_price": _num_or_none(item.get("total_price")),
+                "raw_total_price_incl_tax": _num_or_none(item.get("total_price_incl_tax")),
+                "raw_total_price_excl_tax": _num_or_none(item.get("total_price_excl_tax")),
+                "tax_rate": _num_or_none(item.get("tax_rate")),
+                "tax_amount": _num_or_none(item.get("tax_amount")),
+                # ── 算术校验审计：原 qty 不改，suggested_qty 仅参考 ──
+                "validation_flags": list(item.get("validation_flags") or []),
+                "raw_qty": _num_or_none(item.get("raw_qty")) if item.get("raw_qty") is not None else qty,
+                "suggested_qty": _num_or_none(item.get("suggested_qty")),
             }
 
             line = BidQuoteLine(
@@ -583,6 +670,17 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         except Exception as e:
             errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
             skipped_count += 1
+
+    # ── 强校验：items 非空但全部被跳过 → 回滚并返回 422 ──────────────────────────
+    # 这里捕获的主要情形是：category 虽然传到了后端，但每行的 item_category 仍无效。
+    # 也防止空壳重建失败（重建后仍 0 行）时静默返回 ok。
+    if items and line_count == 0:
+        db.rollback()
+        reason_summary = "; ".join({e["reason"] for e in errors[:3]}) if errors else "品类无效或所有行被过滤"
+        raise HTTPException(
+            422,
+            f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
+        )
 
     db.commit()
 

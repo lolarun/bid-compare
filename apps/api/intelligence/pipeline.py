@@ -39,6 +39,7 @@ from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.prompts import TENDER_PROMPT, QUOTE_PROMPT
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
 from apps.api.intelligence.quote_fact import build_canonical, apply_arithmetic_validation
+from apps.api.intelligence.price_basis import derive_price_basis
 
 log = logging.getLogger(__name__)
 extraction_log = logging.getLogger("mempas.extraction")
@@ -100,23 +101,95 @@ class ExtractionPipeline:
     ) -> ExtractionResponse:
         _notify(progress_cb, "渲染PDF", 10)
         t_start = time.time()
-        if hasattr(self.provider, "ocr_pages_with_roles"):
-            from apps.api.intelligence.document_loader import MAX_PAGES_UNLIMITED
-            images = DocumentLoader.to_images(file_path, max_pages=MAX_PAGES_UNLIMITED)
-            _notify(progress_cb, "单次OCR+页面分类", 15)
-            page_roles_html, ocr_failures = self.provider.ocr_pages_with_roles(images)
-            resp = self._run_with_roles(images, page_roles_html, progress_cb)
-            if ocr_failures:
-                resp.metadata.setdefault("failed_ocr_pages", []).extend(ocr_failures)
+
+        if (hasattr(self.provider, "ocr_pages_with_roles")
+                and hasattr(self.provider, "_llm_call_json")):
+            # Unified skeleton path: full-page OCR → role classify → detect →
+            # per-page LLM (thinking retry + adaptive tiling) → quality gate
+            from apps.api.intelligence.table_recognizer import recognize_tables
+            draft = recognize_tables(
+                file_path=file_path,
+                provider=self.provider,
+                adapter=_get_quote_adapter(),
+                progress_cb=progress_cb,
+            )
+            resp = self._draft_to_quote_response(draft, context or {}, t_start)
         else:
-            images = DocumentLoader.to_images(file_path)  # default MAX_PAGES=12
+            # Legacy path for providers without OCR (mock, non-dashscope)
+            images = DocumentLoader.to_images(file_path)
             resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
-        _notify(progress_cb, "整理结果", 95)
-        resp.data = self._postprocess_quote(resp.data, context or {})
-        self._log_extraction("quote", file_path, images, resp, t_start)
+            _notify(progress_cb, "整理结果", 95)
+            resp.data = self._postprocess_quote(resp.data, context or {})
+            self._log_extraction("quote", file_path, images, resp, t_start)
+
         return resp
 
-    # ─── batched execution ─────────────────────────────────────────────────
+    def _draft_to_quote_response(
+        self,
+        draft: Any,
+        context: dict,
+        t_start: float,
+    ) -> ExtractionResponse:
+        """Convert ExtractionDraft → ExtractionResponse (quote side)."""
+        import time as _time
+        # Convert DraftRow → postprocess-compatible item dicts
+        items = []
+        for row in draft.rows:
+            if row.row_type not in ("quote_line",):
+                continue
+            f = row.fields
+            items.append({
+                "material": f.get("name") or "",
+                "spec": f.get("spec") or "",
+                "brand": f.get("brand") or "",
+                "unit": f.get("unit") or "",
+                "qty": f.get("qty"),
+                # 全部原始价格字段（含税/不含税/通用），口径桥接与入库均需要，不得丢失
+                "unit_price": f.get("unit_price"),
+                "unit_price_incl_tax": f.get("unit_price_incl_tax"),
+                "unit_price_excl_tax": f.get("unit_price_excl_tax"),
+                "total_price": f.get("total_price"),
+                "total_price_incl_tax": f.get("total_price_incl_tax"),
+                "total_price_excl_tax": f.get("total_price_excl_tax"),
+                "tax_rate": f.get("tax_rate"),
+                "tax_amount": f.get("tax_amount"),
+                "material_type": f.get("material_type") or "",
+                "remark": f.get("remark") or "",
+                "canonical": f.get("canonical") or {},
+                "normalized_material": f.get("normalized_material") or "",
+                "ocr_correction_reason": f.get("ocr_correction_reason") or "",
+                "source_ref": row.source_ref.to_dict(),
+                # 算术校验审计：原值 qty 不改，suggested_qty 仅参考；validation_flags 完整传递
+                "validation_flags": list(row.validation_flags or []),
+                "raw_qty": f.get("qty"),
+                "suggested_qty": f.get("arith_suggested_qty"),
+            })
+        data_in = {
+            "supplier_name": (draft.meta or {}).get("supplier_name") or "",
+            "items": items,
+        }
+        processed = self._postprocess_quote(data_in, context)
+        resp = ExtractionResponse(
+            data=processed,
+            metadata={
+                "doc_type": "quote",
+                "quality_status": draft.quality.status,
+                "quality_blocking_reasons": draft.quality.blocking_reasons,
+                "page_count": draft.page_count,
+                "target_pages": draft.target_pages,
+            },
+            tokens_used=0,
+            duration_ms=int((_time.time() - t_start) * 1000),
+        )
+        log.info(
+            "draft_to_quote_response: quality=%s items=%d supplier=%r",
+            draft.quality.status,
+            len(processed.get("items") or []),
+            processed.get("supplier_name"),
+        )
+        return resp
+
+    # ─── batched execution (legacy / non-OCR-provider path) ──────────────
     def _run_batched(
         self,
         images: list[bytes],
@@ -219,144 +292,6 @@ class ExtractionPipeline:
             merged.tokens_used or 0,
         )
         return merged
-
-    def _run_with_roles(
-        self,
-        images: list[bytes],
-        page_roles_html: list[tuple],
-        progress_cb: ProgressCallback | None = None,
-    ) -> ExtractionResponse:
-        """Single-pass OCR path: uses pre-classified page roles to skip re-OCR.
-
-        Only QUOTE_TABLE pages (up to MAX_QUOTE_TABLE_PAGES) go through Stage 2 LLM.
-        COVER/SUMMARY pages (up to MAX_META_PAGES) go to extract_doc_meta().
-        """
-        from apps.api.intelligence.page_classifier import PageRole
-        from apps.api.intelligence.providers.dashscope_ocr import (
-            MAX_QUOTE_TABLE_PAGES, MAX_META_PAGES,
-        )
-
-        n = len(images)
-        quote_pages: list[tuple[int, bytes, str]] = []  # (page_idx, image, html)
-        meta_htmls: list[str] = []
-
-        for idx, (cls, html) in enumerate(page_roles_html):
-            if cls.primary_role in (PageRole.QUOTE_TABLE, PageRole.UNKNOWN) and len(quote_pages) < MAX_QUOTE_TABLE_PAGES:
-                quote_pages.append((idx, images[idx], html))
-            elif (cls.primary_role in (PageRole.COVER, PageRole.SUMMARY, PageRole.OTHER)
-                  and len(meta_htmls) < MAX_META_PAGES):
-                meta_htmls.append(html)
-
-        if not quote_pages:
-            raise ProviderError("No quote_table pages found after page classification")
-
-        workers = min(PAGE_CONCURRENCY, len(quote_pages))
-        t0 = time.time()
-        log.info("Role-aware extraction: %d quote pages, %d meta pages, concurrency=%d",
-                 len(quote_pages), len(meta_htmls), workers)
-        _notify(progress_cb, f"识别 {len(quote_pages)} 个报价页", 20)
-
-        partials_by_page: dict[int, list[ExtractionResponse]] = {}
-        skipped_pages: list[str] = []
-        completed = 0
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    self._extract_page_with_html, idx, image, html, QUOTE_SCHEMA, QUOTE_PROMPT,
-                ): idx
-                for idx, image, html in quote_pages
-            }
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    page_partials, page_skips = future.result()
-                except Exception as e:
-                    log.warning("Page %d/%d failed: %s", idx + 1, n, e)
-                    skipped_pages.append(f"page{idx + 1}({type(e).__name__}: {e})")
-                    page_partials, page_skips = [], []
-                if page_partials:
-                    partials_by_page[idx] = page_partials
-                skipped_pages.extend(page_skips)
-                completed += 1
-                done_pct = 20 + int((completed / len(quote_pages)) * 65)
-                _notify(progress_cb, f"已完成第 {completed}/{len(quote_pages)} 页", done_pct)
-
-        partials: list[ExtractionResponse] = []
-        for idx in sorted(partials_by_page):
-            partials.extend(partials_by_page[idx])
-
-        if not partials:
-            raise ProviderError(
-                f"All {len(quote_pages)} quote pages failed or were blocked."
-            )
-
-        _notify(progress_cb, "合并识别结果", 88)
-        merged = ResultAggregator.merge(partials, "quote")
-        merged.duration_ms = int((time.time() - t0) * 1000)
-
-        # Meta extraction: supplier_name + bid_total from cover/summary pages
-        if meta_htmls and hasattr(self.provider, "extract_doc_meta"):
-            _notify(progress_cb, "提取封面元信息", 89)
-            doc_meta = self.provider.extract_doc_meta(meta_htmls)
-            merged.metadata["doc_meta"] = doc_meta
-            if not (merged.data or {}).get("supplier_name") and doc_meta.get("supplier_name"):
-                merged.data["supplier_name"] = doc_meta["supplier_name"]
-
-        # Legacy cover-scan fallback for providers without extract_doc_meta
-        if (not (merged.data or {}).get("supplier_name")
-                and images
-                and hasattr(self.provider, "extract_supplier_name_from_cover")):
-            _notify(progress_cb, "封面补充供应商名", 90)
-            name = self.provider.extract_supplier_name_from_cover(images[:10])
-            if name:
-                merged.data["supplier_name"] = name
-
-        if skipped_pages:
-            merged.metadata["skipped_pages"] = skipped_pages
-            log.warning("Role-aware extraction: %d pages skipped: %s",
-                        len(skipped_pages), skipped_pages)
-        log.info("Role-aware aggregated %d partials → %d items, %d tokens",
-                 len(partials),
-                 len((merged.data or {}).get("items") or []),
-                 merged.tokens_used or 0)
-        return merged
-
-    def _extract_page_with_html(
-        self,
-        page_idx: int,
-        image: bytes,
-        html: str,
-        schema: dict,
-        prompt: str,
-    ) -> tuple[list[ExtractionResponse], list[str]]:
-        """Extract a page using pre-computed HTML, skipping Stage 1 re-OCR.
-
-        Parses HTML → TableGrid for structured LLM input and row-level source_ref.
-        Falls back gracefully to raw HTML if parsing fails.
-        """
-        table_grids = None
-        try:
-            from apps.api.intelligence.table_parser import html_to_table_grids
-            grids = html_to_table_grids(html, page_idx + 1)  # 1-based page number
-            if grids:
-                table_grids = grids
-        except Exception as e:
-            log.warning("TableGrid parse failed on page %d, falling back to raw HTML: %s",
-                        page_idx + 1, e)
-
-        try:
-            resp = self.provider.extract(
-                [image], schema, prompt, page_html=html, table_grids=table_grids,
-            )
-            # Assign source_ref from TableGrid row indices (consumes table_index/row_index)
-            if table_grids and resp.data:
-                _assign_source_ref_from_grids(resp.data.get("items") or [], table_grids)
-            return [resp], []
-        except ContentModerationError:
-            page_label = f"page{page_idx + 1}"
-            log.warning("%s: blocked with pre-classified HTML — skipping", page_label)
-            return [], [f"{page_label}(blocked)"]
 
     def _log_extraction(
         self,
@@ -519,6 +454,22 @@ class ExtractionPipeline:
                 normalized_material=norm_material,
             )
 
+            # ── 价格口径桥接（§4/§9）：判定 price_basis + effective 价格，原值不改 ──
+            unit_incl = _coerce_num(it.get("unit_price_incl_tax"))
+            unit_excl = _coerce_num(it.get("unit_price_excl_tax"))
+            total_incl = _coerce_num(it.get("total_price_incl_tax"))
+            total_excl = _coerce_num(it.get("total_price_excl_tax"))
+            basis_info = derive_price_basis({
+                "unit_price": price,
+                "unit_price_incl_tax": unit_incl,
+                "unit_price_excl_tax": unit_excl,
+                "total_price": total,
+                "total_price_incl_tax": total_incl,
+                "total_price_excl_tax": total_excl,
+                "tax_rate": _coerce_num(it.get("tax_rate")),
+                "tax_amount": _coerce_num(it.get("tax_amount")),
+            })
+
             cleaned.append({
                 "material": material,
                 "spec": spec_str,
@@ -526,13 +477,24 @@ class ExtractionPipeline:
                 "unit": (it.get("unit") or "").strip(),
                 "qty": qty,
                 "unit_price": price,
-                "unit_price_excl_tax": _coerce_num(it.get("unit_price_excl_tax")),
+                "unit_price_incl_tax": unit_incl,
+                "unit_price_excl_tax": unit_excl,
                 "total_price": total,
+                "total_price_incl_tax": total_incl,
+                "total_price_excl_tax": total_excl,
                 "tax_rate": _coerce_num(it.get("tax_rate")),
+                "tax_amount": _coerce_num(it.get("tax_amount")),
+                # 比价口径桥接结果
+                "price_basis": basis_info["price_basis"],
+                "effective_unit_price": basis_info["effective_unit_price"],
+                "effective_total_price": basis_info["effective_total_price"],
                 "material_type": material_type,
                 "remark": (it.get("remark") or "").strip(),
                 "canonical": canonical,
                 "validation_warning": "",
+                "validation_flags": list(it.get("validation_flags") or []),
+                "raw_qty": _coerce_num(it.get("raw_qty")) if it.get("raw_qty") is not None else qty,
+                "suggested_qty": _coerce_num(it.get("suggested_qty")),
                 "normalized_material": norm_material,
                 "ocr_correction_reason": ocr_reason,
                 "source_ref": it.get("source_ref"),  # {page, table, row} from TableGrid
@@ -544,6 +506,103 @@ class ExtractionPipeline:
             "items": cleaned,
             "context": ctx,
         }
+
+
+# ─── Kept for backward compat (tests import this directly) ───────────────────
+
+def _assign_source_ref_from_grids(items: list[dict], table_grids: list) -> None:
+    """Assign source_ref from TableGrid row indices (legacy utility).
+
+    Used by tests. Production path now goes through table_recognizer.
+    """
+    page = table_grids[0].page if table_grids else None
+    valid_pairs: set[tuple[int, int]] = {
+        (grid.table_index, row.row_index)
+        for grid in table_grids
+        for row in grid.rows
+        if row.row_type == "quote_line"
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        t_idx = item.pop("table_index", None)
+        r_idx = item.pop("row_index", None)
+        if r_idx is None:
+            continue
+        try:
+            t = int(t_idx) if t_idx is not None else 0
+            r = int(r_idx)
+        except (ValueError, TypeError):
+            item["source_ref_invalid"] = f"non-integer table={t_idx!r} row={r_idx!r}"
+            continue
+        ref: dict = {"page": page, "table": t, "row": r}
+        if valid_pairs and (t, r) not in valid_pairs:
+            ref["valid"] = False
+            item["source_ref_invalid"] = f"index ({t},{r}) not in quote_lines"
+        item["source_ref"] = ref
+
+
+# ─── QuoteAdapter（报价侧 RecognizeAdapter）────────────────────────────────
+
+def _quote_detect_pages(htmls: list[str]) -> list[int]:
+    from apps.api.intelligence.page_classifier import classify_page, PageRole
+    return [
+        i + 1
+        for i, html in enumerate(htmls)
+        if classify_page(html).primary_role in (PageRole.QUOTE_TABLE, PageRole.UNKNOWN)
+    ]
+
+
+def _quote_extract_meta(non_target_htmls: list[tuple], provider: Any) -> dict:
+    from apps.api.intelligence.page_classifier import classify_page, PageRole
+    from apps.api.intelligence.providers.dashscope_ocr import MAX_META_PAGES
+
+    meta_htmls = [
+        html for _page_no, html in non_target_htmls
+        if classify_page(html).primary_role in (PageRole.COVER, PageRole.SUMMARY, PageRole.OTHER)
+    ][:MAX_META_PAGES]
+
+    supplier_name = ""
+    declared_total = None
+
+    if meta_htmls and hasattr(provider, "extract_doc_meta"):
+        try:
+            doc_meta = provider.extract_doc_meta(meta_htmls)
+            supplier_name = doc_meta.get("supplier_name") or ""
+            declared_total = doc_meta.get("bid_total") or doc_meta.get("declared_total")
+        except Exception as exc:
+            log.warning("quote extract_meta: extract_doc_meta failed: %s", exc)
+
+    return {"supplier_name": supplier_name, "declared_total": declared_total}
+
+
+def _quote_prompt_for_mode(input_mode: str) -> str:
+    from apps.api.intelligence.providers.dashscope_ocr import (
+        _QUOTE_S2_TABLE_PROMPT, _QUOTE_S2_PROMPT,
+    )
+    if input_mode == "table_grid":
+        return _QUOTE_S2_TABLE_PROMPT
+    return _QUOTE_S2_PROMPT
+
+
+_QUOTE_ADAPTER = None  # deferred import to avoid circular — set at first use
+
+
+def _get_quote_adapter():
+    """Return the QuoteAdapter singleton (lazy to avoid import cycles)."""
+    global _QUOTE_ADAPTER
+    if _QUOTE_ADAPTER is None:
+        from apps.api.intelligence.table_recognizer import RecognizeAdapter
+        from apps.api.intelligence.providers.dashscope_ocr import _QUOTE_S2_PROMPT
+        _QUOTE_ADAPTER = RecognizeAdapter(
+            doc_type="quote",
+            detect_pages=_quote_detect_pages,
+            row_prompt=_QUOTE_S2_PROMPT,
+            name_key="material",
+            extract_meta=_quote_extract_meta,
+            prompt_for_mode=_quote_prompt_for_mode,
+        )
+    return _QUOTE_ADAPTER
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
@@ -575,39 +634,3 @@ def _notify(progress_cb: ProgressCallback | None, stage: str, pct: int) -> None:
         progress_cb(stage, max(0, min(100, pct)))
 
 
-def _assign_source_ref_from_grids(items: list[dict], table_grids: list) -> None:
-    """Consume LLM-output table_index/row_index fields and replace with source_ref dict.
-
-    Called after provider.extract() when TableGrid-structured input was used.
-    LLM outputs {"table_index": T, "row_index": R, ...}; this function pops those
-    fields and sets item["source_ref"] = {"page": P, "table": T, "row": R}.
-
-    Non-integer indices or out-of-range positions are flagged with source_ref_invalid
-    but the item is kept (no extraction loss).
-    """
-    page = table_grids[0].page if table_grids else None
-    # Valid (table_index, row_index) pairs for quote_line rows only
-    valid_pairs: set[tuple[int, int]] = {
-        (grid.table_index, row.row_index)
-        for grid in table_grids
-        for row in grid.rows
-        if row.row_type == "quote_line"
-    }
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        t_idx = item.pop("table_index", None)
-        r_idx = item.pop("row_index", None)
-        if r_idx is None:
-            continue
-        try:
-            t = int(t_idx) if t_idx is not None else 0
-            r = int(r_idx)
-        except (ValueError, TypeError):
-            item["source_ref_invalid"] = f"non-integer table={t_idx!r} row={r_idx!r}"
-            continue
-        ref: dict = {"page": page, "table": t, "row": r}
-        if valid_pairs and (t, r) not in valid_pairs:
-            ref["valid"] = False
-            item["source_ref_invalid"] = f"index ({t},{r}) not in quote_lines"
-        item["source_ref"] = ref

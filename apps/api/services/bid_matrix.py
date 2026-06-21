@@ -169,6 +169,8 @@ def _compute_row_baselines(
             "price": round(reasonable_low_price, 2),
             "date": rl.get("reasonable_low_date") or "",
             "project": rl.get("reasonable_low_project") or "",
+            # 标记是否来自全品类聚合（sub_cat 为空时偏差基准不可靠）
+            "broad_baseline": sub_cat is None,
         }
 
     return historical_avg_info, reasonable_low_info
@@ -700,27 +702,27 @@ def build_anchor_matrix(
             return [i for i in items if i.supplier_id == col_id]
         sub_actual_sids = {}
 
-    # ── Load all groups for this project/category ────────────────────────────
+    # ── Load groups: when session is known, ONLY load that session's groups ──
+    # Prevents cross-session contamination when re-running match after a bad round.
     q = db.query(BidAlignmentGroup).filter(
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
         BidAlignmentGroup.status == "confirmed",
     )
+    if tender_list_session_id is not None:
+        # Strict: only groups that were created by this specific session
+        q = q.filter(BidAlignmentGroup.tender_list_session_id == tender_list_session_id)
     if allowed_group_ids is not None:
         q = q.filter(BidAlignmentGroup.id.in_(allowed_group_ids))
     all_groups: list[BidAlignmentGroup] = q.all()
 
-    # Build lookup: anchor_seq → group (prefer session-matched, fallback to any)
+    # Build lookup: anchor_seq → group (no fallback needed — session already filtered)
     seq_to_group: dict[str, BidAlignmentGroup] = {}
     for g in all_groups:
         if g.anchor_seq is None:
             continue
         seq = str(g.anchor_seq)
         if seq not in seq_to_group:
-            seq_to_group[seq] = g
-        elif (tender_list_session_id is not None
-              and g.tender_list_session_id == tender_list_session_id):
-            # Prefer the group from the current session
             seq_to_group[seq] = g
 
     tier_filter = _detect_brand_tier_filter(db, supplier_ids, category, project_id)
@@ -758,7 +760,12 @@ def build_anchor_matrix(
             db, mat_category, sub_cat, tier_filter
         )
         thresholds = get_category_thresholds(db, mat_category)
-        reasonable_low_price = reasonable_low_info["price"] if reasonable_low_info else None
+        # 仅当 sub_cat 明确时使用基准价（全品类地板价粒度过粗，偏差无意义）
+        reasonable_low_price = (
+            reasonable_low_info["price"]
+            if reasonable_low_info and not reasonable_low_info.get("broad_baseline")
+            else None
+        )
 
         # ── Build cells for each column (submission or supplier) ──────────
         supplier_cells: list[dict] = []
@@ -831,24 +838,74 @@ def build_anchor_matrix(
 
     # ── Totals (quoted-only cells) ────────────────────────────────────────────
     totals = []
+    recommendation_blocked_reasons: list[str] = []
     for col_id in col_ids:
         data = supplier_totals[col_id]
-        avg_dev = sum(data["devs"]) / len(data["devs"]) if data["devs"] else 0.0
+        # avg_deviation=null when 0 quotes (0.0 would falsely make them "best")
+        avg_dev: float | None = (
+            round(sum(data["devs"]) / len(data["devs"]), 4)
+            if data["devs"] else None
+        )
         if use_submission_mode:
             sub = db.get(BidSubmission, col_id)
             cs = _get_submission_checksum(db, sub) if sub else {}
         else:
             cs = _get_supplier_checksum(db, col_id, project_id)
+        quoted = data["quoted"]
+        anomalies = data["anomalies"]
+        checksum_status = cs.get("status", "unknown")
+        col_label = next((sl["name"] for sl in supplier_labels if sl["id"] == col_id), str(col_id))
+        # Per-supplier blocking conditions
+        if quoted == 0:
+            recommendation_blocked_reasons.append(f"{col_label} 无有效报价")
+        if checksum_status in ("fail", "unknown"):
+            cs_label = "核验金额不符" if checksum_status == "fail" else "无核验金额"
+            recommendation_blocked_reasons.append(f"{col_label} {cs_label}")
+        if anomalies > 0:
+            recommendation_blocked_reasons.append(f"{col_label} 含 {anomalies} 个异常价格")
         totals.append({
             "supplier_id": col_id,
             "total": round(data["total"], 2),
-            "avg_deviation": round(avg_dev, 4),
-            "quoted_count": data["quoted"],
-            "anomaly_count": data["anomalies"],
+            "avg_deviation": avg_dev,
+            "quoted_count": quoted,
+            "anomaly_count": anomalies,
             "declared_total": cs.get("declared"),
             "checksum_delta_pct": cs.get("delta_pct"),
-            "checksum_status": cs.get("status"),
+            "checksum_status": checksum_status,
         })
+
+    # Check if any row has pending cells
+    pending_count = sum(
+        1 for row in rows
+        for cell in row.get("suppliers", [])
+        if cell.get("cell_status") == "pending"
+    )
+    if pending_count > 0:
+        recommendation_blocked_reasons.append(f"{pending_count} 个存在待确认报价单元格")
+
+    # Check if no baseline is available at all (broad_baseline for all rows → no deviation)
+    all_devs_empty = all(not supplier_totals[col_id]["devs"] for col_id in col_ids)
+    if all_devs_empty and col_ids:
+        recommendation_blocked_reasons.append("缺少同规格历史基准（无法计算偏差）")
+
+    # Completeness threshold: supplier must quote ≥50% of anchors
+    total_anchors = len(anchors)
+    COMPLETENESS_THRESHOLD = 0.5
+    if total_anchors > 0:
+        for col_id in col_ids:
+            quoted = supplier_totals[col_id]["quoted"]
+            ratio = quoted / total_anchors
+            if ratio < COMPLETENESS_THRESHOLD:
+                col_label = next((sl["name"] for sl in supplier_labels if sl["id"] == col_id), str(col_id))
+                recommendation_blocked_reasons.append(
+                    f"{col_label} 报价完整度不足（{quoted}/{total_anchors}="
+                    f"{int(ratio*100)}%，要求≥{int(COMPLETENESS_THRESHOLD*100)}%）"
+                )
+
+    # When recommendation is blocked, null out all per-row recommended fields
+    if recommendation_blocked_reasons:
+        for row in rows:
+            row["recommended"] = None
 
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
     matrix_distribution = build_matrix_distribution_from_rows(rows, col_ids)
@@ -861,6 +918,8 @@ def build_anchor_matrix(
         "brand_tier_filter": tier_filter,
         "anchor_matrix": True,  # flag for frontend to know it's anchor-driven
         "matrix_distribution": matrix_distribution,
+        "recommendation_blocked": bool(recommendation_blocked_reasons),
+        "recommendation_blocked_reasons": recommendation_blocked_reasons,
     }
 
 

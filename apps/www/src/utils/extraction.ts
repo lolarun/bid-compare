@@ -91,6 +91,10 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
         const {
           material, spec, brand, unit, qty, unit_price, unit_price_excl_tax,
           total_price, tax_rate, remark,
+          // 价格口径桥接字段：显式解构并保留，绝不丢失（§4/§9）
+          unit_price_incl_tax, total_price_incl_tax, total_price_excl_tax,
+          tax_amount, price_basis, effective_unit_price, effective_total_price,
+          validation_flags, raw_qty, suggested_qty,
           // visible fields handled explicitly above — everything else is hidden
           ...rest
         } = it as Record<string, unknown>
@@ -106,6 +110,21 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
         if (typeof rest.category === 'string')      hidden.category      = rest.category
         if (typeof rest.standard_name === 'string') hidden.standard_name = rest.standard_name
         if (typeof rest.standard_spec === 'string') hidden.standard_spec = rest.standard_spec
+        // 价格口径桥接字段：数值字段统一 asNumOrNull，basis 字符串，flags 数组
+        const basis: Partial<QuoteExtractionItem> = {
+          unit_price_incl_tax: asNumOrNull(unit_price_incl_tax),
+          total_price_incl_tax: asNumOrNull(total_price_incl_tax),
+          total_price_excl_tax: asNumOrNull(total_price_excl_tax),
+          tax_amount: asNumOrNull(tax_amount),
+          effective_unit_price: asNumOrNull(effective_unit_price),
+          effective_total_price: asNumOrNull(effective_total_price),
+          raw_qty: asNumOrNull(raw_qty),
+          suggested_qty: asNumOrNull(suggested_qty),
+        }
+        if (typeof price_basis === 'string') basis.price_basis = price_basis
+        if (Array.isArray(validation_flags)) {
+          basis.validation_flags = validation_flags.filter((x): x is string => typeof x === 'string')
+        }
         return {
           material: asStr(material),
           spec: asStr(spec),
@@ -117,6 +136,7 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
           total_price: asNumOrNull(total_price),
           tax_rate: asNumOrNull(tax_rate),
           remark: asStr(remark),
+          ...basis,
           ...hidden,
         }
       })

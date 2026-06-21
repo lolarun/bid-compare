@@ -72,6 +72,7 @@ const categorySessionMap = ref<Record<string, number>>({})  // {品类 → sessi
 const forceUnknownCategory = ref(false)  // 用户显式确认强制归入
 const tenderListConfirming = ref(false)
 const tenderListSessionId = ref<number | null>(null)
+const categoryExplicitlySelected = ref(false)  // 多品类场景：用户显式点击品类切换器后才允许入库
 
 // ─── Step 1 (招标 PDF)：异步抽取 + 品牌映射 + 页范围 + 对账 ────────────────
 // PDF 招标清单是比价主来源，Excel 仅作对照参考
@@ -376,14 +377,21 @@ async function confirmTenderListVersion() {
       brand_requirement: tenderBrandRequirement.value,
       supplier_brands: tenderSupplierBrands.value,
     })
-    // 记录已确认的品类 + 构建 categorySessionMap(切换品类时同步 session_id)
+    // ── 品类状态同步：顺序不可乱，tenderCategory 必须先于 tenderListSessionId 赋值 ──
     confirmedCategories.value = (data.sessions || []).map(s => s.category)
     categorySessionMap.value = Object.fromEntries(
       (data.sessions || []).map(s => [s.category, s.id])
     )
-    // 当前品类对应的 session id
-    const curCat = tenderCategory.value || taskConfig.category
-    tenderListSessionId.value = categorySessionMap.value[curCat] ?? data.id
+    // primary_category 由服务端确定（锚点最多的品类）；前端取 data.primary_category 为准
+    const primaryCat: string = data.primary_category
+      || data.sessions?.find(s => s.id === data.id)?.category
+      || confirmedCategories.value[0]
+      || ''
+    tenderCategory.value = primaryCat
+    taskConfig.category = primaryCat
+    tenderListSessionId.value = categorySessionMap.value[primaryCat] ?? data.id
+    // 单品类时视为已显式选择；多品类时用户须手动点选后方可入库
+    categoryExplicitlySelected.value = confirmedCategories.value.length === 1
     if (data.multi_category) {
       const parts = data.sessions.map(s => `${s.category}(${s.anchors_total})`).join('、')
       message.success(`已按品类拆分为 ${data.sessions.length} 份采购清单：${parts}`)
@@ -507,8 +515,9 @@ interface BatchFileEntry {
   progressPct: number
   uploadPct: number
   jobId: string | null
-  detectedSupplierName: string
-  matchedSupplierId: number | null  // auto-matched
+  detectedSupplierName: string   // OCR-detected name (read-only source of truth)
+  finalSupplierName: string      // user-editable display name (always takes precedence)
+  matchedSupplierId: number | null  // set when user selects from dropdown; null = stranger
   items: QuoteExtractionItem[]
   confirmedSupplierId: number | null    // null for unknown suppliers
   confirmedSubmissionId: number | null  // always set on confirm success
@@ -605,8 +614,13 @@ const matrixSummary = computed(() => {
   const rows = matrixResult.value.rows
   const totals = matrixResult.value.totals
   const suppliers = matrixResult.value.suppliers
-  const best = totals.length
-    ? totals.reduce((a, b) => (a.avg_deviation < b.avg_deviation ? a : b))
+  // 推荐止血：后端标记 recommendation_blocked 时不出推荐（0报价/pending/checksum fail 等情形）
+  const blocked = (matrixResult.value as Record<string, unknown>).recommendation_blocked as boolean | undefined
+  const eligible = blocked
+    ? []
+    : totals.filter((t) => t.quoted_count != null && t.quoted_count > 0 && t.avg_deviation != null)
+  const best = eligible.length
+    ? eligible.reduce((a, b) => ((a.avg_deviation as number) < (b.avg_deviation as number) ? a : b))
     : null
   const bestSupplier = best ? suppliers.find((s) => s.id === best.supplier_id) : null
   // Optimal total: sum of min prices per row
@@ -664,6 +678,8 @@ const insightLoading = ref(false)
 
 async function fetchInsight() {
   if (!matrixResult.value || matrixResult.value.rows.length === 0) return
+  // 推荐止血：数据异常（0报价/pending/checksum fail）时禁止调用 AI insight
+  if ((matrixResult.value as Record<string, unknown>).recommendation_blocked) return
   insightLoading.value = true
   insightResult.value = null
   try {
@@ -826,10 +842,37 @@ onMounted(() => {
 // AUDIT-FIX M1: previously we only ADDED entries — unchecking and re-checking
 // a supplier kept the prior confirmed=true state, making bid-matrix include
 // stale uploads.
-// 切换品类时同步 session_id(多品类场景：confirm 后 categorySessionMap 已填充)
+// 切换品类时同步 session_id；多品类下用户手动切换即视为显式选择
 watch(tenderCategory, (cat) => {
   if (cat && categorySessionMap.value[cat]) {
     tenderListSessionId.value = categorySessionMap.value[cat]
+  }
+  if (cat && confirmedCategories.value.length > 1) {
+    categoryExplicitlySelected.value = true
+  }
+})
+
+// 选择项目 / 刷新后恢复品类状态（404 = 新项目，静默处理）
+watch(() => taskConfig.projectId, async (pid) => {
+  confirmedCategories.value = []
+  categorySessionMap.value = {}
+  tenderCategory.value = ''
+  taskConfig.category = ''
+  tenderListSessionId.value = null
+  categoryExplicitlySelected.value = false
+  if (!pid) return
+  try {
+    const { data } = await analysisApi.tenderListCurrentSessions({ project_id: pid })
+    const sessions = data.sessions ?? []
+    confirmedCategories.value = sessions.map(s => s.category)
+    categorySessionMap.value = Object.fromEntries(sessions.map(s => [s.category, s.id]))
+    const primary = data.primary_category || ''
+    tenderCategory.value = primary
+    taskConfig.category = primary
+    tenderListSessionId.value = categorySessionMap.value[primary] ?? null
+    categoryExplicitlySelected.value = sessions.length === 1
+  } catch {
+    // 新项目无历史会话，保持重置状态
   }
 })
 
@@ -945,12 +988,17 @@ async function confirmSupplier(supplierId: number) {
     message.warning('请先上传该供应商的报价单')
     return
   }
+  const effectiveCategory = tenderCategory.value || taskConfig.category
+  if (!effectiveCategory) {
+    message.error('品类不能为空：请先完成招标清单识别后再入库')
+    return
+  }
   try {
     const { data } = await quoteApi.batchConfirm({
       job_id: slot.job.id,
       supplier_id: supplierId,
       project_id: taskConfig.projectId,
-      category: taskConfig.category,
+      category: effectiveCategory,
       overrides: slot.items as unknown as Array<Record<string, unknown>>,
       bid_status: taskConfig.bidStatus,
     })
@@ -998,6 +1046,7 @@ function handleBatchFile(file: File) {
       uploadPct: 1,
       jobId: null,
       detectedSupplierName: '',
+      finalSupplierName: '',
       matchedSupplierId: null,
       items: [],
       confirmedSupplierId: null,
@@ -1132,7 +1181,7 @@ function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
   const shape = asQuoteShape(job.result)
   entry.items = shape.items
   entry.detectedSupplierName = shape.supplier_name || ''
-  // Auto-match against known suppliers
+  // Auto-match against known suppliers; initialize finalSupplierName from OCR
   if (entry.detectedSupplierName) {
     const name = entry.detectedSupplierName.replace(/\s/g, '').toLowerCase()
     const match = allSuppliers.value.find(
@@ -1141,40 +1190,65 @@ function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
     )
     if (match) {
       entry.matchedSupplierId = match.id
+      entry.finalSupplierName = match.name   // use canonical DB name when matched
+    } else {
+      entry.finalSupplierName = entry.detectedSupplierName
     }
   }
 }
 
 async function confirmBatchEntry(entry: BatchFileEntry) {
   if (!entry.jobId) return
-  const supplierName = entry.matchedSupplierId
-    ? allSuppliers.value.find((s) => s.id === entry.matchedSupplierId)?.name || entry.detectedSupplierName
-    : entry.detectedSupplierName
-  if (!supplierName) {
-    message.warning('请输入或选择供应商名称')
+
+  // ── 品类校验 ──
+  const categories = confirmedCategories.value
+  const effectiveCategory =
+    tenderCategory.value || taskConfig.category ||
+    (categories.length === 1 ? categories[0] : '')
+  if (!effectiveCategory) {
+    message.error(categories.length > 1
+      ? '采购清单包含多个品类，请先选择本报价所属品类'
+      : '未恢复采购清单品类，请返回采购清单步骤重新确认')
     return
   }
+  if (categories.length > 1 && !categoryExplicitlySelected.value) {
+    message.error('采购清单包含多个品类，请先选择本报价所属品类')
+    return
+  }
+
+  // 用 finalSupplierName（用户编辑后的名称）作为权威名称
+  const supplierName = entry.finalSupplierName.trim() || entry.detectedSupplierName
+  if (!supplierName) {
+    message.warning('请输入供应商名称')
+    return
+  }
+
+  // ── 三方冲突警告：文件名提示 / OCR 识别 / 当前输入名称不一致时要求确认 ─────
+  const filenameHint = _extractSupplierHintFromFilename(entry.filename)
+  const ocrName = entry.detectedSupplierName
+  const conflicts: string[] = []
+  if (filenameHint && !supplierName.includes(filenameHint) && !filenameHint.includes(supplierName.slice(0, 4))) {
+    conflicts.push(`· 文件名提示：「${filenameHint}」`)
+  }
+  if (ocrName && ocrName !== supplierName && !ocrName.includes(supplierName) && !supplierName.includes(ocrName.slice(0, 4))) {
+    conflicts.push(`· OCR 识别：「${ocrName}」`)
+  }
+  if (conflicts.length > 0) {
+    const ok = window.confirm(
+      `供应商名称存在冲突，请确认：\n${conflicts.join('\n')}\n· 当前输入：「${supplierName}」\n\n确认以「${supplierName}」入库？`
+    )
+    if (!ok) return
+  }
+
   try {
-    // 若未自动匹配到 id，按名称在已知列表中二次查找（未匹配则作陌生供应商处理）
-    let supplierId = entry.matchedSupplierId ?? undefined
-    if (!supplierId) {
-      const norm = (s: string) => s.replace(/\s/g, '').toLowerCase()
-      const sn = norm(supplierName)
-      const match = allSuppliers.value.find(s =>
-        norm(s.name) === sn || s.name.includes(supplierName)
-      )
-      if (match) {
-        supplierId = match.id
-        entry.matchedSupplierId = match.id
-      }
-      // 未匹配 = 陌生供应商，supplierId 保持 undefined，后端弱关联处理
-    }
+    // supplier_id 由用户主动选择（matchedSupplierId）决定；编辑名称后若不再匹配则为 null（陌生供应商）
+    const supplierId = entry.matchedSupplierId ?? undefined
     const { data } = await quoteApi.batchConfirm({
       job_id: entry.jobId,
       supplier_id: supplierId,
       supplier_name: supplierName,
       project_id: taskConfig.projectId,
-      category: taskConfig.category,
+      category: effectiveCategory,
       overrides: entry.items as unknown as Array<Record<string, unknown>>,
       bid_status: taskConfig.bidStatus,
     })
@@ -1208,6 +1282,15 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
 function removeBatchEntry(entry: BatchFileEntry) {
   if (entry.pollTimer) clearInterval(entry.pollTimer)
   batchFiles.value = batchFiles.value.filter((f) => f.id !== entry.id)
+}
+
+// 从文件名中提取供应商名称提示（用于冲突检测）
+// 例：「泰科龙投标文件.pdf」→「泰科龙」；「上海绵存报价单.xlsx」→「上海绵存」
+function _extractSupplierHintFromFilename(filename: string): string {
+  const base = filename.replace(/\.(pdf|xlsx?|csv|docx?)$/i, '')
+  // 按常见切割词分割，取第一个非空段
+  const parts = base.split(/[投标报价文件单_\-\s··【】()（）]+/)
+  return (parts[0] || '').trim()
 }
 
 onBeforeUnmount(() => {
@@ -1740,23 +1823,22 @@ async function runMatrix() {
             <div v-if="f.status === 'done' && !f.confirmed" class="batch-card__body">
               <div class="batch-card__supplier-row">
                 <span style="font-size:12px;color:rgba(0,0,0,0.55)">识别供应商：</span>
-                <a-select
-                  v-if="f.matchedSupplierId"
-                  v-model:value="f.matchedSupplierId"
-                  style="width:200px"
+                <a-auto-complete
+                  v-model:value="f.finalSupplierName"
+                  style="width:220px"
                   size="small"
-                  show-search
-                  :filter-option="(input: string, opt: { label?: unknown }) => String(opt.label ?? '').includes(input)"
-                >
-                  <a-select-option v-for="s in allSuppliers" :key="s.id" :value="s.id" :label="s.name">{{ s.name }}</a-select-option>
-                </a-select>
-                <a-input
-                  v-else
-                  v-model:value="f.detectedSupplierName"
-                  size="small"
-                  style="width:200px"
-                  placeholder="供应商名称"
+                  placeholder="供应商名称（可自由输入）"
+                  :options="allSuppliers.map(s => ({ value: s.name, label: s.name, id: s.id }))"
+                  :filter-option="(input: string, opt: { value?: unknown }) => String(opt.value ?? '').includes(input)"
+                  @select="(_val: string, opt: { id?: number }) => { f.matchedSupplierId = opt.id ?? null }"
+                  @change="(val: string) => {
+                    const matched = allSuppliers.find(s => s.name === val)
+                    if (!matched) f.matchedSupplierId = null
+                    else f.matchedSupplierId = matched.id
+                  }"
                 />
+                <a-tag v-if="f.matchedSupplierId" color="blue" style="margin-left:4px;font-size:11px">已关联</a-tag>
+                <a-tag v-else style="margin-left:4px;font-size:11px">陌生</a-tag>
                 <a-button type="primary" size="small" @click="confirmBatchEntry(f)">校对入库</a-button>
               </div>
             </div>

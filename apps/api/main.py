@@ -115,15 +115,19 @@ async def lifespan(app: FastAPI):
     app.state.extraction_pipeline = pipeline
     set_runtime_pipeline(pipeline)
 
-    # Recover stuck jobs (startup pass)
+    # Recover stuck jobs (startup pass).
+    # 后台识别任务无法跨进程重启续跑：启动时任何 RUNNING/PENDING 的 job 都是上次进程
+    # 崩溃/重启遗留的孤儿，必须无视年龄全部回收为 FAILED，否则上传幂等会把这条孤儿
+    # 原样返回，用户重传也拿不到新识别（会一直卡在"处理中"）。周期清扫仍用年龄阈值。
     db = SessionLocal()
     try:
         recovered = DocumentIngestionService.recover_stuck_jobs(
             db,
-            max_age_minutes=STUCK_JOB_MAX_AGE_MINUTES,
+            max_age_minutes=0,
+            include_pending=True,
         )
         if recovered:
-            log.info("Recovered %d stuck extraction jobs at startup", recovered)
+            log.info("Recovered %d orphaned extraction jobs at startup", recovered)
     finally:
         db.close()
 

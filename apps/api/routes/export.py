@@ -3,7 +3,7 @@ import io
 from datetime import datetime
 from urllib.parse import quote as url_quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -264,6 +264,25 @@ def export_bid_matrix(
             .first()
         )
         if session and session.anchors_json:
+            # ── 硬闸门：用_submission_ids 必须已写入（与 /bid-matrix 保持一致）────
+            from apps.api.models.bid_submission import BidSubmission as _BSExport
+            _used_sids_export = list(session.used_submission_ids or [])
+            if not _used_sids_export:
+                _any_active_export = (
+                    db.query(_BSExport.id)
+                    .filter(
+                        _BSExport.project_id == project_id,
+                        _BSExport.status.notin_(("rejected", "superseded")),
+                    )
+                    .first()
+                )
+                if _any_active_export:
+                    raise HTTPException(
+                        409,
+                        "报价确认异常：项目存在 BidSubmission 但当前会话 used_submission_ids 为空。"
+                        "请重新执行「校对入库」→「对齐核查」后再导出矩阵。",
+                    )
+
             anchors = []
             for a in session.anchors_json:
                 ta = TenderAnchor(
@@ -303,6 +322,7 @@ def export_bid_matrix(
             result = build_anchor_matrix(
                 db, anchors=anchors,
                 tender_list_session_id=session.id,
+                used_submission_ids=_used_sids_export,
                 supplier_ids=sids,
                 project_id=project_id,
                 category=category,
@@ -553,7 +573,7 @@ def export_bid_matrix(
     for s in suppliers:
         t = totals_map.get(s["id"])
         totals_data.append(f"¥{t['total']:,.0f}" if t else "")
-        totals_data.append(f"{t['avg_deviation'] * 100:.1f}%" if t else "")
+        totals_data.append(f"{t['avg_deviation'] * 100:.1f}%" if t and t.get("avg_deviation") is not None else "")
         totals_data.append("")
     totals_data += ["", ""]
     ws.append(totals_data)

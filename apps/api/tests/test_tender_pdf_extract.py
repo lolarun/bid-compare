@@ -444,7 +444,7 @@ def test_extract_bidlist_real_pdf():
     assert result["detected_pages"]["brand"] == 13, "品牌表页未定位到第13页"
     assert result["detected_pages"]["bidlist"] == [14, 15, 16, 17, 18], \
         f"清单页定位偏差: {result['detected_pages']['bidlist']}"
-    assert result["source_type"] == "pdf"
+    assert result["source_type"] == "pdf_primary"
 
     # 品牌表
     brands_en = {b["brand_en"] for b in result["brand_requirement"]}

@@ -45,6 +45,19 @@ class MockProvider(LLMProvider):
         return {"supplier_name": None, "bid_total": None,
                 "bid_total_basis": "unknown", "tax_rate": None}
 
+    def classify_pages_visual(self, thumbnails: list[bytes], doc_type: str, **_kw):
+        """Stub: every page = table_header（保留旧 mock 行为：所有页都是目标页）。"""
+        role = "tender_table_header" if doc_type == "tender" else "quote_table_header"
+        out = [{"page": i + 1, "role": role, "confidence": 1.0,
+                "contains_table": True, "orientation": 0,
+                "continues_from_page": None, "mixed_content": False,
+                "evidence": ["mock"], "source": "flash"}
+               for i in range(len(thumbnails))]
+        return out, []
+
+    def review_pages_visual(self, page_image, neighbor_thumbs, flash_result, page_no, **_kw):
+        return dict(flash_result)
+
     def extract(
         self,
         images: list[bytes],

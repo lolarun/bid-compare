@@ -39,7 +39,6 @@ log = logging.getLogger(__name__)
 _MAX_RETRIES = 5
 _RETRY_DELAY = 3          # seconds; linear backoff: delay × attempt (3, 6, 9, 12, 15)
 _PER_KEY_CONCURRENCY = 6  # max simultaneous API calls per key
-
 # ── Stage 2 prompts (OCR HTML → structured JSON) ────────────────────────
 _TENDER_S2_PROMPT = """你是机电材料招投标助理。下面是OCR识别出的HTML表格内容。
 请从中提取采购材料清单，返回严格的JSON格式。
@@ -62,29 +61,49 @@ _QUOTE_S2_PROMPT = """你是机电材料报价单解析助理。下面是OCR识�
 要求：
 - 【完整性】逐行提取，不要遗漏任何一条材料报价行；表格有多少数据行就返回多少条
 - 只提取材料报价行，不要表头、合计行、小计行
-- 区分 unit_price（含税单价）与 unit_price_excl_tax（不含税单价）
-- 总价若已标注使用原值，否则留null
-- 税率用小数如0.13表示13%
-- 品牌按原文
-- 无法识别的字段返回空字符串或null
+- 总价若已标注使用原值，否则留null（不要自己计算）
+- 税率用小数如0.13表示13%；品牌按原文；无法识别的字段返回空字符串或null
 
-【含税/不含税价格列处理】
-当表格同时含有不含税和含税两套价格列时（如同时出现"单价(元)"/"合计(元)"和"价税合计(元)"列）：
-- unit_price_excl_tax = "单价(元)"列的值（不含税单价）
-- unit_price = 价税合计(元) ÷ 数量（含税单价）；也可写为 unit_price_excl_tax × (1+税率)
-- total_price = "价税合计(元)"列的值（含税合价）
-- 用"合计(元)"列验证：合计(元) ≈ unit_price_excl_tax × 数量
-数量核验：若 数量×单价(元) ≠ 合计(元) 超过3%，用 合计(元)/单价(元) 反推数量（可能OCR误读）。
+【价格字段——按表头文字严格映射，不按列顺序推断】
+
+  unit_price_excl_tax（不含税单价）：表头含"不含税"/"税前"时填此字段
+  unit_price_incl_tax（含税单价）：表头含"含税"/"综合单价"/"价税"时填此字段
+  unit_price（单价，仅表头无含税/不含税标注时才填）：若表头已区分，则留null
+  total_price_excl_tax（不含税合计）：表头含"不含税合计"/"金额(不含税)"/"合计(不含税)"时填
+  total_price_incl_tax（含税合计）：表头含"价税合计"/"含税合计"/"合价(含税)"/"合计(含税)"时填
+  total_price（合计，仅表头无含税/不含税标注时才填）：若表头已区分，则留null
+  tax_amount（税额）：表头含"税额"/"增值税额"时填；无此列留null
+  model（型号）：表头独立"型号"列时填；规格型号合并在一列时归入spec
+
+【含税/不含税同时存在的典型处理】
+表头为"单价(不含税)"/"合计(不含税)"/"税额"/"税率"/"单价(含税)"/"价税合计"时：
+- unit_price_excl_tax = "单价(不含税)"列值
+- total_price_excl_tax = "合计(不含税)"列值
+- tax_amount = "税额"列值
+- unit_price_incl_tax = "单价(含税)"列值（若有该列）
+- total_price_incl_tax = "价税合计"列值
+- unit_price、total_price 留null
+
+【续表页（无表头行）的含税/不含税识别】
+当前页若无列头行（即续表页），须通过数值关系识别含税与不含税列：
+- 不含税合价 × (1 + 税率) ≈ 含税合价（如税率=13%：不含税 × 1.13 ≈ 含税）
+- 税额 ≈ 不含税合价 × 税率
+- 不含税单价 × 数量 ≈ 不含税合价；含税单价 × 数量 ≈ 含税合价
+- 因此：较小的合价列 = 不含税合价 → total_price_excl_tax；较大的（约=前者×1.13）= 含税合价 → total_price_incl_tax
+- 同理，若存在两列单价，较小的单价列 = 不含税单价 → unit_price_excl_tax；较大的（≈较小单价×1.13）= 含税单价 → unit_price_incl_tax
+- 若含税单价列中某行值为负数（如-791.00），是OCR识别误差，应取其绝对值（791.00）作为含税单价
+- 严禁将"税额"列或"含税合价×1.13"计算值填入 total_price_incl_tax；含税合价必须直接读自对应列原值
+- 若页面有"税额"列，验证：税额 ÷ 不含税合价 ≈ 税率（误差<2%），否则说明列识别有误需重新判断
 
 【转置式报价表处理】
 当HTML表格格式为"每列对应一个产品、每行对应一个属性"时（最后一行全为连续整数序号，如 50/51/52），
 请按列提取，每列=一条报价明细。各行含义（从上到下）：
 - 行0: 系统分类（给水系统/排水系统/给排水）→ remark
 - 行1: 品牌（如"伯尔梅特"）→ brand
-- 行2: 含税合价（最上面的大数字行）→ total_price；unit_price = 含税合价÷数量
-- 行3: 税额（= 含税合价×0.13/1.13）
+- 行2: 含税合价（最上面的大数字行）→ total_price_incl_tax；unit_price_incl_tax = 含税合价÷数量
+- 行3: 税额 → tax_amount
 - 行4: 税率（13%）→ tax_rate=0.13
-- 行5: 不含税合价 → unit_price_excl_tax×数量（可验证）
+- 行5: 不含税合价 → total_price_excl_tax
 - 行6: 不含税单价 → unit_price_excl_tax
 - 行7: 数量（整数）或单位（"个"）混排——整数为数量，"个"/"套"为单位
 - 行8: 单位（如单独一行）
@@ -92,28 +111,21 @@ _QUOTE_S2_PROMPT = """你是机电材料报价单解析助理。下面是OCR识�
 - 倒数第4行: 规格（DN尺寸）→ spec
 - 倒数第3行: 品名（闸阀/蝶阀等阀门名称）→ material
 - 倒数第2行: 专业（给排水/给水系统等）→ remark（不要作为品名）
-- 最后一行: 序号整数 → 不要提取为条目
+- 最后一行: 序号整数（如1/2/3…89）→ 填入该列的 seq 字段（不要把该行作为独立条目）
 重要：若某列的"品名行"（倒数第3行）填写的是系统类别词（给排水/给水系统/排水系统），
 该列为小计行，不要提取为报价明细。
 
 对于阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等），
-额外填写 canonical 对象：
-- valve_type: 阀门类型，如"截止阀"（按原文）
-- dn: 公称直径，格式"DN25"；Φ57/2寸/50mm 请转换
-- pn: 公称压力，格式"PN16"；1.6MPa→PN16
-- material: 主材质（不锈钢/铸铁/球墨铸铁等）
-- connection: 连接方式（螺纹/法兰/焊接等）
-非阀门类材料，canonical 留空对象 {}。
+额外填写 canonical 对象：valve_type/dn/pn/material/connection；非阀门类留空对象 {}。
 
-OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR 错误时（如"阀阀"→闸阀、"橡胶海"→橡胶瓣）：
-- normalized_material: 纠错后的正确名称（确信时填，否则留空字符串）
-- ocr_correction_reason: 纠错依据（词表命中+相邻行规格连续性），无纠错时留空字符串
+OCR 纠错（阀门类）：normalized_material（确信时填），ocr_correction_reason（纠错依据）。
 合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
 material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
 
 返回JSON格式：
-{"supplier_name": "供应商名称", "items": [{"material": "材料名称", "spec": "规格型号", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": 含税单价, "unit_price_excl_tax": 不含税单价, "total_price": 总价, "tax_rate": 税率小数, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
+{"supplier_name": "供应商名称或空字符串", "items": [{"seq": "序号或空字符串", "material": "材料名称", "spec": "规格型号", "model": "型号或空字符串", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": null或单价（仅表头无含税/不含税标注时才填，否则留null）, "unit_price_excl_tax": null或不含税单价, "unit_price_incl_tax": null或含税单价, "total_price": null或合计（仅表头无税种标注时才填，否则留null）, "total_price_excl_tax": null或不含税合计, "total_price_incl_tax": null或含税合计, "tax_rate": 税率小数, "tax_amount": null或税额, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
 
+转置式报价表：seq = 该列最后一行的整数，非转置表时 seq = 该行的序号列值。
 如果该页没有报价明细（如封面、证书等非报价页），返回 {"items": []}"""
 
 _META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件封面/汇总页或营业执照/资质证书页的OCR HTML内容。
@@ -131,7 +143,8 @@ row_type 为 subtotal/grand_total/header/empty/note 的行忽略不提取。
 
 要求：
 - 【完整性】所有 row_type=quote_line 的行都要提取，一行不能遗漏
-- 区分 unit_price（含税单价）与 unit_price_excl_tax（不含税单价）；只有一个价格时填到 unit_price
+- 【价格口径】表头含"含税"/"综合单价"时→unit_price_incl_tax；表头含"不含税"/"税前"时→unit_price_excl_tax；表头无税种区分时才→unit_price；表头已明确区分时unit_price留null
+- 【严禁推算】不得自行用×1.13或÷1.13推导含税/不含税价，文档没有的字段留null；只有一个价格字段时填unit_price_incl_tax（含税）或unit_price_excl_tax（不含税）按表头映射，不填unit_price
 - 对阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等）额外填写 canonical 对象：valve_type/dn/pn/material/connection
 - material_type：若表格有独立材质列按原文填；否则从规格型号中提取；无则留空字符串
 - 总价若表格已标注使用原值，否则留 null（不要自己计算）
@@ -145,13 +158,22 @@ OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR �
 合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
 material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
 
+【价格字段——按表头文字严格映射，不按列顺序推断】
+  unit_price_excl_tax（不含税单价）：表头含"不含税"/"税前"时填此字段
+  unit_price_incl_tax（含税单价）：表头含"含税"/"综合单价"时填此字段
+  unit_price（单价，仅表头无含税/不含税区分时才填）
+  total_price_excl_tax（不含税合计）：表头含"不含税合计"/"金额(不含税)"时填
+  total_price_incl_tax（含税合计）：表头含"价税合计"/"含税合计"/"合价(含税)"时填
+  total_price（合计，仅表头无含税/不含税区分时才填）
+  tax_amount（税额）：表头含"税额"/"增值税额"时填；无此列留null
+  model（型号）：表头独立"型号"列时填；规格型号合并在一列时归入spec
+
 返回 JSON 格式（table_index 和 row_index 必须包含）：
-{"supplier_name": "供应商名称", "items": [{"table_index": 0, "row_index": 2, "material": "材料名称", "spec": "规格型号", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": 含税单价, "unit_price_excl_tax": 不含税单价, "total_price": 总价, "tax_rate": 税率, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
+{"supplier_name": "供应商名称或空字符串", "items": [{"table_index": 0, "row_index": 2, "seq": "序号或空字符串", "material": "材料名称", "spec": "规格型号", "model": "型号或空字符串", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": null或单价（仅表头无税种标注时才填，否则留null）, "unit_price_excl_tax": null或不含税单价, "unit_price_incl_tax": null或含税单价, "total_price": null或合计（仅表头无税种标注时才填，否则留null）, "total_price_excl_tax": null或不含税合计, "total_price_incl_tax": null或含税合计, "tax_rate": 税率, "tax_amount": null或税额, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
 
 没有报价明细时返回 {"items": []}"""
 
-# Limits replacing the old hard MAX_PAGES = 12
-MAX_QUOTE_TABLE_PAGES = 30
+# Max cover/summary pages to process for supplier name / bid total extraction
 MAX_META_PAGES = 5
 
 # ── Cover-page supplier-name fallback prompt ─────────────────────────────
@@ -167,6 +189,125 @@ _SUPPLIER_NAME_PROMPT = """从以下HTML内容中，找出【投标人/投标单
 - 公司全称含"有限公司/集团/实业/设备/科技/贸易/工程"等机构后缀。
 - 【关键】只有当公司名旁有明确的"投标单位名称/投标人/（盖章）"标签时才返回；若本页是封面、投标书抬头、厂家资质/授权页（只有招标人或厂家名），一律返回空字符串。
 只返回投标人公司全称（字符串），不确定就返回 ""。不要JSON，不要任何解释。"""
+
+
+# ── 视觉页面分类（qwen3-vl-flash / plus）────────────────────────────────────
+_VISUAL_FLASH_MODEL = "qwen3-vl-flash"
+_VISUAL_PLUS_MODEL = "qwen3-vl-plus"
+_VISUAL_PROMPT_VERSION = "v4"   # bump when prompt/roles change → cache invalidates
+_VISUAL_THUMB_MAX_PX: int = 2_000_000   # thumbnail pixel budget for Flash batch calls
+_VISUAL_TEMPERATURE: float = 0.0        # must be 0 for deterministic cache-safe results
+
+_VISUAL_VALID_ROLES = (
+    "cover bid_letter tender_table_header tender_table_continuation "
+    "quote_table_header quote_table_continuation subtotal_or_summary "
+    "brand_requirement technical_spec component_parameter_table certificate other"
+)
+
+_VISUAL_ROLE_DEFS = """角色定义（role 只能取下列12个值之一，其他任何字符串均无效）：
+- cover：封面/标题页（项目名、投标单位名，无明细表）
+- bid_letter：投标函/授权委托书/承诺函等信函正文
+- tender_table_header：【招标/采购清单】表头页，含序号/名称/规格/单位/数量等列名（招标文件专用）
+- tender_table_continuation：招标清单续页，无表头但列结构延续上一页清单（招标文件专用）
+- quote_table_header：【投标/报价清单】表头页，含单价/合价/价税等价格列名（投标文件专用）
+- quote_table_continuation：报价清单续页，无表头但列结构延续上一页报价表（投标文件专用）
+- subtotal_or_summary：汇总页（只有总额/小计行，无逐条物料明细；has_line_items 必须为 false）
+- brand_requirement：招标情况表/品牌要求登记表（各供应商参与品牌列表）
+- technical_spec：技术规范/施工说明/技术条款/安装要求等正文
+- component_parameter_table：部件材质参数表（无数量无报价，仅尺寸/材质/压力等级等）
+- certificate：营业执照/资质证书/荣誉证书/检测报告等
+- other：目录/TOC/公司介绍/照片/签名页等，以上都不是的
+
+文档类型专属判定规则（必须遵守）：
+- 若当前文档是【招标文件】（采购方发布）：含逐条采购明细的表格一律用 tender_table_header /
+  tender_table_continuation，绝不使用 quote_table_*（即使表中含单价/合价列也如此）。
+- 若当前文档是【投标文件】（供应商发布）：含逐条报价明细的表格一律用 quote_table_header /
+  quote_table_continuation，绝不使用 tender_table_*。
+
+通用判定要点：
+- header 与 continuation：本页有列名行 → header；直接以数据行开头（无列名）→ continuation，
+  continues_from_page 填上一页页码。
+- subtotal_or_summary 的关键判定：只有当 has_line_items=false（无逐条明细行）才能判此角色；
+  即使有合计行，只要同时有逐条明细行，也应判 *_table_continuation（has_line_items=true）。
+- technical_spec / component_parameter_table 常含"规格/材质/阀体"等词，但没有逐条数量+单价+合价，
+  不可判为任何 *_table_header/continuation。
+- 一页同时有正文段落和明细表 → mixed_content=true，role 取占主体的类型。
+- orientation：页面相对正立的旋转角度，只能是 0/90/180/270（扫描件侧向时常见90/270）。"""
+
+
+def _build_visual_prompt_parts(doc_type: str, page_numbers: list[int]) -> tuple[str, str]:
+    """Return (intro, tail) for interleaved PAGE-N content construction.
+
+    Callers should build content as:
+      [text(intro), text("PAGE N"), image, text("PAGE M"), image, ..., text(tail)]
+    This explicitly binds each image to its page number, preventing mis-attribution
+    in multi-image batches.
+    """
+    if doc_type == "tender":
+        kind = "招标文件（采购方发布的招标采购文件，含采购清单/招标情况表）"
+        type_note = "本文档是招标文件，所有含逐条采购明细的表格必须用 tender_table_* 角色。"
+    else:
+        kind = "供应商投标文件（供应商投标报价文件，含报价清单）"
+        type_note = "本文档是投标文件，所有含逐条报价明细的表格必须用 quote_table_* 角色。"
+    intro = (
+        f"你是机电材料招投标文档的页面分类助手。当前文档类型：{kind}。\n"
+        f"{type_note}\n"
+        f"以下每张图片前均标注了对应的页码（PAGE N），请逐页根据视觉版面判断角色。"
+    )
+    tail = f"""
+{_VISUAL_ROLE_DEFS}
+
+每页必须同时输出以下语义字段（用于代码级确定性校验，不得省略）：
+- has_line_items：true=本页有逐条明细行（品名/规格/数量/单价/合价等多列，每物料一行）；
+  false=只有汇总/合计，无逐条明细；null=无法从图像确定。
+  【重要】has_line_items=true 时 role 不可为 subtotal_or_summary，即使同时有合计行。
+- estimated_line_item_count：估计明细行数（整数，0=无，null=不确定）。
+- has_column_header：true/false/null — 本页是否有列名行（品名/规格/数量/单价等表头行）。
+- has_total_row：true/false/null — 本页是否有合计/小计/总价行。
+- table_structure_continues：true/false/null — 本页表格列结构是否与前一页一致（续表标志）。
+
+严格只返回 JSON（不要解释、不要 markdown 围栏）：
+{{"pages": [{{"page": {page_numbers[0]}, "role": "...", "confidence": 0.0到1.0, "contains_table": true或false, "orientation": 0, "continues_from_page": null或页码, "mixed_content": false, "has_line_items": null, "estimated_line_item_count": null, "has_column_header": null, "has_total_row": null, "table_structure_continues": null, "evidence": ["简短依据1","依据2"]}}]}}
+
+要求：
+- 必须为给出的每一页各返回一条，page 用真实页码（不得遗漏任何页面）。
+- role 只能是上述12个值之一；其他任何字符串（含"quote_table"等缩写）均无效。
+- 不得依赖供应商名称、固定页码、具体物料名做判断，只看版面结构与列语义。
+- 不确定时给低 confidence（≤0.7），并在 evidence 写明疑点。"""
+    return intro, tail
+
+
+def _build_visual_prompt(doc_type: str, page_numbers: list[int]) -> str:
+    """Legacy single-string form — kept for Plus review calls where no images are interleaved."""
+    intro, tail = _build_visual_prompt_parts(doc_type, page_numbers)
+    pages_str = "、".join(str(p) for p in page_numbers)
+    return (f"{intro}\n以下是第 {pages_str} 页的图片（共 {len(page_numbers)} 张，顺序与页码一一对应）：\n"
+            + tail)
+
+
+_VISUAL_REVIEW_SUFFIX = """以上为需要复核的页面高清图（第一张）及其前后相邻页缩略图（用于判断续表关系）。
+Flash 初判结果与理由如下，请你看高清原图重新裁决（尤其：
+- header/continuation 混淆（看本页有无列名行）
+- 技术规范/证书被误判为报价表
+- 招标文件的采购清单被误判为 quote_table（应为 tender_table）
+- orientation 旋转方向
+- 含合计行的续表被误判为 subtotal_or_summary）：
+{flash_json}
+{chain_context_note}
+
+复判必须明确回答 has_line_items（此字段是代码级确定性校验的输入，不得为 null 除非真的无法判断）：
+- true：本页有逐条明细行（品名/规格/数量/单价/合价等多列，每物料占一行）
+  → role 必须为 *_continuation（即使同时有合计行，也不得判 subtotal_or_summary）
+- false：本页只有汇总/合计/总价，无逐条物料明细
+  → role 才可判 subtotal_or_summary
+- null：图像确实无法判断（须在 evidence 写明原因）
+
+有效 role 值（共12个）：cover bid_letter tender_table_header tender_table_continuation
+quote_table_header quote_table_continuation subtotal_or_summary brand_requirement
+technical_spec component_parameter_table certificate other
+
+严格只返回单页 JSON（同协议，不要解释，不要 markdown）：
+{{"page": {page}, "role": "...", "confidence": 0.0到1.0, "contains_table": true或false, "orientation": 0, "continues_from_page": null或页码, "mixed_content": false, "has_line_items": null, "estimated_line_item_count": null, "has_column_header": null, "has_total_row": null, "table_structure_continues": null, "evidence": ["依据"]}}"""
 
 
 class DashScopeOCRProvider(LLMProvider):
@@ -460,6 +601,167 @@ class DashScopeOCRProvider(LLMProvider):
         return ""
 
     # ─── Stage 1: OCR ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_json_text(raw: str) -> str:
+        """Strip markdown fences / <think> from a model text response."""
+        clean = (raw or "").strip()
+        if "</think>" in clean:
+            clean = clean.split("</think>")[-1].strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\s*", "", clean)
+            clean = re.sub(r"\s*```$", "", clean)
+        return clean.strip()
+
+    @staticmethod
+    def _mm_text(resp) -> str:
+        """Extract concatenated text from a MultiModalConversation response."""
+        text = ""
+        if resp.output and resp.output.choices:
+            choice = resp.output.choices[0]
+            if choice.message and choice.message.content:
+                for part in choice.message.content:
+                    if hasattr(part, "text"):
+                        text += part.text or ""
+                    elif isinstance(part, dict) and "text" in part:
+                        text += part["text"] or ""
+        return text
+
+    def _mm_call(self, content: list[dict], model: str,
+                 temperature: float = _VISUAL_TEMPERATURE) -> str:
+        """Multimodal call with key rotation + retry; returns raw text. Reuses
+        the same retry/concurrency infra as _ocr_page."""
+        for attempt in range(_MAX_RETRIES):
+            key = self._next_key()
+            sem = self._per_key_sem[key]
+            sem.acquire()
+            try:
+                resp = dashscope.MultiModalConversation.call(
+                    api_key=key, model=model,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=temperature,
+                )
+            except Exception as e:
+                sem.release()
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    continue
+                raise ProviderError(f"VL call failed after {_MAX_RETRIES} retries: {e}") from e
+            sem.release()
+            if resp.status_code == 429:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    continue
+                raise ProviderError(f"VL 429 after {_MAX_RETRIES} retries")
+            if resp.status_code != 200:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    continue
+                raise ProviderError(f"VL error {resp.status_code}: {resp.message}")
+            return self._mm_text(resp)
+        return ""
+
+    @staticmethod
+    def _img_part(image_bytes: bytes, max_pixels: int = 2000000) -> dict:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        # qwen3-vl-flash/plus require min_pixels >= 65536 (256×256)
+        return {"image": f"data:image/png;base64,{b64}",
+                "min_pixels": 65536, "max_pixels": max_pixels}
+
+    def classify_pages_visual(
+        self, thumbnails: list[bytes], doc_type: str, *,
+        model: str | None = None, prompt_version: str = _VISUAL_PROMPT_VERSION,
+        batch_size: int = 10, overlap: int = 1,
+        temperature: float = _VISUAL_TEMPERATURE,
+        max_pixels: int = _VISUAL_THUMB_MAX_PX,
+        file_path: str | None = None,  # accepted for API compat, not used by real provider
+    ) -> tuple[list[dict], list[dict]]:
+        """Visual page classification via qwen3-vl-flash on low-res thumbnails.
+
+        Batches `batch_size` consecutive pages (with `overlap` context page(s) on
+        each side so cross-batch continuation is visible), one MultiModalConversation
+        call per batch. Returns (per-page dicts in page order, failures).
+        """
+        mdl = model or _VISUAL_FLASH_MODEL
+        n = len(thumbnails)
+        by_page: dict[int, dict] = {}
+        failures: list[dict] = []
+        start = 0
+        while start < n:
+            end = min(start + batch_size, n)
+            ctx_lo = max(0, start - overlap)
+            ctx_hi = min(n, end + overlap)
+            idxs = list(range(ctx_lo, ctx_hi))                 # 0-based
+            page_nums = [i + 1 for i in idxs]
+            # Interleave PAGE N labels with images so the model can unambiguously
+            # bind each image to its page number (prevents mis-attribution in batches).
+            intro, tail = _build_visual_prompt_parts(doc_type, page_nums)
+            content: list[dict] = [{"text": intro}]
+            for j, idx in enumerate(idxs):
+                content.append({"text": f"PAGE {page_nums[j]}"})
+                content.append(self._img_part(thumbnails[idx], max_pixels=max_pixels))
+            content.append({"text": tail})
+            try:
+                raw = self._mm_call(content, mdl, temperature=temperature)
+                data = json.loads(self._clean_json_text(raw))
+                pages = data.get("pages") or []
+            except Exception as e:
+                log.warning("visual classify batch %d-%d failed: %s", ctx_lo + 1, ctx_hi, e)
+                failures.append({"page_range": [ctx_lo + 1, ctx_hi], "error": str(e)})
+                start = end
+                continue
+            for entry in pages:
+                try:
+                    p = int(entry.get("page", 0))
+                except (TypeError, ValueError):
+                    continue
+                if p < 1 or p > n:
+                    continue
+                # 重叠页：取 confidence 更高者
+                prev = by_page.get(p)
+                if prev is None or float(entry.get("confidence", 0)) > float(prev.get("confidence", 0)):
+                    entry["source"] = "flash"
+                    by_page[p] = entry
+            start = end
+        out = [by_page.get(p, {"page": p, "role": "unknown", "confidence": 0.0,
+                               "contains_table": False, "orientation": 0,
+                               "continues_from_page": None, "mixed_content": False,
+                               "evidence": ["flash 未返回该页"], "source": "flash"})
+               for p in range(1, n + 1)]
+        return out, failures
+
+    def review_pages_visual(
+        self, page_image: bytes, neighbor_thumbs: list[bytes],
+        flash_result: dict, page_no: int, *,
+        chain_context: list[dict] | None = None,
+        model: str | None = None,
+    ) -> dict:
+        """Re-adjudicate one low-confidence page with qwen3-vl-plus on the
+        high-res image + neighbor thumbnails. Returns a single page dict."""
+        mdl = model or _VISUAL_PLUS_MODEL
+        chain_note = (
+            f"前序已确认页分类（判断续表关系用）：\n"
+            f"{json.dumps(chain_context, ensure_ascii=False)}\n"
+            if chain_context else ""
+        )
+        content = [self._img_part(page_image, max_pixels=4000000)]
+        content += [self._img_part(t) for t in neighbor_thumbs]
+        content.append({"text": _VISUAL_REVIEW_SUFFIX.format(
+            flash_json=json.dumps(flash_result, ensure_ascii=False),
+            chain_context_note=chain_note, page=page_no)})
+        try:
+            raw = self._mm_call(content, mdl)
+            data = json.loads(self._clean_json_text(raw))
+            if isinstance(data, dict) and "pages" in data and data["pages"]:
+                data = data["pages"][0]
+            data["source"] = "plus"
+            data["page"] = page_no
+            return data
+        except Exception as e:
+            log.warning("visual review page %d failed: %s", page_no, e)
+            fallback = dict(flash_result)
+            fallback["source"] = "plus_failed"
+            return fallback
 
     def _ocr_page(self, page_bytes: bytes) -> tuple[str, int]:
         """Qwen-VL-OCR table_parsing on one page. Retries on 429 / connection errors."""

@@ -1,5 +1,5 @@
 """Analysis & comparison Pydantic schemas."""
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class PriceCompareRequest(BaseModel):
@@ -218,7 +218,7 @@ class MatrixRow(BaseModel):
 class MatrixTotal(BaseModel):
     supplier_id: int
     total: float
-    avg_deviation: float
+    avg_deviation: float | None = None   # null when quoted_count=0 or no baseline
     quoted_count: int
     anomaly_count: int
     declared_total: float | None = None
@@ -261,6 +261,9 @@ class BidMatrixResult(BaseModel):
     anchor_matrix: bool | None = None
     not_finalized_warning: str | None = None
     matrix_distribution: MatrixDistribution | None = None
+    # Recommendation gate
+    recommendation_blocked: bool = False
+    recommendation_blocked_reasons: list[str] = Field(default_factory=list)
 
     model_config = {"extra": "ignore"}
 

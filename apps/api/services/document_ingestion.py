@@ -288,21 +288,38 @@ class DocumentIngestionService:
 
     # ─── housekeeping ─────────────────────────────────────────────────────
     @staticmethod
-    def recover_stuck_jobs(db: Session, max_age_minutes: int = 5) -> int:
-        """Mark RUNNING jobs older than max_age as FAILED. Call at app startup."""
+    def recover_stuck_jobs(
+        db: Session,
+        max_age_minutes: int = 5,
+        *,
+        include_pending: bool = False,
+    ) -> int:
+        """Mark stuck jobs as FAILED. Call at app startup and on a periodic sweep.
+
+        识别在进程内以后台任务执行，无法跨进程重启续跑。因此：
+        - 启动时（max_age_minutes=0, include_pending=True）：任何仍为 RUNNING/PENDING
+          的 job 必然是上次进程崩溃/重启遗留的孤儿，立即标 FAILED。否则上传幂等会把这条
+          孤儿（非 failed）原样返回，用户重传也拿不到新识别（死循环卡在 20%）。
+        - 周期清扫（默认仅 RUNNING + 年龄阈值）：清理运行中卡死的 job，不误伤刚入队的。
+        """
         threshold = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        statuses = [JobStatus.RUNNING.value]
+        if include_pending:
+            statuses.append(JobStatus.PENDING.value)
         stuck = (
             db.query(ExtractionJob)
             .filter(
-                ExtractionJob.status == JobStatus.RUNNING.value,
+                ExtractionJob.status.in_(statuses),
                 ExtractionJob.updated_at < threshold,
             )
             .all()
         )
         for j in stuck:
             j.status = JobStatus.FAILED.value
-            j.error = "Stuck in RUNNING beyond threshold; recovered at startup."
-            j.progress_stage = "识别超时"
+            j.error = (
+                "孤儿任务：进程崩溃/重启导致后台识别中断，已在启动时回收（重传可重新识别）。"
+            )
+            j.progress_stage = "识别中断"
         if stuck:
             db.commit()
         return len(stuck)

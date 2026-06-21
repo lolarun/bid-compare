@@ -50,3 +50,21 @@ _*.xlsx
 e2e_*.log
 e2e_out*.txt
 *.log
+
+# API / dev server temp output
+api.out
+api.err
+www.out
+uvicorn_startup.log.err
+nul
+
+# Temporary OCR/debug HTML files (scripts produce these)
+tmp_*.html
+tmp_*.json
+tmp_*.txt
+
+# OCR snapshots in outputs/ are transient; controlled fixtures are in tests/fixtures/
+outputs/ocr_snapshots/
+
+# Script test outputs
+scripts/test_e2e_alignment_result.json
