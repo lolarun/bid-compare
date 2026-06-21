@@ -67,15 +67,10 @@ def derive_price_basis(fields: dict) -> dict:
 
     # 单价列规范化（确定性，文档无关）：仅有 incl、无 excl、无通用、且无任何税信息时，
     # "含税"标签不成立——这是单一价格列（如绵存只有"单价/合价"），不存在含税/不含税
-    # 区分。降级为 unspecified，有效价取该唯一价格。绝不据此 ×1.13/÷qty 推导对侧口径。
+    # 区分。降级为 unspecified，有效价取该唯一价格（业务上按含税纳入比价）。
     if has_incl and not has_excl and not has_gen and not has_tax_evidence:
-        return {
-            "price_basis": PRICE_BASIS_UNSPECIFIED,
-            "effective_unit_price": u_incl,
-            "effective_total_price": t_incl,
-        }
-
-    if has_incl and has_excl:
+        basis, eff_unit, eff_total = PRICE_BASIS_UNSPECIFIED, u_incl, t_incl
+    elif has_incl and has_excl:
         basis, eff_unit, eff_total = PRICE_BASIS_DUAL, u_incl, t_incl
     elif has_incl:
         basis, eff_unit, eff_total = PRICE_BASIS_INCL, u_incl, t_incl
@@ -86,8 +81,18 @@ def derive_price_basis(fields: dict) -> dict:
     else:
         basis, eff_unit, eff_total = PRICE_BASIS_UNKNOWN, None, None
 
+    # 同口径还原（§4）：若有效单价缺失但有效合价与数量齐全，用 合价÷数量 还原单价。
+    # 这是供应商自己印的"合价=单价×数量"的精确反算（如泰科龙只印含税合价+不含税单价），
+    # **不是** ×1.13/÷1.13 跨口径推导。recovered 标记写入审计，绝不静默。
+    qty = _num(fields.get("qty"))
+    recovered = False
+    if eff_unit is None and eff_total is not None and qty is not None and qty > 0:
+        eff_unit = round(eff_total / qty, 4)
+        recovered = True
+
     return {
         "price_basis": basis,
         "effective_unit_price": eff_unit,
         "effective_total_price": eff_total,
+        "effective_unit_recovered": recovered,
     }

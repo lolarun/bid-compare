@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,7 +52,9 @@ KNOWN_CATEGORIES = [
 ]
 
 BATCH_SIZE = 1          # legacy export; extraction now uses one page per call
-PAGE_CONCURRENCY = 6    # max concurrent page-level LLM calls
+# 每份文档内的页级并发（OCR/LLM）。报价一般 5~10 页，默认 5。env 可调。
+# 单一来源：table_recognizer 从此处 import，避免两处硬编码漂移。
+PAGE_CONCURRENCY = max(1, int(os.getenv("PAGE_CONCURRENCY", "5")))
 ProgressCallback = Callable[[str, int], None]
 
 
@@ -460,6 +463,7 @@ class ExtractionPipeline:
             total_incl = _coerce_num(it.get("total_price_incl_tax"))
             total_excl = _coerce_num(it.get("total_price_excl_tax"))
             basis_info = derive_price_basis({
+                "qty": qty,
                 "unit_price": price,
                 "unit_price_incl_tax": unit_incl,
                 "unit_price_excl_tax": unit_excl,
@@ -488,6 +492,7 @@ class ExtractionPipeline:
                 "price_basis": basis_info["price_basis"],
                 "effective_unit_price": basis_info["effective_unit_price"],
                 "effective_total_price": basis_info["effective_total_price"],
+                "effective_unit_recovered": basis_info.get("effective_unit_recovered", False),
                 "material_type": material_type,
                 "remark": (it.get("remark") or "").strip(),
                 "canonical": canonical,

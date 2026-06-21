@@ -765,13 +765,16 @@ class DashScopeOCRProvider(LLMProvider):
 
     def _ocr_page(self, page_bytes: bytes) -> tuple[str, int]:
         """Qwen-VL-OCR table_parsing on one page. Retries on 429 / connection errors."""
-        b64 = base64.b64encode(page_bytes).decode("ascii")
-        data_uri = f"data:image/png;base64,{b64}"
+        # base64 编码延后到拿到限流信号量之后再做（且只做一次），避免大量等待线程
+        # 各自持有一份 ~1.33x 的 base64/data_uri 副本拖高内存峰值。
+        data_uri: str | None = None
 
         for attempt in range(_MAX_RETRIES):
             key = self._next_key()
             sem = self._per_key_sem[key]
             sem.acquire()
+            if data_uri is None:
+                data_uri = f"data:image/png;base64,{base64.b64encode(page_bytes).decode('ascii')}"
             try:
                 resp = dashscope.MultiModalConversation.call(
                     api_key=key,

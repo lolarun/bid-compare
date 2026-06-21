@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   CheckCircleOutlined, LineChartOutlined, RightOutlined, LeftOutlined,
@@ -40,6 +41,8 @@ import { asQuoteShape } from '@/utils/extraction'
 const STEP_RESULTS = 4
 
 // ─── State ───────────────────────────────────────────────────────────────
+const route = useRoute()
+const router = useRouter()
 const currentStep = ref(0)
 const selectedProfession = ref<string | undefined>(undefined)
 
@@ -725,6 +728,21 @@ const tenderUploading = ref(false)
 const anchorReviewResult = ref<AnchorReviewResult | null>(null)
 const anchorReviewLoading = ref(false)
 
+/** 从 axios 错误里取一条可读消息：detail 可能是字符串，也可能是结构化对象
+ *  （如质量门 409 的 {error, message, failures}）。直接 message.error(对象) 会渲染成
+ *  "[object Object]"，这里统一抽取 message/error 字段或 JSON 兜底。 */
+function extractErrMsg(e: unknown, fallback: string): string {
+  const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof d === 'string') return d
+  if (d && typeof d === 'object') {
+    const o = d as { message?: unknown; error?: unknown }
+    if (typeof o.message === 'string') return o.message
+    if (typeof o.error === 'string') return o.error
+    try { return JSON.stringify(d) } catch { return fallback }
+  }
+  return fallback
+}
+
 // Run tender list matching (called when entering Step 3)
 async function runTenderMatch(): Promise<boolean> {
   if (!taskConfig.projectId) return false
@@ -749,8 +767,7 @@ async function runTenderMatch(): Promise<boolean> {
     }
     return true
   } catch (e: unknown) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '招标清单匹配失败'
-    message.error(detail)
+    message.error(extractErrMsg(e, '招标清单匹配失败'))
     return false
   } finally {
     tenderUploading.value = false
@@ -833,9 +850,29 @@ async function fetchSuppliers() {
   }
 }
 
-onMounted(() => {
-  fetchProjects()
-  fetchSuppliers()
+onMounted(async () => {
+  await Promise.all([fetchProjects(), fetchSuppliers()])
+  // 深链 / 刷新恢复：/compare/:projectId/:step?
+  const pidParam = route.params.projectId
+  const stepParam = route.params.step
+  if (pidParam) {
+    const pid = Number(pidParam)
+    if (Number.isFinite(pid) && pid > 0) {
+      taskConfig.projectId = pid   // 触发 watch(projectId) → 恢复 session + batchFiles
+      if (stepParam !== undefined) {
+        const st = Number(stepParam)
+        if (Number.isFinite(st) && st >= 0 && st <= STEP_RESULTS) currentStep.value = st
+      }
+    }
+  }
+})
+
+// URL 同步：项目/步骤变化时 replace 到 /compare/:projectId/:step（不新增历史栈）。
+watch([currentStep, () => taskConfig.projectId], () => {
+  const pid = taskConfig.projectId
+  if (!pid) return
+  const target = `/compare/${pid}/${currentStep.value}`
+  if (route.path !== target) router.replace(target).catch(() => {})
 })
 
 // Initialise + clean up upload slots when supplier selection changes.
@@ -874,6 +911,8 @@ watch(() => taskConfig.projectId, async (pid) => {
   } catch {
     // 新项目无历史会话，保持重置状态
   }
+  // 刷新可恢复：重建供应商报价卡片（batchFiles 为空时才恢复，避免覆盖会话内上传）
+  await restoreBatchFiles(pid)
 })
 
 watch(() => taskConfig.supplierIds, (ids, prev) => {
@@ -1007,9 +1046,7 @@ async function confirmSupplier(supplierId: number) {
     slot.batch_id = result.batch_id
     message.success(`已入库 ${result.line_count} 条报价`)
   } catch (e) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      ?? '入库失败'
-    message.error(detail)
+    message.error(extractErrMsg(e, '入库失败'))
   }
 }
 
@@ -1197,6 +1234,59 @@ function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
   }
 }
 
+// ── 刷新可恢复：从后端重建 batchFiles（已入库 + 在途识别），续轮询/回填 items ──
+async function restoreBatchFiles(pid: number) {
+  if (batchFiles.value.length > 0) return   // 已有会话内卡片则不覆盖（仅刷新/深链时恢复）
+  let data
+  try {
+    ({ data } = await analysisApi.compareState({ project_id: pid }))
+  } catch {
+    return   // 新项目无状态，静默
+  }
+  const restored: BatchFileEntry[] = []
+  for (const s of data.submissions) {
+    restored.push({
+      id: `restored-sub-${s.submission_id}`,
+      filename: s.filename || `已入库报价 #${s.submission_id}`,
+      status: 'done', stage: `已入库 ${s.line_count} 条`,
+      progressPct: 100, uploadPct: 100,
+      jobId: s.job_id,
+      detectedSupplierName: s.supplier_raw_name,
+      finalSupplierName: s.supplier_raw_name,
+      matchedSupplierId: s.supplier_id,
+      items: [],
+      confirmedSupplierId: s.supplier_id,
+      confirmedSubmissionId: s.submission_id,
+      confirmed: true, error: '', pollTimer: null,
+    })
+  }
+  for (const j of data.inflight_jobs) {
+    restored.push({
+      id: `restored-job-${j.job_id}`,
+      filename: j.filename || '报价文件',
+      status: j.status === 'failed' ? 'failed' : 'processing',
+      stage: j.progress_stage || (j.status === 'done' ? '已识别' : '识别中'),
+      progressPct: j.progress_pct || 0, uploadPct: 100,
+      jobId: j.job_id,
+      detectedSupplierName: '', finalSupplierName: '', matchedSupplierId: null,
+      items: [],
+      confirmedSupplierId: null, confirmedSubmissionId: null,
+      confirmed: false, error: '', pollTimer: null,
+    })
+  }
+  batchFiles.value = restored
+  // 在途任务：拉一次最新 job → running 续轮询；done 回填 items 供"校对入库"。
+  for (const entry of batchFiles.value) {
+    if (entry.confirmed || !entry.jobId || entry.status === 'failed') continue
+    try {
+      const { data: job } = await intakeApi.getJob(entry.jobId)
+      syncBatchProgress(entry, job)
+      if (job.status === 'done') onBatchJobDone(entry, job)
+      else if (job.status === 'running' || job.status === 'pending') startBatchPolling(entry)
+    } catch { /* ignore transient */ }
+  }
+}
+
 async function confirmBatchEntry(entry: BatchFileEntry) {
   if (!entry.jobId) return
 
@@ -1273,8 +1363,7 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
         message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
       }
     } else {
-      const detail = typeof resp === 'string' ? resp : '入库失败'
-      message.error(detail)
+      message.error(extractErrMsg(e, '入库失败'))
     }
   }
 }

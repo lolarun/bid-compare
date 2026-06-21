@@ -2201,6 +2201,82 @@ def tender_list_current(
     }
 
 
+@router.get("/compare-state")
+def compare_state(
+    project_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    """刷新可恢复：返回某项目供应商报价步骤的全部进度，供前端重建 batchFiles。
+
+    纯只读，不改库。返回两类：
+    - submissions：已校对入库的 BidSubmission（join Job 状态 + BidQuoteLine 行数）。
+    - inflight_jobs：已上传但尚未入库的 quote ExtractionJob（识别中/识别完待确认）。
+    前端据此重建文件卡片：confirmed→显"已入库"，running→续轮询，done未确认→回填 items。
+    """
+    from sqlalchemy import func as _func
+    from apps.api.models.bid_submission import BidSubmission as _BS, BidQuoteLine as _BQL
+    from apps.api.models.extraction_job import ExtractionJob as _EJ
+
+    subs = (
+        db.query(_BS)
+        .filter(
+            _BS.project_id == project_id,
+            _BS.status.notin_(["rejected", "superseded"]),
+        )
+        .order_by(_BS.id.asc())
+        .all()
+    )
+    sub_job_ids: set[str] = set()
+    submissions_out = []
+    for s in subs:
+        job = db.get(_EJ, s.job_id) if s.job_id else None
+        if s.job_id:
+            sub_job_ids.add(s.job_id)
+        line_count = (
+            db.query(_func.count(_BQL.id))
+            .filter(_BQL.submission_id == s.id)
+            .scalar()
+        ) or 0
+        submissions_out.append({
+            "submission_id": s.id,
+            "job_id": s.job_id,
+            "filename": (job.filename if job else "") or "",
+            "supplier_raw_name": s.supplier_raw_name,
+            "supplier_id": s.supplier_id,
+            "status": s.status,
+            "line_count": int(line_count),
+            "batch_id": s.batch_id,
+            "job_status": job.status if job else "done",
+            "progress_stage": (job.progress_stage if job else "") or "",
+            "progress_pct": (job.progress_pct if job else 100) or 0,
+        })
+
+    # 在途 quote 任务：context.project_id == pid 且尚未入库（无对应 submission）。
+    inflight_out = []
+    inflight_jobs = (
+        db.query(_EJ)
+        .filter(
+            _EJ.type == "quote",
+            _func.json_extract(_EJ.context, "$.project_id") == project_id,
+        )
+        .order_by(_EJ.created_at.asc())
+        .all()
+    )
+    for j in inflight_jobs:
+        if j.id in sub_job_ids:
+            continue   # 已入库的不重复
+        inflight_out.append({
+            "job_id": j.id,
+            "filename": j.filename or "",
+            "status": j.status,
+            "progress_stage": j.progress_stage or "",
+            "progress_pct": j.progress_pct or 0,
+            "has_result": bool(j.result),
+        })
+
+    return {"submissions": submissions_out, "inflight_jobs": inflight_out}
+
+
 @router.get("/tender-list/versions")
 def tender_list_versions(
     project_id: int | None = Query(None),

@@ -624,6 +624,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "price_basis": price_basis,
                 "effective_unit_price": basis_info["effective_unit_price"],
                 "effective_total_price": basis_info["effective_total_price"],
+                "effective_unit_recovered": basis_info.get("effective_unit_recovered", False),
                 "raw_unit_price": _num_or_none(item.get("unit_price")),
                 "raw_unit_price_incl_tax": _num_or_none(item.get("unit_price_incl_tax")),
                 "raw_unit_price_excl_tax": _num_or_none(item.get("unit_price_excl_tax")),

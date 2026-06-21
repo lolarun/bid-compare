@@ -116,7 +116,7 @@ def test_quality_tender_signal_split():
 def test_normal_no_rotation():
     prov = FakeProvider({0: GOOD_QUOTE_HTML, 90: GOOD_QUOTE_HTML, 270: GOOD_QUOTE_HTML})
     htmls = [GOOD_QUOTE_HTML, GOOD_QUOTE_HTML]
-    imgs = [_png(), _png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1, 2], htmls, imgs, prov, "quote")
     assert angle == 0
     # 已正立：不应触发任何 OCR 探测（成本/回放确定性）
@@ -129,10 +129,10 @@ def test_rotate_90_detected_and_applied():
     # 原图(0°)=BAD；转90=GOOD；转270=BAD → 仅 90 改善
     prov = FakeProvider({0: BAD_QUOTE_HTML, 90: GOOD_QUOTE_HTML, 270: BAD_QUOTE_HTML})
     htmls = [BAD_QUOTE_HTML]
-    imgs = [_png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1], htmls, imgs, prov, "quote")
     assert angle == 90
-    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[0], 1, prov, "quote", {angle})
+    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[1], 1, prov, "quote", {angle})
     assert deg == 90
     assert h2 == GOOD_QUOTE_HTML
 
@@ -142,10 +142,10 @@ def test_rotate_90_detected_and_applied():
 def test_rotate_270_detected_and_applied():
     prov = FakeProvider({0: BAD_QUOTE_HTML, 90: BAD_QUOTE_HTML, 270: GOOD_QUOTE_HTML})
     htmls = [BAD_QUOTE_HTML]
-    imgs = [_png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1], htmls, imgs, prov, "quote")
     assert angle == 270
-    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[0], 1, prov, "quote", {angle})
+    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[1], 1, prov, "quote", {angle})
     assert deg == 270
     assert h2 == GOOD_QUOTE_HTML
 
@@ -156,7 +156,7 @@ def test_tie_no_rotation():
     # 90 与 270 列覆盖求和并列更高 → 方向不可判（90≈270）→ 返回 0，不旋转
     prov = FakeProvider({0: BAD_QUOTE_HTML, 90: GOOD_QUOTE_HTML, 270: GOOD_QUOTE_HTML})
     htmls = [BAD_QUOTE_HTML]
-    imgs = [_png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1], htmls, imgs, prov, "quote")
     assert angle == 0
 
@@ -194,10 +194,10 @@ def test_probe_failure_graceful():
     # 所有旋转探测抛异常 → 无候选，不崩溃
     prov = FakeProvider({0: BAD_QUOTE_HTML}, fail_on={90, 270})
     htmls = [BAD_QUOTE_HTML]
-    imgs = [_png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1], htmls, imgs, prov, "quote")
     assert angle == 0
-    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[0], 1, prov, "quote", {90})
+    h2, img2, deg = _correct_page_orientation(htmls[0], imgs[1], 1, prov, "quote", {90})
     assert deg == 0  # 失败页保留原图
 
 
@@ -208,7 +208,7 @@ def test_tender_no_price_detection():
                   "<tr><td>闸阀</td><td>个</td><td>数量2</td></tr></table>")
     prov = FakeProvider({0: bad_tender, 90: GOOD_TENDER_HTML, 270: bad_tender})
     htmls = [bad_tender]
-    imgs = [_png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1], htmls, imgs, prov, "tender")
     assert angle == 90
 
@@ -232,11 +232,11 @@ def test_chain_continuation_inherits_orientation():
     prov = FakeProvider({0: BAD_QUOTE_HTML, 90: GOOD_QUOTE_HTML, 270: BAD_QUOTE_HTML})
     # p1 锚点（BAD，有数量信号），p2 续页（NOGRID，无方向信号、q=0）
     htmls = [BAD_QUOTE_HTML, NOGRID_HTML]
-    imgs = [_png(), _png()]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([1, 2], htmls, imgs, prov, "quote")
     assert angle == 90, "锚点页判向应代表整条链"
     # 续页 p2 用链方向单候选继承（q0=0 且单候选 → 信任转正）
-    _h, _i, deg = _correct_page_orientation(htmls[1], imgs[1], 2, prov, "quote", {angle})
+    _h, _i, deg = _correct_page_orientation(htmls[1], imgs[2], 2, prov, "quote", {angle})
     assert deg == 90, "续页应继承链方向转正"
 
 
@@ -244,7 +244,7 @@ def test_chain_all_good_no_probe():
     """整条链已正立（kaishuo/miancun 形态）→ 返回 0，零 OCR 探测（回放确定性保护）。"""
     prov = FakeProvider({0: GOOD_QUOTE_HTML, 90: GOOD_QUOTE_HTML, 270: GOOD_QUOTE_HTML})
     htmls = [GOOD_QUOTE_HTML] * 7   # page_htmls 按 1-based 页号索引，需覆盖 p1..p7
-    imgs = [_png() for _ in range(7)]
+    imgs = {_i: _png() for _i in range(1, 11)}
     angle, _probe = _detect_chain_orientation([3, 4, 5, 6, 7], htmls, imgs, prov, "quote")
     assert angle == 0
     assert prov.calls == [], "已正立链不得触发旋转探测"

@@ -27,7 +27,9 @@ from apps.api.intelligence.extraction_draft import (
 
 log = logging.getLogger(__name__)
 
-PAGE_CONCURRENCY = 6  # concurrent LLM calls per document
+import os as _os
+# 每份文档内的页级并发（OCR/LLM）。与 pipeline.PAGE_CONCURRENCY 同一 env，默认 5。
+PAGE_CONCURRENCY = max(1, int(_os.getenv("PAGE_CONCURRENCY", "5")))
 
 
 # ─── Adapter 契约 ─────────────────────────────────────────────────────────────
@@ -142,9 +144,10 @@ def _remap_for_doc_type(c: Any, doc_type: str) -> Any:
 
 
 def _classify_pages(
-    provider: Any, thumbnails: list[bytes], images: list[bytes],
+    provider: Any, thumbnails: list[bytes],
     doc_type: str, notify=None, _debug: dict | None = None,
     file_path: str | None = None,
+    render_full: Any = None,
 ) -> tuple[list, int, int]:
     """视觉页面分类：flash 批量 → Plus 复判 → 语义覆写（三阶段）。
 
@@ -190,8 +193,11 @@ def _classify_pages(
                 {"page": p.page, "role": p.role.value, "orientation": p.orientation}
                 for p in cls[:i] if p.role in table_roles
             ]
+            # 懒渲染：Plus 复判才按需高清渲染该页（i+1 == c.page）；用完即释放。
+            # 字节与旧 images[i]（=to_images()[i]）一致 → review 快照不 miss。
+            page_img = render_full(c.page) if render_full is not None else None
             reviewed = provider.review_pages_visual(
-                images[i], neighbors, flash[i], c.page,
+                page_img, neighbors, flash[i], c.page,
                 chain_context=chain_ctx, model=_PLUS_MDL)
             reviewed_cls = _remap_for_doc_type(VisualPageClassification.from_dict(reviewed), doc_type)
             cls[i] = reviewed_cls
@@ -376,17 +382,21 @@ def recognize_tables(
         QUOTE_TARGET_ROLES, TENDER_TARGET_ROLES, META_ROLES, VisualPageRole,
     )
 
-    _notify("渲染PDF", 5)
-    images = DocumentLoader.to_images(file_path, max_pages=MAX_PAGES_UNLIMITED)
-    total_pages = len(images)
-    rendered_pages = total_pages
-
-    # ── 视觉页面分类（缩略图 → qwen3-vl-flash/plus）──────────────────────
+    # ── 懒渲染（先分类，再只高清渲染目标页）：缩略图优先 → 分类 → 算需高清页集 ──
+    # 旧实现先把全部页渲成 2400px 高清图再分类，浪费内存（泰科龙 53 页峰值 1.6GB）。
+    # 现在分类只用缩略图；全分辨率仅渲染 OCR/方向/Plus 真正需要的 ~12 页。
     _notify("视觉页面分类", 12)
     thumbnails = DocumentLoader.to_thumbnails(file_path, max_pages=MAX_PAGES_UNLIMITED)
+    total_pages = len(thumbnails)
+    rendered_pages = total_pages   # 语义=参与页数（喂 compute_quality），非"全分辨率渲染数"
+
+    def _render_full(pno: int) -> bytes:
+        """按需渲染单页全分辨率（字节与旧 to_images()[pno-1] 一致）。"""
+        return DocumentLoader.render_pages(file_path, [pno])[pno]
+
     page_cls, flash_pages, plus_pages = _classify_pages(
-        provider, thumbnails, images, adapter.doc_type, notify=_notify,
-        file_path=str(file_path))
+        provider, thumbnails, adapter.doc_type, notify=_notify,
+        file_path=str(file_path), render_full=_render_full)
     role_by_page = {c.page: c for c in page_cls}
 
     table_roles = TENDER_TARGET_ROLES if adapter.doc_type == "tender" else QUOTE_TARGET_ROLES
@@ -424,14 +434,19 @@ def recognize_tables(
 
     # ── 仅对目标页(含召回) + meta页 跑 table_parsing OCR（按分类 orientation 转正）──
     ocr_pages = sorted(set(extract_pages) | set(meta_extra))
+    # 懒渲染：现在才高清渲染真正需要的页 = OCR页 ∪ 方向探测样本页（未预知旋转的目标页）。
+    # _detect_chain_orientation 探测样本取自 tgt（无预知旋转者），故 orient_sample 取其超集。
+    orient_sample_pages = [p for p in tgt if not page_rotations.get(p)]
+    needed_full = sorted(set(ocr_pages) | set(orient_sample_pages))
+    page_imgs: dict[int, bytes] = DocumentLoader.render_pages(file_path, needed_full)
     _notify(f"OCR {len(ocr_pages)} 个表格/汇总页", 20)
     ocr_imgs = []
     for p in ocr_pages:
-        img = images[p - 1]
+        img = page_imgs[p]
         deg = page_rotations.get(p, 0)
         if deg:
             img = _rotate_png_bytes(img, deg)
-            images[p - 1] = img        # 让后续 tiling 用转正后的图
+            page_imgs[p] = img        # 让后续 tiling 用转正后的图
         ocr_imgs.append(img)
     if ocr_imgs:
         ocr_res, ocr_failures = provider.ocr_pages_with_roles(ocr_imgs)
@@ -448,7 +463,7 @@ def recognize_tables(
     chain_orient: dict[int, int] = {}   # page -> 所属链方向角（供召回页继承）
     for _chain in _contiguous_runs(no_rot_tgt):
         _angle, _probe_cache = _detect_chain_orientation(
-            _chain, page_htmls, images, provider, adapter.doc_type)
+            _chain, page_htmls, page_imgs, provider, adapter.doc_type)
         if not _angle:
             continue
         log.info("chain %s-%s orientation=%d° (direct apply, probe cache %d pages)",
@@ -462,20 +477,20 @@ def recognize_tables(
                 log.info("  p%d reuse probe OCR → %d° (no re-OCR)", _p, _angle)
             else:
                 # 非 sample 页：旋转后 OCR 一次，不再二次投票
-                _rot_img = _rotate_png_bytes(images[_p - 1], _angle)
+                _rot_img = _rotate_png_bytes(page_imgs[_p], _angle)
                 try:
                     _res, _ = provider.ocr_pages_with_roles([_rot_img])
                     if _res and _res[0][1]:
                         _new_html, _new_img, _ok = _res[0][1], _rot_img, True
                     else:
-                        _new_html, _new_img, _ok = page_htmls[_p - 1], images[_p - 1], False
+                        _new_html, _new_img, _ok = page_htmls[_p - 1], page_imgs[_p], False
                 except Exception as _exc:
                     log.warning("chain orient apply OCR failed p%d deg %d: %s",
                                 _p, _angle, _exc)
-                    _new_html, _new_img, _ok = page_htmls[_p - 1], images[_p - 1], False
+                    _new_html, _new_img, _ok = page_htmls[_p - 1], page_imgs[_p], False
             if _ok:
                 page_htmls[_p - 1] = _new_html
-                images[_p - 1] = _new_img
+                page_imgs[_p] = _new_img
                 page_rotations[_p] = _angle   # 仅成功才记审计
                 log.info("  p%d corrected → %d° (chain direct)", _p, _angle)
             else:
@@ -487,18 +502,18 @@ def recognize_tables(
         _inh = page_rotations.get(_p - 1) or chain_orient.get(_p - 1)
         if not _inh:
             continue
-        _rot_img = _rotate_png_bytes(images[_p - 1], _inh)
+        _rot_img = _rotate_png_bytes(page_imgs[_p], _inh)
         try:
             _res, _ = provider.ocr_pages_with_roles([_rot_img])
             _ok = bool(_res and _res[0][1])
             _new_html = _res[0][1] if _ok else page_htmls[_p - 1]
-            _new_img = _rot_img if _ok else images[_p - 1]
+            _new_img = _rot_img if _ok else page_imgs[_p]
         except Exception as _exc:
             log.warning("recall orient direct OCR failed p%d: %s", _p, _exc)
-            _new_html, _new_img, _ok = page_htmls[_p - 1], images[_p - 1], False
+            _new_html, _new_img, _ok = page_htmls[_p - 1], page_imgs[_p], False
         if _ok:
             page_htmls[_p - 1] = _new_html
-            images[_p - 1] = _new_img
+            page_imgs[_p] = _new_img
             page_rotations[_p] = _inh   # 仅成功才记审计
             log.info("  recall p%d direct → %d° (chain-inherited, no re-vote)", _p, _inh)
         else:
@@ -551,7 +566,7 @@ def recognize_tables(
                 _process_page,
                 page_no, page_no - 1,  # page_no is 1-based; idx 0-based
                 page_htmls[page_no - 1],
-                images[page_no - 1],
+                page_imgs[page_no],
                 role_by_page.get(page_no),
                 provider,
                 adapter,
@@ -665,7 +680,7 @@ def recognize_tables(
                 _retry_rows, _retry_metric = _process_page(
                     _pno, _pno - 1,
                     page_htmls[_pno - 1],
-                    images[_pno - 1],
+                    page_imgs[_pno],
                     role_by_page.get(_pno),
                     provider,
                     adapter,
@@ -683,6 +698,10 @@ def recognize_tables(
                     results_by_page[_pno] = (_retry_rows, _retry_metric)
             except Exception as _exc:
                 log.warning("tax-field retry page %d failed: %s", _pno, _exc)
+
+    # 懒渲染内存释放：逐页 LLM/tiling/tax-retry 全部完成，高清图字节不再需要。
+    # 必须在 tax-retry 块之后（retry 仍读 page_imgs[_pno]）。
+    page_imgs.clear()
 
     recall_rows_buf: list[DraftRow] = []
     for page_no in sorted(results_by_page):
@@ -853,7 +872,7 @@ def _contiguous_runs(pages: list[int]) -> list[list[int]]:
 
 
 def _detect_chain_orientation(
-    chain: list[int], page_htmls: list[str], images: list[bytes],
+    chain: list[int], page_htmls: list[str], page_imgs: dict[int, bytes],
     provider: Any, doc_type: str,
 ) -> tuple[int, dict[int, tuple[str, bytes]]]:
     """连续表链方向检测：返回 (angle, probe_cache)。
@@ -886,7 +905,7 @@ def _detect_chain_orientation(
         s = 0
         for p in sample:
             try:
-                rb = _rotate_png_bytes(images[p - 1], deg)
+                rb = _rotate_png_bytes(page_imgs[p], deg)
                 results, _f = provider.ocr_pages_with_roles([rb])
                 if results:
                     html = results[0][1]

@@ -122,7 +122,7 @@ def test_classify_pages_escalates_only_low_conf():
                   "contains_table": True, "source": "plus"}}
     prov = FakeVisualProvider(flash, review)
     thumbs = [_png(), _png(), _png()]
-    cls, n_flash, n_plus = _classify_pages(prov, thumbs, thumbs, "quote")
+    cls, n_flash, n_plus = _classify_pages(prov, thumbs, "quote", render_full=lambda p: thumbs[p - 1])
     assert n_flash == 3
     assert n_plus == 1 and prov.review_calls == [3]
     assert cls[2].confidence == 0.9 and cls[2].source == "plus"
@@ -135,7 +135,7 @@ def test_classify_pages_no_escalation_when_all_clean():
     ]
     prov = FakeVisualProvider(flash)
     thumbs = [_png(), _png()]
-    cls, _n, n_plus = _classify_pages(prov, thumbs, thumbs, "quote")
+    cls, _n, n_plus = _classify_pages(prov, thumbs, "quote", render_full=lambda p: thumbs[p - 1])
     assert n_plus == 0 and prov.review_calls == []
 
 
@@ -268,7 +268,7 @@ def test_classify_pages_semantic_override_subtotal_to_cont():
     ]
     prov = FakeVisualProvider(flash)
     thumbs = [_png(), _png(), _png()]
-    cls, _, n_plus = _classify_pages(prov, thumbs, thumbs, "quote")
+    cls, _, n_plus = _classify_pages(prov, thumbs, "quote", render_full=lambda p: thumbs[p - 1])
     assert n_plus == 0  # §2 不触发（has_line_items 已知），无 Plus 调用
     assert cls[2].role == VisualPageRole.QUOTE_TABLE_CONTINUATION
     assert "§2-semantic" in " ".join(cls[2].evidence)
@@ -283,7 +283,7 @@ def test_classify_pages_subtotal_false_not_overridden():
     ]
     prov = FakeVisualProvider(flash)
     thumbs = [_png(), _png()]
-    cls, _, _ = _classify_pages(prov, thumbs, thumbs, "quote")
+    cls, _, _ = _classify_pages(prov, thumbs, "quote", render_full=lambda p: thumbs[p - 1])
     assert cls[1].role == VisualPageRole.SUBTOTAL_OR_SUMMARY
 
 
@@ -300,7 +300,8 @@ def test_classify_pages_debug_captures_three_layers():
     prov = FakeVisualProvider(flash, review)
     thumbs = [_png(), _png()]
     debug: dict = {}
-    cls, _, n_plus = _classify_pages(prov, thumbs, thumbs, "quote", _debug=debug)
+    cls, _, n_plus = _classify_pages(prov, thumbs, "quote", _debug=debug,
+                                     render_full=lambda p: thumbs[p - 1])
 
     assert "flash" in debug and "after_plus" in debug and "final" in debug
     # Flash layer: p2 was subtotal

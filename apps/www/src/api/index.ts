@@ -16,6 +16,7 @@ import type {
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
+  CompareStateResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -198,6 +199,8 @@ export const analysisApi = {
     api.post<{ ok: boolean; id: number; version: number; primary_category: string; sessions: TenderListConfirmSession[]; multi_category: boolean }>('/analysis/tender-list/confirm', data),
   tenderListCurrentSessions: (params: { project_id: number }) =>
     api.get<{ sessions: TenderListCurrentSession[]; primary_category: string }>('/analysis/tender-list/current-sessions', { params }),
+  compareState: (params: { project_id: number }) =>
+    api.get<CompareStateResult>('/analysis/compare-state', { params }),
   tenderListReconcile: (data: { xlsx_items: unknown[]; pdf_items: unknown[]; source_type?: string }) =>
     api.post<SourceReconcileResult>('/analysis/tender-list/reconcile', data),
   bidMatrixSave: (data: {

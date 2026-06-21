@@ -113,6 +113,13 @@ const routes: RouteRecordRaw[] = [
     redirect: '/dashboard',
     children: [
       ...appRoutes,
+      // 比价向导深链：/compare/:projectId/:step? —— 刷新可恢复（不进侧边菜单，复用同组件）。
+      {
+        path: '/compare/:projectId/:step?',
+        name: 'CompareDeep',
+        component: () => import('@/views/compare/IndexView.vue'),
+        meta: { title: '招标比价分析', public: false },
+      },
       // Legacy path redirects — inside layout so auth guard runs before redirect
       { path: '/quotes', redirect: '/analysis' },
       { path: '/history', redirect: '/analysis' },

@@ -1127,6 +1127,65 @@ class TestExtendedQualityGate:
         )
 
 
+# ── compare-state 刷新可恢复：按项目列已入库 submission + 在途 job ─────────────────
+
+class TestCompareStateRestore:
+    """GET /api/analysis/compare-state：刷新后重建供应商报价进度（confirmed + inflight）。"""
+
+    def test_lists_confirmed_submissions_and_inflight_jobs(self, compare_client):
+        # 建项目
+        rp = compare_client.post("/api/projects", json={"name": "刷新恢复项目", "remark": ""})
+        assert rp.status_code == 201
+        pid = rp.json()["id"]
+
+        # 上传+入库一份（带 project_id）→ 形成 confirmed submission
+        ru = compare_client.post("/api/intake/upload",
+            data={"type": "quote", "category": "阀门", "project_id": str(pid)},
+            files={"file": ("conf.png", _png(), "image/png")})
+        assert ru.status_code == 200
+        job_conf = ru.json()["id"]
+        rs = compare_client.post("/api/suppliers", json={"name": "恢复供应商A", "categories": ["阀门"]})
+        supplier_id = rs.json()["id"]
+        rc = compare_client.post("/api/quotes/batch-confirm", json={
+            "job_id": job_conf, "supplier_id": supplier_id,
+            "supplier_name": "恢复供应商A", "project_id": pid, "category": "阀门",
+        })
+        assert rc.status_code == 200, rc.text
+        sub_id = rc.json()["submission_id"]
+
+        # 再上传一份但不入库（带 project_id）→ 在途 job
+        buf = io.BytesIO(); Image.new("RGB", (16, 16), (240, 240, 240)).save(buf, format="PNG")
+        ru2 = compare_client.post("/api/intake/upload",
+            data={"type": "quote", "category": "阀门", "project_id": str(pid)},
+            files={"file": ("inflight.png", buf.getvalue(), "image/png")})
+        assert ru2.status_code == 200
+        job_inflight = ru2.json()["id"]
+
+        # compare-state
+        r = compare_client.get("/api/analysis/compare-state", params={"project_id": pid})
+        assert r.status_code == 200, r.text
+        data = r.json()
+
+        subs = data["submissions"]
+        assert len(subs) == 1, subs
+        assert subs[0]["submission_id"] == sub_id
+        assert subs[0]["line_count"] == 2
+        assert subs[0]["supplier_raw_name"] == "恢复供应商A"
+        assert subs[0]["job_id"] == job_conf
+
+        inflight_ids = {j["job_id"] for j in data["inflight_jobs"]}
+        assert job_inflight in inflight_ids, data["inflight_jobs"]
+        # 已入库的 job 不应再出现在 inflight
+        assert job_conf not in inflight_ids
+
+    def test_empty_for_new_project(self, compare_client):
+        rp = compare_client.post("/api/projects", json={"name": "空恢复项目", "remark": ""})
+        pid = rp.json()["id"]
+        r = compare_client.get("/api/analysis/compare-state", params={"project_id": pid})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"submissions": [], "inflight_jobs": []}
+
+
 # ── batch-confirm 复活废弃 submission（"老问题"：超时/旧轮次 superseded 后再上传同一文件）──
 
 class TestBatchConfirmRevive:
@@ -1386,6 +1445,30 @@ class TestPriceBasisBridgeContract:
         assert row["unit_price_excl_tax"] == 100.0
         assert row["extraction_meta"]["price_basis"] == "excl_tax"
 
+    def test_incl_unit_recovered_from_total_when_missing(self, compare_client):
+        """含税合价+数量齐全但缺含税单价 → 同口径还原 effective_unit=合价÷数量（泰科龙形态）。"""
+        draft = _draft_from_rows([
+            # 有含税单价的行：直接用
+            {"name": "DN50 闸阀", "spec": "Z45X", "qty": 2.0,
+             "unit_price_incl_tax": 113.0, "unit_price_excl_tax": 100.0,
+             "total_price_incl_tax": 226.0, "total_price_excl_tax": 200.0,
+             "tax_rate": 0.13, "tax_amount": 26.0},
+            # 缺含税单价、有含税合价+不含税单价（泰科龙缺列形态）→ 应还原 4408.11/3=1469.37
+            {"name": "DN80 闸阀", "spec": "Z45X", "qty": 3.0,
+             "unit_price_incl_tax": None, "unit_price_excl_tax": 975.25,
+             "total_price_incl_tax": 4408.11, "total_price_excl_tax": 2926.0,
+             "tax_rate": 0.13},
+        ])
+        r, _sid, sub_id = _chain_draft_to_bql(compare_client, draft, "口径-还原单价")
+        assert r.status_code == 200, r.text
+        rows = sorted(_bql_dicts(sub_id), key=lambda x: x["raw_name"])
+        # 两行都应有比价单价（unit_price 非空），覆盖率 2/2
+        assert all(x["unit_price"] is not None and x["unit_price"] > 0 for x in rows), rows
+        recovered = [x for x in rows if x["extraction_meta"].get("effective_unit_recovered")]
+        assert len(recovered) == 1, "恰一行通过合价÷数量还原"
+        assert abs(recovered[0]["unit_price"] - round(4408.11 / 3.0, 4)) < 1e-6
+        assert recovered[0]["total_price"] == 4408.11  # 合价不变
+
     def test_unknown_basis_blocks_comparison(self, compare_client):
         """无任何价格 → unknown，effective 为 None，价格覆盖率门拦截 match（不自动入比价）。"""
         draft = _draft_from_rows([
@@ -1444,6 +1527,11 @@ class TestPriceBasisBridgeFixtures:
         eff_total = sum(x["total_price"] or 0.0 for x in rows)
         assert abs(eff_total - expected_total) <= 0.05, (
             f"{doc_name}: effective 总额={eff_total:.2f} 期望={expected_total:.2f}"
+        )
+        # 含税比价单价覆盖率必须 100%（泰科龙缺含税单价的行经合价÷数量还原）→ 过价格覆盖门
+        unit_ok = sum(1 for x in rows if x["unit_price"] is not None and x["unit_price"] > 0)
+        assert unit_ok == expected_rows, (
+            f"{doc_name}: 比价单价覆盖 {unit_ok}/{expected_rows}（应全覆盖，含还原）"
         )
 
     def test_kaishuo_review_fields_fully_persisted(self, compare_client):

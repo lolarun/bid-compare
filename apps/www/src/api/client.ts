@@ -729,6 +729,33 @@ export interface TenderListCurrentSession {
   anchors_total: number
 }
 
+/** /analysis/compare-state — 刷新可恢复：项目供应商报价步骤的全部进度 */
+export interface CompareStateSubmission {
+  submission_id: number
+  job_id: string | null
+  filename: string
+  supplier_raw_name: string
+  supplier_id: number | null
+  status: string
+  line_count: number
+  batch_id: string | null
+  job_status: string
+  progress_stage: string
+  progress_pct: number
+}
+export interface CompareStateInflightJob {
+  job_id: string
+  filename: string
+  status: string
+  progress_stage: string
+  progress_pct: number
+  has_result: boolean
+}
+export interface CompareStateResult {
+  submissions: CompareStateSubmission[]
+  inflight_jobs: CompareStateInflightJob[]
+}
+
 export interface AnchorMatchSummary {
   anchors_total: number
   anchors_covered: number
