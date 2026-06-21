@@ -248,6 +248,7 @@ class MatrixTotal(BaseModel):
     qty_conflict_lines: int | None = None
     undecided_lines: int | None = None
     undecided_amount: float | None = None
+    tax_assumed_lines: int | None = None   # 单一价格列按招标含税要求纳入（假定非确认）
     basis_confirmed: bool | None = None
     eligible_for_ranking: bool | None = None
 

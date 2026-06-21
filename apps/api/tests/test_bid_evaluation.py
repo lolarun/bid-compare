@@ -87,12 +87,50 @@ def test_pending_dn_conflict_undecided_not_silently_dropped():
     assert c["evaluable"] is False and c["eval_status"] == "alignment_pending"
 
 
-def test_basis_unconfirmed_undecided():
-    """税口径未确认（unspecified）→ 不纳入完整评标总价（未决）。"""
-    c = _cell(cell_status="quoted", price=100, price_basis="unspecified", incl_unit=None,
+def test_pending_qty_only_prefix_family_variant_included():
+    """凯硕row89型：cell valve_type='缓闭式止回阀'（含前缀），锚点族='止回阀'。
+    族归一化须与锚点同管线（extract→normalize），不得因前缀误判为对齐未决。
+    DN100/个 一致 + 含税可得 → quantity_source_conflict 纳入（4×865=3460）。"""
+    c = _cell(cell_status="pending", price=865, price_basis="dual_tax", incl_unit=865,
+              supplier_qty=1, item_canonical={"valve_type": "缓闭式止回阀", "dn": "DN100"})
+    _evaluate_cell(c, 4, "止回阀", "DN100", None, "个", {}, _THR)
+    assert c["evaluable"] is True
+    assert c["eval_status"] == "quantity_source_conflict"
+    assert c["eval_amount"] == 3460
+
+
+def test_excl_tax_undecided():
+    """excl_tax（不含税，无含税口径）→ 不纳入完整评标总价（未决，不静默与含税混比）。"""
+    c = _cell(cell_status="quoted", price=100, price_basis="excl_tax", incl_unit=None,
               supplier_qty=1, item_canonical={})
     _evaluate_cell(c, 1, "球阀", "DN100", None, "个", {}, _THR)
     assert c["evaluable"] is False and c["eval_status"] == "basis_unconfirmed"
+
+
+def test_unspecified_single_column_included_as_incl_tax():
+    """锦存型：单一价格列 price_basis=unspecified，incl_unit 可得（=该唯一价）→
+    按招标含税单价要求纳入评标（1×93=93），标 tax_basis_assumed（假定非确认）。"""
+    c = _cell(cell_status="quoted", price=93, price_basis="unspecified", incl_unit=93,
+              supplier_qty=1, item_canonical={})
+    _evaluate_cell(c, 1, "球阀", "DN100", None, "个", {}, _THR)
+    assert c["evaluable"] is True
+    assert c["eval_amount"] == 93
+    assert c["eval_status"] == "ok"
+    assert c["tax_basis_assumed"] is True
+
+
+def test_unspecified_assumed_not_basis_confirmed_but_ranked():
+    """单一价格列假定含税的供应商：纳入排名（eligible），但 basis_confirmed=False，
+    且产出 tax_assumed_lines 风险提示（诚实标注假定，不冒充确认）。"""
+    rows = [_row({"supplier_id": 1, "evaluable": True, "eval_status": "ok",
+                  "eval_amount": 93, "alert_level": "normal", "tender_qty": 1,
+                  "incl_unit": 93, "price": 93, "tax_basis_assumed": True})]
+    rec = _compute_recommendation(rows, [1], _LABELS[:1], 1, {1: "unknown"}, POLICY)
+    se = rec["supplier_evaluation"][0]
+    assert se["eligible_for_ranking"] is True
+    assert se["tax_assumed_lines"] == 1
+    assert se["basis_confirmed"] is False
+    assert any("税口径假定含税" in r for r in rec["risks"])
 
 
 def test_deviation_vs_spec_median():

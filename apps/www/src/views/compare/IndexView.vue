@@ -2184,9 +2184,6 @@ async function runMatrix() {
         <template #description>
           <div style="font-size:12px;line-height:1.7">
             <div>评标方法：合理低价评标价法 — 最低报价不保证中标；本项目单一中标人，不做拆单组合。</div>
-            <div v-if="matrixSummary.committee_required" style="color:#d46b08;font-weight:600">
-              综合评审（企业规模/供货渠道/质量/售后/工期/垫资/承诺）证据不足，最终中标人需招标领导小组确认。
-            </div>
             <div v-if="matrixSummary.ranking?.length" style="margin-top:4px">
               评标总价排名：
               <span v-for="(r, i) in matrixSummary.ranking" :key="r.supplier_id">
@@ -2266,7 +2263,10 @@ async function runMatrix() {
               </div>
               <div class="eval-card__tags">
                 <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id) as any)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
+                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines ?? 0) > 0" color="orange">
+                  税口径假定含税 {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines }} 行
+                </a-tag>
+                <a-tag v-else-if="(matrixTotals.find(t => t.supplier_id === s.id) as any)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
                 <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines ?? 0) > 0" color="gold">
                   {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines }} 行未决
                 </a-tag>

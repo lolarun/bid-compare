@@ -531,10 +531,12 @@ def _parse_flags_from_note(spec_note: str | None) -> list[str]:
 
 
 def _incl_unit_from(data: "_ItemData | None") -> float | None:
-    """含税单价（评标总价的唯一合法口径）。只有税口径确认可得含税价时才返回，否则 None。
+    """评标总价口径单价。税口径可作含税纳入时返回该价，否则 None（不得 ×1.13 换算）。
 
-    incl_tax/dual_tax 且有含税单价 → 该值；纯 incl_tax 用 unit_price；
-    excl_tax/unspecified/unknown → None（不得用 ×1.13 换算）。
+    - incl_tax/dual_tax 且有含税单价 → 该值；纯 incl_tax 用 unit_price。
+    - unspecified（单一价格列，无含税/不含税之分）→ 按招标含税单价要求纳入该唯一价
+      （price_basis.py 设计意图，用户 2026-06-22 确认；调用方须标 tax_basis_assumed）。
+    - excl_tax/unknown → None。
     """
     if data is None:
         return None
@@ -542,6 +544,9 @@ def _incl_unit_from(data: "_ItemData | None") -> float | None:
         return float(data.unit_price_incl_tax)
     if data.price_basis == "incl_tax" and data.unit_price:
         return float(data.unit_price)
+    if data.price_basis == "unspecified":
+        v = data.unit_price_incl_tax or data.unit_price
+        return float(v) if v else None
     return None
 
 
@@ -555,6 +560,18 @@ def _anchor_spec(anchor) -> tuple:
     return fam, c.get("dn"), c.get("pn"), (getattr(anchor, "unit", "") or "").strip()
 
 
+def _canon_family(vt: str | None) -> str | None:
+    """从原始阀型串归一化出族 — 与 _anchor_spec 同管线（extract_valve_canonical→normalize）。
+
+    必须与锚点侧一致：normalize_valve_family('缓闭式止回阀')='缓闭式止回阀'（不降族），
+    而 extract_valve_canonical 先抽出基础族'止回阀'。直接 normalize 存储 canonical 会
+    与锚点族不对称，导致 quantity_source_conflict 被误判为 alignment_pending。
+    """
+    if not vt:
+        return None
+    return normalize_valve_family(extract_valve_canonical(vt, "").get("valve_type"))
+
+
 def _pending_is_qty_only(cell: dict, fam, dn, a_unit) -> bool:
     """pending 单元格的冲突是否**仅数量来源**（DN/族/单位一致，价格口径可得）。
 
@@ -562,8 +579,7 @@ def _pending_is_qty_only(cell: dict, fam, dn, a_unit) -> bool:
     """
     c = cell.get("item_canonical") or {}
     c_dn = c.get("dn")
-    c_vt = c.get("valve_type")
-    c_fam = normalize_valve_family(c_vt) if c_vt else None
+    c_fam = _canon_family(c.get("valve_type"))
     if dn and c_dn and dn != c_dn:
         return False
     if fam and c_fam and fam != c_fam:
@@ -585,6 +601,7 @@ def _evaluate_cell(cell: dict, anchor_qty, fam, dn, pn, a_unit,
     cell["eval_amount"] = None
     cell["evaluable"] = False
     cell["baseline"] = None
+    cell["tax_basis_assumed"] = False
     status = cell["cell_status"]
     basis = cell.get("price_basis")
     incl_unit = cell.get("incl_unit")
@@ -596,9 +613,10 @@ def _evaluate_cell(cell: dict, anchor_qty, fam, dn, pn, a_unit,
         return
 
     # ── 同规格偏差：按本格税口径取对应桶；展示值与计算值同源（中位数）──
+    # unspecified（单一价格列）按招标含税要求与含税桶比较。
     bl = None
     cmp_price = None
-    if incl_unit is not None and basis in ("incl_tax", "dual_tax"):
+    if incl_unit is not None and basis in ("incl_tax", "dual_tax", "unspecified"):
         bl = spec_baseline_from_index(spec_index, fam, dn, pn, a_unit, "incl_tax")
         cmp_price = incl_unit
     elif basis == "excl_tax" and cell.get("price"):
@@ -613,10 +631,12 @@ def _evaluate_cell(cell: dict, anchor_qty, fam, dn, pn, a_unit,
         cell["deviation_pct"] = None
         cell["alert_level"] = "normal"   # 无可靠同规格基准 → 不计异常
 
-    # ── 评标资格：必须有可确认的含税单价 ──
+    # ── 评标资格：必须有可纳入的含税口径单价 ──
     if incl_unit is None:
-        cell["eval_status"] = "basis_unconfirmed"   # 税口径未确认 → 未决（不静默排除）
+        cell["eval_status"] = "basis_unconfirmed"   # 税口径未确认（excl_tax/unknown）→ 未决（不静默排除）
         return
+    # 单一价格列按招标含税要求纳入，但标记假定（非确认），供风险提示与人工核实。
+    cell["tax_basis_assumed"] = (basis == "unspecified")
     eval_amount = round(float(anchor_qty) * incl_unit, 2) if anchor_qty else None
     sq = cell.get("supplier_qty")
     qty_conflict = (
@@ -743,7 +763,8 @@ def _compute_recommendation(
     label_by = {sl["id"]: sl for sl in supplier_labels}
     per = {cid: {"evaluated_total": 0.0, "confirmed_lines": 0, "qty_conflict_lines": 0,
                  "undecided_lines": 0, "undecided_amount": 0.0, "missing_lines": 0,
-                 "anomaly_count": 0, "basis_unconfirmed_lines": 0} for cid in col_ids}
+                 "anomaly_count": 0, "basis_unconfirmed_lines": 0,
+                 "tax_assumed_lines": 0} for cid in col_ids}
     evaluable_by_line: list[set] = []
     for row in rows:
         eset: set = set()
@@ -757,6 +778,8 @@ def _compute_recommendation(
                 eset.add(cid)
                 if st == "quantity_source_conflict":
                     per[cid]["qty_conflict_lines"] += 1
+                if c.get("tax_basis_assumed"):
+                    per[cid]["tax_assumed_lines"] += 1
             elif st in ("basis_unconfirmed", "alignment_pending"):
                 per[cid]["undecided_lines"] += 1
                 if st == "basis_unconfirmed":
@@ -788,7 +811,11 @@ def _compute_recommendation(
             "undecided_amount": round(p["undecided_amount"], 2),
             "missing_lines": p["missing_lines"],
             "anomaly_count": p["anomaly_count"],
-            "basis_confirmed": p["basis_unconfirmed_lines"] == 0 and p["confirmed_lines"] > 0,
+            "tax_assumed_lines": p["tax_assumed_lines"],
+            # 税口径"确认"须同时无未决口径与无假定口径；单一价格列属假定，非确认。
+            "basis_confirmed": (p["basis_unconfirmed_lines"] == 0
+                                and p["tax_assumed_lines"] == 0
+                                and p["confirmed_lines"] > 0),
             "checksum_status": cs,
             "full_coverage": full,
             "eligible_for_ranking": eligible,
@@ -821,6 +848,11 @@ def _compute_recommendation(
             risks.append(
                 f"{nm} {s['qty_conflict_lines']} 行报价数量≠招标数量，已按招标数量计入评标"
                 "（标记 quantity_source_conflict，建议核实）"
+            )
+        if s.get("tax_assumed_lines"):
+            risks.append(
+                f"{nm} {s['tax_assumed_lines']} 行为单一价格列（无含税/不含税标注），"
+                "已按招标含税单价要求纳入评标（税口径假定含税，建议核实）"
             )
         if s["undecided_lines"]:
             risks.append(
@@ -1115,6 +1147,7 @@ def build_anchor_matrix(
         t["qty_conflict_lines"] = se.get("qty_conflict_lines")
         t["undecided_lines"] = se.get("undecided_lines")
         t["undecided_amount"] = se.get("undecided_amount")
+        t["tax_assumed_lines"] = se.get("tax_assumed_lines")
         t["basis_confirmed"] = se.get("basis_confirmed")
         t["eligible_for_ranking"] = se.get("eligible_for_ranking")
 
