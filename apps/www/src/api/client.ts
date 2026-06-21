@@ -428,6 +428,8 @@ export interface QuoteExtractionItem {
   validation_flags?: string[]
   raw_qty?: number | null
   suggested_qty?: number | null
+  // 全局文档行序（1..N）：顺序直连对齐的行身份，必须往返到 batch-confirm，不能丢。
+  document_row_index?: number | null
   material_type?: string
   remark: string
   // hidden fields — never displayed in UI but must round-trip to batch-confirm

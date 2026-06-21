@@ -51,7 +51,7 @@ watch(() => [props.projectId, props.category], load, { immediate: true })
 
 // ─── Filter ───────────────────────────────────────────────────────────────────
 type FilterKey = 'needs_action' | 'all' | 'pending' | 'missing' | 'low'
-const activeFilter = ref<FilterKey>('needs_action')
+const activeFilter = ref<FilterKey>('all')
 const searchText = ref('')
 
 function rowNeedsAction(row: ReviewRow): boolean {
@@ -88,14 +88,7 @@ const filteredRows = computed(() => {
   return rows
 })
 
-const paginationConfig = computed(() => ({
-  pageSize: 60,
-  size: 'small' as const,
-  showTotal: (t: number) =>
-    activeFilter.value === 'all'
-      ? `全部采购项 ${t} 项`
-      : `当前筛选：${t} 条 / 全部 ${result.value?.anchors_total ?? 0} 项`,
-}))
+// 对齐核查表不分页：直接全显示（采购项总数已在上方统计卡展示）。
 
 // Filter counts
 const needsActionCount = computed(() => result.value?.rows.filter(rowNeedsAction).length ?? 0)
@@ -255,11 +248,11 @@ const cellAccountingDetail = computed(() => {
       <!-- ── Filter bar ── -->
       <div class="arm__filter">
         <a-radio-group v-model:value="activeFilter" button-style="solid" size="small">
+          <a-radio-button value="all">全部 ({{ result.anchors_total }})</a-radio-button>
           <a-radio-button value="needs_action">需处理 ({{ needsActionCount }})</a-radio-button>
           <a-radio-button value="pending">待确认 ({{ pendingRowCount }})</a-radio-button>
           <a-radio-button value="missing">缺报 ({{ missingRowCount }})</a-radio-button>
           <a-radio-button value="low">可比不足 ({{ lowCovCount }})</a-radio-button>
-          <a-radio-button value="all">全部 ({{ result.anchors_total }})</a-radio-button>
         </a-radio-group>
         <a-input
           v-model:value="searchText"
@@ -287,8 +280,8 @@ const cellAccountingDetail = computed(() => {
           :columns="columns"
           :data-source="filteredRows"
           :row-key="(r: ReviewRow) => r.anchor_seq"
-          :scroll="{ x: 'max-content', y: 520 }"
-          :pagination="paginationConfig"
+          :scroll="{ x: 'max-content', y: 640 }"
+          :pagination="false"
           size="small"
           :loading="loading"
           class="arm__table"

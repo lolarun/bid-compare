@@ -94,14 +94,13 @@ def test_score_supplier(db_session, sample_supplier, sample_material, sample_quo
 
 
 def test_score_supplier_weights_v2(db_session, sample_supplier, sample_material, sample_quotes):
-    """Weights must use v2 keys: price/history/completeness/brand/commercial."""
+    """Weights use actual scoring keys (price_competitiveness etc.)."""
     result = score_supplier(db_session, sample_supplier.id, "桥架")
     weights = result["weights"]
-    assert "price" in weights
-    assert "history" in weights
-    assert "completeness" in weights
-    assert "brand" in weights
-    assert "commercial" in weights
+    assert "price_competitiveness" in weights
+    assert "history_cooperation" in weights
+    assert "quote_completeness" in weights
+    assert "commercial_terms" in weights
 
 
 def test_refresh_baselines(db_session, sample_material, sample_quotes):

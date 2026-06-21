@@ -445,7 +445,7 @@ async function saveMatrixVersion() {
       alignment_finalization_id: alignmentFinalizationId.value,
       tender_list_session_id: tenderListSessionId.value ?? undefined,
       supplier_ids_json: effectiveSupplierIds.value,
-      recommended_supplier: matrixSummary.value?.recommended_supplier?.name ?? '',
+      recommended_supplier: matrixSummary.value?.price_preferred_candidate?.name ?? '',
     })
     savedMatrixVersionId.value = data.id
     message.success(`比价版本 v${data.version} 已保存`)
@@ -614,31 +614,37 @@ const matrixTotals = computed(() => matrixResult.value?.totals ?? [])
 const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 const matrixSummary = computed(() => {
   if (!matrixResult.value) return null
+  const m = matrixResult.value as unknown as Record<string, any>
   const rows = matrixResult.value.rows
-  const totals = matrixResult.value.totals
   const suppliers = matrixResult.value.suppliers
-  // 推荐止血：后端标记 recommendation_blocked 时不出推荐（0报价/pending/checksum fail 等情形）
-  const blocked = (matrixResult.value as Record<string, unknown>).recommendation_blocked as boolean | undefined
-  const eligible = blocked
-    ? []
-    : totals.filter((t) => t.quoted_count != null && t.quoted_count > 0 && t.avg_deviation != null)
-  const best = eligible.length
-    ? eligible.reduce((a, b) => ((a.avg_deviation as number) < (b.avg_deviation as number) ? a : b))
+  // 招标文件驱动：三态门禁 + 价格优选候选人（确定性，非自动定标）
+  const level = (m.recommendation_level as string) || (m.recommendation_blocked ? 'blocked' : 'conditional')
+  const awardMode = (m.award_mode as string) || 'single_supplier'
+  const allowSplit = awardMode === 'split_award'
+  const pc = m.price_preferred_candidate || null
+  const pricePreferred = pc ? suppliers.find((s) => s.id === pc.supplier_id) : null
+  // 拆单/最优组合总价：仅当招标文件允许分项授标才计算并展示
+  const optimalTotal = allowSplit
+    ? Math.round(rows.reduce((sum, row) => {
+        const tots = row.suppliers.filter((c) => c.total !== null).map((c) => c.total as number)
+        return sum + (tots.length ? Math.min(...tots) : 0)
+      }, 0))
     : null
-  const bestSupplier = best ? suppliers.find((s) => s.id === best.supplier_id) : null
-  // Optimal total: sum of min prices per row
-  const optimalTotal = rows.reduce((sum, row) => {
-    const tots = row.suppliers.filter((c) => c.total !== null).map((c) => c.total as number)
-    return sum + (tots.length ? Math.min(...tots) : 0)
-  }, 0)
   const anomalyCount = rows.reduce(
     (n, r) => n + r.suppliers.filter((c) => c.alert_level === 'red').length, 0,
   )
   return {
     total_materials: rows.length,
     total_suppliers: suppliers.length,
-    recommended_supplier: bestSupplier,
-    optimal_total: Math.round(optimalTotal),
+    recommendation_level: level,
+    award_mode: awardMode,
+    allow_split: allowSplit,
+    price_preferred_candidate: pricePreferred,
+    price_preferred_total: pc ? (pc.evaluated_total as number) : null,
+    committee_required: m.committee_required !== false,
+    ranking: (m.price_ranking as any[]) || [],
+    risks: (m.risks as string[]) || [],
+    optimal_total: optimalTotal,
     anomaly_count: anomalyCount,
   }
 })
@@ -681,16 +687,15 @@ const insightLoading = ref(false)
 
 async function fetchInsight() {
   if (!matrixResult.value || matrixResult.value.rows.length === 0) return
-  // 推荐止血：数据异常（0报价/pending/checksum fail）时禁止调用 AI insight
-  if ((matrixResult.value as Record<string, unknown>).recommendation_blocked) return
+  // 三态都调用 AI：blocked 时让 AI 解释阻断原因（不推荐供应商），不再静默跳过
   insightLoading.value = true
   insightResult.value = null
   try {
-    // Truncate rows to keep request body small — backend prompt also limits to 30 rows
-    const trimmed: BidMatrixResult = {
+    // 携带评标上下文（policy/排名/风险），AI 仅据此解释；行数截断控制体积
+    const trimmed = {
       ...matrixResult.value,
       rows: matrixResult.value.rows.slice(0, 50),
-    }
+    } as unknown as BidMatrixResult
     const { data } = await analysisApi.bidInsight(trimmed)
     insightResult.value = data
   } catch (e: any) {
@@ -709,14 +714,16 @@ watch(matrixResult, (val) => {
   }
 })
 
-// Savings percentage for bottom bar
+// Savings percentage — 仅当允许拆单（有 optimal_total）时才有意义
 const savingsPercent = computed(() => {
   if (!matrixSummary.value || !matrixResult.value) return null
+  const opt = matrixSummary.value.optimal_total
+  if (opt == null) return null
   const totals = matrixResult.value.totals
   if (totals.length < 2) return null
   const avgTotal = totals.reduce((s, t) => s + t.total, 0) / totals.length
   if (avgTotal <= 0) return null
-  const ratio = 1 - matrixSummary.value.optimal_total / avgTotal
+  const ratio = 1 - opt / avgTotal
   return ratio > 0 ? (ratio * 100).toFixed(1) : null
 })
 
@@ -2070,14 +2077,22 @@ async function runMatrix() {
           <StatCard
             :icon="TrophyOutlined"
             icon-bg="rgba(82,196,26,0.1)"
-            label="推荐主供"
-            :value="matrixSummary.recommended_supplier?.name ?? '—'"
+            label="价格优选候选人"
+            :value="matrixSummary.price_preferred_candidate?.name ?? '—'"
           />
           <StatCard
+            v-if="matrixSummary.allow_split && matrixSummary.optimal_total != null"
             :icon="DollarOutlined"
             icon-bg="rgba(250,140,22,0.1)"
             label="最优组合总价"
             :value="'¥' + matrixSummary.optimal_total.toLocaleString()"
+          />
+          <StatCard
+            v-else
+            :icon="DollarOutlined"
+            icon-bg="rgba(250,140,22,0.1)"
+            label="评标总价(价格优选)"
+            :value="matrixSummary.price_preferred_total != null ? '¥' + Math.round(matrixSummary.price_preferred_total).toLocaleString() : '—'"
           />
         </template>
         <StatCard
@@ -2150,9 +2165,44 @@ async function runMatrix() {
         />
       </a-card>
 
+      <!-- ③ 评标结论横幅（三态：firm/conditional/blocked，始终展示） -->
+      <a-alert
+        v-if="matrixSummary && matrixResult && !isSingleSupplierMode"
+        class="eval-banner"
+        :type="matrixSummary.recommendation_level === 'blocked' ? 'error' : matrixSummary.recommendation_level === 'firm' ? 'success' : 'warning'"
+        show-icon
+        style="margin-top:16px"
+      >
+        <template #message>
+          <span v-if="matrixSummary.recommendation_level === 'blocked'">无法形成评标总价排名（数据未达条件）</span>
+          <span v-else-if="matrixSummary.recommendation_level === 'firm'">价格优选候选人：<strong>{{ matrixSummary.price_preferred_candidate?.name }}</strong></span>
+          <span v-else>
+            价格优选候选人（条件推荐）：<strong>{{ matrixSummary.price_preferred_candidate?.name || '—' }}</strong>
+            <span v-if="matrixSummary.price_preferred_total != null">　评标总价 ¥{{ Math.round(matrixSummary.price_preferred_total).toLocaleString() }}</span>
+          </span>
+        </template>
+        <template #description>
+          <div style="font-size:12px;line-height:1.7">
+            <div>评标方法：合理低价评标价法 — 最低报价不保证中标；本项目单一中标人，不做拆单组合。</div>
+            <div v-if="matrixSummary.committee_required" style="color:#d46b08;font-weight:600">
+              综合评审（企业规模/供货渠道/质量/售后/工期/垫资/承诺）证据不足，最终中标人需招标领导小组确认。
+            </div>
+            <div v-if="matrixSummary.ranking?.length" style="margin-top:4px">
+              评标总价排名：
+              <span v-for="(r, i) in matrixSummary.ranking" :key="r.supplier_id">
+                {{ i + 1 }}.{{ r.name }} ¥{{ Math.round(r.evaluated_total).toLocaleString() }}<span v-if="i < matrixSummary.ranking.length - 1">　</span>
+              </span>
+            </div>
+            <ul v-if="matrixSummary.risks?.length" style="margin:6px 0 0;padding-left:18px;color:#8c8c8c">
+              <li v-for="(rk, i) in matrixSummary.risks.slice(0, 6)" :key="i">{{ rk }}</li>
+            </ul>
+          </div>
+        </template>
+      </a-alert>
+
       <!-- ③ Supplier evaluation cards (multi-supplier only) -->
       <div v-if="matrixSummary && matrixResult && !isSingleSupplierMode" class="supplier-eval">
-        <h3 class="section-title">供应商综合评估</h3>
+        <h3 class="section-title">供应商评标情况</h3>
         <a-row :gutter="[14, 14]">
           <a-col
             v-for="s in matrixSuppliers"
@@ -2162,7 +2212,7 @@ async function runMatrix() {
             <div
               class="eval-card"
               :class="{
-                'eval-card--recommended': matrixSummary.recommended_supplier?.id === s.id,
+                'eval-card--recommended': matrixSummary.price_preferred_candidate?.id === s.id,
               }"
             >
               <div class="eval-card__header">
@@ -2170,17 +2220,17 @@ async function runMatrix() {
                 <div class="eval-card__name-block">
                   <span class="eval-card__name">{{ s.name }}</span>
                   <a-tag
-                    v-if="matrixSummary.recommended_supplier?.id === s.id"
+                    v-if="matrixSummary.price_preferred_candidate?.id === s.id"
                     color="blue"
                     style="margin-left:6px;font-size:10px"
-                  >★ 推荐</a-tag>
+                  >★ 价格优选</a-tag>
                 </div>
               </div>
               <div class="eval-card__metrics">
                 <div class="eval-card__metric">
-                  <span class="eval-card__metric-label">报价总额</span>
+                  <span class="eval-card__metric-label">评标总价(含税)</span>
                   <span class="eval-card__metric-value">
-                    ¥{{ (matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
+                    ¥{{ ((matrixTotals.find(t => t.supplier_id === s.id) as any)?.evaluated_total ?? matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
@@ -2216,8 +2266,14 @@ async function runMatrix() {
               </div>
               <div class="eval-card__tags">
                 <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id) as any)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
+                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines ?? 0) > 0" color="gold">
+                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines }} 行未决
+                </a-tag>
+                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines ?? 0) > 0" color="purple">
+                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines }} 行数量冲突
+                </a-tag>
                 <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) < 0" color="blue">价格优势</a-tag>
               </div>
             </div>
           </a-col>
@@ -2242,7 +2298,7 @@ async function runMatrix() {
             </div>
             <div v-if="insightResult.recommendations?.length" class="insight-section">
               <h4 class="insight-section__title">
-                <CheckCircleOutlined style="color:#52c41a" /> 推荐方案
+                <CheckCircleOutlined style="color:#52c41a" /> 评标解读（仅解释系统结果，非定标结论）
               </h4>
               <ul class="insight-section__list">
                 <li v-for="(rec, i) in insightResult.recommendations" :key="i">{{ rec }}</li>
@@ -2274,12 +2330,21 @@ async function runMatrix() {
             </a-tag>
           </template>
           <template v-else-if="matrixSummary">
-            <span class="result-bottom-bar__total">
-              推荐方案总价：<strong>¥{{ matrixSummary.optimal_total.toLocaleString() }}</strong>
-            </span>
-            <a-tag v-if="savingsPercent" color="green" style="margin-left:8px">
-              节省 {{ savingsPercent }}%
-            </a-tag>
+            <!-- 拆单最优组合总价：仅招标文件允许分项授标时展示 -->
+            <template v-if="matrixSummary.allow_split && matrixSummary.optimal_total != null">
+              <span class="result-bottom-bar__total">
+                最优组合总价：<strong>¥{{ matrixSummary.optimal_total.toLocaleString() }}</strong>
+              </span>
+              <a-tag v-if="savingsPercent" color="green" style="margin-left:8px">节省 {{ savingsPercent }}%</a-tag>
+            </template>
+            <!-- 单一授标：展示价格优选候选人评标总价（条件推荐，需委员会确认） -->
+            <template v-else>
+              <span class="result-bottom-bar__total">
+                价格优选候选人：<strong>{{ matrixSummary.price_preferred_candidate?.name || '—' }}</strong>
+                <span v-if="matrixSummary.price_preferred_total != null">　评标总价 ¥{{ Math.round(matrixSummary.price_preferred_total).toLocaleString() }}</span>
+              </span>
+              <a-tag color="orange" style="margin-left:8px">条件推荐 · 需招标领导小组确认</a-tag>
+            </template>
           </template>
         </div>
         <a-space>

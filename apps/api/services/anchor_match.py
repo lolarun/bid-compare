@@ -27,7 +27,9 @@ from apps.api.models import Material, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.models.supplier import Supplier
-from apps.api.services.canonical import canonical_match_score, extract_valve_canonical
+from apps.api.services.canonical import (
+    canonical_match_score, extract_valve_canonical, valve_type_compatible,
+)
 from apps.api.services.tender_list import TenderAnchor, parse_tender_xlsx
 
 
@@ -43,6 +45,7 @@ class _BQLProxy:
     brand: str = ""
     canonical: dict | None = None    # from bql.canonical; used for canonical matching
     is_bql: bool = True
+    document_row_index: int | None = None  # 全局文档行序(1..N)，顺序直连优先用它对齐
 
 
 @dataclass
@@ -462,6 +465,160 @@ def attach_nearest_hints(
     return result
 
 
+# 顺序直连门禁阈值（整表层：决定该供应商是否走顺序直连）
+_SEQ_DN_COVERAGE = 0.90      # 双方都识别出 DN 的位置占比下限（防稀疏DN蒙混整表通过）
+_SEQ_DN_CONSISTENCY = 0.95   # 已识别DN的同位置一致率（确认整体按位置对齐，非shuffle）
+_SEQ_FAM_CONSISTENCY = 0.90  # 同位置大类族一致率（整表防整体/局部交换）
+_SEQ_QTY_TOL = 0.001         # 数量比较容差
+
+# 归一化大类族：稳健于名称变体（止回阀内部橡胶瓣/缓闭式/弹簧式 + 倒流防止器 同族），
+# 但 蝶阀≠闸阀≠球阀 严格区分——用于逐行 + 整表防同DN串位。关键字按特异性排序，先到先得。
+_COARSE_FAMILY_KEYWORDS: list[tuple[str, str]] = [
+    ("蝶阀", "butterfly"), ("闸阀", "gate"), ("球阀", "ball"),
+    ("截止阀", "globe"), ("节流", "throttle"),
+    ("止回", "check"), ("逆止", "check"), ("倒流", "check"), ("防止器", "check"),
+    ("减压", "reducing"), ("安全阀", "safety"), ("调节阀", "control"),
+    ("平衡阀", "balance"), ("排气", "air"), ("排泥", "drain"), ("泄压", "relief"),
+    ("过滤", "filter"), ("滤器", "filter"), ("滤网", "filter"), ("除污", "filter"),
+    ("水表", "meter"), ("流量计", "meter"), ("压力表", "gauge"), ("温度计", "gauge"),
+]
+
+
+def _coarse_family(name: str | None) -> str | None:
+    """名称 → 归一化大类族（无法判定返回 None，不参与冲突判定）。"""
+    n = name or ""
+    for kw, fam in _COARSE_FAMILY_KEYWORDS:
+        if kw in n:
+            return fam
+    return None
+
+
+def _qty_eq(a, b) -> bool:
+    try:
+        return abs(float(a) - float(b)) <= _SEQ_QTY_TOL
+    except (TypeError, ValueError):
+        return False
+
+
+def _doc_order(qis: list[int], doc_index: dict | None) -> tuple[list[int], bool]:
+    """决定该 submission 的文档顺序。返回 (ordered_qis, reject)。
+
+    三态（不把"损坏的业务序号"静默替换成数据库插入顺序）：
+      - 全部行有 document_row_index 且完整/唯一/连续 → 用它排序，reject=False；
+      - 该 submission 全部行都无 document_row_index（历史数据）→ 回退载入顺序(=submission_id,id)，
+        reject=False（legacy_order_fallback，已 log）；
+      - 部分有但残缺/重复/不连续 → reject=True：业务序号已损坏，禁止顺序直连，安全回退语义。
+    """
+    vals = [(doc_index or {}).get(qi) for qi in qis]
+    present = [v for v in vals if v is not None]
+    if not present:
+        log.info("sequential: no document_row_index (legacy_order_fallback) — 用入库(id)顺序")
+        return qis, False                       # 历史数据：ID 顺序兼容
+    if len(present) != len(qis):
+        return qis, True                        # 部分缺失 → 损坏 → 拒绝
+    if len(set(present)) != len(present):
+        return qis, True                        # 重复 → 拒绝
+    lo = min(present)
+    if sorted(present) != list(range(lo, lo + len(present))):
+        return qis, True                        # 不连续 → 拒绝
+    return sorted(qis, key=lambda qi: doc_index[qi]), False
+
+
+def _sequential_matches(
+    anchors: list,
+    quotes: list,
+    materials: list,
+    quote_dns: list,
+    quote_canonicals: list,
+    doc_index: dict | None = None,
+) -> tuple[list[tuple[int, int, float]], set[int], set[int], list[int]]:
+    """顺序直连：按 submission 分组；整表门禁通过的供应商按文档顺序 1:1 对齐、跳过 embedding，
+    再做**逐行冲突隔离**——冲突行单独转 pending，不连累整表。
+
+    整表门禁（每 submission 独立，全部满足才启用顺序直连）：
+      1) 行数 == 锚点数；
+      2) 锚点序号连续唯一；
+      3) DN 覆盖率 ≥ 90%（双方都识别出 DN 的位置占比）；
+      4) 已识别 DN 的同位置一致率 ≥ 95%；
+      5) 归一化大类族(_coarse_family)同位置一致率 ≥ 90%（防整体/局部同DN串位；名称术语差异不否决）。
+    逐行隔离（整表通过后，对每个位置）：
+      - DN 冲突 / 大类族冲突 / 单位不一致 / 数量不一致 → 该行 pending（标 REVIEW）；
+      - 其余行 align。
+    报价行顺序：完整合法的 document_row_index 用它；全缺(历史)用载入顺序(submission_id,id)；
+      残缺/非法(业务序号损坏)→拒绝顺序直连，回退语义。
+
+    返回 (seq_matches[(qi,ai,score)], seq_qi 全部直连行, seq_conflict_qi 需 pending 行, embed_qi)。
+    """
+    if not anchors or not quotes:
+        return [], set(), set(), list(range(len(quotes)))
+    a_dn = _anchor_dns(anchors)
+    a_fam = [_coarse_family(getattr(a, "name", "") or "") for a in anchors]
+    order = sorted(range(len(anchors)), key=lambda ai: int(getattr(anchors[ai], "seq", 0) or 0))
+    seqs = [int(getattr(anchors[ai], "seq", 0) or 0) for ai in order]
+    continuous = bool(seqs) and len(set(seqs)) == len(seqs) and \
+        seqs == list(range(seqs[0], seqs[0] + len(seqs)))
+
+    by_sub: dict[int, list[int]] = {}
+    for qi, q in enumerate(quotes):
+        by_sub.setdefault(q.supplier_id or 0, []).append(qi)
+
+    seq_matches: list[tuple[int, int, float]] = []
+    seq_qi: set[int] = set()
+    seq_conflict_qi: set[int] = set()
+    embed_qi: list[int] = []
+    for sid, qis in by_sub.items():
+        # 文档顺序：完整合法的 document_row_index 用它；全缺(历史)回退id顺序；残缺/非法→拒绝直连。
+        qis, _reject = _doc_order(qis, doc_index)
+        n = len(qis)
+        if _reject or not (continuous and n == len(order)):
+            embed_qi.extend(qis)
+            continue
+        # ── 逐位置评估 ──
+        per_pos: list[tuple[int, int, bool]] = []   # (qi, ai, row_clean)
+        dn_both = dn_match = fam_both = fam_match = 0
+        for pos, qi in enumerate(qis):
+            ai = order[pos]
+            adn, qdn = a_dn[ai], quote_dns[qi]
+            dn_present = bool(adn and qdn)
+            dn_hit = dn_present and str(adn) == str(qdn)
+            if dn_present:
+                dn_both += 1; dn_match += dn_hit
+            # 归一化大类族（稳健于名称变体；逐行+整表都用它防同DN串位）
+            afam, qfam = a_fam[ai], _coarse_family(getattr(materials[qi], "standard_name", "") or "")
+            fam_present = bool(afam and qfam)
+            fam_hit = fam_present and afam == qfam
+            if fam_present:
+                fam_both += 1; fam_match += fam_hit
+            a_unit = (getattr(anchors[ai], "unit", "") or "").strip()
+            q_unit = (getattr(materials[qi], "unit", "") or "").strip()
+            unit_conflict = bool(a_unit and q_unit and a_unit != q_unit)
+            a_qty = getattr(anchors[ai], "qty", None)
+            q_qty = getattr(quotes[qi], "quantity", None)
+            qty_conflict = (a_qty is not None and q_qty is not None and not _qty_eq(a_qty, q_qty))
+            # 逐行冲突：DN不符 / 大类族不符(防同DN异类) / 单位不符 / 数量不符 → 该行 pending
+            row_conflict = (dn_present and not dn_hit) or (fam_present and not fam_hit) \
+                or unit_conflict or qty_conflict
+            per_pos.append((qi, ai, not row_conflict))
+        # ── 整表门禁 ──
+        dn_cov = dn_both / n if n else 0.0
+        dn_cons = dn_match / dn_both if dn_both else 0.0
+        fam_cons = fam_match / fam_both if fam_both else 1.0
+        accept = (dn_cov >= _SEQ_DN_COVERAGE and dn_cons >= _SEQ_DN_CONSISTENCY
+                  and fam_cons >= _SEQ_FAM_CONSISTENCY)
+        if not accept:
+            embed_qi.extend(qis)
+            continue
+        conflicts = 0
+        for qi, ai, clean in per_pos:
+            seq_matches.append((qi, ai, 1.0 if clean else 0.0))
+            seq_qi.add(qi)
+            if not clean:
+                seq_conflict_qi.add(qi); conflicts += 1
+        log.info("sequential direct-connect: submission=%s %d 行直连 (DN覆盖%.0f%% 一致%.0f%% 族%.0f%%, 冲突%d行→pending)",
+                 sid, n, dn_cov * 100, dn_cons * 100, fam_cons * 100, conflicts)
+    return seq_matches, seq_qi, seq_conflict_qi, embed_qi
+
+
 def import_and_match(
     db: Session,
     xlsx_bytes: bytes | None,
@@ -548,7 +705,13 @@ def import_and_match(
         )
         if category:
             _bql_q = _bql_q.filter(BidQuoteLine.category == category)
+        # 显式按 (submission, id) 排序 = 入库/文档顺序，供顺序直连按位置对齐（不依赖隐式顺序）。
+        _bql_q = _bql_q.order_by(BidQuoteLine.submission_id.asc(), BidQuoteLine.id.asc())
         for bql, sub in _bql_q.all():
+            _dri = None
+            _meta = bql.extraction_meta or {}
+            if isinstance(_meta, dict):
+                _dri = _meta.get("document_row_index")
             quotes.append(_BQLProxy(
                 id=bql.id,
                 supplier_id=sub.id,          # group key = submission_id
@@ -558,6 +721,7 @@ def import_and_match(
                 quantity=bql.qty,
                 brand=bql.brand,
                 canonical=bql.canonical,
+                document_row_index=_dri,
             ))
             materials.append(_BQLMatProxy(
                 standard_name=bql.standard_name,
@@ -612,8 +776,28 @@ def import_and_match(
                 canon = extract_valve_canonical(m.standard_name or "", m.spec or "")
             quote_canonicals.append(canon or {})
 
-    matches = match_anchors(anchors, quotes, quote_texts, quote_dns,
-                            quote_canonicals=quote_canonicals)
+    # 顺序直连优先：门禁通过的供应商按文档顺序 1:1 对齐，跳过 embedding；其余走语义。
+    # doc_index：优先用持久化的 document_row_index（extraction_meta），否则回退载入顺序。
+    _doc_index: dict[int, int] = {}
+    for _qi, _qt in enumerate(quotes):
+        if is_bql_flags[_qi]:
+            _dri = (getattr(_qt, "document_row_index", None))
+            if _dri is not None:
+                _doc_index[_qi] = _dri
+    seq_matches, seq_qi, seq_conflict_qi, embed_qi = _sequential_matches(
+        anchors, quotes, materials, quote_dns, quote_canonicals,
+        doc_index=_doc_index or None)
+    embed_matches: list[tuple[int, int, float]] = []
+    if embed_qi:
+        _sub_quotes = [quotes[i] for i in embed_qi]
+        _sub_texts = [quote_texts[i] for i in embed_qi]
+        _sub_dns = [quote_dns[i] for i in embed_qi]
+        _sub_canon = [quote_canonicals[i] for i in embed_qi]
+        for _sqi, _ai, _cos in match_anchors(
+            anchors, _sub_quotes, _sub_texts, _sub_dns, quote_canonicals=_sub_canon
+        ):
+            embed_matches.append((embed_qi[_sqi], _ai, _cos))
+    matches = seq_matches + embed_matches
 
     # Persist canonical to Material.extended_attrs (cache only; don't overwrite; skip BQL proxies)
     for mi, m in enumerate(materials):
@@ -712,16 +896,27 @@ def import_and_match(
                 if qi in seen_qids:
                     continue
                 seen_qids.add(qi)
-                if cos < LOW_CONF:
+                _is_seq = qi in seq_qi
+                _seq_conflict = qi in seq_conflict_qi
+                if cos < LOW_CONF and not _is_seq:
                     low_conf += 1
-                item_action = "align" if cos >= LOW_CONF else "pending"
+                # 顺序直连：clean 行 align；逐行冲突行（DN/类型/单位/数量不一致）→ pending（REVIEW）。
+                if _is_seq:
+                    item_action = "pending" if _seq_conflict else "align"
+                else:
+                    item_action = "align" if cos >= LOW_CONF else "pending"
                 qt = quotes[qi]
                 _actual_sid = getattr(qt, "actual_supplier_id", qt.supplier_id)
                 qsid = _actual_sid if _actual_sid in valid_sids else None
                 canon_snap = quote_canonicals[qi] if qi < len(quote_canonicals) else {}
-                note = f"cos={cos:.2f}"
-                if canon_snap.get("valve_type"):
-                    note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
+                if _is_seq:
+                    note = f"position_direct seq={a.seq}"
+                    if _seq_conflict:
+                        note += " 字段冲突待核(DN/类型/单位/数量)"
+                else:
+                    note = f"cos={cos:.2f}"
+                    if canon_snap.get("valve_type"):
+                        note += f" {canon_snap.get('valve_type')} {canon_snap.get('dn','')} {canon_snap.get('pn','')}"
                 item_action, note = _apply_brand(qt, sid, item_action, note)
                 _qi_bql = is_bql_flags[qi]
                 _sub_id = qt.submission_id if _qi_bql else None

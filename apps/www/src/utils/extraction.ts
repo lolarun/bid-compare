@@ -94,7 +94,7 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
           // 价格口径桥接字段：显式解构并保留，绝不丢失（§4/§9）
           unit_price_incl_tax, total_price_incl_tax, total_price_excl_tax,
           tax_amount, price_basis, effective_unit_price, effective_total_price,
-          validation_flags, raw_qty, suggested_qty,
+          validation_flags, raw_qty, suggested_qty, document_row_index,
           // visible fields handled explicitly above — everything else is hidden
           ...rest
         } = it as Record<string, unknown>
@@ -120,6 +120,7 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
           effective_total_price: asNumOrNull(effective_total_price),
           raw_qty: asNumOrNull(raw_qty),
           suggested_qty: asNumOrNull(suggested_qty),
+          document_row_index: asNumOrNull(document_row_index),
         }
         if (typeof price_basis === 'string') basis.price_basis = price_basis
         if (Array.isArray(validation_flags)) {

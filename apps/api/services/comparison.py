@@ -10,7 +10,11 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Project, Supplier, AnalysisConfig, DEFAULT_THRESHOLDS
+from apps.api.services.canonical import extract_valve_canonical, normalize_valve_family
 from apps.api.services.quote_filters import valid_quote_filters
+
+# 同规格基准最小样本数（< 此值视为"无可靠同规格基准"，deviation=null，不计异常）
+SPEC_BASELINE_MIN_SAMPLES = 5
 
 
 def get_config_value(db: Session, key: str, default=None):
@@ -156,6 +160,95 @@ def compute_reasonable_low(
         "reasonable_low_date": min_date or "",
         "historical_min": float(np.min(prices)),
     }
+
+
+# ─── 同规格历史基准（合理低价偏差的唯一合法基准）─────────────────────────────
+#
+# 偏差只能相对**同规格**历史中位数计算：键 = valve_family + DN + PN + unit + tax_basis。
+# 规格键不全 / 税口径未知 / 样本 < SPEC_BASELINE_MIN_SAMPLES → 返回 None
+# （前端显示"无可靠同规格基准"，deviation 必须为 null，绝不计异常）。
+# 严禁退回品类最低价 / P10 / 跨规格地板价（那正是 ¥11.10 假异常的根因）。
+# 历史报价必须同税口径才纳样（含税价用 unit_price 且需证据为含税口径；不含税用 unit_price_excl_tax），
+# 历史无可确认口径的样本一律排除——宁缺毋滥，避免含税/不含税混样。
+
+
+def _spec_key(name: str, spec: str, unit: str) -> tuple:
+    """(valve_family, dn, pn, unit) — 同规格匹配键。任一缺失则该项不可用于同规格基准。"""
+    c = extract_valve_canonical(name or "", spec or "")
+    fam = normalize_valve_family(c.get("valve_type"))
+    return (fam, c.get("dn"), c.get("pn"), (unit or "").strip())
+
+
+def build_spec_price_index(db: Session, category: str) -> dict[tuple, list[float]]:
+    """一次扫描该品类历史报价，建 (family,dn,pn,unit,tax_basis) → [价格] 索引。
+
+    每行矩阵按自身规格键 O(1) 查表，避免 N×全表重复扫描。
+    """
+    rows = (
+        db.query(
+            Quote.unit_price, Quote.unit_price_excl_tax, Quote.tax_rate,
+            Material.standard_name, Material.spec, Material.unit,
+        )
+        .join(Material, Material.id == Quote.material_id)
+        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .filter(Material.category == category, *valid_quote_filters())
+        .all()
+    )
+    index: dict[tuple, list[float]] = {}
+    for up, upx, tr, name, spec, munit in rows:
+        fam, dn, pn, u = _spec_key(name, spec, munit)
+        if not (fam and dn and pn and u):
+            continue
+        # 含税口径样本：unit_price 且能确认为含税（含税>不含税，或有正税率）
+        if up and up > 0 and ((upx and up > upx) or (tr and tr > 0)):
+            index.setdefault((fam, dn, pn, u, "incl_tax"), []).append(float(up))
+        # 不含税口径样本
+        if upx and upx > 0:
+            index.setdefault((fam, dn, pn, u, "excl_tax"), []).append(float(upx))
+    return index
+
+
+def spec_baseline_from_index(
+    index: dict[tuple, list[float]],
+    valve_family: str | None,
+    dn: str | None,
+    pn: str | None,
+    unit: str | None,
+    tax_basis: str | None,
+    min_samples: int = SPEC_BASELINE_MIN_SAMPLES,
+) -> dict | None:
+    """从索引取同规格基准。规格键不全 / 税口径未知 / 样本不足 → None。
+
+    返回 {median, count, basis, spec_key}；median 同时是展示值与偏差计算基准（同源）。
+    """
+    u = (unit or "").strip()
+    if not (valve_family and dn and pn and u) or tax_basis not in ("incl_tax", "excl_tax"):
+        return None
+    prices = index.get((valve_family, dn, pn, u, tax_basis))
+    if not prices or len(prices) < min_samples:
+        return None
+    median = float(np.median(prices))
+    return {
+        "median": round(median, 2),
+        "count": len(prices),
+        "basis": tax_basis,
+        "spec_key": f"{valve_family}|{dn}|{pn}|{u}|{tax_basis}",
+    }
+
+
+def compute_spec_baseline(
+    db: Session,
+    category: str,
+    valve_family: str | None,
+    dn: str | None,
+    pn: str | None,
+    unit: str | None,
+    tax_basis: str | None,
+    min_samples: int = SPEC_BASELINE_MIN_SAMPLES,
+) -> dict | None:
+    """便捷封装（建索引 + 查表）；矩阵路径请用 build_spec_price_index 复用索引。"""
+    index = build_spec_price_index(db, category)
+    return spec_baseline_from_index(index, valve_family, dn, pn, unit, tax_basis, min_samples)
 
 
 def compare_price(

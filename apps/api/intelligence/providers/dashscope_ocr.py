@@ -38,7 +38,10 @@ log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 5
 _RETRY_DELAY = 3          # seconds; linear backoff: delay × attempt (3, 6, 9, 12, 15)
-_PER_KEY_CONCURRENCY = 6  # max simultaneous API calls per key
+# 每个 API key 同时打到 Qwen-VL-OCR 的最大并发调用数（真正的"OCR 并发识别数"）。
+# 这是所有 OCR 调用（批量识别/切片/方向探测）的硬上限。env 可调；注意 Qwen 账号本身
+# 有 QPS/并发限额，调太高会触发 429（有退避重试，但会拖慢）。多 key 时总并发 = 本值 × key数。
+_PER_KEY_CONCURRENCY = max(1, int(os.getenv("OCR_PER_KEY_CONCURRENCY", "6")))
 # ── Stage 2 prompts (OCR HTML → structured JSON) ────────────────────────
 _TENDER_S2_PROMPT = """你是机电材料招投标助理。下面是OCR识别出的HTML表格内容。
 请从中提取采购材料清单，返回严格的JSON格式。

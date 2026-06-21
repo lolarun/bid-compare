@@ -631,7 +631,11 @@ def fill_one_supplier(
     k: int = 3,
     timeout: int = 300,
 ) -> SupplierFillResult:
-    """attach_topk → Tier-1 预判 → build_prompt → call_llm → validate。无 DB 写。"""
+    """attach_topk → Tier-1 → LLM → validate。无 DB 写。
+
+    注：顺序直连(position_direct)统一实现在 anchor_match.import_and_match()（网页 /match 走那条）。
+    本函数(/llm-fill)保持 LLM 语义填表本职，不再各做一套门禁，避免两接口结果分叉。
+    """
     if not rows:
         return SupplierFillResult(supplier_id=0)
     supplier_id = rows[0].supplier_id

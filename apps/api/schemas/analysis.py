@@ -185,14 +185,26 @@ class SupplierCell(BaseModel):
     pending_note: str | None = None         # "另有 N 条待确认" when align+pending coexist
     flags: list[str] | None = None          # validator flags: ocr_corrected_verified, valve_type_conflict, etc.
     evidence: str | None = None             # LLM fill reasoning/evidence stored in name_note
+    # 评标口径（招标数量×含税单价）+ 同规格偏差
+    price_basis: str | None = None
+    incl_unit: float | None = None          # 含税单价（评标用）
+    tender_qty: float | None = None         # 招标数量（评标数量，非供应商报价数量）
+    eval_amount: float | None = None        # 评标金额 = 招标数量×含税单价
+    eval_status: str | None = None          # ok|quantity_source_conflict|basis_unconfirmed|alignment_pending|missing
+    evaluable: bool | None = None
+    baseline: dict | None = None            # 同规格基准 {median,count,basis,spec_key}
 
     model_config = {"extra": "ignore"}
 
 
 class HistoricalAvg(BaseModel):
     price: float
-    period: str
-    projects: int
+    period: str = ""
+    projects: int = 0
+    # 同规格基准（新口径：median 即展示值=偏差计算值）
+    spec_key: str | None = None
+    count: int | None = None
+    basis: str | None = None
 
 
 class ReasonableLowInfo(BaseModel):
@@ -207,10 +219,16 @@ class MatrixRow(BaseModel):
     spec: str
     anchor_seq: str | None = None  # v2.5: TenderAnchor.seq
     historical_avg: HistoricalAvg | None
-    reasonable_low: ReasonableLowInfo | None
+    reasonable_low: ReasonableLowInfo | None = None
+    spec_baseline: HistoricalAvg | None = None
     suppliers: list[SupplierCell]
     min_deviation: float | None
     recommended: str | None
+    # anchor 展示
+    unit: str | None = None
+    quantity: float | None = None
+    materials: str | None = None
+    brand: str | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -224,6 +242,14 @@ class MatrixTotal(BaseModel):
     declared_total: float | None = None
     checksum_delta_pct: float | None = None
     checksum_status: str | None = None  # "pass" / "fail" / "unknown"
+    # 评标口径（招标数量×含税单价）
+    evaluated_total: float | None = None
+    confirmed_lines: int | None = None
+    qty_conflict_lines: int | None = None
+    undecided_lines: int | None = None
+    undecided_amount: float | None = None
+    basis_confirmed: bool | None = None
+    eligible_for_ranking: bool | None = None
 
 
 class BidMatrixRequest(BaseModel):
@@ -261,9 +287,22 @@ class BidMatrixResult(BaseModel):
     anchor_matrix: bool | None = None
     not_finalized_warning: str | None = None
     matrix_distribution: MatrixDistribution | None = None
-    # Recommendation gate
+    # Recommendation gate（兼容旧前端：仅 blocked 置 true）
     recommendation_blocked: bool = False
     recommendation_blocked_reasons: list[str] = Field(default_factory=list)
+    # 招标文件驱动的三态评标
+    recommendation_level: str | None = None   # firm | conditional | blocked
+    recommendation_reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    evaluation_policy: dict | None = None
+    award_mode: str | None = None
+    committee_required: bool | None = None
+    price_ranking: list[dict] = Field(default_factory=list)
+    price_preferred_candidate: dict | None = None
+    supplier_evaluation: list[dict] = Field(default_factory=list)
+    common_comparable: dict | None = None
+    non_price_factors: list[dict] = Field(default_factory=list)
+    comprehensive_recommendation_status: str | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -276,6 +315,17 @@ class BidInsightRequest(BaseModel):
     suppliers: list[SupplierLabel]
     rows: list[MatrixRow]
     totals: list[MatrixTotal]
+    # 评标上下文（AI 只能据此解释，不得改选）
+    recommendation_level: str | None = None
+    evaluation_policy: dict | None = None
+    award_mode: str | None = None
+    committee_required: bool | None = None
+    price_ranking: list[dict] = Field(default_factory=list)
+    price_preferred_candidate: dict | None = None
+    supplier_evaluation: list[dict] = Field(default_factory=list)
+    common_comparable: dict | None = None
+    non_price_factors: list[dict] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
 
 
 class BidInsightResult(BaseModel):

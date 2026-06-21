@@ -505,6 +505,10 @@ class ExtractionPipeline:
                 "source_ref": it.get("source_ref"),  # {page, table, row} from TableGrid
             })
         apply_arithmetic_validation(cleaned)
+        # 全局文档行序（1..N，按 page→table→row 的抽取顺序）。顺序直连对齐用它做行身份，
+        # 不依赖会跨页重置的 source_ref.row 或数据库自增 id。
+        for _i, _it in enumerate(cleaned, 1):
+            _it["document_row_index"] = _i
         return {
             "supplier_name": (data.get("supplier_name") or "").strip(),
             "quote_date": (data.get("quote_date") or "").strip(),

@@ -13,7 +13,11 @@ from apps.api.services.comparison import (
     compute_baseline,
     determine_alert,
     get_category_thresholds,
+    build_spec_price_index,
+    spec_baseline_from_index,
 )
+from apps.api.services.canonical import extract_valve_canonical, normalize_valve_family
+from apps.api.services.evaluation_policy import get_evaluation_policy
 
 
 @dataclass
@@ -32,6 +36,11 @@ class _ItemData:
     bid_quote_line_id: int | None    # 新路径: BidQuoteLine.id；旧路径: None
     standard_name: str = ""
     spec: str = ""
+    # 税口径桥接（评标总价/同规格偏差用）；旧路径无则为 None/unknown
+    price_basis: str | None = None           # incl_tax/dual_tax/excl_tax/unspecified/unknown
+    unit_price_incl_tax: float | None = None  # 含税单价（评标总价唯一口径）
+    unit: str = ""
+    canonical: dict | None = None
 
 
 def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
@@ -45,6 +54,7 @@ def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
         bql = db.get(BidQuoteLine, item.bid_quote_line_id)
         if bql is None:
             return None
+        meta = bql.extraction_meta or {}
         return _ItemData(
             unit_price=bql.unit_price,
             quantity=bql.qty,
@@ -54,6 +64,11 @@ def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
             bid_quote_line_id=bql.id,
             standard_name=bql.standard_name,
             spec=bql.spec or "",
+            price_basis=meta.get("price_basis"),
+            # 桥接字段在 extraction_meta 里带 raw_ 前缀；effective_unit_price 已是该口径有效价
+            unit_price_incl_tax=meta.get("raw_unit_price_incl_tax") or meta.get("effective_unit_price"),
+            unit=bql.unit or "",
+            canonical=bql.canonical or None,
         )
     else:
         qt = db.get(Quote, item.quote_id)
@@ -69,6 +84,7 @@ def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
             bid_quote_line_id=None,
             standard_name=mat.standard_name if mat else "",
             spec=(mat.spec or "") if mat else "",
+            unit=(mat.unit or "") if mat else "",
         )
 
 # Cell status constants
@@ -514,18 +530,122 @@ def _parse_flags_from_note(spec_note: str | None) -> list[str]:
     return [f for f in m.group(1).split(",") if f.strip()]
 
 
+def _incl_unit_from(data: "_ItemData | None") -> float | None:
+    """含税单价（评标总价的唯一合法口径）。只有税口径确认可得含税价时才返回，否则 None。
+
+    incl_tax/dual_tax 且有含税单价 → 该值；纯 incl_tax 用 unit_price；
+    excl_tax/unspecified/unknown → None（不得用 ×1.13 换算）。
+    """
+    if data is None:
+        return None
+    if data.price_basis in ("incl_tax", "dual_tax") and data.unit_price_incl_tax:
+        return float(data.unit_price_incl_tax)
+    if data.price_basis == "incl_tax" and data.unit_price:
+        return float(data.unit_price)
+    return None
+
+
+_EVAL_QTY_TOL = 0.001
+
+
+def _anchor_spec(anchor) -> tuple:
+    """(family, dn, pn, unit) — 招标锚点的规格键（同规格基准/偏差以招标侧为准）。"""
+    c = extract_valve_canonical(getattr(anchor, "name", "") or "", getattr(anchor, "spec", "") or "")
+    fam = normalize_valve_family(c.get("valve_type"))
+    return fam, c.get("dn"), c.get("pn"), (getattr(anchor, "unit", "") or "").strip()
+
+
+def _pending_is_qty_only(cell: dict, fam, dn, a_unit) -> bool:
+    """pending 单元格的冲突是否**仅数量来源**（DN/族/单位一致，价格口径可得）。
+
+    仅当如此才允许纳入评标总价（标 quantity_source_conflict）；否则属对齐未决，不纳入。
+    """
+    c = cell.get("item_canonical") or {}
+    c_dn = c.get("dn")
+    c_vt = c.get("valve_type")
+    c_fam = normalize_valve_family(c_vt) if c_vt else None
+    if dn and c_dn and dn != c_dn:
+        return False
+    if fam and c_fam and fam != c_fam:
+        return False
+    cu = (cell.get("unit") or "").strip()
+    if a_unit and cu and a_unit != cu:
+        return False
+    return True
+
+
+def _evaluate_cell(cell: dict, anchor_qty, fam, dn, pn, a_unit,
+                   spec_index: dict, thresholds: dict) -> None:
+    """就地填充单元格的同规格偏差 + 评标资格字段。
+
+    评标金额恒 = 招标数量 × 含税单价（incl_unit）；供应商报价数量仅作校验。
+    偏差相对同规格中位数（展示==计算）；无可靠同规格基准 → deviation=null、不计异常。
+    """
+    cell["tender_qty"] = anchor_qty
+    cell["eval_amount"] = None
+    cell["evaluable"] = False
+    cell["baseline"] = None
+    status = cell["cell_status"]
+    basis = cell.get("price_basis")
+    incl_unit = cell.get("incl_unit")
+
+    if status in (CELL_MISSING, CELL_EXCLUDED) or cell.get("price") is None:
+        cell["eval_status"] = "missing" if status == CELL_MISSING else status
+        cell["deviation_pct"] = None
+        cell["alert_level"] = "normal"
+        return
+
+    # ── 同规格偏差：按本格税口径取对应桶；展示值与计算值同源（中位数）──
+    bl = None
+    cmp_price = None
+    if incl_unit is not None and basis in ("incl_tax", "dual_tax"):
+        bl = spec_baseline_from_index(spec_index, fam, dn, pn, a_unit, "incl_tax")
+        cmp_price = incl_unit
+    elif basis == "excl_tax" and cell.get("price"):
+        bl = spec_baseline_from_index(spec_index, fam, dn, pn, a_unit, "excl_tax")
+        cmp_price = cell["price"]
+    if bl and cmp_price:
+        dev = round((cmp_price - bl["median"]) / bl["median"], 4)
+        cell["deviation_pct"] = dev
+        cell["alert_level"] = determine_alert(dev, thresholds)
+        cell["baseline"] = bl
+    else:
+        cell["deviation_pct"] = None
+        cell["alert_level"] = "normal"   # 无可靠同规格基准 → 不计异常
+
+    # ── 评标资格：必须有可确认的含税单价 ──
+    if incl_unit is None:
+        cell["eval_status"] = "basis_unconfirmed"   # 税口径未确认 → 未决（不静默排除）
+        return
+    eval_amount = round(float(anchor_qty) * incl_unit, 2) if anchor_qty else None
+    sq = cell.get("supplier_qty")
+    qty_conflict = (
+        sq is not None and anchor_qty is not None
+        and abs(float(sq) - float(anchor_qty)) > _EVAL_QTY_TOL
+    )
+    if status == CELL_PENDING:
+        if _pending_is_qty_only(cell, fam, dn, a_unit):
+            cell["eval_status"] = "quantity_source_conflict"
+            cell["evaluable"] = True
+            cell["eval_amount"] = eval_amount
+        else:
+            cell["eval_status"] = "alignment_pending"   # 非数量原因未决 → 不纳入
+        return
+    # align / aggregated
+    cell["evaluable"] = True
+    cell["eval_amount"] = eval_amount
+    cell["eval_status"] = "quantity_source_conflict" if qty_conflict else "ok"
+
+
 def _build_cell_for_supplier(
     db: Session,
     items: list[BidAlignmentItem],
     sid: int,
-    reasonable_low_price: float | None,
-    thresholds: dict,
-    letter_map: dict[int, str],
 ) -> dict:
     """Build a SupplierCell dict for one (group, supplier) combination.
 
-    Priority: align/aggregated > pending > excluded > missing
-    Pending prices are shown (method A) but excluded from totals/lowest/recommended.
+    Priority: align/aggregated > pending > excluded > missing.
+    价格基准/偏差/评标资格在行循环中按同规格基准计算，这里只取价格与税口径原料。
     """
     align_items = [i for i in items if i.action == "align"]
     pending_items = [i for i in items if i.action == "pending"]
@@ -547,34 +667,34 @@ def _build_cell_for_supplier(
         "pending_note": None,
         "flags": None,
         "evidence": None,
+        # 税口径/评标原料（行循环用）
+        "price_basis": None,
+        "incl_unit": None,
+        "unit": "",
+        "supplier_qty": None,
+        "item_canonical": None,
     }
 
-    def _price_from_item(item: BidAlignmentItem) -> tuple[float | None, float | None, int | None, int | None]:
-        """Return (unit_price, total, source_quote_id, bid_quote_line_id)."""
-        data = _get_item_data(db, item)
+    def _fill(cell: dict, item: BidAlignmentItem, data: "_ItemData | None") -> None:
         if not data:
-            return None, None, None, None
+            return
         if item.agg_total is not None and item.agg_qty:
             price = round(item.agg_total / item.agg_qty, 4)
             total = round(item.agg_total, 2)
         else:
             price = data.unit_price
             total = round(price * (data.quantity or 1), 2) if price else None
-        return price, total, data.source_quote_id, data.bid_quote_line_id
-
-    def _fill_price(cell: dict, price: float | None, total: float | None,
-                    source_qid: int | None, bql_id: int | None = None) -> None:
         cell["price"] = price
         cell["total"] = total
-        cell["source_quote_id"] = source_qid
-        cell["bid_quote_line_id"] = bql_id
-        if price and reasonable_low_price:
-            dev = round((price - reasonable_low_price) / reasonable_low_price, 4)
-            cell["deviation_pct"] = dev
-            cell["alert_level"] = determine_alert(dev, thresholds) if dev is not None else "normal"
+        cell["source_quote_id"] = data.source_quote_id
+        cell["bid_quote_line_id"] = data.bid_quote_line_id
+        cell["price_basis"] = data.price_basis
+        cell["incl_unit"] = _incl_unit_from(data)
+        cell["unit"] = data.unit
+        cell["supplier_qty"] = data.quantity
+        cell["item_canonical"] = data.canonical
 
     if align_items:
-        # Pick best align item: prefer aggregated; among multiple, take lowest effective price
         def _effective_price(i: BidAlignmentItem) -> float:
             if i.agg_total is not None and i.agg_qty:
                 return i.agg_total / i.agg_qty
@@ -582,22 +702,17 @@ def _build_cell_for_supplier(
             return (data.unit_price or float("inf")) if data else float("inf")
 
         best = min(align_items, key=_effective_price)
-        price, total, source_qid, bql_id = _price_from_item(best)
-        _fill_price(base, price, total, source_qid, bql_id)
-        # Use AGGREGATED if agg columns are set, else QUOTED
+        _fill(base, best, _get_item_data(db, best))
         base["cell_status"] = CELL_AGGREGATED if (best.agg_total is not None) else CELL_QUOTED
         base["flags"] = _parse_flags_from_note(best.spec_note) or None
         base["evidence"] = best.name_note or None
-        # Annotate if there are also pending items (inline action hint)
         if pending_items:
             base["pending_note"] = f"另有 {len(pending_items)} 条待确认"
         return base
 
     if pending_items:
-        # Show reference price in orange; don't count in totals
         best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
-        price, total, source_qid, bql_id = _price_from_item(best)
-        _fill_price(base, price, total, source_qid, bql_id)
+        _fill(base, best, _get_item_data(db, best))
         base["cell_status"] = CELL_PENDING
         base["item_id"] = best.id
         base["confidence"] = _parse_cosine_from_note(best.spec_note)
@@ -609,8 +724,144 @@ def _build_cell_for_supplier(
         base["cell_status"] = CELL_EXCLUDED
         return base
 
-    # missing — no item for this supplier
-    return base
+    return base  # missing
+
+
+def _compute_recommendation(
+    rows: list[dict],
+    col_ids: list[int],
+    supplier_labels: list[dict],
+    total_anchors: int,
+    checksum_by_col: dict[int, str],
+    policy,
+) -> dict:
+    """招标文件驱动的确定性推荐（不自动定标、不拆单、不造权重）。
+
+    产出：评标总价排名(价格优选候选人) + 共同可比金额 + 未决行金额 + 非价格因素证据缺口 +
+    三态 recommendation_level。LLM 仅据此解释，不得改选。
+    """
+    label_by = {sl["id"]: sl for sl in supplier_labels}
+    per = {cid: {"evaluated_total": 0.0, "confirmed_lines": 0, "qty_conflict_lines": 0,
+                 "undecided_lines": 0, "undecided_amount": 0.0, "missing_lines": 0,
+                 "anomaly_count": 0, "basis_unconfirmed_lines": 0} for cid in col_ids}
+    evaluable_by_line: list[set] = []
+    for row in rows:
+        eset: set = set()
+        cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
+        for cid in col_ids:
+            c = cell_by.get(cid, {})
+            st = c.get("eval_status")
+            if c.get("evaluable"):
+                per[cid]["confirmed_lines"] += 1
+                per[cid]["evaluated_total"] += c.get("eval_amount") or 0.0
+                eset.add(cid)
+                if st == "quantity_source_conflict":
+                    per[cid]["qty_conflict_lines"] += 1
+            elif st in ("basis_unconfirmed", "alignment_pending"):
+                per[cid]["undecided_lines"] += 1
+                if st == "basis_unconfirmed":
+                    per[cid]["basis_unconfirmed_lines"] += 1
+                ref_unit = c.get("incl_unit") or c.get("price")
+                if c.get("tender_qty") and ref_unit:
+                    per[cid]["undecided_amount"] += round(float(c["tender_qty"]) * float(ref_unit), 2)
+            else:
+                per[cid]["missing_lines"] += 1
+            if c.get("alert_level") == "red":
+                per[cid]["anomaly_count"] += 1
+        evaluable_by_line.append(eset)
+
+    supplier_eval = []
+    for cid in col_ids:
+        p = per[cid]
+        cs = checksum_by_col.get(cid, "unknown")
+        full = (total_anchors > 0 and p["confirmed_lines"] == total_anchors)
+        eligible = full and cs != "fail"
+        supplier_eval.append({
+            "supplier_id": cid,
+            "name": label_by.get(cid, {}).get("name"),
+            "letter": label_by.get(cid, {}).get("letter"),
+            "evaluated_total": round(p["evaluated_total"], 2),
+            "confirmed_lines": p["confirmed_lines"],
+            "total_anchors": total_anchors,
+            "qty_conflict_lines": p["qty_conflict_lines"],
+            "undecided_lines": p["undecided_lines"],
+            "undecided_amount": round(p["undecided_amount"], 2),
+            "missing_lines": p["missing_lines"],
+            "anomaly_count": p["anomaly_count"],
+            "basis_confirmed": p["basis_unconfirmed_lines"] == 0 and p["confirmed_lines"] > 0,
+            "checksum_status": cs,
+            "full_coverage": full,
+            "eligible_for_ranking": eligible,
+        })
+
+    ranked = sorted(
+        [s for s in supplier_eval if s["eligible_for_ranking"]],
+        key=lambda s: s["evaluated_total"],
+    )
+    ranked_ids = [s["supplier_id"] for s in ranked]
+    # 共同可比金额：所有入排名供应商**均可评标**的行
+    common_lines = 0
+    common_sub = {cid: 0.0 for cid in ranked_ids}
+    for ridx, row in enumerate(rows):
+        if ranked_ids and all(cid in evaluable_by_line[ridx] for cid in ranked_ids):
+            common_lines += 1
+            cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
+            for cid in ranked_ids:
+                common_sub[cid] += cell_by[cid].get("eval_amount") or 0.0
+    price_preferred = ranked[0] if ranked else None
+
+    risks: list[str] = []
+    for s in supplier_eval:
+        nm = s["name"]
+        if s["checksum_status"] == "fail":
+            risks.append(f"{nm} 核验金额不符（checksum fail）")
+        elif s["checksum_status"] in ("unknown", None):
+            risks.append(f"{nm} 无声明总价核验（风险提示，未阻断）")
+        if s["qty_conflict_lines"]:
+            risks.append(
+                f"{nm} {s['qty_conflict_lines']} 行报价数量≠招标数量，已按招标数量计入评标"
+                "（标记 quantity_source_conflict，建议核实）"
+            )
+        if s["undecided_lines"]:
+            risks.append(
+                f"{nm} {s['undecided_lines']} 行税口径/对齐未确认，未计入完整评标总价"
+                f"（未决金额≈¥{s['undecided_amount']:,.0f}）"
+            )
+        if s["anomaly_count"]:
+            risks.append(f"{nm} {s['anomaly_count']} 行同规格偏差异常，建议核实异常低价")
+        if s["missing_lines"]:
+            risks.append(f"{nm} {s['missing_lines']} 行缺报")
+
+    reasons: list[str] = []
+    if not ranked:
+        level = "blocked"
+        reasons.append("无任一供应商可形成完整含税评标总价（税口径/对齐未确认或缺报）→ 无价格优选候选人")
+    else:
+        level = "conditional"
+        reasons.append("已得确定性『评标总价排名』与『价格优选候选人』")
+        reasons.append("招标文件为合理低价评标价法且未给评分权重 → 综合评审需招标领导小组确认，非自动中标")
+
+    # 非价格八项因素证据：系统无结构化证据 → 一律 missing（待评标小组）
+    non_price = [{"factor": f, "evidence_status": "missing"} for f in policy.factors if f != "价格"]
+
+    return {
+        "recommendation_level": level,
+        "recommendation_reasons": reasons,
+        "risks": risks,
+        "evaluation_policy": policy.to_dict(),
+        "award_mode": policy.award_mode,
+        "committee_required": policy.final_decision_requires_committee,
+        "price_ranking": ranked,
+        "price_preferred_candidate": price_preferred,
+        "supplier_evaluation": supplier_eval,
+        "common_comparable": {
+            "supplier_ids": ranked_ids,
+            "line_count": common_lines,
+            "subtotals": {str(k): round(v, 2) for k, v in common_sub.items()},
+        },
+        "non_price_factors": non_price,
+        "comprehensive_recommendation_status": "pending_committee",
+    }
 
 
 def build_anchor_matrix(
@@ -727,6 +978,11 @@ def build_anchor_matrix(
 
     tier_filter = _detect_brand_tier_filter(db, supplier_ids, category, project_id)
 
+    # ── 同规格基准索引（一次扫描品类历史）+ 评标政策 ──────────────────────────
+    spec_index = build_spec_price_index(db, category)
+    policy = get_evaluation_policy(project_id)
+    thresholds = get_category_thresholds(db, category)
+
     # ── Build one row per anchor ─────────────────────────────────────────────
     rows = []
     supplier_totals: dict[int, dict] = {
@@ -737,90 +993,74 @@ def build_anchor_matrix(
     for anchor in anchors:
         seq_key = str(anchor.seq)
         group = seq_to_group.get(seq_key)
+        fam, dn, pn, a_unit = _anchor_spec(anchor)
+        anchor_qty = getattr(anchor, "qty", None)
 
-        # Determine baseline for this anchor's category
-        if group:
-            # Use the first align item's material for category lookup
-            first_align = next(
-                (i for i in group.items if i.action == "align"), None
-            )
-            if first_align:
-                _align_data = _get_item_data(db, first_align)
-                _mid = _align_data.material_id if _align_data else None
-                ref_mat = db.get(Material, _mid) if _mid else None
-            else:
-                ref_mat = None
-            mat_category = ref_mat.category if ref_mat else category
-            sub_cat = ref_mat.sub_category if ref_mat else None
-        else:
-            mat_category = category
-            sub_cat = None
-
-        historical_avg, reasonable_low_info = _compute_row_baselines(
-            db, mat_category, sub_cat, tier_filter
-        )
-        thresholds = get_category_thresholds(db, mat_category)
-        # 仅当 sub_cat 明确时使用基准价（全品类地板价粒度过粗，偏差无意义）
-        reasonable_low_price = (
-            reasonable_low_info["price"]
-            if reasonable_low_info and not reasonable_low_info.get("broad_baseline")
-            else None
-        )
-
-        # ── Build cells for each column (submission or supplier) ──────────
-        supplier_cells: list[dict] = []
-        prices_this_row: list[tuple] = []  # only quoted/aggregated
-
-        for col_id in col_ids:
-            actual_sid = sub_actual_sids.get(col_id, col_id) if use_submission_mode else col_id
-            if group is None:
-                # No match at all — missing for all suppliers
-                cell = {
-                    "supplier_id": col_id,
-                    "price": None,
-                    "total": None,
-                    "deviation_pct": None,
-                    "alert_level": "normal",
-                    "is_lowest": False,
-                    "cell_status": CELL_MISSING,
-                    "item_id": None,
-                    "confidence": None,
-                    "source_quote_id": None,
-                    "bid_quote_line_id": None,
-                    "pending_note": None,
-                }
-            else:
-                col_items = _items_for_col(group.items, col_id, actual_sid)
-                cell = _build_cell_for_supplier(
-                    db, col_items, col_id,
-                    reasonable_low_price, thresholds, letter_map,
-                )
-
-            supplier_cells.append(cell)
-
-            # Only confirmed cells participate in lowest/totals
-            if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED) and cell["price"] is not None:
-                prices_this_row.append((col_id, cell["price"], cell.get("deviation_pct")))
-                supplier_totals[col_id]["quoted"] += 1
-                if cell["total"] is not None:
-                    supplier_totals[col_id]["total"] += cell["total"]
-                if cell["deviation_pct"] is not None:
-                    supplier_totals[col_id]["devs"].append(cell["deviation_pct"])
-            if cell.get("alert_level") == "red":
-                supplier_totals[col_id]["anomalies"] += 1
-
-        # Mark lowest price (among quoted/aggregated only)
-        min_deviation, recommended = _finalize_row(supplier_cells, prices_this_row, letter_map)
-
-        # Use first confirmed item's material_id as row reference
         ref_material_id: int | None = None
         if group:
             for it in group.items:
                 if it.action == "align":
-                    _ref_data = _get_item_data(db, it)
-                    if _ref_data:
-                        ref_material_id = _ref_data.material_id
+                    _rd = _get_item_data(db, it)
+                    if _rd:
+                        ref_material_id = _rd.material_id
                         break
+
+        supplier_cells: list[dict] = []
+        prices_this_row: list[tuple] = []  # (col_id, 含税单价, deviation) — 评标口径
+        row_baseline: dict | None = None
+
+        for col_id in col_ids:
+            actual_sid = sub_actual_sids.get(col_id, col_id) if use_submission_mode else col_id
+            if group is None:
+                cell = {
+                    "supplier_id": col_id, "price": None, "total": None,
+                    "deviation_pct": None, "alert_level": "normal", "is_lowest": False,
+                    "cell_status": CELL_MISSING, "item_id": None, "confidence": None,
+                    "source_quote_id": None, "bid_quote_line_id": None, "pending_note": None,
+                    "price_basis": None, "incl_unit": None, "unit": "",
+                    "supplier_qty": None, "item_canonical": None,
+                }
+            else:
+                col_items = _items_for_col(group.items, col_id, actual_sid)
+                cell = _build_cell_for_supplier(db, col_items, col_id)
+
+            # 同规格偏差 + 评标资格（评标金额 = 招标数量 × 含税单价）
+            _evaluate_cell(cell, anchor_qty, fam, dn, pn, a_unit, spec_index, thresholds)
+            supplier_cells.append(cell)
+            if cell.get("baseline") and row_baseline is None:
+                row_baseline = cell["baseline"]
+
+            if cell.get("price") is not None and cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING):
+                supplier_totals[col_id]["quoted"] += 1
+            if cell.get("evaluable"):
+                supplier_totals[col_id]["total"] += cell.get("eval_amount") or 0.0
+                if cell.get("incl_unit") is not None:
+                    prices_this_row.append((col_id, cell["incl_unit"], cell.get("deviation_pct")))
+            if cell.get("deviation_pct") is not None:
+                supplier_totals[col_id]["devs"].append(cell["deviation_pct"])
+            if cell.get("alert_level") == "red":
+                supplier_totals[col_id]["anomalies"] += 1
+
+        # 最低含税评标单价标记（仅展示）；行级 recommended 仅在允许拆单时给
+        if prices_this_row:
+            min_p = min(p for _, p, _ in prices_this_row)
+            for cid, p, _ in prices_this_row:
+                if p == min_p:
+                    for c in supplier_cells:
+                        if c["supplier_id"] == cid:
+                            c["is_lowest"] = True
+                    break
+        min_deviation = min((d for _, _, d in prices_this_row if d is not None), default=None)
+        recommended = None  # single_supplier：不做分项授标推荐
+        if policy.allows_split_award and prices_this_row:
+            recommended = letter_map.get(min(prices_this_row, key=lambda x: x[1])[0])
+
+        # 展示基准 == 偏差计算基准（同规格中位数）
+        historical_avg = (
+            {"price": row_baseline["median"], "spec_key": row_baseline["spec_key"],
+             "count": row_baseline["count"], "basis": row_baseline["basis"]}
+            if row_baseline else None
+        )
 
         rows.append({
             "material_id": ref_material_id,
@@ -829,97 +1069,83 @@ def build_anchor_matrix(
             "materials": anchor.material_text() if hasattr(anchor, "material_text") else "",
             "brand": getattr(anchor, "brand", "") or "",
             "anchor_seq": str(anchor.seq),
+            "unit": a_unit,
+            "quantity": anchor_qty,
             "historical_avg": historical_avg,
-            "reasonable_low": reasonable_low_info,
+            "spec_baseline": historical_avg,
+            "reasonable_low": None,   # 弃用全品类地板价（假异常根因）
             "suppliers": supplier_cells,
             "min_deviation": min_deviation,
             "recommended": recommended,
         })
 
-    # ── Totals (quoted-only cells) ────────────────────────────────────────────
+    # ── Totals（含税评标口径）+ checksum（仅 fail 阻断）──────────────────────────
     totals = []
-    recommendation_blocked_reasons: list[str] = []
+    checksum_by_col: dict[int, str] = {}
     for col_id in col_ids:
         data = supplier_totals[col_id]
-        # avg_deviation=null when 0 quotes (0.0 would falsely make them "best")
         avg_dev: float | None = (
-            round(sum(data["devs"]) / len(data["devs"]), 4)
-            if data["devs"] else None
+            round(sum(data["devs"]) / len(data["devs"]), 4) if data["devs"] else None
         )
         if use_submission_mode:
             sub = db.get(BidSubmission, col_id)
             cs = _get_submission_checksum(db, sub) if sub else {}
         else:
             cs = _get_supplier_checksum(db, col_id, project_id)
-        quoted = data["quoted"]
-        anomalies = data["anomalies"]
         checksum_status = cs.get("status", "unknown")
-        col_label = next((sl["name"] for sl in supplier_labels if sl["id"] == col_id), str(col_id))
-        # Per-supplier blocking conditions
-        if quoted == 0:
-            recommendation_blocked_reasons.append(f"{col_label} 无有效报价")
-        if checksum_status in ("fail", "unknown"):
-            cs_label = "核验金额不符" if checksum_status == "fail" else "无核验金额"
-            recommendation_blocked_reasons.append(f"{col_label} {cs_label}")
-        if anomalies > 0:
-            recommendation_blocked_reasons.append(f"{col_label} 含 {anomalies} 个异常价格")
+        checksum_by_col[col_id] = checksum_status
         totals.append({
             "supplier_id": col_id,
-            "total": round(data["total"], 2),
+            "total": round(data["total"], 2),   # 含税评标总价（招标数量×含税单价，确认行）
             "avg_deviation": avg_dev,
-            "quoted_count": quoted,
-            "anomaly_count": anomalies,
+            "quoted_count": data["quoted"],
+            "anomaly_count": data["anomalies"],
             "declared_total": cs.get("declared"),
             "checksum_delta_pct": cs.get("delta_pct"),
             "checksum_status": checksum_status,
         })
 
-    # Check if any row has pending cells
-    pending_count = sum(
-        1 for row in rows
-        for cell in row.get("suppliers", [])
-        if cell.get("cell_status") == "pending"
-    )
-    if pending_count > 0:
-        recommendation_blocked_reasons.append(f"{pending_count} 个存在待确认报价单元格")
-
-    # Check if no baseline is available at all (broad_baseline for all rows → no deviation)
-    all_devs_empty = all(not supplier_totals[col_id]["devs"] for col_id in col_ids)
-    if all_devs_empty and col_ids:
-        recommendation_blocked_reasons.append("缺少同规格历史基准（无法计算偏差）")
-
-    # Completeness threshold: supplier must quote ≥50% of anchors
     total_anchors = len(anchors)
-    COMPLETENESS_THRESHOLD = 0.5
-    if total_anchors > 0:
-        for col_id in col_ids:
-            quoted = supplier_totals[col_id]["quoted"]
-            ratio = quoted / total_anchors
-            if ratio < COMPLETENESS_THRESHOLD:
-                col_label = next((sl["name"] for sl in supplier_labels if sl["id"] == col_id), str(col_id))
-                recommendation_blocked_reasons.append(
-                    f"{col_label} 报价完整度不足（{quoted}/{total_anchors}="
-                    f"{int(ratio*100)}%，要求≥{int(COMPLETENESS_THRESHOLD*100)}%）"
-                )
-
-    # When recommendation is blocked, null out all per-row recommended fields
-    if recommendation_blocked_reasons:
-        for row in rows:
-            row["recommended"] = None
+    rec = _compute_recommendation(rows, col_ids, supplier_labels, total_anchors, checksum_by_col, policy)
+    eval_by = {s["supplier_id"]: s for s in rec["supplier_evaluation"]}
+    for t in totals:
+        se = eval_by.get(t["supplier_id"], {})
+        t["evaluated_total"] = se.get("evaluated_total")
+        t["confirmed_lines"] = se.get("confirmed_lines")
+        t["qty_conflict_lines"] = se.get("qty_conflict_lines")
+        t["undecided_lines"] = se.get("undecided_lines")
+        t["undecided_amount"] = se.get("undecided_amount")
+        t["basis_confirmed"] = se.get("basis_confirmed")
+        t["eligible_for_ranking"] = se.get("eligible_for_ranking")
 
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
     matrix_distribution = build_matrix_distribution_from_rows(rows, col_ids)
 
+    blocked = rec["recommendation_level"] == "blocked"
     return {
         "project_id": project_id,
         "suppliers": supplier_labels,
         "rows": rows,
         "totals": totals,
         "brand_tier_filter": tier_filter,
-        "anchor_matrix": True,  # flag for frontend to know it's anchor-driven
+        "anchor_matrix": True,
         "matrix_distribution": matrix_distribution,
-        "recommendation_blocked": bool(recommendation_blocked_reasons),
-        "recommendation_blocked_reasons": recommendation_blocked_reasons,
+        # 三态门禁 + 招标文件驱动的评标
+        "recommendation_level": rec["recommendation_level"],
+        "recommendation_reasons": rec["recommendation_reasons"],
+        "risks": rec["risks"],
+        "evaluation_policy": rec["evaluation_policy"],
+        "award_mode": rec["award_mode"],
+        "committee_required": rec["committee_required"],
+        "price_ranking": rec["price_ranking"],
+        "price_preferred_candidate": rec["price_preferred_candidate"],
+        "supplier_evaluation": rec["supplier_evaluation"],
+        "common_comparable": rec["common_comparable"],
+        "non_price_factors": rec["non_price_factors"],
+        "comprehensive_recommendation_status": rec["comprehensive_recommendation_status"],
+        # 兼容旧前端（过渡）：仅 blocked 置 true，卡片/AI 不再因 conditional 隐藏
+        "recommendation_blocked": blocked,
+        "recommendation_blocked_reasons": (rec["recommendation_reasons"] if blocked else []),
     }
 
 

@@ -67,6 +67,7 @@ interface QuoteRow extends RowBase {
   validation_flags?: string[]
   raw_qty?: number | null
   suggested_qty?: number | null
+  document_row_index?: number | null
   material_type?: string
   remark: string
   // AI-enhanced fields (populated after /api/intake/enhance)

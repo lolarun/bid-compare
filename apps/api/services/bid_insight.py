@@ -9,93 +9,115 @@ from openai import OpenAI
 
 log = logging.getLogger(__name__)
 
-BID_INSIGHT_PROMPT = """你是建筑机电材料采购比价分析专家。请根据以下横向比价矩阵数据，给出专业的分析建议。
+BID_INSIGHT_PROMPT = """你是建筑机电材料招投标评标解读助手。你的职责是**解释系统已计算的确定性结果**，
+绝不自行定标、不改选供应商、不把评标方法改成"最低价中标"。
 
-## 比价数据
+## 本项目评标规则（来自招标文件，最高优先级，不得违反）
+{policy_text}
 
-供应商列表：
-{suppliers}
+## 系统已计算的确定性结果（你只能据此解释，不得改动）
+评标总价排名（招标数量 × 供应商有效含税单价；最低报价**不保证**中标）：
+{ranking_text}
 
-材料报价矩阵（单价/偏差%）：
-{matrix_text}
+价格优选候选人（仅价格维度，**非中标结论**）：{price_preferred}
 
-汇总：
-{totals_text}
+各投标人评标情况：
+{eval_text}
 
-## 输出要求
+共同可比金额（各入排名投标人均可评标的行）：{common_text}
 
-请以 JSON 格式返回分析结果，包含以下字段：
+非价格因素（招标文件八项，系统暂无结构化证据）：
+{factors_text}
+
+系统识别的风险：
+{risks_text}
+
+## 输出要求（严格 JSON）
 {{
-  "overall": "整体评估（1-2 句话，概括本次比价情况）",
+  "overall": "1-2 句：说明评标方法为合理低价评标价法、最低价不保证中标、最终由招标领导小组确定",
   "recommendations": [
-    "推荐方案第 1 条（指明主供应商及理由）",
-    "推荐方案第 2 条（补充供应商建议）",
-    "推荐方案第 3 条（专项采购建议，可选）"
+    "解释『价格优选候选人』的依据（引用评标总价、完整度），并明确这只是价格维度、需综合评审",
+    "明确综合评审（企业规模/供货渠道/质量/售后/工期/垫资/承诺）证据不足，待招标领导小组确认",
+    "（如有未决：说明未决行与金额影响，建议补充材料）"
   ],
-  "risks": [
-    "风险提示第 1 条",
-    "风险提示第 2 条"
-  ]
+  "risks": ["逐条复述/细化系统风险，给出可操作核实建议"]
 }}
 
-注意：
-- 推荐理由要具体，引用数据（偏差率、总价、完整度）
-- 风险提示要有可操作性（如"建议核实 XX 供应商的 YY 材料报价"）
-- 仅返回 JSON，不要解释
+## 红线（违反即错误）
+- 不得输出"中标""定标""确定中标人"等表述；最终结论一律"需招标领导小组确认"。
+- 不得自行给出综合评分或权重；招标文件未提供评分公式。
+- 不得改选供应商、不得宣称最低价即中标、不得生成拆单/最优组合方案。
+- 仅返回 JSON，不要额外解释。
 """
 
 
-def _build_matrix_text(data: dict) -> tuple[str, str, str]:
-    """Compress matrix data into readable text tables for the LLM prompt."""
-    suppliers = data.get("suppliers", [])
-    rows = data.get("rows", [])
-    totals = data.get("totals", [])
-
-    # Suppliers
-    sup_text = "\n".join(
-        f"  {s['letter']}. {s['name']}" for s in suppliers
+def _build_policy_text(data: dict) -> str:
+    p = data.get("evaluation_policy") or {}
+    factors = "、".join(p.get("factors") or [])
+    return (
+        f"- 评标方法：{p.get('method', 'reasonable_low_price')}（合理低价评标价法，最低报价不保证中标）\n"
+        f"- 授标方式：{p.get('award_mode', 'single_supplier')}（单一中标人，{'不' if p.get('award_mode') != 'split_award' else ''}允许拆单分项授标）\n"
+        f"- 综合评价因素（未给权重）：{factors}\n"
+        f"- 最终由招标领导小组确定：{'是' if p.get('final_decision_requires_committee', True) else '否'}"
     )
 
-    # Matrix rows
-    header = "材料名称 | 历史均价"
-    for s in suppliers:
-        header += f" | {s['letter']}(单价/偏差)"
-    lines = [header, "-" * len(header)]
 
-    for row in rows[:30]:  # Limit to 30 rows to stay within token budget
-        line = f"{row['material_name']}"
-        if row.get("spec"):
-            line += f" ({row['spec'][:20]})"
-        ha = row.get("historical_avg")
-        line += f" | ¥{ha['price']:.0f}" if ha else " | —"
-        for cell in row.get("suppliers", []):
-            if cell["price"] is not None:
-                dev = cell.get("deviation_pct")
-                dev_str = f"{dev:+.1%}" if dev is not None else "—"
-                lowest = " ★" if cell.get("is_lowest") else ""
-                line += f" | ¥{cell['price']:.0f} {dev_str}{lowest}"
-            else:
-                line += " | 未报价"
-        lines.append(line)
+def _build_matrix_text(data: dict) -> dict:
+    """Compress evaluation context into readable text blocks for the LLM prompt."""
+    suppliers = data.get("suppliers", [])
+    rows = data.get("rows", [])
+    name_by = {s["id"]: s["name"] for s in suppliers}
 
-    matrix_text = "\n".join(lines)
-    if len(rows) > 30:
-        matrix_text += f"\n...（共 {len(rows)} 条，此处仅展示前 30 条）"
-
-    # Totals
-    total_lines = []
-    for t in totals:
-        sup = next((s for s in suppliers if s["id"] == t["supplier_id"]), None)
-        name = sup["name"] if sup else str(t["supplier_id"])
-        qc = t.get("quoted_count", "?")
-        ac = t.get("anomaly_count", 0)
-        total_lines.append(
-            f"  {name}: 总价 ¥{t['total']:,.0f}, 平均偏差 {t['avg_deviation']:+.1%}, "
-            f"报价 {qc}/{len(rows)} 项, 异常 {ac} 项"
+    ranking = data.get("price_ranking") or []
+    if ranking:
+        ranking_text = "\n".join(
+            f"  {i}. {r.get('name')}：评标总价 ¥{r.get('evaluated_total', 0):,.0f}"
+            f"（确认 {r.get('confirmed_lines')}/{r.get('total_anchors')} 行）"
+            for i, r in enumerate(ranking, 1)
         )
-    totals_text = "\n".join(total_lines)
+    else:
+        ranking_text = "  （无投标人可形成完整含税评标总价）"
 
-    return sup_text, matrix_text, totals_text
+    pc = data.get("price_preferred_candidate")
+    price_preferred = (
+        f"{pc.get('name')}（评标总价 ¥{pc.get('evaluated_total', 0):,.0f}）" if pc else "无（条件不足）"
+    )
+
+    eval_lines = []
+    for s in data.get("supplier_evaluation", []):
+        eval_lines.append(
+            f"  {s.get('name')}：评标总价 ¥{s.get('evaluated_total', 0):,.0f}，"
+            f"确认 {s.get('confirmed_lines')}/{s.get('total_anchors')} 行，"
+            f"数量冲突 {s.get('qty_conflict_lines')} 行，"
+            f"未决 {s.get('undecided_lines')} 行(≈¥{s.get('undecided_amount', 0):,.0f})，"
+            f"含税口径确认={s.get('basis_confirmed')}，核验={s.get('checksum_status')}"
+        )
+    eval_text = "\n".join(eval_lines) or "  （无）"
+
+    cc = data.get("common_comparable") or {}
+    common_text = (
+        f"{cc.get('line_count', 0)} 行可共同比价；小计："
+        + "，".join(f"{name_by.get(int(k), k)} ¥{v:,.0f}" for k, v in (cc.get("subtotals") or {}).items())
+        if cc.get("subtotals") else f"{cc.get('line_count', 0)} 行"
+    )
+
+    factors = data.get("non_price_factors") or []
+    factors_text = "\n".join(
+        f"  - {f.get('factor')}：{f.get('evidence_status', 'missing')}" for f in factors
+    ) or "  （招标文件八项，证据待补）"
+
+    risks = data.get("risks") or []
+    risks_text = "\n".join(f"  - {r}" for r in risks) or "  （无）"
+
+    return {
+        "policy_text": _build_policy_text(data),
+        "ranking_text": ranking_text,
+        "price_preferred": price_preferred,
+        "eval_text": eval_text,
+        "common_text": common_text,
+        "factors_text": factors_text,
+        "risks_text": risks_text,
+    }
 
 
 def generate_bid_insight(
@@ -113,13 +135,8 @@ def generate_bid_insight(
                            "error": str}
     """
     try:
-        sup_text, matrix_text, totals_text = _build_matrix_text(matrix_data)
-
-        prompt = BID_INSIGHT_PROMPT.format(
-            suppliers=sup_text,
-            matrix_text=matrix_text,
-            totals_text=totals_text,
-        )
+        blocks = _build_matrix_text(matrix_data)
+        prompt = BID_INSIGHT_PROMPT.format(**blocks)
 
         t0 = time.time()
         resp = client.chat.completions.create(

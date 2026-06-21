@@ -633,6 +633,10 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "raw_total_price_excl_tax": _num_or_none(item.get("total_price_excl_tax")),
                 "tax_rate": _num_or_none(item.get("tax_rate")),
                 "tax_amount": _num_or_none(item.get("tax_amount")),
+                # 全局文档行序：顺序直连对齐的行身份（不依赖 source_ref.row / db id）。
+                "document_row_index": (
+                    int(v) if (v := item.get("document_row_index")) is not None else None
+                ),
                 # ── 算术校验审计：原 qty 不改，suggested_qty 仅参考 ──
                 "validation_flags": list(item.get("validation_flags") or []),
                 "raw_qty": _num_or_none(item.get("raw_qty")) if item.get("raw_qty") is not None else qty,

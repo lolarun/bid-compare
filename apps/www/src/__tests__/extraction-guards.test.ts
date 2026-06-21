@@ -106,6 +106,10 @@ describe('extraction runtime guards', () => {
       expect(it.validation_flags).toEqual(['qty_arithmetic_mismatch'])
       expect(it.raw_qty).toBe(1)
       expect(it.suggested_qty).toBe(4)
+      // document_row_index 必须存活（顺序直连对齐的行身份，不能被白名单丢掉）
+      ;(backendItem as Record<string, unknown>).document_row_index = 88
+      const r2 = asQuoteShape({ items: [{ ...backendItem }] })
+      expect(r2.items[0].document_row_index).toBe(88)
       // 隐藏字段照旧存活
       expect(it.canonical).toEqual({ dn: 50 })
       expect(it.source_ref).toEqual({ page: 7, table: 0, row: 88 })
