@@ -10,7 +10,7 @@ import type { AnchorReviewMatrixResult, ReviewRow, ReviewCell, ReviewSupplier } 
 const props = defineProps<{
   projectId: number
   category: string
-  supplierIds?: number[]  // 本次比价供应商集合，不传则拉历史全量（不推荐）
+  submissionIds?: number[]  // §7 authoritative: BidSubmission IDs for this comparison
 }>()
 
 const emit = defineEmits<{
@@ -24,8 +24,8 @@ const confirmLoading = ref<Record<number, boolean>>({})
 const expandedCells = ref<Record<string, boolean>>({})   // key: `${anchor_seq}_${supplier_id}`
 const confirmedMissing = ref<Record<string, boolean>>({})
 
-function confirmMissing(anchorSeq: string, supplierId: number) {
-  confirmedMissing.value[`${anchorSeq}_${supplierId}`] = true
+function confirmMissing(anchorSeq: string, submissionId: number) {
+  confirmedMissing.value[`${anchorSeq}_${submissionId}`] = true
 }
 
 async function load() {
@@ -35,7 +35,7 @@ async function load() {
     const { data } = await analysisApi.anchorReviewMatrix({
       project_id: props.projectId,
       category: props.category,
-      supplier_ids: props.supplierIds?.length ? props.supplierIds.join(',') : undefined,
+      submission_ids: props.submissionIds?.length ? props.submissionIds.join(',') : undefined,
     })
     result.value = data
     emit('pending-count', data.pending_cells)
@@ -47,7 +47,7 @@ async function load() {
   }
 }
 
-watch(() => [props.projectId, props.category], load, { immediate: true })
+watch(() => [props.projectId, props.category, props.submissionIds], load, { immediate: true })
 
 // ─── Filter ───────────────────────────────────────────────────────────────────
 type FilterKey = 'needs_action' | 'all' | 'pending' | 'missing' | 'low'
@@ -111,9 +111,9 @@ const columns = computed(() => {
     { title: '数量', dataIndex: 'quantity', key: 'qty', width: 60 },
   ]
   const supCols = result.value.suppliers.map((s: ReviewSupplier) => ({
-    title: s.supplier_name,
-    key: `sup_${s.supplier_id}`,
-    dataIndex: `sup_${s.supplier_id}`,
+    title: s.supplier_raw_name || s.supplier_name,
+    key: `sub_${s.submission_id}`,
+    dataIndex: `sub_${s.submission_id}`,
     width: 170,
     customCell: () => ({ style: 'padding: 4px 6px;' }),
   }))
@@ -166,13 +166,13 @@ async function confirmCandidate(candidateItemId: number, action: 'align' | 'excl
   await confirmItem(candidateItemId, action)
 }
 
-function toggleExpand(anchorSeq: string, supplierId: number) {
-  const key = `${anchorSeq}_${supplierId}`
+function toggleExpand(anchorSeq: string, submissionId: number) {
+  const key = `${anchorSeq}_${submissionId}`
   expandedCells.value[key] = !expandedCells.value[key]
 }
 
-function isExpanded(anchorSeq: string, supplierId: number): boolean {
-  return !!expandedCells.value[`${anchorSeq}_${supplierId}`]
+function isExpanded(anchorSeq: string, submissionId: number): boolean {
+  return !!expandedCells.value[`${anchorSeq}_${submissionId}`]
 }
 
 // ─── Hard assertion: anchors_total × supplier_count == actual cell count ──────
@@ -234,9 +234,9 @@ const cellAccountingDetail = computed(() => {
           </a-tag>
         </div>
         <!-- checksum warnings -->
-        <template v-for="sup in result.suppliers" :key="sup.supplier_id">
+        <template v-for="sup in result.suppliers" :key="sup.submission_id">
           <a-tag v-if="sup.checksum_status === 'fail'" color="orange" style="font-size:11px">
-            {{ sup.supplier_name }} 核价异常
+            {{ sup.supplier_raw_name || sup.supplier_name }} 核价异常
           </a-tag>
         </template>
         <a-button size="small" :loading="loading" @click="load" style="margin-left:auto">
@@ -317,33 +317,33 @@ const cellAccountingDetail = computed(() => {
               </a-tag>
             </template>
 
-            <!-- Supplier cell -->
-            <template v-else-if="column.key.startsWith('sup_')">
+            <!-- Supplier cell — keyed by submission_id (§7) -->
+            <template v-else-if="column.key.startsWith('sub_')">
               <div
-                v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key)"
-                :key="sup.supplier_id"
+                v-for="sup in result!.suppliers.filter(s => `sub_${s.submission_id}` === column.key)"
+                :key="sup.submission_id"
               >
                 <div
-                  :style="cellBg(record.cells[String(sup.supplier_id)])"
+                  :style="cellBg(record.cells[String(sup.submission_id)])"
                   style="border-radius:4px;padding:4px 6px;min-height:36px"
                 >
                   <!-- ── 未报价 ── -->
-                  <template v-if="!record.cells[String(sup.supplier_id)] || record.cells[String(sup.supplier_id)].cell_status === 'missing'">
+                  <template v-if="!record.cells[String(sup.submission_id)] || record.cells[String(sup.submission_id)].cell_status === 'missing'">
                     <div style="display:flex;align-items:center;gap:4px">
                       <span style="color:#bbb;font-size:11px">未报价</span>
                       <a-button
                         type="link" size="small"
                         style="font-size:10px;padding:0;height:16px;color:#bbb"
-                        @click.stop="toggleExpand(record.anchor_seq, sup.supplier_id)"
-                      >{{ isExpanded(record.anchor_seq, sup.supplier_id) ? '▴' : '▾' }}</a-button>
+                        @click.stop="toggleExpand(record.anchor_seq, sup.submission_id)"
+                      >{{ isExpanded(record.anchor_seq, sup.submission_id) ? '▴' : '▾' }}</a-button>
                     </div>
-                    <div v-if="isExpanded(record.anchor_seq, sup.supplier_id)"
+                    <div v-if="isExpanded(record.anchor_seq, sup.submission_id)"
                       style="margin-top:4px;font-size:10px;color:#999;line-height:1.5;border-top:1px solid #f0f0f0;padding-top:4px">
-                      <div>{{ record.cells[String(sup.supplier_id)]?.missing_reason || '该供应商未报价此品项' }}</div>
+                      <div>{{ record.cells[String(sup.submission_id)]?.missing_reason || '该供应商未报价此品项' }}</div>
                       <div style="margin-top:4px;display:flex;gap:4px"
-                        v-if="!confirmedMissing[`${record.anchor_seq}_${sup.supplier_id}`]">
+                        v-if="!confirmedMissing[`${record.anchor_seq}_${sup.submission_id}`]">
                         <a-button size="small" style="font-size:10px;height:18px;padding:0 6px"
-                          @click.stop="confirmMissing(record.anchor_seq, sup.supplier_id)"
+                          @click.stop="confirmMissing(record.anchor_seq, sup.submission_id)"
                         >确认缺报</a-button>
                       </div>
                       <div v-else style="color:#52c41a;font-size:10px;margin-top:2px">✓ 已确认缺报</div>
@@ -351,56 +351,56 @@ const cellAccountingDetail = computed(() => {
                   </template>
 
                   <!-- ── 已排除 ── -->
-                  <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'excluded'">
+                  <template v-else-if="record.cells[String(sup.submission_id)].cell_status === 'excluded'">
                     <span style="color:#bbb;font-size:12px;text-decoration:line-through">已排除</span>
                   </template>
 
                   <!-- ── 待确认 ── -->
-                  <template v-else-if="record.cells[String(sup.supplier_id)].cell_status === 'pending'">
+                  <template v-else-if="record.cells[String(sup.submission_id)].cell_status === 'pending'">
                     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                       <a-tag color="orange" style="font-size:10px;padding:0 4px;margin:0">待确认</a-tag>
-                      <a-tooltip v-if="record.cells[String(sup.supplier_id)].evidence"
-                        :title="record.cells[String(sup.supplier_id)].evidence">
+                      <a-tooltip v-if="record.cells[String(sup.submission_id)].evidence"
+                        :title="record.cells[String(sup.submission_id)].evidence">
                         <span style="font-size:12px;color:#d46b08;font-weight:600;cursor:help">
-                          {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                          {{ fmtPrice(record.cells[String(sup.submission_id)].unit_price) }}
                         </span>
                       </a-tooltip>
                       <span v-else style="font-size:12px;color:#d46b08;font-weight:600">
-                        {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                        {{ fmtPrice(record.cells[String(sup.submission_id)].unit_price) }}
                       </span>
-                      <span v-if="record.cells[String(sup.supplier_id)].confidence != null"
+                      <span v-if="record.cells[String(sup.submission_id)].confidence != null"
                         style="font-size:10px;color:#999">
-                        {{ fmtConf(record.cells[String(sup.supplier_id)].confidence) }}
+                        {{ fmtConf(record.cells[String(sup.submission_id)].confidence) }}
                       </span>
                     </div>
                     <div style="display:flex;gap:4px;margin-top:4px;align-items:center">
                       <a-button
                         type="primary" size="small"
                         style="font-size:11px;padding:0 6px;height:20px"
-                        :loading="confirmLoading[record.cells[String(sup.supplier_id)].item_id!]"
-                        @click.stop="confirmItem(record.cells[String(sup.supplier_id)].item_id, 'align')"
+                        :loading="confirmLoading[record.cells[String(sup.submission_id)].item_id!]"
+                        @click.stop="confirmItem(record.cells[String(sup.submission_id)].item_id, 'align')"
                       >✓ 纳入</a-button>
                       <a-button
                         danger size="small"
                         style="font-size:11px;padding:0 6px;height:20px"
-                        :loading="confirmLoading[record.cells[String(sup.supplier_id)].item_id!]"
-                        @click.stop="confirmItem(record.cells[String(sup.supplier_id)].item_id, 'exclude')"
+                        :loading="confirmLoading[record.cells[String(sup.submission_id)].item_id!]"
+                        @click.stop="confirmItem(record.cells[String(sup.submission_id)].item_id, 'exclude')"
                       >✗ 排除</a-button>
                       <a-button
-                        v-if="record.cells[String(sup.supplier_id)].candidates?.length > 1"
+                        v-if="record.cells[String(sup.submission_id)].candidates?.length > 1"
                         size="small"
                         style="font-size:10px;padding:0 4px;height:20px"
-                        @click.stop="toggleExpand(record.anchor_seq, sup.supplier_id)"
+                        @click.stop="toggleExpand(record.anchor_seq, sup.submission_id)"
                       >换候选</a-button>
                     </div>
                     <!-- Candidates expand -->
-                    <div v-if="isExpanded(record.anchor_seq, sup.supplier_id)"
+                    <div v-if="isExpanded(record.anchor_seq, sup.submission_id)"
                       style="margin-top:6px;border-top:1px solid #ffe7ba;padding-top:4px">
                       <div
-                        v-for="cand in record.cells[String(sup.supplier_id)].candidates"
+                        v-for="cand in record.cells[String(sup.submission_id)].candidates"
                         :key="cand.item_id"
                         style="display:flex;align-items:center;gap:4px;padding:2px 0;font-size:11px"
-                        :style="cand.item_id === record.cells[String(sup.supplier_id)].item_id ? 'background:#fff7e6;border-radius:2px;padding:2px 4px' : ''"
+                        :style="cand.item_id === record.cells[String(sup.submission_id)].item_id ? 'background:#fff7e6;border-radius:2px;padding:2px 4px' : ''"
                       >
                         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                           {{ cand.material_name }}
@@ -421,19 +421,19 @@ const cellAccountingDetail = computed(() => {
                   <!-- ── 已确认/聚合 ── -->
                   <template v-else>
                     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-                      <CheckCircleOutlined v-if="record.cells[String(sup.supplier_id)].cell_status === 'quoted'"
+                      <CheckCircleOutlined v-if="record.cells[String(sup.submission_id)].cell_status === 'quoted'"
                         style="color:#52c41a;font-size:11px" />
                       <a-tag v-else color="cyan" style="font-size:10px;padding:0 4px;margin:0">聚合</a-tag>
                       <span
                         style="font-size:13px;font-weight:600"
-                        :style="record.cells[String(sup.supplier_id)].is_lowest ? 'color:#389e0d' : ''"
+                        :style="record.cells[String(sup.submission_id)].is_lowest ? 'color:#389e0d' : ''"
                       >
-                        {{ fmtPrice(record.cells[String(sup.supplier_id)].unit_price) }}
+                        {{ fmtPrice(record.cells[String(sup.submission_id)].unit_price) }}
                       </span>
-                      <span v-if="record.cells[String(sup.supplier_id)].is_lowest"
+                      <span v-if="record.cells[String(sup.submission_id)].is_lowest"
                         style="font-size:10px;color:#389e0d">最低</span>
-                      <a-tooltip v-if="record.cells[String(sup.supplier_id)].evidence"
-                        :title="record.cells[String(sup.supplier_id)].evidence">
+                      <a-tooltip v-if="record.cells[String(sup.submission_id)].evidence"
+                        :title="record.cells[String(sup.submission_id)].evidence">
                         <a style="font-size:10px;color:#bbb;cursor:help">证据</a>
                       </a-tooltip>
                     </div>
@@ -446,10 +446,10 @@ const cellAccountingDetail = computed(() => {
 
           <!-- Supplier column header -->
           <template #headerCell="{ column }: { column: { key: string; title: string } }">
-            <template v-if="column.key.startsWith('sup_')">
-              <div v-for="sup in result!.suppliers.filter(s => `sup_${s.supplier_id}` === column.key)" :key="sup.supplier_id">
+            <template v-if="column.key.startsWith('sub_')">
+              <div v-for="sup in result!.suppliers.filter(s => `sub_${s.submission_id}` === column.key)" :key="sup.submission_id">
                 <div>
-                  {{ sup.supplier_name }}
+                  {{ sup.supplier_raw_name || sup.supplier_name }}
                   <a-tag
                     v-if="sup.checksum_status === 'fail'"
                     color="orange"

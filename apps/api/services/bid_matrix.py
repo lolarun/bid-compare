@@ -1255,17 +1255,21 @@ def build_anchor_review_matrix(
     db: Session,
     project_id: int,
     category: str,
-    supplier_ids: list[int] | None = None,
+    submission_ids: list[int] | None = None,
+    supplier_ids: list[int] | None = None,  # legacy path: Supplier.id; new BID path uses submission_ids
 ) -> dict:
     """Anchor-first review matrix for the pre-review UI.
 
-    Returns one row per TenderAnchor with cells dict keyed by str(supplier_id).
-    Includes candidates list for pending cells. Does not compute deviations or
-    alert levels (those are for the final bid matrix).
+    Two modes:
+    - New BID path (submission_ids provided): cells keyed by str(submission_id),
+      looks up BidSubmission for display name, filters alignment items by i.submission_id.
+    - Legacy path (supplier_ids provided): cells keyed by str(supplier_id),
+      looks up Supplier for display name, filters alignment items by i.supplier_id.
 
-    supplier_ids: 本次比价的供应商集合。若提供，矩阵列严格等于该列表，不自动扫历史报价。
+    submission_ids takes precedence. At least one of the two must be non-empty.
     """
     from apps.api.models.tender_list_session import TenderListSession
+    from apps.api.models.bid_submission import BidSubmission
     from apps.api.services.tender_list import rebuild_anchors
 
     session = (
@@ -1283,34 +1287,58 @@ def build_anchor_review_matrix(
 
     anchors = rebuild_anchors(session)
 
-    if not supplier_ids:
+    use_submission_path = bool(submission_ids)
+
+    if use_submission_path:
+        ids = sorted(set(submission_ids))  # type: ignore[arg-type]
+    elif supplier_ids:
+        ids = sorted(set(supplier_ids))
+    else:
         raise ValueError(
-            "supplier_ids 不可为空 — 比价流程禁止扫历史全量供应商。"
-            "请先完成供应商报价上传并「开始匹配」后再调用本接口。"
+            "submission_ids 不可为空 — 比价流程禁止扫历史全量供应商。"
+            "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。"
         )
-    supplier_ids = sorted(set(supplier_ids))
 
-    # 供应商参与品牌（招标文件第13页）：supplier_id → brand（品牌作为供应商属性展示，绝不替代供应商列）
+    # ── Build suppliers_info ──────────────────────────────────────────────────
+    # New path: BidSubmission lookup; Legacy path: Supplier lookup + supplier_brand_map
     supplier_brand: dict[int, str] = {}
-    for sb in (session.supplier_brand_map or []):
-        if isinstance(sb, dict) and sb.get("supplier_id") is not None and sb.get("brand"):
-            supplier_brand[int(sb["supplier_id"])] = str(sb["brand"])
+    if not use_submission_path:
+        for sb in (session.supplier_brand_map or []):
+            if isinstance(sb, dict) and sb.get("supplier_id") is not None and sb.get("brand"):
+                supplier_brand[int(sb["supplier_id"])] = str(sb["brand"])
 
-    # Supplier info + checksum
     suppliers_info = []
-    for sid in supplier_ids:
-        sup = db.get(Supplier, sid)
-        if not sup:
-            continue
-        cs = _get_supplier_checksum(db, sid, project_id)
-        suppliers_info.append({
-            "supplier_id": sid,
-            "supplier_name": sup.name,
-            "brand": supplier_brand.get(sid, ""),
-            "checksum_status": cs.get("status"),
-            "declared_total": cs.get("declared"),
-            "checksum_delta_pct": cs.get("delta_pct"),
-        })
+    for col_id in ids:
+        if use_submission_path:
+            sub = db.get(BidSubmission, col_id)
+            if not sub:
+                continue
+            cs = _get_submission_checksum(db, sub)
+            suppliers_info.append({
+                "submission_id": col_id,
+                "supplier_id": sub.supplier_id,       # nullable soft-ref
+                "supplier_name": sub.supplier_raw_name,
+                "supplier_raw_name": sub.supplier_raw_name,
+                "brand": "",
+                "checksum_status": cs.get("status"),
+                "declared_total": cs.get("declared"),
+                "checksum_delta_pct": cs.get("delta_pct"),
+            })
+        else:
+            sup = db.get(Supplier, col_id)
+            if not sup:
+                continue
+            cs = _get_supplier_checksum(db, col_id, project_id)
+            suppliers_info.append({
+                "submission_id": None,
+                "supplier_id": col_id,
+                "supplier_name": sup.name,
+                "supplier_raw_name": sup.name,
+                "brand": supplier_brand.get(col_id, ""),
+                "checksum_status": cs.get("status"),
+                "declared_total": cs.get("declared"),
+                "checksum_delta_pct": cs.get("delta_pct"),
+            })
 
     # Load confirmed groups scoped to current session ONLY (prevents historical data leakage)
     all_groups = (
@@ -1331,13 +1359,13 @@ def build_anchor_review_matrix(
         if seq not in seq_to_group:
             seq_to_group[seq] = g
 
-    # Build rows
+    # Build rows — cells keyed by str(col_id) [submission_id or supplier_id depending on mode]
     rows = []
     pending_cells = 0
     missing_cells = 0
     quoted_ge_2 = 0
     quoted_full = 0
-    n = len(supplier_ids)
+    n = len(ids)
 
     for anchor in anchors:
         seq_key = str(anchor.seq)
@@ -1348,7 +1376,7 @@ def build_anchor_review_matrix(
         covered_count = 0
         prices_this_row: dict[int, float] = {}
 
-        for sid in supplier_ids:
+        for col_id in ids:
             if group is None:
                 cell: dict = {
                     "cell_status": CELL_MISSING,
@@ -1365,8 +1393,11 @@ def build_anchor_review_matrix(
                 }
                 missing_cells += 1
             else:
-                sid_items = [i for i in group.items if i.supplier_id == sid]
-                cell = _build_review_cell(db, sid_items, sid)
+                if use_submission_path:
+                    col_items = [i for i in group.items if i.submission_id == col_id]
+                else:
+                    col_items = [i for i in group.items if i.supplier_id == col_id]
+                cell = _build_review_cell(db, col_items, col_id)
                 status = cell["cell_status"]
                 if status == CELL_MISSING:
                     missing_cells += 1
@@ -1374,19 +1405,19 @@ def build_anchor_review_matrix(
                 elif status == CELL_PENDING:
                     pending_cells += 1
                 if status in (CELL_QUOTED, CELL_AGGREGATED) and cell["unit_price"]:
-                    prices_this_row[sid] = cell["unit_price"]
+                    prices_this_row[col_id] = cell["unit_price"]
 
             if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED):
                 quoted_count += 1
             if cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING):
                 covered_count += 1
 
-            cells[str(sid)] = cell
+            cells[str(col_id)] = cell
 
         # Mark lowest among confirmed cells
         if prices_this_row:
-            min_sid = min(prices_this_row, key=prices_this_row.__getitem__)
-            cells[str(min_sid)]["is_lowest"] = True
+            min_col = min(prices_this_row, key=prices_this_row.__getitem__)
+            cells[str(min_col)]["is_lowest"] = True
 
         # Row status
         if n == 0 or quoted_count == n:
@@ -1424,16 +1455,16 @@ def build_anchor_review_matrix(
         {
             "suppliers": [
                 {
-                    "supplier_id": sid,
-                    "cell_status": row["cells"].get(str(sid), {}).get("cell_status", CELL_MISSING),
-                    "price": row["cells"].get(str(sid), {}).get("unit_price"),
+                    "supplier_id": col_id,
+                    "cell_status": row["cells"].get(str(col_id), {}).get("cell_status", CELL_MISSING),
+                    "price": row["cells"].get(str(col_id), {}).get("unit_price"),
                 }
-                for sid in supplier_ids
+                for col_id in ids
             ]
         }
         for row in rows
     ]
-    matrix_distribution = build_matrix_distribution_from_rows(fake_rows, supplier_ids)
+    matrix_distribution = build_matrix_distribution_from_rows(fake_rows, ids)
 
     return {
         "anchors_total": len(anchors),

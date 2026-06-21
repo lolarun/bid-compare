@@ -499,45 +499,61 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
 def anchor_review_matrix(
     project_id: int = Query(...),
     category: str = Query(...),
-    supplier_ids: str | None = Query(None),  # 逗号分隔的供应商 ID
+    submission_ids: str | None = Query(None),  # 逗号分隔的 BidSubmission ID（优先）
+    supplier_ids: str | None = Query(None),     # deprecated: 已忽略
     db: Session = Depends(get_db),
 ):
     """采购清单维度对齐复核矩阵 — 一行一个采购锚点，N列供应商。
 
-    supplier_ids: 本次比价的供应商集合（逗号分隔整数）。
-    若不传，尝试从当前 TenderListSession.confirmed_supplier_ids 恢复。
+    submission_ids: 本次比价的 BidSubmission ID 集合（§7 authoritative column identity）。
+    若不传，从当前 TenderListSession.used_submission_ids 恢复。
     两者均为空 → 400，禁止拉历史全量供应商。
     """
     from apps.api.services.bid_matrix import build_anchor_review_matrix
     from apps.api.models.tender_list_session import TenderListSession as _TLS
 
     sids: list[int] | None = None
-    if supplier_ids:
+    _use_submission = True  # new BID path by default
+
+    if submission_ids:
+        try:
+            sids = [int(x) for x in submission_ids.split(",") if x.strip()]
+            _use_submission = True
+        except ValueError:
+            raise HTTPException(400, "submission_ids 须为逗号分隔的整数")
+    elif supplier_ids:
         try:
             sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
+            _use_submission = False  # explicit legacy supplier scope
         except ValueError:
             raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
-
     if not sids:
-        # Try recovering from persisted session scope
+        # Recover from session scope — new BID path first, legacy fallback
         _s = db.query(_TLS).filter(
             _TLS.project_id == project_id,
             _TLS.category == category,
             _TLS.is_current == True,  # noqa: E712
             _TLS.status == "confirmed",
         ).first()
-        if _s and _s.confirmed_supplier_ids:
+        if _s and _s.used_submission_ids:
+            sids = list(_s.used_submission_ids)
+            _use_submission = True
+        elif _s and _s.confirmed_supplier_ids:
             sids = [int(x) for x in _s.confirmed_supplier_ids]
+            _use_submission = False  # legacy supplier scope
 
     if not sids:
         raise HTTPException(400, {
-            "error": "missing_supplier_ids",
-            "message": "必须提供本次比价的供应商 ID（supplier_ids），禁止拉历史全量供应商。"
+            "error": "missing_submission_ids",
+            "message": "必须提供本次比价的投标 ID（submission_ids），禁止拉历史全量供应商。"
                        "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。",
         })
 
     try:
-        result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)
+        if _use_submission:
+            result = build_anchor_review_matrix(db, project_id, category, submission_ids=sids)
+        else:
+            result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)  # legacy
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return result

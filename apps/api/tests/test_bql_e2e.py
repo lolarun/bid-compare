@@ -309,19 +309,20 @@ class TestBqlE2E:
             for a in (anchors_json or [])[:1]  # just test first anchor
         ]
 
+        submission_id = seed["submission_id"]
         result = build_anchor_review_matrix(
             db=db_session,
             project_id=proj.id,
             category=category,
-            supplier_ids=[sup.id],
+            submission_ids=[submission_id],
         )
         assert result is not None
 
-        # Verify cells for supplier contain bid_quote_line_id
+        # Verify cells for submission carry bid_quote_line_id (BQL path)
         rows = result.get("rows", [])
         bql_cells_found = False
         for row in rows:
-            cell = row["cells"].get(str(sup.id), {})
+            cell = row["cells"].get(str(submission_id), {})
             if cell.get("bid_quote_line_id") is not None:
                 bql_cells_found = True
                 assert cell.get("unit_price") is not None, "BQL cell must carry unit_price"

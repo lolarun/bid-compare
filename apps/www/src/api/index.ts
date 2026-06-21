@@ -178,7 +178,7 @@ export const analysisApi = {
     tender_list_session_id?: number | null; k?: number; mode?: string; model?: string | null
   }) =>
     api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
-  anchorReviewMatrix: (params: { project_id: number; category: string; supplier_ids?: string }) =>
+  anchorReviewMatrix: (params: { project_id: number; category: string; submission_ids?: string; supplier_ids?: string }) =>
     api.get<AnchorReviewMatrixResult>('/analysis/anchor-review/matrix', { params }),
   anchorReview: (params: { project_id: number; category: string; supplier_ids?: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),

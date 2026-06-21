@@ -2015,7 +2015,7 @@ async function runMatrix() {
           v-if="taskConfig.projectId"
           :project-id="taskConfig.projectId"
           :category="tenderCategory || taskConfig.category"
-          :supplier-ids="effectiveSupplierIds.length ? effectiveSupplierIds : undefined"
+          :submission-ids="effectiveSubmissionIds.length ? effectiveSubmissionIds : undefined"
           @pending-count="reviewPendingCount = $event"
         />
       </template>

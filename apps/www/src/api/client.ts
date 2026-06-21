@@ -839,9 +839,11 @@ export interface ReviewRow {
 }
 
 export interface ReviewSupplier {
-  supplier_id: number
-  supplier_name: string
-  brand?: string                       // 参与品牌（招标第13页，供应商属性）
+  submission_id: number               // §7 authoritative column identity
+  supplier_id: number | null          // nullable soft-ref (may be null for unlinked submissions)
+  supplier_name: string               // = supplier_raw_name
+  supplier_raw_name: string
+  brand?: string
   checksum_status: string | null
   declared_total: number | null
   checksum_delta_pct: number | null
