@@ -184,6 +184,26 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                     "矩阵只消费当前会话 used_submission_ids，不支持外部传入覆盖。",
                 )
 
+            # B2: 过期 finalize 快照防御 —— 若锁定组与当前 session 的 confirmed 组零交集，
+            # 说明这是上一轮匹配的快照（重跑 match 后已产生新组），按它过滤会把矩阵清空。
+            # 回退到当前 confirmed 组并告警，提示重新 finalize 锁定最新快照。
+            if allowed_group_ids is not None:
+                from apps.api.models.bid_alignment import BidAlignmentGroup as _BAGCheck
+                _cur_gids = {
+                    gid for (gid,) in db.query(_BAGCheck.id).filter(
+                        _BAGCheck.project_id == body.project_id,
+                        _BAGCheck.category == body.category,
+                        _BAGCheck.status == "confirmed",
+                        _BAGCheck.tender_list_session_id == session.id,
+                    ).all()
+                }
+                if _cur_gids and not (allowed_group_ids & _cur_gids):
+                    allowed_group_ids = None
+                    not_finalized_warning = (
+                        "对齐快照已过期（锁定的是上一轮匹配的对齐组），已回退使用当前确认的"
+                        "对齐组。请重新完成「对齐核查」finalize 以锁定最新快照。"
+                    )
+
             result = build_anchor_matrix(
                 db,
                 anchors=anchors,
@@ -1481,6 +1501,16 @@ def _persist_llm_fill(
     ).all()
     for g in old_confirmed:
         g.status = "superseded"
+    db.flush()
+
+    # B1: 替换组后，旧 finalize 快照锁定的是刚被 superseded 的组，必须一并作废。
+    # 否则比价矩阵按过期快照(group_ids)过滤，会把当前新组全部排除 → 全「未报价」。
+    from apps.api.models.alignment_finalization import AlignmentFinalization as _AF
+    db.query(_AF).filter(
+        _AF.project_id == project_id,
+        _AF.category == category,
+        _AF.status == "finalized",
+    ).update({"status": "superseded"}, synchronize_session=False)
     db.flush()
 
     cells_by_seq: dict[int, list] = {}

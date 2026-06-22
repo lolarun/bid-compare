@@ -417,6 +417,48 @@ class TestBidMatrixGates:
         assert r.status_code == 409, r.text
         assert "used_submission_ids" in r.json()["detail"]
 
+    def test_stale_finalization_does_not_empty_matrix(self, compare_client, db_session):
+        """B2 回归：过期 finalize 快照（group_ids 指向旧轮次的组）不得把矩阵清空。
+
+        复现生产项目 59：重跑 match 产生新 confirmed 组后，旧 finalize 快照仍锁定
+        被 superseded 的旧组 → 按它过滤 allowed_group_ids 会排除全部当前组 → 全「未报价」。
+        修复后：检测到快照与当前 confirmed 组零交集 → 回退当前组 + 告警。
+        """
+        from apps.api.models.alignment_finalization import AlignmentFinalization
+
+        state = _make_full_project(compare_client)
+        pid = state["project_id"]
+        body = {
+            "project_id": pid,
+            "supplier_ids": [state["supplier_a_id"], state["supplier_b_id"]],
+            "category": "阀门",
+        }
+
+        def _priced_cells(matrix):
+            return sum(
+                1 for row in matrix["rows"] for c in row["suppliers"]
+                if c.get("price") is not None
+            )
+
+        # 基线（无 finalize 快照）：矩阵有报价格
+        base = compare_client.post("/api/analysis/bid-matrix", json=body).json()
+        base_priced = _priced_cells(base)
+        assert base_priced > 0, "基线矩阵应有报价格（mock 报价已对齐）"
+
+        # 注入过期 finalize 快照：group_ids 指向不存在的旧组
+        db_session.add(AlignmentFinalization(
+            project_id=pid, category="阀门", status="finalized",
+            group_ids_json=[999999, 999998],
+        ))
+        db_session.commit()
+
+        # B2：矩阵不得被过期快照清空；报价格数与基线一致；并给出过期告警
+        r = compare_client.post("/api/analysis/bid-matrix", json=body)
+        assert r.status_code == 200, r.text
+        m = r.json()
+        assert _priced_cells(m) == base_priced, "过期 finalize 快照不应导致矩阵全空"
+        assert m.get("not_finalized_warning"), "应提示快照已过期并回退"
+
 
 # ── Export consistency tests ─────────────────────────────────────────────────
 
