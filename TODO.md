@@ -1,8 +1,8 @@
 # MEMPAS 工程待办（后端架构 / 技术债）
 
-> 最后更新：2026-06-23（§7.3/§10.3/§10.4/§11.2/§11.3/§11.4/§11.5 完成）
+> 最后更新：2026-06-23（§7.3/§10.3/§10.4/§11.2/§11.3/§11.4/§11.5 完成；snapshot replay 7 失败修复）
 > 范围：后端架构整改与技术债。**产品功能 / UI / 客户反馈待办见 [`docs/TODO.md`](docs/TODO.md)**，两者不重叠。
-> 权威依据：[`docs/design/12-招标比价后端审计与整改.md`](docs/design/12-招标比价后端审计与整改.md)（下称「审计12」）。
+> 权威依据：[`docs/design/12-bid-backend-audit-remediation.md`](docs/design/12-bid-backend-audit-remediation.md)（下称「审计12」）。
 > 本文件只列**已决定延后**或**未完成**的项；已交付项见各 commit 与审计12 §8。
 
 ---
@@ -131,6 +131,6 @@ P1-1 抽了 confirm/export/finalize 等 7 个服务，**唯独漏了 match 和 l
 
 ---
 
-## 5. 已知非阻断现象（记录在案，非待办）
+## 5. 已知非阻断现象
 
-- `test_e2e_snapshot.py` / `test_compare_integration.py` 中 kaishuo / taikelong 共 7 个 snapshot replay 失败：既有缺页 fixture 所致，与近期改动无关（多轮 stash 基线复现确认，见 memory `project_baseline_metrics`）。补齐 fixture 或重录 snapshot 后方可转绿，不得静默跳页冒充。
+（无——所有已知非阻断现象已消除。全套测试 506 passed 0 failed。）
