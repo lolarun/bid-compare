@@ -40,13 +40,60 @@ def get_db():
 
 
 def init_db():
-    """Create all tables."""
+    """Bring the database schema up to date.
+
+    Order (docs/design/13 方案 B):
+      1. create_all  — bootstrap a brand-new DB to the full current model schema.
+      2. _ensure_sqlite_schema — FROZEN legacy path: migrate pre-Alembic SQLite
+         files up to the baseline (no new entries added here going forward).
+      3. _run_alembic_upgrade — stamp the baseline anchor if unversioned, then
+         apply every versioned migration after it. ALL new schema changes live
+         here from now on.
+    """
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_schema()
+    _run_alembic_upgrade()
+
+
+def _run_alembic_upgrade():
+    """Stamp baseline (if unversioned) then upgrade to head.
+
+    Uses the app engine's own connection so migrations run on the same DB the
+    app uses. Migrations added after the baseline MUST be idempotent (inspect
+    before ALTER/CREATE), because on a fresh DB create_all has already built the
+    full model schema — see docs/design/13 §2 方案 B.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect as _sa_inspect
+
+    # Configure programmatically rather than reading alembic.ini: configparser
+    # reads with the OS locale encoding (GBK on Windows), which chokes on any
+    # non-ASCII byte in the ini. env.py sources the URL from DATABASE_URL and
+    # uses the injected connection, so only script_location is needed here.
+    migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+    cfg = Config()
+    cfg.set_main_option("script_location", str(migrations_dir))
+
+    # engine.begin() opens a transaction that COMMITS on clean exit. With an
+    # injected connection Alembic defers commit to the caller, so we must own
+    # the transaction here or the version row never persists.
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        has_version = "alembic_version" in _sa_inspect(conn).get_table_names()
+        if not has_version:
+            # Existing or freshly-created DB: current schema already == baseline.
+            command.stamp(cfg, "0001_baseline")
+        command.upgrade(cfg, "head")
 
 
 def _ensure_sqlite_schema():
-    """Apply small additive schema fixes for existing SQLite databases."""
+    """Apply small additive schema fixes for existing SQLite databases.
+
+    FROZEN (docs/design/13 方案 B): do NOT add new entries here. All schema
+    changes from the baseline onward go through versioned Alembic migrations
+    under apps/api/migrations/versions/.
+    """
     with engine.begin() as conn:
         if engine.dialect.name != "sqlite":
             return
