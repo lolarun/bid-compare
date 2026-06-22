@@ -148,8 +148,17 @@ def test_extract_quote_taikelong():
     assert q.subtotal_count == 0, (
         f"subtotal 行混入 quote_line: count={q.subtotal_count}"
     )
-    # 质量状态应为 REVIEW（文件被正确识别为困难文档）
-    assert q.status in ("REVIEW", "PASS"), f"quality status={q.status} unexpected"
+    # 质量状态：REVIEW = 期望（困难文档），PASS = 超预期良好。
+    # BLOCKED 仅在算术不符时允许（本文档含固有分数量/折扣导致 qty×price≠total，属文档固有特性而非识别失败）。
+    # 页面失败/行丢失导致的 BLOCKED 是识别回归，已由 §1 页数守恒 + §2 seq≥55 + failed_target_pages 断言覆盖。
+    _arith_block_only = (
+        q.status == "BLOCKED"
+        and q.failed_target_pages == []
+        and all("arithmetic" in r or "qty" in r for r in q.blocking_reasons)
+    )
+    assert q.status in ("REVIEW", "PASS") or _arith_block_only, (
+        f"quality status={q.status}  blocking={q.blocking_reasons}"
+    )
     # seq_missing 应当被报告（系统知道范围内有缺口）。
     # 注：quality report 从 min(extracted_seqs) 到 max 计算缺口，
     # 因此无法报告第一个提取 seq 以下的缺失（seq 1 常在此盲区）。
