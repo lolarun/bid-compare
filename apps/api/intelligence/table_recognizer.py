@@ -27,9 +27,7 @@ from apps.api.intelligence.extraction_draft import (
 
 log = logging.getLogger(__name__)
 
-import os as _os
-# 每份文档内的页级并发（OCR/LLM）。与 pipeline.PAGE_CONCURRENCY 同一 env，默认 5。
-PAGE_CONCURRENCY = max(1, int(_os.getenv("PAGE_CONCURRENCY", "5")))
+from apps.api.intelligence.pipeline import PAGE_CONCURRENCY  # single env source
 
 
 # ─── Adapter 契约 ─────────────────────────────────────────────────────────────
@@ -386,9 +384,11 @@ def recognize_tables(
     # 旧实现先把全部页渲成 2400px 高清图再分类，浪费内存（泰科龙 53 页峰值 1.6GB）。
     # 现在分类只用缩略图；全分辨率仅渲染 OCR/方向/Plus 真正需要的 ~12 页。
     _notify("视觉页面分类", 12)
+    actual_page_count = DocumentLoader.get_page_count(file_path)
     thumbnails = DocumentLoader.to_thumbnails(file_path, max_pages=MAX_PAGES_UNLIMITED)
-    total_pages = len(thumbnails)
-    rendered_pages = total_pages   # 语义=参与页数（喂 compute_quality），非"全分辨率渲染数"
+    rendered_pages = len(thumbnails)
+    truncated = rendered_pages < actual_page_count
+    total_pages = actual_page_count   # 真实页数，截断时 > rendered_pages
 
     def _render_full(pno: int) -> bytes:
         """按需渲染单页全分辨率（字节与旧 to_images()[pno-1] 一致）。"""
@@ -757,6 +757,7 @@ def recognize_tables(
         total_pages=total_pages,
         target_pages=tgt,
         declared_total=declared_total,
+        truncated=truncated,
         rendered_pages=rendered_pages,
         ocr_success_pages=ocr_success,
         ocr_failed_pages=ocr_failed,

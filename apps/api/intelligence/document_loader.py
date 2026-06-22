@@ -93,6 +93,18 @@ class DocumentLoader:
         raise ValueError(f"Unsupported file for thumbnails: {suffix}")
 
     @staticmethod
+    def get_page_count(file_path: str | Path) -> int:
+        """Return actual PDF page count without rendering any pages."""
+        path = Path(file_path)
+        if path.suffix.lower() != ".pdf":
+            return 1
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()
+
+    @staticmethod
     def _downscale_png(img: Image.Image, edge_px: int) -> bytes:
         w, h = img.size
         longest = max(w, h)
