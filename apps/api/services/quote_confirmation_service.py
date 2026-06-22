@@ -1,0 +1,416 @@
+"""QuoteConfirmationService — batch quote confirmation authority.
+
+Extracted from routes/quotes.py (batch_confirm) so the core write path
+(ExtractionJob → BidSubmission + BidQuoteLine) lives in a testable service,
+not inline in the route handler.
+
+The route delegates here and is responsible only for HTTP mapping.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from apps.api.core.config import PROFESSION_MAP
+from apps.api.models import (
+    BrandTier,
+    ExtractionJob,
+    Material,
+    Project,
+    Supplier,
+    BidSubmission,
+    BidQuoteLine,
+)
+from apps.api.services.standardize import standardize_name
+from apps.api.intelligence.price_basis import derive_price_basis
+
+log = logging.getLogger(__name__)
+
+# Grand-total/subtotal name patterns — keep in sync with table_parser / routes/quotes.py.
+_GRAND_TOTAL_NAME_RE = re.compile(
+    r"价税合计|总计|合计金额|投标总价|^合计$|含税总计|含税合计|详见投标清单"
+)
+
+
+def _num_or_none(v: Any) -> float | None:
+    return float(v) if v is not None else None
+
+
+def confirm_batch(db: Session, body) -> dict:
+    """将 OCR 提取结果暂存为 BidSubmission + BidQuoteLine（P0 新版）。
+
+    `body` must have the same fields as BatchConfirmRequest in routes/quotes.py.
+
+    Returns the response dict the route should return directly.
+    """
+    job = db.get(ExtractionJob, body.job_id)
+    if not job:
+        raise HTTPException(404, f"Job {body.job_id} not found")
+    if job.type != "quote":
+        raise HTTPException(400, f"Job type is {job.type}; must be 'quote'")
+    if job.status != "done":
+        raise HTTPException(400, f"Job status is {job.status}; must be 'done'")
+
+    # ── Supplier 验证（弱关联：supplier_id 可选，有则校验状态）──────────────────
+    supplier: Supplier | None = None
+    if body.supplier_id is not None:
+        supplier = db.get(Supplier, body.supplier_id)
+        if not supplier:
+            raise HTTPException(404, f"Supplier {body.supplier_id} not found")
+        if supplier.merge_status != "active":
+            raise HTTPException(
+                400,
+                f"Supplier {supplier.name!r} merge_status={supplier.merge_status}，"
+                "只允许选择 active 供应商",
+            )
+    else:
+        if not body.supplier_name.strip():
+            raise HTTPException(422, "陌生供应商必须提供 supplier_name")
+
+    # ── Project（允许按名查找或创建，project 不是污染来源）─────────────────────
+    project: Project | None = None
+    if body.project_id:
+        project = db.get(Project, body.project_id)
+        if not project:
+            raise HTTPException(404, f"Project {body.project_id} not found")
+    elif body.project_name.strip():
+        pname = body.project_name.strip()
+        project = db.query(Project).filter_by(name=pname).first()
+        if not project:
+            project = Project(name=pname)
+            db.add(project)
+            db.flush()
+    elif (job.context or {}).get("project_id"):
+        ctx_pid = job.context["project_id"]
+        project = db.get(Project, ctx_pid)
+        if not project:
+            raise HTTPException(
+                400,
+                f"Project {ctx_pid} from job context no longer exists; "
+                "specify project_name or project_id to proceed.",
+            )
+
+    # ── 默认 category ──────────────────────────────────────────────────────────
+    default_category = (
+        body.category.strip()
+        or (job.context or {}).get("category", "")
+        or ""
+    )
+    if default_category and default_category not in PROFESSION_MAP:
+        raise HTTPException(400, f"Unknown category: {default_category}")
+
+    # ── Item list ──────────────────────────────────────────────────────────────
+    raw_items: Any = (
+        body.overrides
+        if body.overrides is not None
+        else (job.result or {}).get("items")
+    )
+    if raw_items is None:
+        raw_items = []
+    if not isinstance(raw_items, list):
+        raise HTTPException(422, f"Expected items list, got {type(raw_items).__name__}")
+
+    # 早期校验：有 items 但 category 为空 → 立即拒绝，不创建空壳 submission
+    _has_real_items = any(
+        str(r.get("material") or "").strip() for r in raw_items if isinstance(r, dict)
+    )
+    if _has_real_items and not default_category:
+        raise HTTPException(
+            422,
+            "category 不能为空：无法确定报价品类，入库中止。"
+            "请在前端选择品类（如「阀门」）后重新点击「校对入库」。",
+        )
+
+    items: list[dict[str, Any]] = []
+    shape_errors: list[dict] = []
+    for idx, item in enumerate(raw_items):
+        if isinstance(item, dict):
+            items.append(item)
+        else:
+            shape_errors.append({"row": idx + 1, "reason": f"not an object: {type(item).__name__}"})
+
+    # ── 幂等：BidSubmission.batch_id 检查（一个 job 最多一条 BidSubmission）────────
+    batch_id = f"BID-{job.id}"
+    prior_submission = db.query(BidSubmission).filter_by(batch_id=batch_id).first()
+    display_name = (
+        body.supplier_name.strip()
+        or (supplier.name if supplier else "")
+        or (job.result or {}).get("supplier_name", "")
+    )
+    if prior_submission:
+        # 同一文件→同一 job→同一 batch_id。废弃状态不能作为幂等命中。
+        _stale = prior_submission.status in ("superseded", "rejected")
+        prior_line_count = db.query(BidQuoteLine).filter_by(
+            submission_id=prior_submission.id
+        ).count()
+        if prior_line_count > 0 and not _stale:
+            log.info(
+                "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
+                prior_submission.id, batch_id, prior_line_count,
+            )
+            if job.lifecycle != "confirmed":
+                job.lifecycle = "confirmed"
+                db.commit()
+            return {
+                "status": "ok",
+                "submission_id": prior_submission.id,
+                "line_count": prior_line_count,
+                "skipped_count": 0,
+                "errors": [],
+                "unknown_brands": [],
+                "supplier_id": prior_submission.supplier_id,
+                "project_id": project.id if project else None,
+                "batch_id": batch_id,
+                "idempotent": True,
+            }
+        if _stale:
+            deleted = db.query(BidQuoteLine).filter_by(
+                submission_id=prior_submission.id
+            ).delete()
+            log.warning(
+                "batch_confirm: reviving %s submission_id=%d batch=%s "
+                "(cleared %d stale lines → pending)",
+                prior_submission.status, prior_submission.id, batch_id, deleted,
+            )
+            prior_submission.status = "pending"
+            prior_submission.supplier_id = supplier.id if supplier else None
+            if project:
+                prior_submission.project_id = project.id
+        else:
+            log.warning(
+                "batch_confirm: rebuilding empty shell submission_id=%d batch=%s",
+                prior_submission.id, batch_id,
+            )
+        if display_name:
+            prior_submission.supplier_raw_name = display_name
+        if body.bid_status:
+            prior_submission.bid_status = body.bid_status
+        submission = prior_submission
+    else:
+        submission = BidSubmission(
+            job_id=job.id,
+            supplier_id=supplier.id if supplier else None,
+            supplier_raw_name=display_name,
+            project_id=project.id if project else None,
+            batch_id=batch_id,
+            status="pending",
+            bid_status=body.bid_status,
+        )
+        db.add(submission)
+        db.flush()
+
+    job.lifecycle = "confirmed"
+
+    if not items:
+        db.commit()
+        return {
+            "status": "ok",
+            "submission_id": submission.id,
+            "line_count": 0,
+            "skipped_count": 0,
+            "errors": shape_errors,
+            "unknown_brands": [],
+            "supplier_id": submission.supplier_id,
+            "project_id": project.id if project else None,
+            "batch_id": batch_id,
+        }
+
+    # ── 逐行处理 → BidQuoteLine ────────────────────────────────────────────────
+    from apps.api.services.comparison import get_category_thresholds, determine_alert
+
+    thresholds_cache: dict[str, dict] = {}
+    line_count = 0
+    skipped_count = 0
+    errors: list[dict] = list(shape_errors)
+    unknown_brands: set[str] = set()
+    line_total_sum: float = 0.0
+
+    for idx, item in enumerate(items):
+        try:
+            raw_name = str(item.get("material") or "").strip()
+            if not raw_name:
+                skipped_count += 1
+                continue
+            if _GRAND_TOTAL_NAME_RE.search(raw_name):
+                log.info("batch_confirm: skipping aggregate row %r", raw_name)
+                skipped_count += 1
+                continue
+
+            item_category = str(item.get("category") or "").strip() or default_category
+            if not item_category or item_category not in PROFESSION_MAP:
+                errors.append({"row": idx + 1, "reason": f"invalid category: {item_category!r}"})
+                skipped_count += 1
+                continue
+
+            ai_std_name = str(item.get("standard_name") or "").strip()
+            standard_name = ai_std_name if ai_std_name else standardize_name(raw_name, item_category)["standardized"]
+
+            spec = str(item.get("standard_spec") or item.get("spec") or "").strip()
+
+            # Material 查找（P0：仅查找，不创建）
+            mat: Material | None = None
+            matched_mid = item.get("matched_material_id")
+            if matched_mid is not None:
+                try:
+                    mat = db.get(Material, int(matched_mid))
+                except (ValueError, TypeError):
+                    pass
+            if not mat:
+                mat = (
+                    db.query(Material)
+                    .filter_by(category=item_category, standard_name=standard_name, spec=spec)
+                    .first()
+                )
+
+            brand = str(item.get("brand") or "").strip()
+            brand_tier = ""
+            if brand:
+                bt = db.query(BrandTier).filter_by(brand_name=brand).first()
+                if bt:
+                    brand_tier = bt.tier
+                else:
+                    unknown_brands.add(brand)
+
+            qty = float(q) if (q := item.get("qty")) is not None else None
+
+            # 价格口径桥接（§4/§9）：现场 re-derive，不信任客户端回传的 price_basis
+            basis_info = derive_price_basis(item)
+            price_basis = basis_info["price_basis"]
+            confirmed_unit = float(cu) if (cu := item.get("unit_price")) is not None else None
+            confirmed_total = float(ct) if (ct := item.get("total_price")) is not None else None
+            price = confirmed_unit if confirmed_unit is not None else basis_info["effective_unit_price"]
+            total = confirmed_total if confirmed_total is not None else basis_info["effective_total_price"]
+            if total is None and price is not None and qty is not None:
+                total = round(price * qty, 4)
+            if total is not None:
+                total = float(total)
+
+            deviation: float | None = None
+            alert: str = ""
+            if mat and price:
+                ref = mat.ref_price_reasonable_low or mat.ref_price_median
+                if ref and ref > 0:
+                    if item_category not in thresholds_cache:
+                        thresholds_cache[item_category] = get_category_thresholds(db, item_category)
+                    deviation = round((price - ref) / ref, 4)
+                    alert = determine_alert(deviation, thresholds_cache[item_category])
+
+            extraction_meta = {
+                "extraction_job_id": body.job_id,
+                "source_ref": item.get("source_ref"),
+                "raw_material": raw_name,
+                "raw_spec": str(item.get("spec") or "").strip(),
+                "raw_unit": str(item.get("unit") or "").strip(),
+                "raw_remark": str(item.get("remark") or "").strip(),
+                "material_type": str(item.get("material_type") or "").strip(),
+                "canonical": item.get("canonical") or {},
+                "validation_warning": item.get("validation_warning") or "",
+                "normalized_material": str(item.get("normalized_material") or "").strip(),
+                "ocr_correction_reason": str(item.get("ocr_correction_reason") or "").strip(),
+                "price_basis": price_basis,
+                "effective_unit_price": basis_info["effective_unit_price"],
+                "effective_total_price": basis_info["effective_total_price"],
+                "effective_unit_recovered": basis_info.get("effective_unit_recovered", False),
+                "raw_unit_price": _num_or_none(item.get("unit_price")),
+                "raw_unit_price_incl_tax": _num_or_none(item.get("unit_price_incl_tax")),
+                "raw_unit_price_excl_tax": _num_or_none(item.get("unit_price_excl_tax")),
+                "raw_total_price": _num_or_none(item.get("total_price")),
+                "raw_total_price_incl_tax": _num_or_none(item.get("total_price_incl_tax")),
+                "raw_total_price_excl_tax": _num_or_none(item.get("total_price_excl_tax")),
+                "tax_rate": _num_or_none(item.get("tax_rate")),
+                "tax_amount": _num_or_none(item.get("tax_amount")),
+                "document_row_index": (
+                    int(v) if (v := item.get("document_row_index")) is not None else None
+                ),
+                "validation_flags": list(item.get("validation_flags") or []),
+                "raw_qty": _num_or_none(item.get("raw_qty")) if item.get("raw_qty") is not None else qty,
+                "suggested_qty": _num_or_none(item.get("suggested_qty")),
+            }
+
+            line = BidQuoteLine(
+                submission_id=submission.id,
+                material_id=mat.id if mat else None,
+                raw_name=raw_name,
+                standard_name=standard_name,
+                category=item_category,
+                spec=spec,
+                unit=str(item.get("unit") or ""),
+                qty=qty,
+                unit_price=price,
+                unit_price_excl_tax=(
+                    float(v) if (v := item.get("unit_price_excl_tax")) is not None else None
+                ),
+                tax_rate=(float(v) if (v := item.get("tax_rate")) is not None else None),
+                total_price=total,
+                brand=brand,
+                brand_tier=brand_tier,
+                remark=str(item.get("remark") or "")[:500],
+                quote_date=str(item.get("quote_date") or ""),
+                canonical=item.get("canonical"),
+                extraction_meta=extraction_meta,
+                deviation_pct=deviation,
+                alert_level=alert,
+            )
+            db.add(line)
+            line_count += 1
+            if total is not None:
+                line_total_sum += total
+
+        except Exception as e:
+            errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
+            skipped_count += 1
+
+    # 强校验：items 非空但全部被跳过 → 回滚并返回 422
+    if items and line_count == 0:
+        db.rollback()
+        reason_summary = "; ".join({e["reason"] for e in errors[:3]}) if errors else "品类无效或所有行被过滤"
+        raise HTTPException(
+            422,
+            f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
+        )
+
+    db.commit()
+
+    # checksum 回写到 job.result
+    try:
+        doc_meta = (job.result or {}).get("_doc_meta") or {}
+        declared = doc_meta.get("bid_total")
+        if declared and float(declared) > 0 and line_count > 0:
+            delta_pct = abs(line_total_sum - float(declared)) / float(declared) * 100
+            cs_status = "pass" if delta_pct <= 5 else "fail"
+        else:
+            delta_pct = None
+            cs_status = "unknown"
+        job.result = {
+            **(job.result or {}),
+            "_checksum": {
+                "declared": declared,
+                "line_sum": round(line_total_sum, 2),
+                "delta_pct": round(delta_pct, 1) if delta_pct is not None else None,
+                "status": cs_status,
+            },
+        }
+        ctx = dict(job.context or {})
+        if submission.supplier_id and ctx.get("supplier_id") != submission.supplier_id:
+            ctx["supplier_id"] = submission.supplier_id
+            job.context = ctx
+        db.add(job)
+        db.commit()
+    except Exception:
+        log.exception("batch_confirm: checksum write failed for job %s", body.job_id)
+
+    return {
+        "status": "ok",
+        "submission_id": submission.id,
+        "line_count": line_count,
+        "skipped_count": skipped_count,
+        "errors": errors,
+        "unknown_brands": sorted(unknown_brands),
+        "supplier_id": submission.supplier_id,
+        "project_id": project.id if project else None,
+        "batch_id": batch_id,
+    }
