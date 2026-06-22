@@ -16,9 +16,6 @@ from apps.api.models.material import Material
 from apps.api.models.supplier import Supplier
 from apps.api.models.quote import Quote
 from apps.api.models.project import Project
-from apps.api.services.bid_matrix import build_anchor_matrix
-from apps.api.services.tender_session_service import get_finalization_snapshot
-
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 # ── Shared styles ────────────────────────────────────────────────────────────
@@ -249,85 +246,13 @@ def export_bid_matrix(
     """
     sids = parse_id_csv(supplier_ids, "supplier_ids")
 
-    # Prefer anchor-full-axis matrix when TenderListSession exists
-    result = None
+    from apps.api.services.bid_export_service import get_bid_matrix_for_export
     if project_id and category:
-        from apps.api.models.tender_list_session import TenderListSession
-        from apps.api.services.tender_list import TenderAnchor
-        from apps.api.services.canonical import extract_valve_canonical
-
-        session = (
-            db.query(TenderListSession)
-            .filter(
-                TenderListSession.project_id == project_id,
-                TenderListSession.category == category,
-                TenderListSession.is_current.is_(True),
-            )
-            .first()
-        )
-        if session and session.anchors_json:
-            # ── 硬闸门：用_submission_ids 必须已写入（与 /bid-matrix 保持一致）────
-            from apps.api.models.bid_submission import BidSubmission as _BSExport
-            _used_sids_export = list(session.used_submission_ids or [])
-            if not _used_sids_export:
-                _any_active_export = (
-                    db.query(_BSExport.id)
-                    .filter(
-                        _BSExport.project_id == project_id,
-                        _BSExport.status.notin_(("rejected", "superseded")),
-                    )
-                    .first()
-                )
-                if _any_active_export:
-                    raise HTTPException(
-                        409,
-                        "报价确认异常：项目存在 BidSubmission 但当前会话 used_submission_ids 为空。"
-                        "请重新执行「校对入库」→「对齐核查」后再导出矩阵。",
-                    )
-
-            anchors = []
-            for a in session.anchors_json:
-                ta = TenderAnchor(
-                    seq=int(a.get("seq") or 0),
-                    name=str(a.get("name") or ""),
-                    spec=str(a.get("spec") or ""),
-                    model=str(a.get("model") or ""),
-                    pressure=str(a.get("pressure") or ""),
-                    materials=dict(a.get("materials") or {}),
-                    unit=str(a.get("unit") or ""),
-                    qty=float(a.get("qty") or 0) or None,
-                    profession=str(a.get("profession") or ""),
-                )
-                stored_canon = a.get("canonical")
-                if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
-                    ta.canonical = stored_canon
-                else:
-                    ta.canonical = extract_valve_canonical(
-                        ta.name, ta.spec, ta.pressure, ta.material_text()
-                    )
-                anchors.append(ta)
-
-            # Use finalization snapshot so export matches the locked matrix on screen
-            fin = get_finalization_snapshot(db, project_id, category)
-            allowed_group_ids = set(fin.group_ids_json) if fin and fin.group_ids_json else None
-
-            result = build_anchor_matrix(
-                db, anchors=anchors,
-                tender_list_session_id=session.id,
-                used_submission_ids=_used_sids_export,
-                supplier_ids=sids,
-                project_id=project_id,
-                category=category,
-                allowed_group_ids=allowed_group_ids,
-            )
-
-    if result is None:
+        result = get_bid_matrix_for_export(db, project_id, category, sids)
+    else:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"项目 {project_id} / 品类 {category} 尚无已确认采购清单（TenderListSession）。"
-                "请先完成采购清单上传和确认步骤后再导出。"
-            ),
+            detail="必须同时提供 project_id 和 category 才能导出比价矩阵。",
         )
 
     wb = Workbook()
