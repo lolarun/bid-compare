@@ -94,3 +94,50 @@ def test_deactivate_current_marks_not_current(db_session):
     db_session.refresh(s)
     assert s.is_current is False
     assert s.superseded_at is not None
+
+
+# ── Second-slice helper tests ────────────────────────────────────────────────
+
+
+def test_get_any_current_confirmed_session_returns_most_recent(db_session):
+    _mk(db_session, project_id=10, category="阀门", version=1, is_current=False, status="confirmed")
+    s2 = _mk(db_session, project_id=10, category="桥架", version=1, is_current=True, status="confirmed")
+    got = svc.get_any_current_confirmed_session(db_session, 10)
+    assert got is not None and got.id == s2.id
+
+
+def test_get_any_current_confirmed_session_ignores_unconfirmed(db_session):
+    _mk(db_session, project_id=11, category="阀门", version=1, is_current=True, status="preview")
+    assert svc.get_any_current_confirmed_session(db_session, 11) is None
+
+
+def test_get_session_for_fill_by_explicit_id(db_session):
+    s = _mk(db_session, project_id=12, category="阀门", version=1, is_current=True, status="preview")
+    got = svc.get_session_for_fill(db_session, 12, "阀门", tls_id=s.id)
+    assert got is not None and got.id == s.id
+
+
+def test_get_session_for_fill_fallback_to_current(db_session):
+    s = _mk(db_session, project_id=13, category="阀门", version=1, is_current=True, status="preview")
+    got = svc.get_session_for_fill(db_session, 13, "阀门", tls_id=None)
+    assert got is not None and got.id == s.id
+
+
+def test_record_submission_scope_writes_ids(db_session):
+    s = _mk(db_session, project_id=14, category="阀门", version=1, is_current=True)
+    svc.record_submission_scope(db_session, s.id, sub_ids=[1, 3, 5], supplier_ids=[10, 20])
+    db_session.refresh(s)
+    assert s.used_submission_ids == [1, 3, 5]
+    assert s.confirmed_supplier_ids == [10, 20]
+
+
+def test_record_submission_scope_none_sub_ids_preserves_existing(db_session):
+    s = _mk(db_session, project_id=15, category="阀门", version=1, is_current=True)
+    # First call sets both
+    svc.record_submission_scope(db_session, s.id, sub_ids=[1, 2], supplier_ids=[10])
+    db_session.refresh(s)
+    # Second call with sub_ids=None should NOT clear used_submission_ids
+    svc.record_submission_scope(db_session, s.id, sub_ids=None, supplier_ids=[30])
+    db_session.refresh(s)
+    assert s.used_submission_ids == [1, 2]  # unchanged
+    assert s.confirmed_supplier_ids == [30]  # updated

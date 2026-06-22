@@ -170,3 +170,73 @@ def deactivate_current(
     updated = q.update({"is_current": False, "superseded_at": datetime.utcnow()})
     db.commit()
     return updated
+
+
+# ── Second-slice helpers (replaces remaining inline TLS queries in routes) ───
+
+
+def get_any_current_confirmed_session(db: Session, project_id: int):
+    """Return the most-recent confirmed current session for the project, any category.
+
+    Used as a fallback when the caller has not specified a category: e.g. the
+    match route finds whatever confirmed session the project currently has.
+    Prefer get_current_confirmed_session (category-scoped) when the category
+    is known.
+    """
+    return (
+        db.query(TenderListSession)
+        .filter(
+            TenderListSession.project_id == project_id,
+            TenderListSession.is_current.is_(True),
+            TenderListSession.status == "confirmed",
+        )
+        .order_by(TenderListSession.id.desc())
+        .first()
+    )
+
+
+def get_session_for_fill(
+    db: Session,
+    project_id: int,
+    category: str,
+    tls_id: int | None = None,
+) -> TenderListSession | None:
+    """Resolve session for the LLM-fill route.
+
+    When tls_id is provided, fetch by primary key (caller's explicit choice).
+    Otherwise fall back to the current is_current session for project+category
+    (any status — fill can work on unconfirmed sessions too).
+    """
+    if tls_id is not None:
+        return db.get(TenderListSession, tls_id)
+    return (
+        db.query(TenderListSession)
+        .filter(
+            TenderListSession.project_id == project_id,
+            TenderListSession.category == category,
+            TenderListSession.is_current.is_(True),
+        )
+        .first()
+    )
+
+
+def record_submission_scope(
+    db: Session,
+    tls_id: int,
+    sub_ids: list[int] | None,
+    supplier_ids: list[int] | None,
+) -> None:
+    """Persist the resolved submission scope onto TenderListSession after a match run.
+
+    Writes used_submission_ids (when sub_ids provided) and/or
+    confirmed_supplier_ids (when supplier_ids provided) then commits.
+    Callers that cannot determine sub_ids may still pass None to skip that field.
+    """
+    tls = db.get(TenderListSession, tls_id)
+    if tls is None:
+        return
+    if supplier_ids is not None:
+        tls.confirmed_supplier_ids = sorted(set(supplier_ids))
+    if sub_ids is not None:
+        tls.used_submission_ids = sorted(sub_ids)
+    db.commit()

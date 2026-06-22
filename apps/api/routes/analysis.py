@@ -948,17 +948,8 @@ async def tender_list_match(
         )
         if session is None and category is None:
             # category 未指定时回退：找该项目最新的已确认 session
-            from apps.api.models.tender_list_session import TenderListSession
-            session = (
-                db.query(TenderListSession)
-                .filter(
-                    TenderListSession.project_id == project_id,
-                    TenderListSession.is_current.is_(True),
-                    TenderListSession.status == "confirmed",
-                )
-                .order_by(TenderListSession.id.desc())
-                .first()
-            )
+            from apps.api.services.tender_session_service import get_any_current_confirmed_session
+            session = get_any_current_confirmed_session(db, project_id)
         if not session:
             raise HTTPException(
                 400,
@@ -1317,20 +1308,13 @@ async def tender_list_match(
 
     # v2.7+: persist used_submission_ids on TenderListSession
     if _tls_id:
-        from apps.api.models.tender_list_session import TenderListSession as _TLSup
-        _tls_obj = db.get(_TLSup, _tls_id)
-        if _tls_obj:
-            if sids:
-                _tls_obj.confirmed_supplier_ids = sorted(set(sids))
-            # submission_ids 显式传入时精确写入，保证 Gate 一致性；
-            # 否则从 per_supplier keys 推导（旧兼容路径）
-            if sub_ids:
-                _tls_obj.used_submission_ids = sorted(sub_ids)
-            else:
-                _tls_obj.used_submission_ids = sorted(
-                    k for k in per_supplier.keys() if k in sub_records
-                )
-            db.commit()
+        from apps.api.services.tender_session_service import record_submission_scope
+        # submission_ids 显式传入时精确写入，保证 Gate 一致性；
+        # 否则从 per_supplier keys 推导（旧兼容路径）
+        resolved_sub_ids = sorted(sub_ids) if sub_ids else sorted(
+            k for k in per_supplier.keys() if k in sub_records
+        )
+        record_submission_scope(db, _tls_id, resolved_sub_ids, sorted(set(sids)) if sids else None)
 
     result = summary.as_dict()
     result["readiness_list"] = readiness_list
@@ -1606,7 +1590,6 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     """
     import asyncio
     import os
-    from apps.api.models.tender_list_session import TenderListSession
     from apps.api.models import Supplier, Quote, Material
     from apps.api.models.alignment_finalization import AlignmentFinalization
     from apps.api.services.tender_list import rebuild_anchors
@@ -1619,14 +1602,10 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
         raise HTTPException(400, "v1 仅支持 mode='replace'")
 
     # 1. 解析 session + 重建锚点
-    sq = db.query(TenderListSession).filter(
-        TenderListSession.project_id == body.project_id,
-        TenderListSession.category == body.category,
+    from apps.api.services.tender_session_service import get_session_for_fill
+    session = get_session_for_fill(
+        db, body.project_id, body.category, tls_id=body.tender_list_session_id
     )
-    if body.tender_list_session_id is not None:
-        session = db.get(TenderListSession, body.tender_list_session_id)
-    else:
-        session = sq.filter(TenderListSession.is_current.is_(True)).first()
     if not session or not session.anchors_json:
         raise HTTPException(400, "未找到已确认的采购清单 (TenderListSession)")
 
@@ -2298,86 +2277,23 @@ def anchor_review_finalize(
 
     force=True 时必须提供 reason 字段。
     """
-    from apps.api.models.alignment_finalization import AlignmentFinalization
-    from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-    from sqlalchemy import func as _func
-    from datetime import datetime as _dt
+    from apps.api.services.alignment_service import finalize_alignment
 
-    if body.force and not body.reason:
-        raise HTTPException(400, "force=True 时必须提供 reason 字段")
-
-    # v2.5: item-level pending check (group.status is always "confirmed" now)
-    pending_count = (
-        db.query(_func.count(BidAlignmentItem.id))
-        .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
-        .filter(
-            BidAlignmentGroup.project_id == body.project_id,
-            BidAlignmentGroup.category == body.category,
-            BidAlignmentItem.action == "pending",
-        )
-        .scalar() or 0
-    )
-
-    if pending_count > 0 and not body.force:
-        raise HTTPException(
-            409,
-            f"仍有 {pending_count} 条 item 处于 pending 状态未处理。"
-            "请先逐条确认，或使用 force=true 强制完成（需提供原因）。",
-        )
-
-    # Safety gate: refuse finalization if align items still carry valve_type_conflict flag
-    fp_align_count = (
-        db.query(_func.count(BidAlignmentItem.id))
-        .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
-        .filter(
-            BidAlignmentGroup.project_id == body.project_id,
-            BidAlignmentGroup.category == body.category,
-            BidAlignmentGroup.status == "confirmed",
-            BidAlignmentItem.action == "align",
-            BidAlignmentItem.spec_note.like("%valve_type_conflict%"),
-        )
-        .scalar() or 0
-    )
-    if fp_align_count > 0 and not body.force:
-        raise HTTPException(
-            409,
-            f"存在 {fp_align_count} 条 align item 含阀型冲突标记，拒绝 finalize。"
-            "请重新运行 LLM 填表或使用 force=true 强制完成（需提供原因）。",
-        )
-
-    # 锁定当前 confirmed 组的 ID 快照
-    confirmed_groups = (
-        db.query(BidAlignmentGroup)
-        .filter(
-            BidAlignmentGroup.project_id == body.project_id,
-            BidAlignmentGroup.category == body.category,
-            BidAlignmentGroup.status == "confirmed",
-        )
-        .all()
-    )
-    group_ids = [g.id for g in confirmed_groups]
-
-    fin = AlignmentFinalization(
+    result = finalize_alignment(
+        db,
         project_id=body.project_id,
         category=body.category,
-        group_ids_json=group_ids,
-        status="finalized",
-        pending_at_finalize=pending_count,
-        finalized_by=body.finalized_by or None,
-        finalized_at=_dt.utcnow(),
-        forced=body.force,
-        force_reason=body.reason if body.force else None,
+        force=body.force,
+        reason=body.reason,
+        finalized_by=body.finalized_by,
     )
-    db.add(fin)
-    db.commit()
-    db.refresh(fin)
     return {
         "ok": True,
-        "id": fin.id,
+        "id": result.id,
         "status": "finalized",
-        "group_ids_count": len(group_ids),
-        "pending_at_finalize": pending_count,
-        "forced": body.force,
+        "group_ids_count": result.group_ids_count,
+        "pending_at_finalize": result.pending_at_finalize,
+        "forced": result.forced,
     }
 
 
