@@ -59,7 +59,7 @@ class _BQLMatProxy:
 # 余弦低于此视为无可信锚点(与测量脚本一致)
 SIM_THRESHOLD = 0.50
 # 低于此标记为低置信、建议复核(写入 reason,前端可高亮)
-LOW_CONF = 0.70
+from apps.api.core.domain_config import MATCH_LOW_CONFIDENCE_THRESHOLD as LOW_CONF
 EMBED_MODEL = "text-embedding-v3"
 _EMBED_BATCH = 10
 

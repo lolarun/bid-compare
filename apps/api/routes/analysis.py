@@ -498,7 +498,7 @@ def anchor_review_matrix(
     project_id: int = Query(...),
     category: str = Query(...),
     submission_ids: str | None = Query(None),  # 逗号分隔的 BidSubmission ID（优先）
-    supplier_ids: str | None = Query(None),     # deprecated: 已忽略
+    supplier_ids: str | None = Query(None),     # deprecated: 遗留兼容路径，submission_ids 优先
     db: Session = Depends(get_db),
 ):
     """采购清单维度对齐复核矩阵 — 一行一个采购锚点，N列供应商。
@@ -506,6 +506,8 @@ def anchor_review_matrix(
     submission_ids: 本次比价的 BidSubmission ID 集合（§7 authoritative column identity）。
     若不传，从当前 TenderListSession.used_submission_ids 恢复。
     两者均为空 → 400，禁止拉历史全量供应商。
+    supplier_ids: 遗留兼容参数。submission_ids 存在时被忽略；仅当 submission_ids 和
+    session.used_submission_ids 均为空时才作为降级路径使用。新客户端请传 submission_ids。
     """
     from apps.api.services.bid_matrix import build_anchor_review_matrix
 
@@ -566,8 +568,6 @@ def anchor_review(
     from apps.api.models.material import Material as MaterialModel
     from apps.api.models.supplier import Supplier as SupplierModel
     from apps.api.services.bid_submission_resolve import resolve_active_submissions
-
-    LOW_CONF = 0.70
 
     sub_ids: list[int] | None = parse_id_csv(submission_ids, "submission_ids") if submission_ids else None
     sids: list[int] | None = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
@@ -1003,11 +1003,7 @@ async def tender_list_match(
                     _tls_id = s.id
             db.commit()
             # 用本品类锚点匹配(避免拿全清单跨品类误配)
-            cur = db.query(_TLS).filter(
-                _TLS.project_id == project_id,
-                _TLS.category == category,
-                _TLS.is_current.is_(True),
-            ).first()
+            cur = tender_session_service.get_current_session(db, category, project_id=project_id)
             if cur:
                 prebuilt_anchors = rebuild_anchors(cur)
 

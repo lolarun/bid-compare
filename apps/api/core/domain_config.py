@@ -27,3 +27,6 @@ MATCH_MAX_LINE_CONCENTRATION: float = 0.60
 
 # Declared-total tolerance: 3% before raising a completeness flag
 MATCH_DECLARED_TOTAL_TOLERANCE: float = 0.03
+
+# Cosine similarity below this value is flagged as low-confidence match (→ pending)
+MATCH_LOW_CONFIDENCE_THRESHOLD: float = 0.70
