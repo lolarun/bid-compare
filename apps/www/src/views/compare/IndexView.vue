@@ -1377,35 +1377,52 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
 
 async function removeBatchEntry(entry: BatchFileEntry) {
   if (entry.pollTimer) clearInterval(entry.pollTimer)
-  // 已入库 → 调用后端软删除（标记 superseded），否则仅去掉前端卡片
-  if (entry.confirmed && entry.confirmedSubmissionId != null) {
-    try {
+  // 已入库 → supersede submission；在途/失败（有 jobId 无 submission）→ 标记 job removed；
+  // 二者皆持久化到后端，避免刷新后 compare-state 把卡片再拉回来。
+  try {
+    if (entry.confirmed && entry.confirmedSubmissionId != null) {
       await quoteApi.supersedeSubmission(entry.confirmedSubmissionId)
       message.success('已移除该报价')
-    } catch (e: unknown) {
-      message.error(extractErrMsg(e, '移除失败'))
-      return
+    } else if (entry.jobId) {
+      await quoteApi.removeJob(entry.jobId)
     }
+  } catch (e: unknown) {
+    message.error(extractErrMsg(e, '移除失败'))
+    return
   }
   batchFiles.value = batchFiles.value.filter((f) => f.id !== entry.id)
 }
 
-// 一键移除：清空当前项目下全部供应商报价（已入库的标记 superseded，可复活）
+// 一键移除：清空当前项目下全部供应商报价。
+// - 已入库：项目级 supersede（可复活）。
+// - 在途失败/已识别待确认（非运行中）：逐个标记 job removed。
+// - 运行中（识别未完）：保留，不强制中断后台线程。
 async function removeAllBatchEntries() {
-  for (const f of batchFiles.value) {
-    if (f.pollTimer) clearInterval(f.pollTimer)
-  }
   const pid = taskConfig.projectId
   if (pid) {
     try {
       const { data } = await quoteApi.supersedeProjectSubmissions(pid)
-      message.success(`已移除全部报价（${data.count} 条）`)
+      message.success(`已移除全部已入库报价（${data.count} 条）`)
     } catch (e: unknown) {
       message.error(extractErrMsg(e, '一键移除失败'))
       return
     }
   }
-  batchFiles.value = []
+  // 非运行中的在途任务（失败/已识别待确认）→ 标记 removed
+  const inflightDone = batchFiles.value.filter(
+    (f) => !f.confirmed && f.jobId && (f.status === 'failed' || f.status === 'done'),
+  )
+  for (const f of inflightDone) {
+    try { await quoteApi.removeJob(f.jobId!) } catch { /* best-effort */ }
+  }
+  // 清理 UI：移除已入库 + 已处理在途；保留运行中的卡片（及其轮询）
+  for (const f of batchFiles.value) {
+    const keep = !f.confirmed && (f.status === 'uploading' || f.status === 'processing')
+    if (!keep && f.pollTimer) clearInterval(f.pollTimer)
+  }
+  batchFiles.value = batchFiles.value.filter(
+    (f) => !f.confirmed && (f.status === 'uploading' || f.status === 'processing'),
+  )
 }
 
 // 从文件名中提取供应商名称提示（用于冲突检测）

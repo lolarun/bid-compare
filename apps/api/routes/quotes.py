@@ -230,6 +230,25 @@ def supersede_project_submissions(
     return {"superseded_ids": ids, "count": len(ids)}
 
 
+@router.delete("/jobs/{job_id}")
+def remove_job(job_id: str, db: Session = Depends(get_db)):
+    """移除在途/失败的识别任务：标记 ExtractionJob.lifecycle=removed（软删，不物删）。
+
+    用于失败或"已识别待确认"的报价文件卡片移除（这类 job 无 BidSubmission，
+    不走 supersede 路径）。compare-state 据此不再作为在途返回。
+    注意：若任务仍 running，仅隐藏，不强制中断后台线程（避免半完成状态）。
+    """
+    job = db.get(ExtractionJob, job_id)
+    if job is None:
+        raise HTTPException(404, f"Job {job_id} not found")
+    if job.lifecycle == "removed":
+        return {"job_id": job_id, "lifecycle": "removed", "already": True}
+    job.lifecycle = "removed"
+    db.commit()
+    log.info("remove_job: job_id=%s → removed (ocr_status=%s)", job_id, job.status)
+    return {"job_id": job_id, "lifecycle": "removed", "already": False}
+
+
 # ─── Stats (must be before /{quote_id} to avoid route conflict) ────────────
 
 @router.get("/stats", response_model=dict)

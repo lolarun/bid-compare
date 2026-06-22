@@ -101,6 +101,11 @@ export const quoteApi = {
     api.delete<{ superseded_ids: number[]; count: number }>('/quotes/submissions', {
       params: { project_id: projectId },
     }),
+  // 移除在途/失败的识别任务（无 submission）：标记 job lifecycle=removed
+  removeJob: (jobId: string) =>
+    api.delete<{ job_id: string; lifecycle: string; already: boolean }>(
+      `/quotes/jobs/${jobId}`,
+    ),
   import: (formData: FormData) =>
     api.post<ImportResult>('/quotes/import', formData, {
       // Don't set Content-Type explicitly — axios will add the

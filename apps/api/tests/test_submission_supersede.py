@@ -161,3 +161,33 @@ def test_compare_state_excludes_removed_job_keeps_inflight(client, db_session):
     assert removed_sub.job_id not in [j["job_id"] for j in after["inflight_jobs"]]
     # 真正在途的：仍然显示
     assert "job-cs-inflight" in [j["job_id"] for j in after["inflight_jobs"]]
+
+
+def test_remove_failed_inflight_job(client, db_session):
+    """失败/在途 job（无 submission）可经 DELETE /quotes/jobs/{id} 移除，
+    标记 removed 后 compare-state 不再返回；幂等；404。"""
+    proj = Project(name="P-job", code="PJ-1")
+    db_session.add(proj)
+    db_session.commit()
+    pid = proj.id
+    db_session.add(ExtractionJob(
+        id="job-failed-1", type="quote", status="failed", lifecycle="active",
+        filename="失败.pdf", context={"project_id": pid},
+    ))
+    db_session.commit()
+
+    # 移除前在途可见
+    r0 = client.get("/api/analysis/compare-state", params={"project_id": pid})
+    assert "job-failed-1" in [j["job_id"] for j in r0.json()["inflight_jobs"]]
+
+    r = client.delete("/api/quotes/jobs/job-failed-1")
+    assert r.status_code == 200 and r.json()["already"] is False
+    assert db_session.get(ExtractionJob, "job-failed-1").lifecycle == "removed"
+
+    # 移除后不再作为在途返回
+    r1 = client.get("/api/analysis/compare-state", params={"project_id": pid})
+    assert "job-failed-1" not in [j["job_id"] for j in r1.json()["inflight_jobs"]]
+
+    # 幂等 + 404
+    assert client.delete("/api/quotes/jobs/job-failed-1").json()["already"] is True
+    assert client.delete("/api/quotes/jobs/nope").status_code == 404
