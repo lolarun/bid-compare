@@ -292,226 +292,6 @@ def _build_material_row(
         "recommended": recommended,
     }
 
-
-def _build_alignment_row(
-    db: Session,
-    ag: BidAlignmentGroup,
-    supplier_ids: list[int],
-    project_id: int | None,
-    tier_filter: str | None,
-    letter_map: dict[int, str],
-) -> dict | None:
-    """Build a matrix row from an alignment group (AI-confirmed grouping)."""
-    # Build lookup: supplier_id → (item, _ItemData)
-    item_by_supplier: dict[int, tuple] = {}
-    for item in ag.items:
-        if item.action != "align":
-            continue
-        data = _get_item_data(db, item)
-        if data and data.unit_price and data.unit_price > 0:
-            sid = item.supplier_id
-            existing = item_by_supplier.get(sid)
-            if existing is None or data.unit_price < existing[1].unit_price:
-                item_by_supplier[sid] = (item, data)
-
-    if not item_by_supplier:
-        return None
-
-    # Use the first aligned item's material for baseline lookups
-    first_data = next(iter(item_by_supplier.values()))[1]
-    mat = db.get(Material, first_data.material_id) if first_data.material_id else None
-    mat_category = mat.category if mat else ag.category
-
-    historical_avg, reasonable_low_info = _compute_row_baselines(
-        db, mat_category, mat.sub_category if mat else None, tier_filter,
-    )
-    thresholds = get_category_thresholds(db, mat_category)
-    reasonable_low_price = reasonable_low_info["price"] if reasonable_low_info else None
-
-    supplier_cells = []
-    prices_this_row = []
-
-    for sid in supplier_ids:
-        pair = item_by_supplier.get(sid)
-        if pair:
-            item, qt = pair
-            # Use aggregated pricing when available (multi-row same-canonical aggregation)
-            if item.agg_total is not None and item.agg_qty:
-                price = round(item.agg_total / item.agg_qty, 4)
-                total = round(item.agg_total, 2)
-            else:
-                price = qt.unit_price
-                total = round(price * (qt.quantity or 1), 2) if price else None
-            dev = round((price - reasonable_low_price) / reasonable_low_price, 4) if reasonable_low_price else None
-            alert = determine_alert(dev, thresholds) if dev is not None else "normal"
-            prices_this_row.append((sid, price, dev))
-            supplier_cells.append({
-                "supplier_id": sid,
-                "price": price,
-                "total": total,
-                "deviation_pct": dev,
-                "alert_level": alert,
-                "is_lowest": False,
-            })
-        else:
-            supplier_cells.append({
-                "supplier_id": sid,
-                "price": None,
-                "total": None,
-                "deviation_pct": None,
-                "alert_level": "normal",
-                "is_lowest": False,
-            })
-
-    min_deviation, recommended = _finalize_row(supplier_cells, prices_this_row, letter_map)
-
-    return {
-        "material_id": first_qt.material_id,  # reference material
-        "material_name": ag.suggested_name,  # use aligned name
-        "spec": ag.suggested_spec,  # use aligned spec
-        "historical_avg": historical_avg,
-        "reasonable_low": reasonable_low_info,
-        "suppliers": supplier_cells,
-        "min_deviation": min_deviation,
-        "recommended": recommended,
-    }
-
-
-def build_bid_matrix(
-    db: Session,
-    supplier_ids: list[int],
-    project_id: int | None = None,
-    material_ids: list[int] | None = None,
-    category: str | None = None,
-    allowed_group_ids: set[int] | None = None,
-) -> dict:
-    """Build the horizontal bid comparison matrix.
-
-    Args:
-        supplier_ids: 参与比价的供应商 ID 列表
-        project_id: 当前比价项目（可选）
-        material_ids: 限定物料范围（可选，None=全部）
-        category: 限定品类（可选）
-    """
-    # ── 1. 确定供应商标签 (A/B/C/D...) ────────────────────────────────────
-    letters = list(string.ascii_uppercase)
-    supplier_labels = []
-    for i, sid in enumerate(supplier_ids):
-        sup = db.get(Supplier, sid)
-        if sup:
-            supplier_labels.append({
-                "id": sid,
-                "letter": letters[i] if i < len(letters) else str(i + 1),
-                "name": sup.name,
-            })
-    letter_map = {sl["id"]: sl["letter"] for sl in supplier_labels}
-
-    # ── 2. 确定需要比价的物料列表 ────────────────────────────────────────
-    if material_ids:
-        materials = [db.get(Material, mid) for mid in material_ids if db.get(Material, mid)]
-    else:
-        # 从这些供应商在该项目的报价中获取物料
-        q = db.query(Quote.material_id).filter(
-            Quote.supplier_id.in_(supplier_ids),
-            Quote.unit_price > 0,
-        )
-        if project_id:
-            q = q.filter(Quote.project_id == project_id)
-        if category:
-            q = q.join(Material).filter(Material.category == category)
-        mid_set = {r[0] for r in q.distinct().all()}
-        materials = [db.get(Material, mid) for mid in mid_set if db.get(Material, mid)]
-
-    if not materials:
-        return {
-            "project_id": project_id,
-            "suppliers": supplier_labels,
-            "rows": [],
-            "totals": [],
-        }
-
-    # ── 2.5 Brand-tier-aware baseline for single-supplier comparison ──────
-    tier_filter = _detect_brand_tier_filter(db, supplier_ids, category or "", project_id)
-
-    # ── 2.6 Load confirmed alignment groups ─────────────────────────────
-    alignment_groups: list[BidAlignmentGroup] = []
-    aligned_quote_ids: set[int] = set()
-    if project_id and category:
-        q = db.query(BidAlignmentGroup).filter(
-            BidAlignmentGroup.project_id == project_id,
-            BidAlignmentGroup.category == category,
-            BidAlignmentGroup.status == "confirmed",
-        )
-        if allowed_group_ids is not None:
-            q = q.filter(BidAlignmentGroup.id.in_(allowed_group_ids))
-        alignment_groups = q.all()
-        for ag in alignment_groups:
-            for item in ag.items:
-                if item.action == "align" and item.quote_id is not None:
-                    aligned_quote_ids.add(item.quote_id)
-
-    # ── 3. 按物料构建矩阵行 ───────────────────────────────────────────────
-    rows = []
-
-    # 3a. Rows from alignment groups (take priority)
-    for ag in alignment_groups:
-        row = _build_alignment_row(
-            db, ag, supplier_ids, project_id, tier_filter, letter_map,
-        )
-        if row:
-            rows.append(row)
-
-    # 3b. Rows from unaligned materials (skip quotes already in alignment groups)
-    for mat in materials:
-        row = _build_material_row(
-            db, mat, supplier_ids, project_id, tier_filter, letter_map,
-            aligned_quote_ids=aligned_quote_ids,
-        )
-        if row:
-            rows.append(row)
-
-    # ── 4. 汇总 totals ────────────────────────────────────────────────────
-    supplier_totals: dict[int, dict] = {
-        sid: {"total": 0.0, "devs": [], "quoted": 0, "anomalies": 0}
-        for sid in supplier_ids
-    }
-    for row in rows:
-        for cell in row["suppliers"]:
-            sid = cell["supplier_id"]
-            if cell["price"] is not None:
-                supplier_totals[sid]["quoted"] += 1
-            if cell["total"] is not None:
-                supplier_totals[sid]["total"] += cell["total"]
-            if cell["deviation_pct"] is not None:
-                supplier_totals[sid]["devs"].append(cell["deviation_pct"])
-            if cell["alert_level"] == "red":
-                supplier_totals[sid]["anomalies"] += 1
-
-    totals = []
-    for sid in supplier_ids:
-        data = supplier_totals[sid]
-        avg_dev = sum(data["devs"]) / len(data["devs"]) if data["devs"] else 0.0
-        cs = _get_supplier_checksum(db, sid, project_id)
-        totals.append({
-            "supplier_id": sid,
-            "total": round(data["total"], 2),
-            "avg_deviation": round(avg_dev, 4),
-            "quoted_count": data["quoted"],
-            "anomaly_count": data["anomalies"],
-            "declared_total": cs.get("declared"),
-            "checksum_delta_pct": cs.get("delta_pct"),
-            "checksum_status": cs.get("status"),
-        })
-
-    return {
-        "project_id": project_id,
-        "suppliers": supplier_labels,
-        "rows": rows,
-        "totals": totals,
-        "brand_tier_filter": tier_filter,
-    }
-
-
 def _parse_cosine_from_note(spec_note: str | None) -> float | None:
     """Extract 'cos=0.XX' from spec_note string."""
     if not spec_note:
@@ -871,7 +651,10 @@ def _compute_recommendation(
     else:
         level = "conditional"
         reasons.append("已得确定性『评标总价排名』与『价格优选候选人』")
-        reasons.append("招标文件为合理低价评标价法且未给评分权重 → 综合评审需招标领导小组确认，非自动中标")
+        if policy.method == "unknown":
+            reasons.append("评标法尚未确认 → 价格排名仅供参考，定标需人工确认招标文件评标法后方可进行")
+        else:
+            reasons.append("招标文件为合理低价评标价法且未给评分权重 → 综合评审需招标领导小组确认，非自动中标")
 
     # 非价格八项因素证据：系统无结构化证据 → 一律 missing（待评标小组）
     non_price = [{"factor": f, "evidence_status": "missing"} for f in policy.factors if f != "价格"]
@@ -1301,20 +1084,11 @@ def build_anchor_review_matrix(
 
     submission_ids takes precedence. At least one of the two must be non-empty.
     """
-    from apps.api.models.tender_list_session import TenderListSession
     from apps.api.models.bid_submission import BidSubmission
     from apps.api.services.tender_list import rebuild_anchors
+    from apps.api.services.session_helpers import get_current_confirmed_session
 
-    session = (
-        db.query(TenderListSession)
-        .filter(
-            TenderListSession.project_id == project_id,
-            TenderListSession.category == category,
-            TenderListSession.is_current == True,  # noqa: E712
-            TenderListSession.status == "confirmed",
-        )
-        .first()
-    )
+    session = get_current_confirmed_session(db, project_id, category)
     if not session:
         raise ValueError(f"No current TenderListSession for project {project_id} / {category}")
 

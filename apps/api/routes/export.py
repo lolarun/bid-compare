@@ -11,11 +11,13 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.utils import parse_id_csv
 from apps.api.models.material import Material
 from apps.api.models.supplier import Supplier
 from apps.api.models.quote import Quote
 from apps.api.models.project import Project
-from apps.api.services.bid_matrix import build_bid_matrix, build_anchor_matrix
+from apps.api.services.bid_matrix import build_anchor_matrix
+from apps.api.services.session_helpers import get_finalization_snapshot
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
@@ -245,7 +247,7 @@ def export_bid_matrix(
 
     v2.5: 优先使用锚点全量矩阵（TenderListSession）；无 session 时 fallback 旧逻辑。
     """
-    sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
+    sids = parse_id_csv(supplier_ids, "supplier_ids")
 
     # Prefer anchor-full-axis matrix when TenderListSession exists
     result = None
@@ -306,17 +308,7 @@ def export_bid_matrix(
                 anchors.append(ta)
 
             # Use finalization snapshot so export matches the locked matrix on screen
-            from apps.api.models.alignment_finalization import AlignmentFinalization
-            fin = (
-                db.query(AlignmentFinalization)
-                .filter(
-                    AlignmentFinalization.project_id == project_id,
-                    AlignmentFinalization.category == category,
-                    AlignmentFinalization.status == "finalized",
-                )
-                .order_by(AlignmentFinalization.created_at.desc())
-                .first()
-            )
+            fin = get_finalization_snapshot(db, project_id, category)
             allowed_group_ids = set(fin.group_ids_json) if fin and fin.group_ids_json else None
 
             result = build_anchor_matrix(
@@ -330,24 +322,12 @@ def export_bid_matrix(
             )
 
     if result is None:
-        # Fallback non-anchor path also respects finalization snapshot
-        fallback_allowed = None
-        if project_id and category:
-            from apps.api.models.alignment_finalization import AlignmentFinalization
-            fin = (
-                db.query(AlignmentFinalization)
-                .filter(
-                    AlignmentFinalization.project_id == project_id,
-                    AlignmentFinalization.category == category,
-                    AlignmentFinalization.status == "finalized",
-                )
-                .order_by(AlignmentFinalization.created_at.desc())
-                .first()
-            )
-            fallback_allowed = set(fin.group_ids_json) if fin and fin.group_ids_json else None
-        result = build_bid_matrix(
-            db, supplier_ids=sids, project_id=project_id, category=category,
-            allowed_group_ids=fallback_allowed,
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"项目 {project_id} / 品类 {category} 尚无已确认采购清单（TenderListSession）。"
+                "请先完成采购清单上传和确认步骤后再导出。"
+            ),
         )
 
     wb = Workbook()

@@ -27,18 +27,18 @@ from apps.api.services.statistics import (
     get_dashboard_heatmap,
     get_dashboard_bubble,
 )
-from apps.api.services.bid_matrix import build_bid_matrix
 from apps.api.services.bid_insight import generate_bid_insight
 from apps.api.core.config import get_settings
-
-# ── Quality gate constants ────────────────────────────────────────────────────
-# Eligible row = raw_name not a summary/header AND at least one numeric field present.
-MATCH_PRICE_COVERAGE_THRESHOLD     = 0.80   # min fraction of eligible rows with unit_price > 0
-MATCH_ARITHMETIC_MAX_ERROR_RATE    = 0.05   # max fraction of evaluable rows with hard arithmetic error
-MATCH_ARITHMETIC_VAT_TOLERANCE     = 0.125  # 11.5% (=13%/113%) + 1% rounding allowance
-MATCH_VAT_MISMATCH_BLOCK_RATE      = 0.20   # systematic VAT mismatch if >20% rows at ~11-12.5% dev
-MATCH_MAX_LINE_CONCENTRATION       = 0.60   # single row total must not exceed 60% of sum of all totals
-MATCH_DECLARED_TOTAL_TOLERANCE     = 0.03   # 3% tolerance when declared_total is available
+from apps.api.core.utils import parse_id_csv
+from apps.api.core.domain_config import (
+    MATCH_PRICE_COVERAGE_THRESHOLD,
+    MATCH_ARITHMETIC_MAX_ERROR_RATE,
+    MATCH_ARITHMETIC_VAT_TOLERANCE,
+    MATCH_VAT_MISMATCH_BLOCK_RATE,
+    MATCH_MAX_LINE_CONCENTRATION,
+    MATCH_DECLARED_TOTAL_TOLERANCE,
+)
+from apps.api.services.session_helpers import get_current_confirmed_session, get_finalization_snapshot
 
 _SUMMARY_NAME_PAT = _re.compile(
     r"合计|小计|说明|备注|合计金额|总价|total|subtotal", _re.IGNORECASE
@@ -87,22 +87,11 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
     (all tender list anchors as rows, cells have cell_status).
     Falls back to original quote-driven matrix when no session found.
     """
-    from apps.api.models.alignment_finalization import AlignmentFinalization
-
     allowed_group_ids = None
     not_finalized_warning = None
 
     if body.project_id and body.category:
-        fin = (
-            db.query(AlignmentFinalization)
-            .filter(
-                AlignmentFinalization.project_id == body.project_id,
-                AlignmentFinalization.category == body.category,
-                AlignmentFinalization.status == "finalized",
-            )
-            .order_by(AlignmentFinalization.created_at.desc())
-            .first()
-        )
+        fin = get_finalization_snapshot(db, body.project_id, body.category)
         if fin and fin.group_ids_json:
             allowed_group_ids = set(fin.group_ids_json)
         else:
@@ -118,19 +107,10 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
     # v2.5: prefer anchor-full-axis matrix when TenderListSession exists
     result = None
     if body.project_id and body.category:
-        from apps.api.models.tender_list_session import TenderListSession
         from apps.api.services.tender_list import rebuild_anchors
         from apps.api.services.bid_matrix import build_anchor_matrix
 
-        session = (
-            db.query(TenderListSession)
-            .filter(
-                TenderListSession.project_id == body.project_id,
-                TenderListSession.category == body.category,
-                TenderListSession.is_current.is_(True),
-            )
-            .first()
-        )
+        session = get_current_confirmed_session(db, body.project_id, body.category)
         if session and session.anchors_json:
             anchors = rebuild_anchors(session)
 
@@ -226,17 +206,11 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                 ),
             )
 
-    # Fallback: no project_id or no category — legacy quote-driven mode
     if result is None:
-        result = build_bid_matrix(
-            db,
-            supplier_ids=body.supplier_ids,
-            project_id=body.project_id,
-            material_ids=body.material_ids,
-            category=body.category,
-            allowed_group_ids=allowed_group_ids,
+        raise HTTPException(
+            status_code=400,
+            detail="project_id 和 category 均为必填项。请先完成采购清单上传和确认步骤。",
         )
-        result["anchor_matrix"] = False
 
     if not_finalized_warning:
         result["not_finalized_warning"] = not_finalized_warning
@@ -530,31 +504,19 @@ def anchor_review_matrix(
     两者均为空 → 400，禁止拉历史全量供应商。
     """
     from apps.api.services.bid_matrix import build_anchor_review_matrix
-    from apps.api.models.tender_list_session import TenderListSession as _TLS
 
     sids: list[int] | None = None
     _use_submission = True  # new BID path by default
 
     if submission_ids:
-        try:
-            sids = [int(x) for x in submission_ids.split(",") if x.strip()]
-            _use_submission = True
-        except ValueError:
-            raise HTTPException(400, "submission_ids 须为逗号分隔的整数")
+        sids = parse_id_csv(submission_ids, "submission_ids")
+        _use_submission = True
     elif supplier_ids:
-        try:
-            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
-            _use_submission = False  # explicit legacy supplier scope
-        except ValueError:
-            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
+        sids = parse_id_csv(supplier_ids, "supplier_ids")
+        _use_submission = False  # explicit legacy supplier scope
     if not sids:
         # Recover from session scope — new BID path first, legacy fallback
-        _s = db.query(_TLS).filter(
-            _TLS.project_id == project_id,
-            _TLS.category == category,
-            _TLS.is_current == True,  # noqa: E712
-            _TLS.status == "confirmed",
-        ).first()
+        _s = get_current_confirmed_session(db, project_id, category)
         if _s and _s.used_submission_ids:
             sids = list(_s.used_submission_ids)
             _use_submission = True
@@ -583,14 +545,14 @@ def anchor_review_matrix(
 def anchor_review(
     project_id: int = Query(...),
     category: str = Query(...),
-    supplier_ids: str | None = Query(None),  # 逗号分隔的供应商 ID
+    supplier_ids: str | None = Query(None, description="[DEPRECATED] 改用 submission_ids"),
     db: Session = Depends(get_db),
 ):
     """人工复核:返回低置信锚点组 + 残差报价,含供应商/物料名称。
 
     低置信 = group.confidence < 0.70。
     残差   = 本项目/品类的报价中未出现在任何对齐组里的条目。
-    supplier_ids: 提供时只统计这些供应商的报价，防历史数据污染。
+    supplier_ids: [DEPRECATED] 历史兼容，优先从 TenderListSession 恢复 submission 范围。
     """
     import re as _re
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
@@ -600,21 +562,10 @@ def anchor_review(
 
     LOW_CONF = 0.70
 
-    sids: list[int] | None = None
-    if supplier_ids:
-        try:
-            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
-        except ValueError:
-            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
+    sids: list[int] | None = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
 
-    # v2.7: resolve supplier scope from session if not provided; hard-block if still empty
-    from apps.api.models.tender_list_session import TenderListSession as _TLSA
-    _cur_session = db.query(_TLSA).filter(
-        _TLSA.project_id == project_id,
-        _TLSA.category == category,
-        _TLSA.is_current == True,  # noqa: E712
-        _TLSA.status == "confirmed",
-    ).first()
+    # resolve supplier scope from session if not provided
+    _cur_session = get_current_confirmed_session(db, project_id, category)
     if not sids and _cur_session and _cur_session.confirmed_supplier_ids:
         sids = [int(x) for x in _cur_session.confirmed_supplier_ids]
     if not sids:
@@ -963,32 +914,31 @@ async def tender_list_match(
         if not content:
             raise HTTPException(400, "Empty file upload")
 
-    sids = None
-    if supplier_ids:
-        try:
-            sids = [int(x) for x in supplier_ids.split(",") if x.strip()]
-        except ValueError:
-            raise HTTPException(400, "supplier_ids 须为逗号分隔的整数")
-
-    sub_ids = None
-    if submission_ids:
-        try:
-            sub_ids = [int(x) for x in submission_ids.split(",") if x.strip()]
-        except ValueError:
-            raise HTTPException(400, "submission_ids 须为逗号分隔的整数")
+    sids = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
+    sub_ids = parse_id_csv(submission_ids, "submission_ids") if submission_ids else None
 
     # If no file provided, reconstruct anchors from current TenderListSession (issue 6)
     prebuilt_anchors = None
     if content is None:
-        from apps.api.models.tender_list_session import TenderListSession
         from apps.api.services.tender_list import rebuild_anchors
-        tls_q = db.query(TenderListSession).filter(
-            TenderListSession.project_id == project_id,
-            TenderListSession.is_current.is_(True),
+        session = (
+            get_current_confirmed_session(db, project_id, category)
+            if category
+            else None
         )
-        if category:
-            tls_q = tls_q.filter(TenderListSession.category == category)
-        session = tls_q.order_by(TenderListSession.id.desc()).first()
+        if session is None and category is None:
+            # category 未指定时回退：找该项目最新的已确认 session
+            from apps.api.models.tender_list_session import TenderListSession
+            session = (
+                db.query(TenderListSession)
+                .filter(
+                    TenderListSession.project_id == project_id,
+                    TenderListSession.is_current.is_(True),
+                    TenderListSession.status == "confirmed",
+                )
+                .order_by(TenderListSession.id.desc())
+                .first()
+            )
         if not session:
             raise HTTPException(
                 400,
@@ -1008,15 +958,10 @@ async def tender_list_match(
         # (closes the gap where match ran but no session was persisted → matrix 409).
         if not category:
             raise HTTPException(400, "上传招标清单时必须指定 category（品类）")
-        from apps.api.models.tender_list_session import TenderListSession as _TLS
         from apps.api.services.tender_list import (
             parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
         )
-        _s = db.query(_TLS).filter(
-            _TLS.project_id == project_id,
-            _TLS.category == category,
-            _TLS.is_current.is_(True),
-        ).first()
+        _s = get_current_confirmed_session(db, project_id, category)
         if _s:
             _tls_id = _s.id
             # 用该品类 session 的锚点匹配(避免重解析整份多品类文件跨品类误配)
