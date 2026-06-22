@@ -1,6 +1,6 @@
 # MEMPAS 工程待办（后端架构 / 技术债）
 
-> 最后更新：2026-06-22（P1-6/P2-3/P1-3+P1-4 完成）
+> 最后更新：2026-06-23（§7.3/§10.3/§10.4/§11.2/§11.3/§11.4/§11.5 完成）
 > 范围：后端架构整改与技术债。**产品功能 / UI / 客户反馈待办见 [`docs/TODO.md`](docs/TODO.md)**，两者不重叠。
 > 权威依据：[`docs/design/12-招标比价后端审计与整改.md`](docs/design/12-招标比价后端审计与整改.md)（下称「审计12」）。
 > 本文件只列**已决定延后**或**未完成**的项；已交付项见各 commit 与审计12 §8。
@@ -85,26 +85,40 @@ P1-1 抽了 confirm/export/finalize 等 7 个服务，**唯独漏了 match 和 l
 
 ## 3. 第三批：结构治理（审计12 §7.3 / §10 / §11）
 
-- [ ] **§10.3 `bid_matrix.py` 拆分**：矩阵 + 评标 `_evaluate_cell` + 推荐门禁 `_compute_recommendation` + 基准 + 族归一混在一处。
-  拆 `bid_evaluation.py` / `bid_recommendation.py` / `matrix_cell.py`。这是 P1-1 BidMatrixService 留下的「第三批」尾巴。
+- [x] **§7.3 工作区卫生** —— **2026-06-23 完成**
+  `.gitignore` 新增 `scripts/`、`tmp/`；`.claude/rules/`、`.claude/plans/`、根目录 `tests/` 已提交。
 
-- [ ] **§10.4 / §10.5 状态三轴枚举统一**（标注为「最高 ROI 的命名整改」，但范围大）
-  同一三态被写成 7 套词汇且大小写不一（`BLOCKED` vs `blocked` 最易出 bug）。`status` 一词被生命周期 / 存在性 / 可评标性三条正交轴共用。
-  方案：三轴各起名 `lifecycle_state` / `presence` / `evaluability`，集中 `core/enums.py`，三态主词收敛到 `AUTO/REVIEW/BLOCKED`。涉及 ORM 列 / API 契约 / 前端，需迁移 + 前端同步（审计12 归为第二/三批，因体量大延后）。
+- [x] **§10.3 `bid_matrix.py` 拆分** —— **2026-06-23 完成**（commit `1bb54e2`）
+  - `bid_evaluation.py`：`_evaluate_cell` + 4 帮助函数（`_anchor_spec/_canon_family/_pending_is_qty_only/_EVAL_QTY_TOL`）
+  - `bid_recommendation.py`：`_compute_recommendation`
+  - `bid_matrix.py`：1291→890 行，保留 re-export 供测试向后兼容
+  - 剩余可做（低优先级）：`_build_cell_for_supplier` 抽 `matrix_cell.py`；两处 `agg_total/agg_qty` helper
 
-- [ ] **§11.2 软外键补正**：`bid_alignment.tender_list_session_id`、`BidAlignmentItem.submission_id`、`alignment_finalization.project_id`、`bid_matrix_version.project_id` 为裸 `Integer`，随 Alembic 补正式 `ForeignKey` 约束与索引。
+- [x] **§10.4 状态三轴枚举统一（后端）** —— **2026-06-23 完成**（commit `7e8bb85`）
+  - `core/enums.py`：`CELL_*`（cell status）+ `QG_*`（quality gate）+ `REC_*`（recommendation level）+ `RT_*`（row type）
+  - `bid_matrix.py`：`_compute_recommendation` 改用 `REC_BLOCKED/REC_CONDITIONAL` 常量
+  - **未完成**：ORM 列 / API 契约 / 前端枚举同步（涉及破坏性变更，需前后端联调，延后）
 
-- [ ] **§11.3 死代码 / 测试专用代码下线**：`pipeline.py:525 _assign_source_ref_from_grids`、`table_recognizer.py:931 _correct_page_orientation`、`splitter.PageSplitter` / `aggregator.ResultAggregator`（legacy `_run_batched` 路径）。全仓 grep 确认无生产调用后下线，**不得误删用户工作区资料**。
+- [x] **§11.2 软外键补正** —— **2026-06-23 完成**（commit `295a536`）
+  - Alembic 0004：`batch_alter_table` 添加 4 列 FK（bid_alignment_groups / bid_alignment_items / alignment_finalizations / bid_matrix_versions）
+  - ORM 模型同步更新 `ForeignKey()` 声明
 
-- [ ] **§11.4 `row_type` 双枚举统一**：`table_parser._classify_row`（header/note/empty）vs `table_recognizer._raw_items_to_draft_rows`（section_header/remark/invalid）同概念异名。并入 §10.4 定义单一 `RowType` Enum，并解决「未持久化到 BidQuoteLine、下游靠 `合计|小计` 正则兜底」。
+- [x] **§11.3 死代码 / 测试专用代码** —— **2026-06-23 决定保留**
+  - `pipeline.py:522 _assign_source_ref_from_grids`：docstring 已标注「Used by tests. Production path now goes through table_recognizer.」
+  - `table_recognizer.py:929 _correct_page_orientation`：docstring 已标注「生产路径已停用 ... 仅保留供 test_orientation_correction.py」
+  - `_run_batched`、`PageSplitter`、`ResultAggregator`：经 grep 确认为活跃生产代码（§11.3 范围已修正，非死代码）
+  - 决定：两个真实死函数保留作测试辅助，不删除（删除破坏 test_orientation_correction.py）
 
-- [~] **§11.5 横切重复代码** —— 部分完成
-  已消除：`parse_id_csv()`（逗号分隔解析）、`get_finalization_snapshot()` / `get_current_confirmed_session()`。
-  仍待抽：`OpenAI` 客户端三处各自实例化（`/bid-insight`、`/bid-alignment/suggest`、`/llm-fill`）→ LLM provider；聚合价 `round(agg_total/agg_qty,4)` 规则 5 处闭包复制 → 单一 helper；LLM 响应去 markdown 围栏 2 处逐字节重复 → 共用解析器。
+- [x] **§11.4 `row_type` 双枚举统一** —— **2026-06-23 完成**（commit `7e8bb85`）
+  - `table_parser._classify_row` 返回规范词汇：`section_header/remark/invalid`（取代 `header/note/empty`）
+  - `table_recognizer._raw_items_to_draft_rows` 过滤条件同步为 `RT_INVALID`
+  - `services/audit.py normalize_row_type` 仍保留旧词汇→规范映射（接收前端/旧数据）
+
+- [x] **§11.5 横切重复代码（LLM 客户端）** —— **2026-06-23 完成**（commit `7e8bb85`）
+  - `services/llm_provider.get_dashscope_client()`：统一工厂，4 处实例化全部收口
+  - **剩余债务**：`agg_total/agg_qty` 5 处 helper（在 bid_matrix.py 内，低优先级）；LLM 响应去 markdown 围栏 2 处（待 §0.1 拆分后顺手处理）
 
 - [ ] **§11.1 行级 bbox 来源证据**：`SourceRef.bbox` 全仓只读不写，行级定位覆盖率恒为 0。明确为**产品级持续目标（可下游回填）**，质量报告须如实标注「无行级像素定位」，不得宣称像素级完整追溯（见 memory `project_rootcause_layers`）。
-
-- [ ] **§7.3 工作区卫生**：未跟踪的临时脚本（`scripts/` 大量 `??`）、`apps/api/services/rebuild_submission_lines.py`、重复 fixture 提交前分类归档或删除。**不得误删用户资料**。
 
 ---
 
