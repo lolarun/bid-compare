@@ -1,6 +1,6 @@
 # MEMPAS 工程待办（后端架构 / 技术债）
 
-> 最后更新：2026-06-22（P1-6/P2-3 完成，P1-3+P1-4 合并待设计先行）
+> 最后更新：2026-06-22（P1-6/P2-3/P1-3+P1-4 完成）
 > 范围：后端架构整改与技术债。**产品功能 / UI / 客户反馈待办见 [`docs/TODO.md`](docs/TODO.md)**，两者不重叠。
 > 权威依据：[`docs/design/12-招标比价后端审计与整改.md`](docs/design/12-招标比价后端审计与整改.md)（下称「审计12」）。
 > 本文件只列**已决定延后**或**未完成**的项；已交付项见各 commit 与审计12 §8。
@@ -41,21 +41,31 @@ P1-1 抽了 confirm/export/finalize 等 7 个服务，**唯独漏了 match 和 l
 
 ## 1. P1 剩余（审计12 §4）
 
-- [ ] **P1-3 识别审计字段弱类型 JSON**（§4 P1-3）
-  缺口：`row_type` / `corrections` 未完整持久化到 `BidQuoteLine`；source_ref/flags/人工修正均为弱类型 JSON；缺字段级前后值与操作者。
-  建议：高频质量字段结构化，JSON 留作原始审计包；人工修正另建 append-only change log。与 §11.4 `row_type` 双枚举同源。
+- [x] **P1-3+P1-4 合并：字段级审计 + row_type 持久化** —— **2026-06-22 完成**（commit `bdaa890`）
 
-- [ ] **P1-4 OperationLog 不足以满足字段级审计**（§4 P1-4，`models/operation_log.py:9-19`）
-  现仅 user/module/action/target/result/remark/time，无结构化 before/after、无 project/session/submission/row identity。
-  建议：新增领域审计事件（确认 / 修正 / 排除 / 重匹配 / finalize / 历史导入各记结构化 payload）。
-  设计参考 `docs/design/14`；倾向**扩展 OperationLog 而非新建死表**（见 memory `project_p1_services`）。
+  **P1-3 BidQuoteLine.row_type**：
+  - 新列 `row_type VARCHAR(32)`（迁移 0003，存量回填 `quote_line`）
+  - 词汇收口（§11.4 双枚举合并）：`quote_line|section_header|remark|invalid|subtotal|grand_total`
+  - `header`→`section_header` / `note`→`remark` / `empty`→`invalid`
+  - `confirm_batch` 落库时写入 `normalize_row_type(item.row_type)`
+
+  **P1-4 OperationLog.payload 结构化事件**：
+  - 新列 `operation_logs.payload JSON`（迁移 0003）
+  - `services/audit.py`：`write_domain_event()`（no-commit，caller 控制事务）
+  - 7 个事件埋点：`bql_confirm / tender_session_confirm / alignment_group_confirm /
+    alignment_item_confirm / alignment_bulk_confirm / alignment_finalize / llm_fill_persist`
+  - payload schema：`{event_type, identity, before, after, meta}`
+
+  **未完成（超出本轮范围）**：
+  - 人工修正的字段级 before/after（需要修正端点，当前无此 API）
+  - corrections append-only 表（留待修正 API 建立后一起做）
 
 - [x] **P1-6 业务阈值散落**（§4 P1-6）—— **2026-06-22 完成**
   domain_config.py 现收录全部10个 `MATCH_*` 领域阈值（含 `MATCH_SEQUENTIAL_SIM_THRESHOLD`、
   `MATCH_ARITHMETIC_PASS_THRESHOLD`、`MATCH_PRICE_ARITHMETIC_TOLERANCE`）。
   env 层（PAGE_CONCURRENCY / PDF_RENDER_CONCURRENCY / MAX_PAGES 等）有意保留在 env，符合三层模型，不属于错位。
 
-> P1-1（7 服务）/ P1-2（submission 身份权威解析）/ P1-5（current confirmed session 统一）/ P1-6（阈值收口）已完成。
+> P1-1（7 服务）/ P1-2（submission 身份权威解析）/ P1-3+P1-4（row_type+审计事件）/ P1-5（session统一）/ P1-6（阈值收口）已完成。
 
 ---
 
