@@ -8,6 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from apps.api.core.domain_config import (
+    MATCH_ARITHMETIC_PASS_THRESHOLD as _ARITHMETIC_PASS_THRESHOLD,
+)
+
 
 # ─── Source evidence ─────────────────────────────────────────────────────────
 
@@ -172,7 +176,7 @@ class ExtractionDraft:
 # ─── Quality gate logic (thresholds centralised here) ────────────────────────
 
 _EXPECTED_ROWS_MIN_RATIO = 0.70     # trigger retry/tiling when extracted < expected * ratio
-_ARITHMETIC_PASS_THRESHOLD = 0.90   # below this → REVIEW
+# _ARITHMETIC_PASS_THRESHOLD imported from domain_config.MATCH_ARITHMETIC_PASS_THRESHOLD
 _DECLARED_TOTAL_DIFF_BLOCKED = 500.0  # yuan; above this → BLOCKED (without human note)
 _DECLARED_TOTAL_DIFF_REVIEW = 50.0   # yuan; above this → REVIEW
 _REVIEW_PAGE_RATIO = 0.30           # if > 30% target pages are under-extracted → BLOCKED

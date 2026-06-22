@@ -30,3 +30,12 @@ MATCH_DECLARED_TOTAL_TOLERANCE: float = 0.03
 
 # Cosine similarity below this value is flagged as low-confidence match (→ pending)
 MATCH_LOW_CONFIDENCE_THRESHOLD: float = 0.70
+
+# Cosine similarity below this value: no credible anchor found (sequential path skipped)
+MATCH_SEQUENTIAL_SIM_THRESHOLD: float = 0.50
+
+# Arithmetic validation: fraction of rows that must pass qty×price≈total check (→ REVIEW below)
+MATCH_ARITHMETIC_PASS_THRESHOLD: float = 0.90
+
+# Row-level arithmetic tolerance: qty×price vs total_price deviation ratio
+MATCH_PRICE_ARITHMETIC_TOLERANCE: float = 0.05

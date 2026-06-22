@@ -57,7 +57,7 @@ class _BQLMatProxy:
     extended_attrs: dict | None = None
 
 # 余弦低于此视为无可信锚点(与测量脚本一致)
-SIM_THRESHOLD = 0.50
+from apps.api.core.domain_config import MATCH_SEQUENTIAL_SIM_THRESHOLD as SIM_THRESHOLD
 # 低于此标记为低置信、建议复核(写入 reason,前端可高亮)
 from apps.api.core.domain_config import MATCH_LOW_CONFIDENCE_THRESHOLD as LOW_CONF
 EMBED_MODEL = "text-embedding-v3"
@@ -798,17 +798,6 @@ def import_and_match(
         ):
             embed_matches.append((embed_qi[_sqi], _ai, _cos))
     matches = seq_matches + embed_matches
-
-    # Persist canonical to Material.extended_attrs (cache only; don't overwrite; skip BQL proxies)
-    for mi, m in enumerate(materials):
-        if is_bql_flags[mi]:
-            continue  # _BQLMatProxy has no DB-backed extended_attrs
-        canon = quote_canonicals[mi]
-        if canon.get("valve_type"):
-            ext = dict(m.extended_attrs or {})
-            if "canonical" not in ext:
-                ext["canonical"] = canon
-                m.extended_attrs = ext
 
     # 预载有效 supplier_id 集合，避免向已删除供应商插外键
     valid_sids: set[int] = {row[0] for row in db.query(Supplier.id).all()}

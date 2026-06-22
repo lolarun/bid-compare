@@ -18,6 +18,8 @@ Optional extra key (ignored by batch-confirm, used by Tier3 LLM review later):
 from __future__ import annotations
 
 import re
+
+from apps.api.core.domain_config import MATCH_PRICE_ARITHMETIC_TOLERANCE as _PRICE_TOL
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,7 +81,6 @@ def apply_arithmetic_validation(items: list[dict]) -> list[dict]:
     Mirrors pipeline.ExtractionPipeline._validate_items (lines 441-458).
     Mutates items in-place and returns them for convenience.
     """
-    _TOL = 0.05
     for item in items:
         qty = item.get("qty")
         price = item.get("unit_price")
@@ -92,7 +93,7 @@ def apply_arithmetic_validation(items: list[dict]) -> list[dict]:
         ):
             computed = qty * price
             diff_ratio = abs(computed - total) / total
-            if diff_ratio > _TOL:
+            if diff_ratio > _PRICE_TOL:
                 item["validation_warning"] = (
                     f"金额不符: {qty}×{price:.2f}={computed:.2f}≠{total:.2f}"
                     f" (diff {diff_ratio:.1%})"
