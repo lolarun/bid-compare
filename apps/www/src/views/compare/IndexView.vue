@@ -786,9 +786,12 @@ async function loadAnchorReview() {
   anchorReviewLoading.value = true
   try {
     const sids = effectiveSupplierIds.value
+    const subIds = effectiveSubmissionIds.value
     const { data } = await analysisApi.anchorReview({
       project_id: taskConfig.projectId,
       category: tenderCategory.value || taskConfig.category,
+      // submission identity is authoritative; supplier_ids kept only as fallback
+      submission_ids: subIds.length ? subIds.join(',') : undefined,
       supplier_ids: sids.length ? sids.join(',') : undefined,
     })
     anchorReviewResult.value = data

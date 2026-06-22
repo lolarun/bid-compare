@@ -195,7 +195,7 @@ export const analysisApi = {
     api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
   anchorReviewMatrix: (params: { project_id: number; category: string; submission_ids?: string; supplier_ids?: string }) =>
     api.get<AnchorReviewMatrixResult>('/analysis/anchor-review/matrix', { params }),
-  anchorReview: (params: { project_id: number; category: string; supplier_ids?: string }) =>
+  anchorReview: (params: { project_id: number; category: string; submission_ids?: string; supplier_ids?: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
   anchorReviewConfirm: (data: { group_id: number; action: 'confirm' | 'reject' }) =>
     api.post('/analysis/anchor-review/confirm', data),

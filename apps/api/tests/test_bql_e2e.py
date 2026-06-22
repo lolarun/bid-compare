@@ -278,6 +278,37 @@ class TestBqlE2E:
 
         assert len(new_path_items) > 0, "No new-path (BQL) items found in anchor_review"
 
+    def test_anchor_review_submission_ids_scope(self, client, db_session, seed):
+        """P1-2: anchor_review must accept submission_ids (authoritative列身份) and
+        return the same BQL items as the deprecated supplier_ids path."""
+        proj = seed["proj"]
+        sup = seed["sup"]
+        category = seed["category"]
+        submission_id = seed["submission_id"]
+
+        def _bql_ids(params):
+            r = client.get("/api/analysis/anchor-review", params=params)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            groups = data.get("confirmed_groups", []) + data.get("low_conf_groups", [])
+            ids = set()
+            for g in groups:
+                for it in g.get("items", []):
+                    if it.get("bid_quote_line_id") is not None:
+                        ids.add(it["bid_quote_line_id"])
+            return ids
+
+        by_submission = _bql_ids({
+            "project_id": proj.id, "category": category,
+            "submission_ids": str(submission_id),
+        })
+        by_supplier = _bql_ids({
+            "project_id": proj.id, "category": category,
+            "supplier_ids": str(sup.id),
+        })
+        assert by_submission, "submission_ids scope returned no BQL items"
+        assert by_submission == by_supplier, "submission_ids scope must match supplier_ids scope"
+
     def test_bid_matrix_cells_have_bql_id(self, client, db_session, seed):
         """bid_matrix cells built from BQL items must carry bid_quote_line_id, not source_quote_id."""
         from apps.api.services.bid_matrix import build_anchor_review_matrix

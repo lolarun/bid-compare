@@ -545,6 +545,7 @@ def anchor_review_matrix(
 def anchor_review(
     project_id: int = Query(...),
     category: str = Query(...),
+    submission_ids: str | None = Query(None, description="本次比价的 BidSubmission 列身份（权威）"),
     supplier_ids: str | None = Query(None, description="[DEPRECATED] 改用 submission_ids"),
     db: Session = Depends(get_db),
 ):
@@ -552,27 +553,38 @@ def anchor_review(
 
     低置信 = group.confidence < 0.70。
     残差   = 本项目/品类的报价中未出现在任何对齐组里的条目。
-    supplier_ids: [DEPRECATED] 历史兼容，优先从 TenderListSession 恢复 submission 范围。
+    submission_ids: 权威列身份；非空时唯一决定范围（忽略 supplier_ids，禁止 union）。
+    supplier_ids: [DEPRECATED] 历史兼容；两者皆空时回退 TenderListSession 已确认范围。
     """
     import re as _re
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
     from apps.api.models.quote import Quote as QuoteModel
     from apps.api.models.material import Material as MaterialModel
     from apps.api.models.supplier import Supplier as SupplierModel
+    from apps.api.services.bid_submission_resolve import resolve_active_submissions
 
     LOW_CONF = 0.70
 
+    sub_ids: list[int] | None = parse_id_csv(submission_ids, "submission_ids") if submission_ids else None
     sids: list[int] | None = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
 
-    # resolve supplier scope from session if not provided
+    # resolve scope from current confirmed session only if no explicit scope given
     _cur_session = get_current_confirmed_session(db, project_id, category)
-    if not sids and _cur_session and _cur_session.confirmed_supplier_ids:
+    if not sub_ids and not sids and _cur_session and _cur_session.confirmed_supplier_ids:
         sids = [int(x) for x in _cur_session.confirmed_supplier_ids]
-    if not sids:
+
+    # submission identity is authoritative; supplier_ids only as deprecated fallback
+    subs = resolve_active_submissions(
+        db, project_id, category, supplier_ids=sids, submission_ids=sub_ids
+    )
+    if not subs:
         raise HTTPException(400, {
-            "error": "missing_supplier_ids",
-            "message": "必须提供本次比价的供应商 ID，请先完成上传匹配后再查看复核数据。",
+            "error": "missing_submission_scope",
+            "message": "必须提供本次比价的投标 submission（或供应商）范围，请先完成上传匹配后再查看复核数据。",
         })
+    resolved_sub_ids = list(subs.keys())
+    # Legacy historical-Quote path is supplier-keyed (Quote has no submission_id).
+    derived_supplier_ids = [s.supplier_id for s in subs.values() if s.supplier_id]
     _cur_session_id = _cur_session.id if _cur_session else None
 
     # 只拉当前 TenderListSession 的已确认锚点组（防历史数据污染）
@@ -597,9 +609,13 @@ def anchor_review(
             MaterialModel.category == category,
         )
     )
-    if sids:
-        q_base = q_base.filter(QuoteModel.supplier_id.in_(sids))
-    all_rows = q_base.all()
+    # Scope the legacy Quote path by the resolved submissions' suppliers. If none
+    # have a bound supplier (陌生供应商), the legacy path contributes nothing —
+    # never run unfiltered (would leak全项目历史报价).
+    if derived_supplier_ids:
+        all_rows = q_base.filter(QuoteModel.supplier_id.in_(derived_supplier_ids)).all()
+    else:
+        all_rows = []
     quote_map = {qt.id: (qt, mat, sup) for qt, mat, sup in all_rows}
 
     # 构建 bid_quote_line_id → (bql, supplier) 映射（新路径）
@@ -654,8 +670,8 @@ def anchor_review(
             _BQL.category == category,
         )
     )
-    if sids:
-        _unmatched_bql_q = _unmatched_bql_q.filter(_BidSub.supplier_id.in_(sids))
+    # Authoritative submission-identity scoping for the new BQL residue path.
+    _unmatched_bql_q = _unmatched_bql_q.filter(_BidSub.id.in_(resolved_sub_ids))
     if matched_bql_ids:
         _unmatched_bql_q = _unmatched_bql_q.filter(~_BQL.id.in_(matched_bql_ids))
     for bql, sup in _unmatched_bql_q.all():
