@@ -7,8 +7,12 @@ from sqlalchemy.orm import Session
 
 from apps.api.core.enums import (
     CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING, CELL_EXCLUDED, CELL_MISSING,
-    REC_BLOCKED, REC_CONDITIONAL,
+    REC_BLOCKED,
 )
+from apps.api.services.bid_evaluation import (
+    _anchor_spec, _canon_family, _pending_is_qty_only, _evaluate_cell, _EVAL_QTY_TOL,
+)
+from apps.api.services.bid_recommendation import _compute_recommendation
 from apps.api.models import Material, Quote, Supplier, Project, BrandTier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.extraction_job import ExtractionJob
@@ -18,9 +22,7 @@ from apps.api.services.comparison import (
     determine_alert,
     get_category_thresholds,
     build_spec_price_index,
-    spec_baseline_from_index,
 )
-from apps.api.services.canonical import extract_valve_canonical, normalize_valve_family
 from apps.api.services.evaluation_policy import get_evaluation_policy
 
 
@@ -334,111 +336,9 @@ def _incl_unit_from(data: "_ItemData | None") -> float | None:
     return None
 
 
-_EVAL_QTY_TOL = 0.001
-
-
-def _anchor_spec(anchor) -> tuple:
-    """(family, dn, pn, unit) — 招标锚点的规格键（同规格基准/偏差以招标侧为准）。"""
-    c = extract_valve_canonical(getattr(anchor, "name", "") or "", getattr(anchor, "spec", "") or "")
-    fam = normalize_valve_family(c.get("valve_type"))
-    return fam, c.get("dn"), c.get("pn"), (getattr(anchor, "unit", "") or "").strip()
-
-
-def _canon_family(vt: str | None) -> str | None:
-    """从原始阀型串归一化出族 — 与 _anchor_spec 同管线（extract_valve_canonical→normalize）。
-
-    必须与锚点侧一致：normalize_valve_family('缓闭式止回阀')='缓闭式止回阀'（不降族），
-    而 extract_valve_canonical 先抽出基础族'止回阀'。直接 normalize 存储 canonical 会
-    与锚点族不对称，导致 quantity_source_conflict 被误判为 alignment_pending。
-    """
-    if not vt:
-        return None
-    return normalize_valve_family(extract_valve_canonical(vt, "").get("valve_type"))
-
-
-def _pending_is_qty_only(cell: dict, fam, dn, a_unit) -> bool:
-    """pending 单元格的冲突是否**仅数量来源**（DN/族/单位一致，价格口径可得）。
-
-    仅当如此才允许纳入评标总价（标 quantity_source_conflict）；否则属对齐未决，不纳入。
-    """
-    c = cell.get("item_canonical") or {}
-    c_dn = c.get("dn")
-    c_fam = _canon_family(c.get("valve_type"))
-    if dn and c_dn and dn != c_dn:
-        return False
-    if fam and c_fam and fam != c_fam:
-        return False
-    cu = (cell.get("unit") or "").strip()
-    if a_unit and cu and a_unit != cu:
-        return False
-    return True
-
-
-def _evaluate_cell(cell: dict, anchor_qty, fam, dn, pn, a_unit,
-                   spec_index: dict, thresholds: dict) -> None:
-    """就地填充单元格的同规格偏差 + 评标资格字段。
-
-    评标金额恒 = 招标数量 × 含税单价（incl_unit）；供应商报价数量仅作校验。
-    偏差相对同规格中位数（展示==计算）；无可靠同规格基准 → deviation=null、不计异常。
-    """
-    cell["tender_qty"] = anchor_qty
-    cell["eval_amount"] = None
-    cell["evaluable"] = False
-    cell["baseline"] = None
-    cell["tax_basis_assumed"] = False
-    status = cell["cell_status"]
-    basis = cell.get("price_basis")
-    incl_unit = cell.get("incl_unit")
-
-    if status in (CELL_MISSING, CELL_EXCLUDED) or cell.get("price") is None:
-        cell["eval_status"] = "missing" if status == CELL_MISSING else status
-        cell["deviation_pct"] = None
-        cell["alert_level"] = "normal"
-        return
-
-    # ── 同规格偏差：按本格税口径取对应桶；展示值与计算值同源（中位数）──
-    # unspecified（单一价格列）按招标含税要求与含税桶比较。
-    bl = None
-    cmp_price = None
-    if incl_unit is not None and basis in ("incl_tax", "dual_tax", "unspecified"):
-        bl = spec_baseline_from_index(spec_index, fam, dn, pn, a_unit, "incl_tax")
-        cmp_price = incl_unit
-    elif basis == "excl_tax" and cell.get("price"):
-        bl = spec_baseline_from_index(spec_index, fam, dn, pn, a_unit, "excl_tax")
-        cmp_price = cell["price"]
-    if bl and cmp_price:
-        dev = round((cmp_price - bl["median"]) / bl["median"], 4)
-        cell["deviation_pct"] = dev
-        cell["alert_level"] = determine_alert(dev, thresholds)
-        cell["baseline"] = bl
-    else:
-        cell["deviation_pct"] = None
-        cell["alert_level"] = "normal"   # 无可靠同规格基准 → 不计异常
-
-    # ── 评标资格：必须有可纳入的含税口径单价 ──
-    if incl_unit is None:
-        cell["eval_status"] = "basis_unconfirmed"   # 税口径未确认（excl_tax/unknown）→ 未决（不静默排除）
-        return
-    # 单一价格列按招标含税要求纳入，但标记假定（非确认），供风险提示与人工核实。
-    cell["tax_basis_assumed"] = (basis == "unspecified")
-    eval_amount = round(float(anchor_qty) * incl_unit, 2) if anchor_qty else None
-    sq = cell.get("supplier_qty")
-    qty_conflict = (
-        sq is not None and anchor_qty is not None
-        and abs(float(sq) - float(anchor_qty)) > _EVAL_QTY_TOL
-    )
-    if status == CELL_PENDING:
-        if _pending_is_qty_only(cell, fam, dn, a_unit):
-            cell["eval_status"] = "quantity_source_conflict"
-            cell["evaluable"] = True
-            cell["eval_amount"] = eval_amount
-        else:
-            cell["eval_status"] = "alignment_pending"   # 非数量原因未决 → 不纳入
-        return
-    # align / aggregated
-    cell["evaluable"] = True
-    cell["eval_amount"] = eval_amount
-    cell["eval_status"] = "quantity_source_conflict" if qty_conflict else "ok"
+# _EVAL_QTY_TOL, _anchor_spec, _canon_family, _pending_is_qty_only, _evaluate_cell
+# are imported from bid_evaluation (see top of file). Re-exported here for tests
+# that import them directly from bid_matrix.
 
 
 def _build_cell_for_supplier(
@@ -531,156 +431,8 @@ def _build_cell_for_supplier(
     return base  # missing
 
 
-def _compute_recommendation(
-    rows: list[dict],
-    col_ids: list[int],
-    supplier_labels: list[dict],
-    total_anchors: int,
-    checksum_by_col: dict[int, str],
-    policy,
-) -> dict:
-    """招标文件驱动的确定性推荐（不自动定标、不拆单、不造权重）。
-
-    产出：评标总价排名(价格优选候选人) + 共同可比金额 + 未决行金额 + 非价格因素证据缺口 +
-    三态 recommendation_level。LLM 仅据此解释，不得改选。
-    """
-    label_by = {sl["id"]: sl for sl in supplier_labels}
-    per = {cid: {"evaluated_total": 0.0, "confirmed_lines": 0, "qty_conflict_lines": 0,
-                 "undecided_lines": 0, "undecided_amount": 0.0, "missing_lines": 0,
-                 "anomaly_count": 0, "basis_unconfirmed_lines": 0,
-                 "tax_assumed_lines": 0} for cid in col_ids}
-    evaluable_by_line: list[set] = []
-    for row in rows:
-        eset: set = set()
-        cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
-        for cid in col_ids:
-            c = cell_by.get(cid, {})
-            st = c.get("eval_status")
-            if c.get("evaluable"):
-                per[cid]["confirmed_lines"] += 1
-                per[cid]["evaluated_total"] += c.get("eval_amount") or 0.0
-                eset.add(cid)
-                if st == "quantity_source_conflict":
-                    per[cid]["qty_conflict_lines"] += 1
-                if c.get("tax_basis_assumed"):
-                    per[cid]["tax_assumed_lines"] += 1
-            elif st in ("basis_unconfirmed", "alignment_pending"):
-                per[cid]["undecided_lines"] += 1
-                if st == "basis_unconfirmed":
-                    per[cid]["basis_unconfirmed_lines"] += 1
-                ref_unit = c.get("incl_unit") or c.get("price")
-                if c.get("tender_qty") and ref_unit:
-                    per[cid]["undecided_amount"] += round(float(c["tender_qty"]) * float(ref_unit), 2)
-            else:
-                per[cid]["missing_lines"] += 1
-            if c.get("alert_level") == "red":
-                per[cid]["anomaly_count"] += 1
-        evaluable_by_line.append(eset)
-
-    supplier_eval = []
-    for cid in col_ids:
-        p = per[cid]
-        cs = checksum_by_col.get(cid, "unknown")
-        full = (total_anchors > 0 and p["confirmed_lines"] == total_anchors)
-        eligible = full and cs != "fail"
-        supplier_eval.append({
-            "supplier_id": cid,
-            "name": label_by.get(cid, {}).get("name"),
-            "letter": label_by.get(cid, {}).get("letter"),
-            "evaluated_total": round(p["evaluated_total"], 2),
-            "confirmed_lines": p["confirmed_lines"],
-            "total_anchors": total_anchors,
-            "qty_conflict_lines": p["qty_conflict_lines"],
-            "undecided_lines": p["undecided_lines"],
-            "undecided_amount": round(p["undecided_amount"], 2),
-            "missing_lines": p["missing_lines"],
-            "anomaly_count": p["anomaly_count"],
-            "tax_assumed_lines": p["tax_assumed_lines"],
-            # 税口径"确认"须同时无未决口径与无假定口径；单一价格列属假定，非确认。
-            "basis_confirmed": (p["basis_unconfirmed_lines"] == 0
-                                and p["tax_assumed_lines"] == 0
-                                and p["confirmed_lines"] > 0),
-            "checksum_status": cs,
-            "full_coverage": full,
-            "eligible_for_ranking": eligible,
-        })
-
-    ranked = sorted(
-        [s for s in supplier_eval if s["eligible_for_ranking"]],
-        key=lambda s: s["evaluated_total"],
-    )
-    ranked_ids = [s["supplier_id"] for s in ranked]
-    # 共同可比金额：所有入排名供应商**均可评标**的行
-    common_lines = 0
-    common_sub = {cid: 0.0 for cid in ranked_ids}
-    for ridx, row in enumerate(rows):
-        if ranked_ids and all(cid in evaluable_by_line[ridx] for cid in ranked_ids):
-            common_lines += 1
-            cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
-            for cid in ranked_ids:
-                common_sub[cid] += cell_by[cid].get("eval_amount") or 0.0
-    price_preferred = ranked[0] if ranked else None
-
-    risks: list[str] = []
-    for s in supplier_eval:
-        nm = s["name"]
-        if s["checksum_status"] == "fail":
-            risks.append(f"{nm} 核验金额不符（checksum fail）")
-        elif s["checksum_status"] in ("unknown", None):
-            risks.append(f"{nm} 无声明总价核验（风险提示，未阻断）")
-        if s["qty_conflict_lines"]:
-            risks.append(
-                f"{nm} {s['qty_conflict_lines']} 行报价数量≠招标数量，已按招标数量计入评标"
-                "（标记 quantity_source_conflict，建议核实）"
-            )
-        if s.get("tax_assumed_lines"):
-            risks.append(
-                f"{nm} {s['tax_assumed_lines']} 行为单一价格列（无含税/不含税标注），"
-                "已按招标含税单价要求纳入评标（税口径假定含税，建议核实）"
-            )
-        if s["undecided_lines"]:
-            risks.append(
-                f"{nm} {s['undecided_lines']} 行税口径/对齐未确认，未计入完整评标总价"
-                f"（未决金额≈¥{s['undecided_amount']:,.0f}）"
-            )
-        if s["anomaly_count"]:
-            risks.append(f"{nm} {s['anomaly_count']} 行同规格偏差异常，建议核实异常低价")
-        if s["missing_lines"]:
-            risks.append(f"{nm} {s['missing_lines']} 行缺报")
-
-    reasons: list[str] = []
-    if not ranked:
-        level = REC_BLOCKED
-        reasons.append("无任一供应商可形成完整含税评标总价（税口径/对齐未确认或缺报）→ 无价格优选候选人")
-    else:
-        level = REC_CONDITIONAL
-        reasons.append("已得确定性『评标总价排名』与『价格优选候选人』")
-        if policy.method == "unknown":
-            reasons.append("评标法尚未确认 → 价格排名仅供参考，定标需人工确认招标文件评标法后方可进行")
-        else:
-            reasons.append("招标文件为合理低价评标价法且未给评分权重 → 综合评审需招标领导小组确认，非自动中标")
-
-    # 非价格八项因素证据：系统无结构化证据 → 一律 missing（待评标小组）
-    non_price = [{"factor": f, "evidence_status": "missing"} for f in policy.factors if f != "价格"]
-
-    return {
-        "recommendation_level": level,
-        "recommendation_reasons": reasons,
-        "risks": risks,
-        "evaluation_policy": policy.to_dict(),
-        "award_mode": policy.award_mode,
-        "committee_required": policy.final_decision_requires_committee,
-        "price_ranking": ranked,
-        "price_preferred_candidate": price_preferred,
-        "supplier_evaluation": supplier_eval,
-        "common_comparable": {
-            "supplier_ids": ranked_ids,
-            "line_count": common_lines,
-            "subtotals": {str(k): round(v, 2) for k, v in common_sub.items()},
-        },
-        "non_price_factors": non_price,
-        "comprehensive_recommendation_status": "pending_committee",
-    }
+# _compute_recommendation is imported from bid_recommendation (see top of file).
+# It is re-exported here for tests that import it directly from bid_matrix.
 
 
 def build_anchor_matrix(

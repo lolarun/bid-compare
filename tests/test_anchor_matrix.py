@@ -14,6 +14,7 @@ from typing import Any
 
 from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.models.tender_list_session import TenderListSession
 from apps.api.schemas.analysis import BidMatrixResult
 from apps.api.services.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
 
@@ -79,6 +80,11 @@ def anchor_setup(db_session):
     db_session.add_all([qt_a1, qt_b1])
     db_session.flush()
 
+    # Create real TenderListSession (bid_alignment_groups.tender_list_session_id now has FK)
+    tls = TenderListSession(project_id=proj.id, category="阀门")
+    db_session.add(tls)
+    db_session.flush()
+
     # Anchor 1 alignment group
     grp = BidAlignmentGroup(
         project_id=proj.id,
@@ -88,7 +94,7 @@ def anchor_setup(db_session):
         confidence=0.85,
         status="confirmed",
         anchor_seq="1",           # links to anchor with seq=1
-        tender_list_session_id=99,  # fake session id
+        tender_list_session_id=tls.id,
     )
     db_session.add(grp)
     db_session.flush()
@@ -118,7 +124,7 @@ def anchor_setup(db_session):
         "sup_a": sup_a,
         "sup_b": sup_b,
         "anchors": anchors,
-        "session_id": 99,
+        "session_id": tls.id,
         "qt_a1": qt_a1,
         "qt_b1": qt_b1,
     }
