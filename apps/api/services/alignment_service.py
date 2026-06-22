@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.models.alignment_finalization import AlignmentFinalization
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.services.audit import write_domain_event, EVENT_ALIGNMENT_FINALIZE
 
 
 @dataclass
@@ -107,6 +108,13 @@ def finalize_alignment(
         force_reason=reason if force else None,
     )
     db.add(fin)
+    db.flush()  # get fin.id before committing
+    write_domain_event(
+        db, user=finalized_by or "system", event_type=EVENT_ALIGNMENT_FINALIZE,
+        identity={"project_id": project_id, "finalization_id": fin.id},
+        after={"category": category, "group_ids_count": len(group_ids), "forced": force},
+        meta={"pending_at_finalize": pending_count, "reason": reason if force else ""},
+    )
     db.commit()
     db.refresh(fin)
 

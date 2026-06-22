@@ -43,6 +43,14 @@ from apps.api.services.tender_session_service import (
     get_current_confirmed_session,
     get_finalization_snapshot,
 )
+from apps.api.services.audit import (
+    write_domain_event,
+    EVENT_TENDER_SESSION_CONFIRM,
+    EVENT_ALIGNMENT_GROUP_CONFIRM,
+    EVENT_ALIGNMENT_ITEM_CONFIRM,
+    EVENT_ALIGNMENT_BULK_CONFIRM,
+    EVENT_LLM_FILL_PERSIST,
+)
 
 _SUMMARY_NAME_PAT = _re.compile(
     r"合计|小计|说明|备注|合计金额|总价|total|subtotal", _re.IGNORECASE
@@ -795,7 +803,14 @@ def anchor_review_item_confirm(
     item = db.get(BidAlignmentItem, body.item_id)
     if not item:
         raise HTTPException(404, f"BidAlignmentItem {body.item_id} 不存在")
+    before_action = item.action
     item.action = body.action
+    write_domain_event(
+        db, user="system", event_type=EVENT_ALIGNMENT_ITEM_CONFIRM,
+        identity={"alignment_item_id": body.item_id},
+        before={"action": before_action},
+        after={"action": body.action},
+    )
     db.commit()
     return {"ok": True, "item_id": body.item_id, "action": body.action}
 
@@ -901,9 +916,19 @@ def anchor_review_confirm(
         for item in group.items:
             if item.action == "pending":
                 item.action = "align"
+        write_domain_event(
+            db, user="system", event_type=EVENT_ALIGNMENT_GROUP_CONFIRM,
+            identity={"alignment_group_id": body.group_id},
+            after={"action": "confirm", "status": "confirmed"},
+        )
         db.commit()
         return {"ok": True, "group_id": body.group_id, "status": "confirmed"}
     else:
+        write_domain_event(
+            db, user="system", event_type=EVENT_ALIGNMENT_GROUP_CONFIRM,
+            identity={"alignment_group_id": body.group_id},
+            after={"action": "reject", "status": "deleted"},
+        )
         db.delete(group)
         db.commit()
         return {"ok": True, "group_id": body.group_id, "status": "deleted"}
@@ -1433,6 +1458,7 @@ def _persist_llm_fill(
     bql_supplier_ids: supplier_ids whose rows came from BidQuoteLine (cell.quote_id is
     actually a BidQuoteLine.id — must be written to bid_quote_line_id, not quote_id).
     bql_supplier_to_submission: supplier_id → submission_id mapping for BQL path.
+    审计事件：llm_fill_persist（加入 session；caller 负责 commit）。
     """
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 
@@ -1518,6 +1544,12 @@ def _persist_llm_fill(
                     name_note=(cell.reason or "")[:500],
                     agg_total=cell.agg_total, agg_qty=cell.agg_qty,
                 ))
+
+    write_domain_event(
+        db, user="system", event_type=EVENT_LLM_FILL_PERSIST,
+        identity={"project_id": project_id, "session_id": session_id},
+        after={"category": category, "group_count": len(cells_by_seq), "supplier_count": len(results)},
+    )
 
 
 # ─── Dynamic suspect anchor selection ────────────────────────────────────────
@@ -2062,6 +2094,16 @@ def tender_list_confirm(
             "anchors_total": len(anchors),
         })
 
+    write_domain_event(
+        db, user=body.confirmed_by or "system", event_type=EVENT_TENDER_SESSION_CONFIRM,
+        identity={"project_id": body.project_id},
+        after={
+            "session_count": len(sessions_out),
+            "anchor_count": sum(s["anchors_total"] for s in sessions_out),
+            "categories": [s["category"] for s in sessions_out],
+        },
+        meta={"file_name": body.file_name or ""},
+    )
     db.commit()
 
     # 主 session = 锚点最多的品类(向后兼容旧前端读 id/version)
@@ -2251,6 +2293,11 @@ def anchor_review_bulk_confirm(
             BidAlignmentItem.action == "pending",
         )
         .update({"action": "align"})
+    )
+    write_domain_event(
+        db, user="system", event_type=EVENT_ALIGNMENT_BULK_CONFIRM,
+        identity={"project_id": project_id},
+        after={"category": category, "confirmed_count": updated},
     )
     db.commit()
     return {"ok": True, "confirmed": updated}

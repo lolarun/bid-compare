@@ -97,6 +97,9 @@ class BidQuoteLine(Base):
     # 行级审计时序（P1-3）：人工修正/重匹配等任意行变更自动刷新（ORM onupdate）。
     # 存量行由迁移回填为 created_at。
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+    # 确认时的行类型快照（P1-3）: quote_line|section_header|remark|invalid|subtotal|grand_total
+    # 存量行由迁移回填为 'quote_line'（非 quote_line 行在 confirm 阶段被过滤不入库）。
+    row_type = Column(String(32), nullable=True, default="quote_line")
 
     submission = relationship("BidSubmission", back_populates="lines")
 

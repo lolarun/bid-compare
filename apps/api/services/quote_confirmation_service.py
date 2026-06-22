@@ -27,6 +27,7 @@ from apps.api.models import (
 )
 from apps.api.services.standardize import standardize_name
 from apps.api.intelligence.price_basis import derive_price_basis
+from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
 
 log = logging.getLogger(__name__)
 
@@ -354,6 +355,7 @@ def confirm_batch(db: Session, body) -> dict:
                 extraction_meta=extraction_meta,
                 deviation_pct=deviation,
                 alert_level=alert,
+                row_type=normalize_row_type(item.get("row_type")),
             )
             db.add(line)
             line_count += 1
@@ -373,6 +375,20 @@ def confirm_batch(db: Session, body) -> dict:
             f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
         )
 
+    write_domain_event(
+        db, user="system", event_type=EVENT_BQL_CONFIRM,
+        identity={
+            "project_id": project.id if project else None,
+            "submission_id": submission.id,
+        },
+        after={
+            "line_count": line_count,
+            "supplier_name": display_name,
+            "category": default_category,
+            "batch_id": batch_id,
+        },
+        meta={"skipped_count": skipped_count},
+    )
     db.commit()
 
     # checksum 回写到 job.result

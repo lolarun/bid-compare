@@ -1,6 +1,6 @@
 """Operation log model for audit trail."""
 
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Integer, String, Text, JSON
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -16,4 +16,6 @@ class OperationLog(Base):
     target = Column(String(256), default="")
     result = Column(String(8), nullable=False, default="成功")  # 成功/失败
     remark = Column(Text, default="")
+    # Structured domain-event payload: {event_type, identity, before, after, meta}
+    payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now, index=True)
