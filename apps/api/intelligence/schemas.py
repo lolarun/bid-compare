@@ -180,8 +180,8 @@ TENDER_BRANDTABLE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "brand_en": {"type": "string", "description": "品牌英文/拼音，如 KITZ"},
-                    "brand_cn": {"type": "string", "description": "品牌中文，如 开滋"},
+                    "brand_en": {"type": "string", "description": "品牌英文/拼音，如 ALFA"},
+                    "brand_cn": {"type": "string", "description": "品牌中文，如 阿法"},
                 },
             },
         },

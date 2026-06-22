@@ -41,8 +41,8 @@ QUOTE_PROMPT = """你是上海建工一建集团的机电材料报价单解析�
 ━━ 一、供应商基本信息 ━━
 关于 supplier_name（供应商名）——非常重要：
 - supplier_name 是【投标/报价单位的公司全称】，通常出现在封面、投标函、报价单抬头或落款盖章处，
-  一般带有"有限公司/股份/集团/厂/经营部/商行/贸易/实业/工程/设备/科技/中心"等机构后缀，例如"上海绵存设备有限公司"。
-- 【绝对不要】把明细表"品牌"列里的产品品牌当作 supplier_name，例如 KITZ、伯尔梅特、正泰、良工 等是产品品牌，不是投标公司名。
+  一般带有"有限公司/股份/集团/厂/经营部/商行/贸易/实业/工程/设备/科技/中心"等机构后缀，例如"星辉机电设备有限公司"。
+- 【绝对不要】把明细表"品牌"列里的产品品牌当作 supplier_name，例如 ALPHA、万通、金星、宏达 等是产品品牌，不是投标公司名。
 - 找不到明确的公司全称时，supplier_name 留空字符串，不要瞎猜。
 
 ━━ 二、报价明细字段（逐列映射规则）━━
@@ -170,12 +170,12 @@ TENDER_BRANDTABLE_PROMPT = """你是机电材料招投标助理。下面是 OCR 
 
 提取要求：
 - material_class：材料类别（如 水阀门）。
-- brand_requirement：业主招标品牌要求列表。品牌常为「英文+中文」组合（如 KITZ 开滋、WATTS 沃茨、BERMAD 伯尔梅特），拆成 brand_en / brand_cn。只有中文或只有英文时，另一个留空字符串。
+- brand_requirement：业主招标品牌要求列表。品牌常为「英文+中文」组合（如 ALFA 阿法、VEGA 威盖、ORION 猎户），拆成 brand_en / brand_cn。只有中文或只有英文时，另一个留空字符串。
 - supplier_brands：每个投标单位一条，supplier_name 为公司全称（带"有限公司/集团/科技/设备"等后缀），brand 为该单位的参与品牌（中文）。
 - 不要把品牌当成投标单位，也不要把投标单位当成品牌。
 - 无法识别的字段返回空字符串，**不要瞎猜**。
 
 返回 JSON 格式：
-{"material_class": "水阀门", "brand_requirement": [{"brand_en": "KITZ", "brand_cn": "开滋"}, {"brand_en": "WATTS", "brand_cn": "沃茨"}, {"brand_en": "BERMAD", "brand_cn": "伯尔梅特"}], "supplier_brands": [{"supplier_name": "凯硕新正（上海）机电设备科技发展有限公司", "brand": "开滋"}, {"supplier_name": "上海绵存机电设备有限公司", "brand": "沃茨"}, {"supplier_name": "上海泰科龙阀门有限公司", "brand": "伯尔梅特"}]}
+{"material_class": "水阀门", "brand_requirement": [{"brand_en": "ALFA", "brand_cn": "阿法"}, {"brand_en": "VEGA", "brand_cn": "威盖"}, {"brand_en": "ORION", "brand_cn": "猎户"}], "supplier_brands": [{"supplier_name": "星辉（上海）机电设备科技有限公司", "brand": "阿法"}, {"supplier_name": "上海宏达机电设备有限公司", "brand": "威盖"}, {"supplier_name": "上海金星阀门有限公司", "brand": "猎户"}]}
 
 如果该页不是招标情况表，返回 {"material_class": "", "brand_requirement": [], "supplier_brands": []}。"""

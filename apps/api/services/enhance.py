@@ -40,7 +40,7 @@ ENHANCE_PROMPT = """\
    如果无法判断，返回空字符串。
 
 2. **名称标准化**：将供应商特有的材料名称转换为通用标准名称。
-   - 去掉品牌前缀（如"KITZ截止阀"→"截止阀"）
+   - 去掉品牌前缀（如"某品牌截止阀"→"截止阀"）
    - 统一同义词（如"逆止阀"→"止回阀"，"闸板阀"→"闸阀"）
    - 保留关键修饰词（如"不锈钢"、"青铜"、"消声"等材质/功能描述）
    - 分离名称和规格（如"Y型过滤器DN20"→名称="Y型过滤器"，规格="DN20"）
@@ -65,9 +65,9 @@ ENHANCE_PROMPT = """\
       "category": "阀门",
       "standard_name": "截止阀",
       "standard_spec": "DN20, PN16, 不锈钢",
-      "original_name": "KITZ不锈钢截止阀",
+      "original_name": "ALFA不锈钢截止阀",
       "original_spec": "DN20 PN16UKG 1.6Mpa",
-      "name_note": "去掉品牌前缀KITZ",
+      "name_note": "去掉品牌前缀ALFA",
       "matched_material_id": 123,
       "alignment_note": "与已有供应商XX的截止阀DN20对应"
     }}
