@@ -740,11 +740,12 @@ def recognize_tables(
     if adapter.extract_meta:
         _notify("提取文档元信息", 83)
         try:
-            # 仅传 OCR 过的非目标页（summary/brand/cover）；其余页未 OCR、无 html
-            tgt_set = set(tgt)
+            # 传所有 OCR 过的页（meta_extra ∪ extract_pages，排除 recall）；
+            # 各 adapter 内部用 _is_brand_page / classify_page 做内容过滤，
+            # 不依赖视觉分类（品牌页偶被误判为 table continuation 时仍可找到）。
             non_target_htmls = [
-                (p, html_by_page[p]) for p in meta_extra
-                if p not in tgt_set and html_by_page.get(p)
+                (p, html_by_page[p]) for p in sorted(html_by_page)
+                if p not in recall_set and html_by_page.get(p)
             ]
             meta = adapter.extract_meta(non_target_htmls, provider) or {}
         except Exception as exc:
