@@ -94,6 +94,9 @@ class BidQuoteLine(Base):
     archived_quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=True)
 
     created_at = Column(DateTime, default=_now)
+    # 行级审计时序（P1-3）：人工修正/重匹配等任意行变更自动刷新（ORM onupdate）。
+    # 存量行由迁移回填为 created_at。
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
 
     submission = relationship("BidSubmission", back_populates="lines")
 

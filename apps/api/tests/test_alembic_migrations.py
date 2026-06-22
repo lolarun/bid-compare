@@ -88,3 +88,45 @@ def test_stamp_existing_db_is_structural_noop(tmp_path, monkeypatch):
     assert after == before, "init_db altered existing schema beyond alembic_version"
     assert _version(engine) is not None
     engine.dispose()
+
+
+def test_bql_updated_at_present_on_fresh_db(tmp_path, monkeypatch):
+    engine = _point_engine(monkeypatch, tmp_path / "fresh.db")
+    db_mod.init_db()
+    cols = {c["name"] for c in inspect(engine).get_columns("bid_quote_lines")}
+    assert "updated_at" in cols
+    engine.dispose()
+
+
+def test_bql_updated_at_migration_backfills_legacy_db(tmp_path, monkeypatch):
+    """A pre-P1-3 DB (no updated_at) gets the column added and backfilled to
+    created_at when init_db runs migration 0002."""
+    from apps.api.models import BidQuoteLine
+
+    db_path = tmp_path / "legacy.db"
+    legacy_engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
+    )
+    db_mod.Base.metadata.create_all(bind=legacy_engine)
+    Session = sessionmaker(bind=legacy_engine)
+    s = Session()
+    s.add(BidQuoteLine(submission_id=1, raw_name="X"))
+    s.commit()
+    s.close()
+    with legacy_engine.begin() as c:
+        c.execute(text("ALTER TABLE bid_quote_lines DROP COLUMN updated_at"))
+    cols_before = {c["name"] for c in inspect(legacy_engine).get_columns("bid_quote_lines")}
+    assert "updated_at" not in cols_before
+    legacy_engine.dispose()
+
+    engine = _point_engine(monkeypatch, db_path)
+    db_mod.init_db()
+
+    cols_after = {c["name"] for c in inspect(engine).get_columns("bid_quote_lines")}
+    assert "updated_at" in cols_after
+    with engine.connect() as c:
+        created, updated = c.execute(
+            text("SELECT created_at, updated_at FROM bid_quote_lines")
+        ).fetchone()
+    assert created == updated, "updated_at not backfilled from created_at"
+    engine.dispose()
