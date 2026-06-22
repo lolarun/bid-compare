@@ -1086,7 +1086,7 @@ def build_anchor_review_matrix(
     """
     from apps.api.models.bid_submission import BidSubmission
     from apps.api.services.tender_list import rebuild_anchors
-    from apps.api.services.session_helpers import get_current_confirmed_session
+    from apps.api.services.tender_session_service import get_current_confirmed_session
 
     session = get_current_confirmed_session(db, project_id, category)
     if not session:

@@ -38,7 +38,11 @@ from apps.api.core.domain_config import (
     MATCH_MAX_LINE_CONCENTRATION,
     MATCH_DECLARED_TOTAL_TOLERANCE,
 )
-from apps.api.services.session_helpers import get_current_confirmed_session, get_finalization_snapshot
+from apps.api.services import tender_session_service
+from apps.api.services.tender_session_service import (
+    get_current_confirmed_session,
+    get_finalization_snapshot,
+)
 
 _SUMMARY_NAME_PAT = _re.compile(
     r"合计|小计|说明|备注|合计金额|总价|total|subtotal", _re.IGNORECASE
@@ -2019,53 +2023,6 @@ def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
     return resolved
 
 
-def _save_tender_session(
-    db, project_id, category, file_name, anchors_json, confirmed_by,
-    source_type="excel", brand_requirement=None, supplier_brand_map=None,
-):
-    """新建一个 confirmed TenderListSession，旧的同 (project,category) 版本设为非当前。
-
-    返回新建的 session(未 commit；由调用方统一 commit)。
-    """
-    from apps.api.models.tender_list_session import TenderListSession
-    from datetime import datetime as _dt
-
-    db.query(TenderListSession).filter(
-        TenderListSession.project_id == project_id,
-        TenderListSession.category == category,
-        TenderListSession.is_current.is_(True),
-    ).update({"is_current": False, "superseded_at": _dt.utcnow()})
-
-    last = (
-        db.query(TenderListSession)
-        .filter(
-            TenderListSession.project_id == project_id,
-            TenderListSession.category == category,
-        )
-        .order_by(TenderListSession.version.desc())
-        .first()
-    )
-    new_version = (last.version + 1) if last else 1
-
-    session = TenderListSession(
-        project_id=project_id,
-        category=category,
-        file_name=file_name,
-        source_type=source_type,
-        anchors_total=len(anchors_json),
-        anchors_json=anchors_json,
-        brand_requirement=brand_requirement,
-        supplier_brand_map=supplier_brand_map,
-        version=new_version,
-        is_current=True,
-        status="confirmed",
-        confirmed_by=confirmed_by or None,
-        confirmed_at=_dt.utcnow(),
-    )
-    db.add(session)
-    return session
-
-
 @router.post("/tender-list/confirm")
 def tender_list_confirm(
     body: _TenderListConfirmBody,
@@ -2118,7 +2075,7 @@ def tender_list_confirm(
 
     sessions_out = []
     for cat, anchors in groups.items():
-        s = _save_tender_session(
+        s = tender_session_service.save_session(
             db, body.project_id, cat, body.file_name, anchors, body.confirmed_by,
             source_type=body.source_type,
             brand_requirement=body.brand_requirement,
@@ -2155,16 +2112,7 @@ def tender_list_current_sessions(
     categorySessionMap、tenderCategory、taskConfig.category、tenderListSessionId。
     无 current session（新项目）时返回 404，前端静默处理。
     """
-    from apps.api.models.tender_list_session import TenderListSession
-    sessions = (
-        db.query(TenderListSession)
-        .filter(
-            TenderListSession.project_id == project_id,
-            TenderListSession.is_current.is_(True),
-        )
-        .order_by(TenderListSession.id.asc())
-        .all()
-    )
+    sessions = tender_session_service.list_current_sessions(db, project_id)
     if not sessions:
         raise HTTPException(404, "该项目暂无已确认的采购清单")
     out = [
@@ -2184,14 +2132,7 @@ def tender_list_current(
     category: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    from apps.api.models.tender_list_session import TenderListSession
-    q = db.query(TenderListSession).filter(
-        TenderListSession.category == category,
-        TenderListSession.is_current.is_(True),
-    )
-    if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    session = q.first()
+    session = tender_session_service.get_current_session(db, category, project_id)
     if not session:
         raise HTTPException(404, "No current TenderListSession found")
     return {
@@ -2288,11 +2229,7 @@ def tender_list_versions(
     category: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    from apps.api.models.tender_list_session import TenderListSession
-    q = db.query(TenderListSession).filter(TenderListSession.category == category)
-    if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    sessions = q.order_by(TenderListSession.version.desc()).all()
+    sessions = tender_session_service.list_versions(db, category, project_id)
     return [
         {
             "id": s.id, "version": s.version, "is_current": s.is_current,
@@ -2310,16 +2247,7 @@ def tender_list_deactivate(
     db: Session = Depends(get_db),
 ):
     """将当前版 is_current=False（保留历史，不删除）。"""
-    from apps.api.models.tender_list_session import TenderListSession
-    from datetime import datetime as _dt
-    q = db.query(TenderListSession).filter(
-        TenderListSession.category == category,
-        TenderListSession.is_current.is_(True),
-    )
-    if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    updated = q.update({"is_current": False, "superseded_at": _dt.utcnow()})
-    db.commit()
+    updated = tender_session_service.deactivate_current(db, category, project_id)
     return {"ok": True, "deactivated": updated}
 
 

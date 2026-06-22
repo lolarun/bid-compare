@@ -17,7 +17,7 @@ from apps.api.models.supplier import Supplier
 from apps.api.models.quote import Quote
 from apps.api.models.project import Project
 from apps.api.services.bid_matrix import build_anchor_matrix
-from apps.api.services.session_helpers import get_finalization_snapshot
+from apps.api.services.tender_session_service import get_finalization_snapshot
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
