@@ -16,7 +16,7 @@ class BidMatrixVersion(Base):
     __tablename__ = "bid_matrix_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)  # §11.2
     category = Column(String(50), default="", nullable=False)
     version = Column(Integer, default=1)                    # 同 project+category 下自增
 

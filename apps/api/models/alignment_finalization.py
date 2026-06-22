@@ -4,7 +4,7 @@
 比价矩阵保存必须存在 status=finalized 的 AlignmentFinalization。
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, Text, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, Text, Index, ForeignKey
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -16,7 +16,7 @@ class AlignmentFinalization(Base):
     __tablename__ = "alignment_finalizations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)  # §11.2
     category = Column(String(50), default="", nullable=False)
 
     alignment_run_id = Column(String(100), nullable=True)  # 某次 import_and_match 批次标识

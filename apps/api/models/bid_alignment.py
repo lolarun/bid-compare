@@ -34,7 +34,7 @@ class BidAlignmentGroup(Base):
     status = Column(String(20), default="confirmed")  # confirmed / rejected / pending
 
     # Anchor linkage: composite key for unique identification across projects/versions
-    tender_list_session_id = Column(Integer, nullable=True)   # FK → tender_list_sessions.id
+    tender_list_session_id = Column(Integer, ForeignKey("tender_list_sessions.id"), nullable=True)   # §11.2
     anchor_seq = Column(String(20), nullable=True)            # TenderAnchor.seq (stringified)
 
     created_at = Column(DateTime, default=_now)
@@ -66,7 +66,7 @@ class BidAlignmentItem(Base):
         Integer, ForeignKey("bid_quote_lines.id"), nullable=True, index=True,
     )
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
-    submission_id = Column(Integer, nullable=True, index=True)  # BidSubmission.id; set for BQL path
+    submission_id = Column(Integer, ForeignKey("bid_submissions.id"), nullable=True, index=True)  # §11.2
 
     action = Column(String(20), default="align")  # align / pending / exclude
     spec_note = Column(String(500), default="")
