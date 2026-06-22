@@ -254,7 +254,8 @@ def _tail_recall_pages(
 
     Args:
         tgt: 已排序的视觉路由目标页（1-based）。
-        handled: 已被处理的页集合（tgt ∪ meta_extra），避免重复/抢占 summary 页。
+        handled: 已在 tgt 中处理的页集合，避免对已确认目标页重复召回。
+                 不包含 meta_extra：被误判为 summary 的尾部页应允许被召回（LLM 兜底）。
         total_pages: 文档总页数。
     Returns:
         需追加为目标页的召回页列表（已排序去重）。
@@ -416,7 +417,7 @@ def recognize_tables(
         tgt = sorted(target_pages)
     else:
         tgt = sorted(c.page for c in page_cls if c.role in table_roles)
-        recall_pages = _tail_recall_pages(tgt, set(tgt) | set(meta_extra), total_pages)
+        recall_pages = _tail_recall_pages(tgt, set(tgt), total_pages)
         if recall_pages:
             log.info("tail-recall (best-effort, isolated from rotation): %s", recall_pages)
     extract_pages = sorted(set(tgt) | set(recall_pages))   # 实际 OCR+抽取的页（含召回）

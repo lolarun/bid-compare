@@ -27,7 +27,7 @@ from apps.api.services.source_reconcile import reconcile_anchors
 
 REPO = Path(__file__).parent.parent.parent.parent
 TENDER_PDF = REPO / "docs" / "test" / "金桥地体上盖招标文件.pdf"
-TENDER_XLSX = REPO / "docs" / "test" / "金桥地铁上盖J9A-03地块（浦发上城科创智谷）研发及商业项目（阀门）招标清单.xlsx"
+TENDER_XLSX = REPO / "docs" / "test" / "金桥地体上盖招标文件.xlsx"
 
 BRAND_REQ = [
     {"brand_en": "KITZ", "brand_cn": "开滋"},
