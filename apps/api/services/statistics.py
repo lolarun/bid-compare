@@ -186,8 +186,15 @@ def refresh_material_baselines(db: Session, category: str | None = None):
         mat.price_cv = float(np.std(filtered, ddof=1) / mean_val) if mean_val > 0 and len(filtered) > 1 else 0.0
         mat.deviation_threshold = round(max(mat.price_cv * 1.5, 0.05), 3)
 
-        brands_q = db.query(func.distinct(Quote.brand)).filter(
-            Quote.material_id == mat.id, Quote.brand != "", Quote.brand.isnot(None),
+        brands_q = (
+            db.query(func.distinct(Quote.brand))
+            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .filter(
+                Quote.material_id == mat.id,
+                Quote.brand != "",
+                Quote.brand.isnot(None),
+                *valid_quote_filters(),
+            )
         )
         brands = [r[0] for r in brands_q.all() if r[0]]
         mat.recommended_brands = brands

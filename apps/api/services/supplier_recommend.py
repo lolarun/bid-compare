@@ -243,6 +243,7 @@ def recommend_suppliers(
             .filter(
                 Material.category.in_(categories),
                 Quote.unit_price > 0,
+                *valid_quote_filters(),
             )
             .distinct()
             .all()
@@ -267,7 +268,12 @@ def recommend_suppliers(
     # ── 4. Cold-start: fill remaining slots from global pool ──
     if len(primary) < top_n:
         primary_ids = {s["supplier_id"] for s in primary}
-        all_others_q = db.query(Supplier).filter(~Supplier.id.in_(primary_ids)) if primary_ids else db.query(Supplier)
+        all_others_q = (
+            db.query(Supplier)
+            .filter(Supplier.merge_status == "active", ~Supplier.id.in_(primary_ids))
+            if primary_ids
+            else db.query(Supplier).filter(Supplier.merge_status == "active")
+        )
         # Cap at 50 to bound cold-start cost
         all_others = all_others_q.limit(50).all()
         # Score without category constraint → use empty cat_stats
