@@ -66,5 +66,10 @@ tmp_*.txt
 # OCR snapshots in outputs/ are transient; controlled fixtures are in tests/fixtures/
 outputs/ocr_snapshots/
 
-# Script test outputs
-scripts/test_e2e_alignment_result.json
+# Developer diagnostic / one-off scripts (not production code; keep local only)
+scripts/
+
+# Local data directory and temp directories
+tmp/
+data/test_*/
+data/debug_*/
