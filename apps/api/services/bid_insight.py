@@ -53,11 +53,24 @@ BID_INSIGHT_PROMPT = """你是建筑机电材料招投标评标解读助手。�
 
 def _build_policy_text(data: dict) -> str:
     p = data.get("evaluation_policy") or {}
+    method = p.get("method", "unknown")
+    award_mode = p.get("award_mode", "unknown")
     factors = "、".join(p.get("factors") or [])
+    if method == "unknown":
+        method_desc = "未确认（招标文件评标法尚未解析或人工确认）"
+    else:
+        method_desc = f"{method}（合理低价评标价法，最低报价不保证中标）"
+    if award_mode == "unknown":
+        award_desc = "未确认（授标方式尚未确认）"
+    elif award_mode == "split_award":
+        award_desc = f"{award_mode}（允许拆单分项授标）"
+    else:
+        award_desc = f"{award_mode}（单一中标人，不允许拆单分项授标）"
+    factors_desc = factors if factors else "未确认"
     return (
-        f"- 评标方法：{p.get('method', 'reasonable_low_price')}（合理低价评标价法，最低报价不保证中标）\n"
-        f"- 授标方式：{p.get('award_mode', 'single_supplier')}（单一中标人，{'不' if p.get('award_mode') != 'split_award' else ''}允许拆单分项授标）\n"
-        f"- 综合评价因素（未给权重）：{factors}\n"
+        f"- 评标方法：{method_desc}\n"
+        f"- 授标方式：{award_desc}\n"
+        f"- 综合评价因素（未给权重）：{factors_desc}\n"
         f"- 最终由招标领导小组确定：{'是' if p.get('final_decision_requires_committee', True) else '否'}"
     )
 

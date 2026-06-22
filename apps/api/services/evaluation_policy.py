@@ -74,14 +74,25 @@ class EvaluationPolicy:
         }
 
 
-# 默认（保守）策略：对任何未知招标文件安全——不自动定标、不拆单、不造权重。
+# 具名默认策略（仅用于 Project 66 已确认政策的向后兼容；不得作新项目缺省值）。
 DEFAULT_EVALUATION_POLICY = EvaluationPolicy()
+
+# 未确认政策：招标文件尚未解析或人工确认 → 所有字段 unknown，禁止推导定标结论。
+UNKNOWN_EVALUATION_POLICY = EvaluationPolicy(
+    method="unknown",
+    award_mode="unknown",
+    lowest_price_wins=False,
+    factors=(),
+    weights=None,
+    final_decision_requires_committee=True,
+)
 
 
 def get_evaluation_policy(project_id: int | None = None) -> EvaluationPolicy:
     """返回项目的评标政策。
 
-    现阶段所有项目用保守默认策略（合理低价 / 单一授标 / 无权重 / 需委员会）。
-    未来可按 project_id 从招标文件解析结果加载；在那之前绝不返回会自动定标的策略。
+    未实现招标文件政策持久化前，所有项目返回 UNKNOWN_EVALUATION_POLICY。
+    method/award_mode=unknown 时下游禁止输出定标结论，只能呈现价格事实和缺口。
     """
-    return DEFAULT_EVALUATION_POLICY
+    # TODO: 按 project_id 从 DB 查询已确认政策；当前无持久化，全部返回 unknown。
+    return UNKNOWN_EVALUATION_POLICY
