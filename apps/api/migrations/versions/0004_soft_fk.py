@@ -45,7 +45,7 @@ def upgrade() -> None:
     if not _fk_exists(bind, "bid_alignment_groups", None, ["tender_list_session_id"]):
         with op.batch_alter_table("bid_alignment_groups", recreate="always") as batch_op:
             batch_op.create_foreign_key(
-                None, "tender_list_sessions",
+                "fk_bag_tender_session", "tender_list_sessions",
                 ["tender_list_session_id"], ["id"],
                 ondelete="SET NULL",
             )
@@ -57,7 +57,7 @@ def upgrade() -> None:
     if not _fk_exists(bind, "bid_alignment_items", None, ["submission_id"]):
         with op.batch_alter_table("bid_alignment_items", recreate="always") as batch_op:
             batch_op.create_foreign_key(
-                None, "bid_submissions",
+                "fk_bai_submission", "bid_submissions",
                 ["submission_id"], ["id"],
                 ondelete="SET NULL",
             )
@@ -66,7 +66,7 @@ def upgrade() -> None:
     if not _fk_exists(bind, "alignment_finalizations", None, ["project_id"]):
         with op.batch_alter_table("alignment_finalizations", recreate="always") as batch_op:
             batch_op.create_foreign_key(
-                None, "projects",
+                "fk_af_project", "projects",
                 ["project_id"], ["id"],
                 ondelete="SET NULL",
             )
@@ -75,7 +75,7 @@ def upgrade() -> None:
     if not _fk_exists(bind, "bid_matrix_versions", None, ["project_id"]):
         with op.batch_alter_table("bid_matrix_versions", recreate="always") as batch_op:
             batch_op.create_foreign_key(
-                None, "projects",
+                "fk_bmv_project", "projects",
                 ["project_id"], ["id"],
                 ondelete="SET NULL",
             )
@@ -85,16 +85,16 @@ def downgrade() -> None:
     # Dropping FK constraints from SQLite requires full table recreation.
     # This downgrade is provided as a best-effort; it may leave behind orphan constraints.
     with op.batch_alter_table("bid_matrix_versions", recreate="always") as batch_op:
-        batch_op.drop_constraint(None, type_="foreignkey")
+        batch_op.drop_constraint("fk_bmv_project", type_="foreignkey")
 
     with op.batch_alter_table("alignment_finalizations", recreate="always") as batch_op:
-        batch_op.drop_constraint(None, type_="foreignkey")
+        batch_op.drop_constraint("fk_af_project", type_="foreignkey")
 
     with op.batch_alter_table("bid_alignment_items", recreate="always") as batch_op:
-        batch_op.drop_constraint(None, type_="foreignkey")
+        batch_op.drop_constraint("fk_bai_submission", type_="foreignkey")
 
     with op.batch_alter_table("bid_alignment_groups", recreate="always") as batch_op:
-        batch_op.drop_constraint(None, type_="foreignkey")
+        batch_op.drop_constraint("fk_bag_tender_session", type_="foreignkey")
         try:
             batch_op.drop_index("ix_bag_tender_session")
         except Exception:
