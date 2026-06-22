@@ -19,6 +19,12 @@ class ExtractionJob(Base):
     id = Column(String(36), primary_key=True)  # UUID4 hex
     type = Column(String(16), nullable=False, index=True)  # 'tender' | 'quote'
     status = Column(String(16), nullable=False, default="pending", index=True)
+    # 业务生命周期（与 OCR status 正交）：
+    #   active    — 已上传/识别中/已识别待确认/失败，属于在途
+    #   confirmed — 已校对入库（生成了 BidSubmission）
+    #   removed   — 其 BidSubmission 已被移除（supersede）
+    # compare-state 据此判定是否在途，无需反查 bid_submissions。
+    lifecycle = Column(String(16), nullable=False, default="active", index=True)
 
     # File
     filename = Column(String(255), default="")

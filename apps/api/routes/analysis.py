@@ -2242,12 +2242,9 @@ def compare_state(
         .order_by(_BS.id.asc())
         .all()
     )
-    sub_job_ids: set[str] = set()
     submissions_out = []
     for s in subs:
         job = db.get(_EJ, s.job_id) if s.job_id else None
-        if s.job_id:
-            sub_job_ids.add(s.job_id)
         line_count = (
             db.query(_func.count(_BQL.id))
             .filter(_BQL.submission_id == s.id)
@@ -2267,20 +2264,21 @@ def compare_state(
             "progress_pct": (job.progress_pct if job else 100) or 0,
         })
 
-    # 在途 quote 任务：context.project_id == pid 且尚未入库（无对应 submission）。
+    # 在途 quote 任务：lifecycle='active' 即未入库、未移除（含识别中/已识别待确认/失败）。
+    # confirmed → 已在 submissions_out；removed → 已被用户移除，二者皆不在途。
+    # 不再反查 bid_submissions：job 自带生命周期，写时维护、读时直用。
     inflight_out = []
     inflight_jobs = (
         db.query(_EJ)
         .filter(
             _EJ.type == "quote",
+            _EJ.lifecycle == "active",
             _func.json_extract(_EJ.context, "$.project_id") == project_id,
         )
         .order_by(_EJ.created_at.asc())
         .all()
     )
     for j in inflight_jobs:
-        if j.id in sub_job_ids:
-            continue   # 已入库的不重复
         inflight_out.append({
             "job_id": j.id,
             "filename": j.filename or "",

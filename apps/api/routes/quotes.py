@@ -174,6 +174,62 @@ def delete_batch(batch_id: str, db: Session = Depends(get_db)):
     return {"deleted": count}
 
 
+# ─── BidSubmission 软删除（比价暂存层移除，须在 /{quote_id} 之前注册）──────────
+# 标记 status=superseded 而非物理删除（CLAUDE.md §12：优先标记不物删）。
+# compare-state 过滤 superseded → 前端刷新后不再出现；重新上传同一文件会复活
+# （见 batch-confirm 复活分支）；BidQuoteLine 保留，复活时清理重建。
+_ACTIVE_SUBMISSION_STATUSES = ["superseded", "rejected"]
+
+
+@router.delete("/submissions/{submission_id}")
+def supersede_submission(submission_id: int, db: Session = Depends(get_db)):
+    """逐个移除：把单条比价暂存 submission 标记 superseded（软删除，可复活）。"""
+    sub = db.query(BidSubmission).get(submission_id)
+    if sub is None:
+        raise HTTPException(404, f"Submission {submission_id} not found")
+    if sub.status == "superseded":
+        return {"submission_id": submission_id, "status": "superseded", "already": True}
+    sub.status = "superseded"
+    # 同步 job 生命周期 → removed，避免其作为在途任务重新出现在 compare-state
+    if sub.job_id:
+        job = db.get(ExtractionJob, sub.job_id)
+        if job:
+            job.lifecycle = "removed"
+    db.commit()
+    log.info("supersede_submission: submission_id=%d → superseded", submission_id)
+    return {"submission_id": submission_id, "status": "superseded", "already": False}
+
+
+@router.delete("/submissions")
+def supersede_project_submissions(
+    project_id: int = Query(...), db: Session = Depends(get_db)
+):
+    """一键移除：把某项目下全部 active submission 标记 superseded（软删除，可复活）。"""
+    subs = (
+        db.query(BidSubmission)
+        .filter(
+            BidSubmission.project_id == project_id,
+            BidSubmission.status.notin_(_ACTIVE_SUBMISSION_STATUSES),
+        )
+        .all()
+    )
+    ids = [s.id for s in subs]
+    job_ids = [s.job_id for s in subs if s.job_id]
+    for s in subs:
+        s.status = "superseded"
+    # 同步对应 job 生命周期 → removed（在途 job 无 submission，不受影响）
+    if job_ids:
+        db.query(ExtractionJob).filter(ExtractionJob.id.in_(job_ids)).update(
+            {ExtractionJob.lifecycle: "removed"}, synchronize_session=False
+        )
+    db.commit()
+    log.info(
+        "supersede_project_submissions: project_id=%d superseded %d submissions %s",
+        project_id, len(ids), ids,
+    )
+    return {"superseded_ids": ids, "count": len(ids)}
+
+
 # ─── Stats (must be before /{quote_id} to avoid route conflict) ────────────
 
 @router.get("/stats", response_model=dict)
@@ -442,6 +498,9 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
                 "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
                 prior_submission.id, batch_id, prior_line_count,
             )
+            if job.lifecycle != "confirmed":   # 修正回填遗漏/旧数据
+                job.lifecycle = "confirmed"
+                db.commit()
             return {
                 "status": "ok",
                 "submission_id": prior_submission.id,
@@ -494,6 +553,9 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
         )
         db.add(submission)
         db.flush()
+
+    # job 已入库（业务生命周期）→ compare-state 不再视为在途
+    job.lifecycle = "confirmed"
 
     if not items:
         db.commit()

@@ -1375,9 +1375,37 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
   }
 }
 
-function removeBatchEntry(entry: BatchFileEntry) {
+async function removeBatchEntry(entry: BatchFileEntry) {
   if (entry.pollTimer) clearInterval(entry.pollTimer)
+  // 已入库 → 调用后端软删除（标记 superseded），否则仅去掉前端卡片
+  if (entry.confirmed && entry.confirmedSubmissionId != null) {
+    try {
+      await quoteApi.supersedeSubmission(entry.confirmedSubmissionId)
+      message.success('已移除该报价')
+    } catch (e: unknown) {
+      message.error(extractErrMsg(e, '移除失败'))
+      return
+    }
+  }
   batchFiles.value = batchFiles.value.filter((f) => f.id !== entry.id)
+}
+
+// 一键移除：清空当前项目下全部供应商报价（已入库的标记 superseded，可复活）
+async function removeAllBatchEntries() {
+  for (const f of batchFiles.value) {
+    if (f.pollTimer) clearInterval(f.pollTimer)
+  }
+  const pid = taskConfig.projectId
+  if (pid) {
+    try {
+      const { data } = await quoteApi.supersedeProjectSubmissions(pid)
+      message.success(`已移除全部报价（${data.count} 条）`)
+    } catch (e: unknown) {
+      message.error(extractErrMsg(e, '一键移除失败'))
+      return
+    }
+  }
+  batchFiles.value = []
 }
 
 // 从文件名中提取供应商名称提示（用于冲突检测）
@@ -1859,6 +1887,17 @@ async function runMatrix() {
             style="width:200px;margin-left:12px"
           />
         </div>
+        <div v-if="batchFiles.length > 0" class="batch-list-header">
+          <span class="batch-list-header__count">共 {{ batchFiles.length }} 份报价</span>
+          <a-popconfirm
+            title="一键移除将清空当前项目下全部已上传/已入库的供应商报价（标记 superseded，重新上传可恢复）。确认移除全部？"
+            ok-text="移除全部"
+            cancel-text="取消"
+            @confirm="removeAllBatchEntries"
+          >
+            <a-button size="small" danger>一键移除</a-button>
+          </a-popconfirm>
+        </div>
         <div v-if="batchFiles.length > 0" class="batch-list">
           <div v-for="f in batchFiles" :key="f.id" class="batch-card" :class="{ 'batch-card--done': f.confirmed }">
             <div class="batch-card__head">
@@ -1877,7 +1916,16 @@ async function runMatrix() {
               <a-tag v-else-if="f.confirmed && !f.jobId" color="green">Excel 已导入</a-tag>
               <a-tag v-else-if="f.confirmed" color="green">已入库</a-tag>
               <a-tag v-else color="cyan">{{ f.stage }} · {{ f.items.length }} 项</a-tag>
-              <a-button v-if="!f.confirmed" size="small" type="text" danger @click="removeBatchEntry(f)">移除</a-button>
+              <a-popconfirm
+                v-if="f.confirmed"
+                title="移除后该报价将从本次比价中删除（标记 superseded，重新上传可恢复）。确认移除？"
+                ok-text="移除"
+                cancel-text="取消"
+                @confirm="removeBatchEntry(f)"
+              >
+                <a-button size="small" type="text" danger>移除</a-button>
+              </a-popconfirm>
+              <a-button v-else size="small" type="text" danger @click="removeBatchEntry(f)">移除</a-button>
             </div>
 
             <a-progress
@@ -2491,6 +2539,18 @@ async function runMatrix() {
   align-items: center;
   font-size: 13px;
   color: @text-color-secondary;
+}
+
+.batch-list-header {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  &__count {
+    font-size: 13px;
+    color: @text-color-secondary;
+  }
 }
 
 .batch-list {

@@ -91,6 +91,16 @@ export const quoteApi = {
     api.get<{ items: Array<{ batch_id: string; count: number; created_at: string | null; supplier_id: number | null; supplier_name: string; project_id: number | null; project_name: string }>; total: number }>('/quotes/batches'),
   deleteBatch: (batchId: string) =>
     api.delete(`/quotes/batches/${encodeURIComponent(batchId)}`),
+  // 软删除单条比价暂存 submission（标记 superseded，可复活）
+  supersedeSubmission: (submissionId: number) =>
+    api.delete<{ submission_id: number; status: string; already: boolean }>(
+      `/quotes/submissions/${submissionId}`,
+    ),
+  // 一键移除：软删除某项目下全部 active submission
+  supersedeProjectSubmissions: (projectId: number) =>
+    api.delete<{ superseded_ids: number[]; count: number }>('/quotes/submissions', {
+      params: { project_id: projectId },
+    }),
   import: (formData: FormData) =>
     api.post<ImportResult>('/quotes/import', formData, {
       // Don't set Content-Type explicitly — axios will add the

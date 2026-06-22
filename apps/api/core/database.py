@@ -370,3 +370,34 @@ def _ensure_sqlite_schema():
                 "CREATE INDEX IF NOT EXISTS ix_bai_submission_id "
                 "ON bid_alignment_items(submission_id)"
             ))
+
+        # v4.1: ExtractionJob.lifecycle — job 自带业务生命周期（active/confirmed/removed），
+        # compare-state 据此判定在途，不再反查 bid_submissions。
+        job_cols_v41 = {
+            row[1] for row in conn.execute(
+                text("PRAGMA table_info(extraction_jobs)")
+            ).fetchall()
+        }
+        if "lifecycle" not in job_cols_v41:
+            conn.execute(text(
+                "ALTER TABLE extraction_jobs "
+                "ADD COLUMN lifecycle VARCHAR(16) NOT NULL DEFAULT 'active'"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_extraction_jobs_lifecycle "
+                "ON extraction_jobs(lifecycle)"
+            ))
+            # 回填：job_id 唯一对应至多一条 submission（batch_id=BID-{job_id}）。
+            #   active submission   → job confirmed
+            #   superseded/rejected → job removed
+            #   无 submission       → 保持 active
+            conn.execute(text(
+                "UPDATE extraction_jobs SET lifecycle='confirmed' WHERE id IN ("
+                "  SELECT job_id FROM bid_submissions "
+                "  WHERE job_id IS NOT NULL AND status NOT IN ('superseded','rejected'))"
+            ))
+            conn.execute(text(
+                "UPDATE extraction_jobs SET lifecycle='removed' WHERE id IN ("
+                "  SELECT job_id FROM bid_submissions "
+                "  WHERE job_id IS NOT NULL AND status IN ('superseded','rejected'))"
+            ))
