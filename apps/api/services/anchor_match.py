@@ -19,10 +19,10 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import get_settings
+from apps.api.services.llm_provider import get_dashscope_client
 from apps.api.models import Material, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
@@ -93,12 +93,8 @@ def _dn_of(s: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _embed_client() -> OpenAI:
-    s = get_settings()
-    key = s.DASHSCOPE_API_KEY
-    if not key and getattr(s, "DASHSCOPE_API_KEYS", ""):
-        key = s.DASHSCOPE_API_KEYS.split(",")[0].strip()
-    return OpenAI(api_key=key, base_url=s.DASHSCOPE_BASE_URL)
+def _embed_client():
+    return get_dashscope_client()
 
 
 def _embed(client: OpenAI, texts: list[str]) -> list[list[float]]:

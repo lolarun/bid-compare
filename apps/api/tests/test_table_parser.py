@@ -28,7 +28,7 @@ def test_basic_quote_table_page():
     assert grid.page == 1
     assert grid.table_index == 0
     quote_lines = [r for r in grid.rows if r.row_type == "quote_line"]
-    headers = [r for r in grid.rows if r.row_type == "header"]
+    headers = [r for r in grid.rows if r.row_type == "section_header"]
     assert len(quote_lines) == 5
     assert len(headers) >= 1
 
@@ -160,7 +160,7 @@ def test_classify_subtotal():
 
 def test_classify_empty():
     cells = {"名称": "", "规格": "", "单位": "", "数量": "", "单价": ""}
-    assert _classify_row(cells) == "empty"
+    assert _classify_row(cells) == "invalid"
 
 
 def test_classify_quote_line():
@@ -193,8 +193,8 @@ def test_grids_to_llm_json_structure():
 
     # header rows should NOT appear in llm output (filtered out)
     types_in_output = {r["row_type"] for r in t["rows"]}
-    assert "header" not in types_in_output
-    assert "empty" not in types_in_output
+    assert "section_header" not in types_in_output
+    assert "invalid" not in types_in_output
 
 
 def test_grids_to_llm_json_no_grand_total_rows():

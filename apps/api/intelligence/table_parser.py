@@ -21,6 +21,11 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
+from apps.api.core.enums import (
+    RT_GRAND_TOTAL, RT_INVALID, RT_QUOTE_LINE,
+    RT_REMARK, RT_SECTION_HEADER, RT_SUBTOTAL,
+)
+
 log = logging.getLogger(__name__)
 
 # ── Column semantic slot detection ────────────────────────────────────────
@@ -91,7 +96,7 @@ class TableGrid:
                     "cells": r.cells,
                 }
                 for r in self.rows
-                if r.row_type not in ("empty", "header")
+                if r.row_type not in (RT_INVALID, RT_SECTION_HEADER)
             ],
         }
 
@@ -257,7 +262,7 @@ def _classify_row(cells: dict[str, str]) -> str:
     non_empty = [v for v in values if v.strip()]
 
     if not non_empty:
-        return "empty"
+        return RT_INVALID
 
     # Split into text cells (non-numeric) and numeric cells
     text_cells = [
@@ -270,11 +275,11 @@ def _classify_row(cells: dict[str, str]) -> str:
     empty_ratio = (len(values) - len(non_empty)) / max(len(values), 1)
     if text_cells and any(_GRAND_TOTAL_KEYWORDS.search(v) for v in text_cells):
         if empty_ratio >= 0.3:
-            return "grand_total"
+            return RT_GRAND_TOTAL
 
     # subtotal
     if _SUBTOTAL_KEYWORDS.search(combined):
-        return "subtotal"
+        return RT_SUBTOTAL
 
     # Repeated header row (e.g. after page break)
     if _HEADER_KEYWORDS.search(combined) and len(non_empty) >= 3:
@@ -284,13 +289,13 @@ def _classify_row(cells: dict[str, str]) -> str:
             if any(kw in k for kw in ("价", "金额", "合价"))
         ]
         if price_vals and not any(_NUMBER_RE.match(v.replace(",", "")) for v in price_vals if v):
-            return "header"
+            return RT_SECTION_HEADER
 
-    # Note: single non-empty text cell, no numeric price
+    # Single non-empty text cell, no numeric price — remark/annotation row
     if len(non_empty) == 1:
-        return "note"
+        return RT_REMARK
 
-    return "quote_line"
+    return RT_QUOTE_LINE
 
 
 # ── public API ────────────────────────────────────────────────────────────
@@ -351,7 +356,7 @@ def html_to_table_grids(html: str, page_num: int,
         table_rows: list[TableRow] = []
         for r_idx, row_cells_flat in enumerate(expanded):
             cells = dict(zip(header, row_cells_flat))
-            row_type = "header" if r_idx < data_start else _classify_row(cells)
+            row_type = RT_SECTION_HEADER if r_idx < data_start else _classify_row(cells)
             table_rows.append(TableRow(
                 row_index=r_idx,
                 row_type=row_type,

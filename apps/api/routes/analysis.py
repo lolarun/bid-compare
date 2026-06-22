@@ -271,15 +271,11 @@ def refresh_baselines(category: str | None = None, db: Session = Depends(get_db)
 @router.post("/bid-insight", response_model=BidInsightResult)
 def bid_insight(body: BidInsightRequest):
     """AI 综合分析建议 — 调用 Qwen 文本模型分析比价矩阵。"""
-    from openai import OpenAI
+    from apps.api.services.llm_provider import get_dashscope_client
 
-    _settings = get_settings()
-    api_key = _settings.DASHSCOPE_API_KEY
-    base_url = _settings.DASHSCOPE_BASE_URL
-    if not api_key:
+    client = get_dashscope_client()
+    if client is None:
         return BidInsightResult(error="LLM API key not configured")
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
     matrix_data = body.model_dump()
     result = generate_bid_insight(matrix_data, client, model="qwen-plus")
     return result
@@ -293,14 +289,12 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
       1. Pass `rows` directly (from OCR results before DB import)
       2. Pass `project_id + supplier_ids + category` (query confirmed quotes from DB)
     """
-    from openai import OpenAI
     from apps.api.services.bid_alignment import suggest_alignment
+    from apps.api.services.llm_provider import get_dashscope_client
     from apps.api.models import Quote, Material, Supplier
 
-    _settings = get_settings()
-    api_key = _settings.DASHSCOPE_API_KEY
-    base_url = _settings.DASHSCOPE_BASE_URL
-    if not api_key:
+    client = get_dashscope_client()
+    if client is None:
         return AlignmentSuggestResult(error="LLM API key not configured")
 
     rows_data: list[dict] = []
@@ -356,7 +350,6 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
     else:
         return AlignmentSuggestResult(error="No quote rows or supplier_ids provided")
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
     result = suggest_alignment(
         rows=rows_data,
         category=body.category,

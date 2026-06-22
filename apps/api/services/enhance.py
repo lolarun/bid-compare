@@ -19,10 +19,10 @@ import logging
 import time
 from typing import Any
 
-from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import PROFESSION_MAP, ALL_CATEGORIES, get_settings
+from apps.api.services.llm_provider import get_dashscope_client
 from apps.api.models import Material, Quote, Supplier
 
 log = logging.getLogger(__name__)
@@ -182,8 +182,8 @@ def enhance_ocr_items(
         On failure: adds "error" key.
     """
     settings = get_settings()
-    api_key = settings.DASHSCOPE_API_KEY
-    if not api_key:
+    client = get_dashscope_client()
+    if client is None:
         return {"items": items, "summary": {}, "error": "LLM API key not configured"}
 
     try:
@@ -195,7 +195,7 @@ def enhance_ocr_items(
             items_text=items_text,
         )
 
-        client = OpenAI(api_key=api_key, base_url=settings.DASHSCOPE_BASE_URL)
+
         t0 = time.time()
         resp = client.chat.completions.create(
             model=settings.DASHSCOPE_LLM_MODEL,  # qwen3.6-flash: fast enough, cheaper

@@ -5,6 +5,10 @@ import string
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
+from apps.api.core.enums import (
+    CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING, CELL_EXCLUDED, CELL_MISSING,
+    REC_BLOCKED, REC_CONDITIONAL,
+)
 from apps.api.models import Material, Quote, Supplier, Project, BrandTier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.extraction_job import ExtractionJob
@@ -87,12 +91,12 @@ def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
             unit=(mat.unit or "") if mat else "",
         )
 
-# Cell status constants
-CELL_QUOTED = "quoted"        # confirmed align item with price
-CELL_AGGREGATED = "aggregated"  # aggregated multi-row align item
-CELL_PENDING = "pending"      # pending item — show price in orange, exclude from calcs
-CELL_EXCLUDED = "excluded"    # explicitly excluded
-CELL_MISSING = "missing"      # no item at all (supplier didn't quote)
+# CELL_* re-exported from core.enums for backward compatibility
+# (tests/test_anchor_matrix.py imports these names from bid_matrix)
+__all__ = [
+    "CELL_QUOTED", "CELL_AGGREGATED", "CELL_PENDING", "CELL_EXCLUDED", "CELL_MISSING",
+    "build_anchor_matrix", "build_anchor_review_matrix",
+]
 
 
 def _get_supplier_checksum(db: Session, supplier_id: int, project_id: int | None) -> dict:
@@ -646,10 +650,10 @@ def _compute_recommendation(
 
     reasons: list[str] = []
     if not ranked:
-        level = "blocked"
+        level = REC_BLOCKED
         reasons.append("无任一供应商可形成完整含税评标总价（税口径/对齐未确认或缺报）→ 无价格优选候选人")
     else:
-        level = "conditional"
+        level = REC_CONDITIONAL
         reasons.append("已得确定性『评标总价排名』与『价格优选候选人』")
         if policy.method == "unknown":
             reasons.append("评标法尚未确认 → 价格排名仅供参考，定标需人工确认招标文件评标法后方可进行")
@@ -937,7 +941,7 @@ def build_anchor_matrix(
     from apps.api.services.matrix_stats import build_matrix_distribution_from_rows
     matrix_distribution = build_matrix_distribution_from_rows(rows, col_ids)
 
-    blocked = rec["recommendation_level"] == "blocked"
+    blocked = rec["recommendation_level"] == REC_BLOCKED
     return {
         "project_id": project_id,
         "suppliers": supplier_labels,

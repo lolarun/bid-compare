@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from apps.api.core.enums import RT_INVALID, RT_GRAND_TOTAL, RT_SUBTOTAL
 from apps.api.intelligence.document_loader import DocumentLoader, MAX_PAGES_UNLIMITED
 from apps.api.intelligence.extraction_draft import (
     ExtractionDraft, DraftRow, PageMetric, SourceRef,
@@ -1175,7 +1176,7 @@ def _build_llm_input(html: str, page_no: int,
                 rows = [
                     {"row_index": r.row_index, "row_type": r.row_type, "cells": r.cells}
                     for r in g.rows
-                    if r.row_type not in ("empty", "grand_total", "subtotal")
+                    if r.row_type not in (RT_INVALID, RT_GRAND_TOTAL, RT_SUBTOTAL)
                 ]
                 if rows:
                     rows_out.append({"page": g.page, "table_index": g.table_index, "rows": rows})
