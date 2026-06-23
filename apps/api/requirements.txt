@@ -2,6 +2,8 @@
 #    uv export --no-dev --frozen --no-hashes -o apps/api/requirements.txt
 alembic==1.18.4
     # via bid-compare
+dashscope==1.25.19
+    # via bid-compare
 annotated-doc==0.0.4
     # via fastapi
 annotated-types==0.7.0
