@@ -249,7 +249,7 @@ defineExpose({ retry, currentJob })
   padding: 14px 16px;
   border: 1px solid @border-color-base;
   border-radius: @border-radius-lg;
-  background: @component-background;
+  background: #faf9f5;
   transition: border-color 0.15s;
 
   &--done { border-color: #b7eb8f; background: #f6ffed; }

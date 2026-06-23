@@ -180,7 +180,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
 
     <a-row :gutter="16" class="invite-page__body">
       <!-- ════════ 左侧：招标信息（容器卡 + 悬浮按钮卡） ════════ -->
-      <a-col :xs="24" :lg="7" class="invite-page__col">
+      <a-col :xs="24" :lg="8" class="invite-page__col">
         <div class="tender-card">
           <div class="tender-card__title">招标信息</div>
           <div class="tender-card__subtitle">上传招标文件，自动识别清单后生成邀标建议</div>
@@ -257,7 +257,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
       </a-col>
 
       <!-- ════════ 右侧：推荐供应商（无容器 + 悬浮按钮卡） ════════ -->
-      <a-col :xs="24" :lg="17" class="invite-page__col">
+      <a-col :xs="24" :lg="16" class="invite-page__col">
         <div class="reco-panel">
           <!-- 信息条（常驻） -->
           <div class="reco-header">
