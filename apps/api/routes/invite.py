@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api/invite", tags=["invite"])
 @router.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest, db: Session = Depends(get_db)) -> RecommendResponse:
     categories = infer_categories(req.tender_items)
-    recs = recommend_suppliers(
+    recs, total_candidates = recommend_suppliers(
         db,
         req.tender_items,
         top_n=max(1, req.top_n),
@@ -48,6 +48,7 @@ def recommend(req: RecommendRequest, db: Session = Depends(get_db)) -> Recommend
     return RecommendResponse(
         categories=categories,
         recommendations=[SupplierRecommendation(**r) for r in recs],
+        total_candidates=total_candidates,
     )
 
 
@@ -98,7 +99,7 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
     # Pass brand_requirements so the stored rank matches what the user saw.
     rec_lookup: dict[int, dict] = {}
     if req.items:
-        recs = recommend_suppliers(
+        recs, _ = recommend_suppliers(
             db,
             req.items,
             top_n=max(len(req.supplier_ids), 5),

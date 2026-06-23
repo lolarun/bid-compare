@@ -25,7 +25,7 @@ def get_dashboard_summary(db: Session) -> dict:
         quote_count = (
             db.query(func.count(Quote.id))
             .join(Material)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Material.category == cat, *valid_quote_filters())
             .scalar() or 0
         )
@@ -33,7 +33,7 @@ def get_dashboard_summary(db: Session) -> dict:
         avg_price_row = (
             db.query(func.avg(Quote.unit_price))
             .join(Material)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Material.category == cat, Quote.unit_price > 0, *valid_quote_filters())
             .scalar()
         )
@@ -41,7 +41,7 @@ def get_dashboard_summary(db: Session) -> dict:
         supplier_count = (
             db.query(func.count(func.distinct(Quote.supplier_id)))
             .join(Material)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Material.category == cat, *valid_quote_filters())
             .scalar() or 0
         )
@@ -49,7 +49,7 @@ def get_dashboard_summary(db: Session) -> dict:
         project_count = (
             db.query(func.count(func.distinct(Quote.project_id)))
             .join(Material)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Material.category == cat, *valid_quote_filters())
             .scalar() or 0
         )
@@ -88,7 +88,7 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
     valid_prices = (
         db.query(func.count(Quote.id))
         .join(Material)
-        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
         .filter(Material.category == category, Quote.unit_price > 0, *valid_quote_filters())
         .scalar() or 0
     )
@@ -105,7 +105,7 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
         prices_q = (
             db.query(Quote.unit_price)
             .join(Material)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(
                 Material.category == category,
                 Material.sub_category == sub_cat,
@@ -157,7 +157,7 @@ def refresh_material_baselines(db: Session, category: str | None = None):
     for mat in q.all():
         prices_q = (
             db.query(Quote.unit_price)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Quote.material_id == mat.id, Quote.unit_price > 0, *valid_quote_filters())
         )
         prices = [r[0] for r in prices_q.all()]
@@ -188,7 +188,7 @@ def refresh_material_baselines(db: Session, category: str | None = None):
 
         brands_q = (
             db.query(func.distinct(Quote.brand))
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(
                 Quote.material_id == mat.id,
                 Quote.brand != "",

@@ -1645,7 +1645,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
         q = (
             db.query(Quote.supplier_id)
             .join(Material, Quote.material_id == Material.id)
-            .join(Supplier, Quote.supplier_id == Supplier.id)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
             .filter(Quote.project_id == body.project_id, Material.category == body.category, *_vqf3())
             .distinct()
         )

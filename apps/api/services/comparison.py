@@ -49,7 +49,7 @@ def compute_baseline(db: Session, category: str, sub_category: str | None = None
     q = (
         db.query(Quote.unit_price)
         .join(Material)
-        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
         .filter(
             Material.category == category,
             Quote.unit_price.isnot(None),
@@ -113,7 +113,7 @@ def compute_reasonable_low(
     q = (
         db.query(Quote.unit_price, Quote.quote_date, Quote.project_id)
         .join(Material)
-        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
         .filter(
             Material.category == category,
             Quote.unit_price.isnot(None),
@@ -190,7 +190,7 @@ def build_spec_price_index(db: Session, category: str) -> dict[tuple, list[float
             Material.standard_name, Material.spec, Material.unit,
         )
         .join(Material, Material.id == Quote.material_id)
-        .join(Supplier, Quote.supplier_id == Supplier.id)
+        .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
         .filter(Material.category == category, *valid_quote_filters())
         .all()
     )

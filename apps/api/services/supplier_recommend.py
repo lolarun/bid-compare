@@ -219,16 +219,47 @@ def _aggregate_supplier_stats(
     return stats
 
 
+def _compute_tags(
+    history_count: int,
+    avg_dev: float | None,
+    overall_score: float,
+    brand_requirements: list[str] | None,
+    supplier_brands: list[str],
+) -> list[str]:
+    """Generate semantic tags for a supplier recommendation card."""
+    tags: list[str] = []
+    if avg_dev is not None and avg_dev <= -0.05:
+        tags.append("价格优势")
+    if history_count >= 6:
+        tags.append("长期合作")
+    elif 0 < history_count <= 2:
+        tags.append("新合作机会")
+    if overall_score >= 88:
+        tags.append("质量优秀")
+    elif overall_score >= 75 and history_count >= 3:
+        tags.append("稳定供应")
+    if brand_requirements:
+        matched = [b for b in brand_requirements if b in supplier_brands]
+        if matched:
+            tags.append("品牌匹配")
+    return tags[:4]
+
+
 def recommend_suppliers(
     db: Session,
     tender_items: list[dict[str, Any]],
     top_n: int = 5,
     project_id: int | None = None,
     brand_requirements: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """Recommend up to `top_n` suppliers for the given tender items."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Recommend up to `top_n` suppliers for the given tender items.
+
+    Returns (recommendations, total_candidates) where total_candidates is the
+    size of the initial scored pool before top_n filtering (exposed in the UI
+    as "已分析 N 家相关供应商").
+    """
     if top_n <= 0:
-        return []
+        return [], 0
     categories = infer_categories(tender_items)
 
     # ── 1. Recall candidates: bulk-fetch suppliers with category history ──
@@ -263,6 +294,7 @@ def recommend_suppliers(
         scored.append(_score_one(db, sup, categories, cat_stats.get(sup.id), brand_requirements))
 
     scored.sort(key=lambda x: x["score"], reverse=True)
+    total_candidates = len(scored)
     primary = scored[:top_n]
 
     # ── 4. Cold-start: fill remaining slots from global pool ──
@@ -282,10 +314,12 @@ def recommend_suppliers(
         extras.sort(key=lambda x: x["score"], reverse=True)
         primary.extend(extras[: top_n - len(primary)])
 
-    # ── 5. Assign ranks ──
+    # ── 5. Assign ranks and add rank-based tags ──
     for i, entry in enumerate(primary):
         entry["rank"] = i + 1
-    return primary
+        if i >= 3 and "补充邀标" not in entry["reason"]["tags"]:
+            entry["reason"]["tags"].append("补充邀标")
+    return primary, total_candidates
 
 
 def _per_category_breakdown(
@@ -404,6 +438,8 @@ def _score_one(
         summary_parts.append(f"平均偏差 {sign}{avg_dev:.1%}{coverage}")
     summary_parts.append(f"综合评分 {overall_score:.0f}")
 
+    tags = _compute_tags(history_count, avg_dev, overall_score, brand_requirements, supplier_brands)
+
     return {
         "supplier_id": sup.id,
         "supplier_name": sup.name,
@@ -417,5 +453,6 @@ def _score_one(
             "overall_score": round(overall_score, 1),
             "summary": " · ".join(summary_parts),
             "brands": supplier_brands[:10],
+            "tags": tags,
         },
     }

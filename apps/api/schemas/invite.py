@@ -31,6 +31,7 @@ class RecommendReason(BaseModel):
     overall_score: float = 0
     summary: str = ""
     brands: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
 
 
 class SupplierRecommendation(BaseModel):
@@ -44,6 +45,7 @@ class SupplierRecommendation(BaseModel):
 class RecommendResponse(BaseModel):
     categories: list[str]
     recommendations: list[SupplierRecommendation]
+    total_candidates: int = 0
 
 
 class SaveInvitationsRequest(BaseModel):

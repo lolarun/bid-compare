@@ -456,6 +456,7 @@ export interface RecommendReason {
   overall_score: number
   summary: string
   brands: string[]
+  tags: string[]
 }
 
 export interface SupplierRecommendation {
@@ -469,6 +470,7 @@ export interface SupplierRecommendation {
 export interface RecommendResponse {
   categories: string[]
   recommendations: SupplierRecommendation[]
+  total_candidates: number
 }
 
 export interface BatchConfirmResult {
