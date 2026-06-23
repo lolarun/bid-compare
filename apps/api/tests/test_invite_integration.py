@@ -132,7 +132,7 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
 
 @pytest.fixture
 def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
-    """TestClient with seeded DB + MockProvider."""
+    """TestClient with seeded DB + MockProvider + auth bypass."""
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
         "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -162,9 +162,14 @@ def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
         db.close()
 
     from apps.api.main import app
+    from apps.api.routes.auth import get_current_user
 
-    with TestClient(app) as c:
-        yield c
+    app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 def _png() -> bytes:

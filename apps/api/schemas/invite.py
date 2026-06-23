@@ -56,6 +56,7 @@ class SaveInvitationsRequest(BaseModel):
     deadline: str = ""
     items: list[dict[str, Any]] = Field(default_factory=list)
     supplier_ids: list[int]
+    brand_requirements: list[str] = Field(default_factory=list)
 
 
 class SavedInvitation(BaseModel):

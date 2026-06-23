@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   SaveOutlined,
@@ -16,7 +16,7 @@ import type {
   TenderExtractionItem,
   SupplierRecommendation,
 } from '@/api/client'
-import { asTenderShape } from '@/utils/extraction'
+import { asTenderBidlistShape } from '@/utils/extraction'
 
 /**
  * Invite (邀标建议) page — full real-data flow:
@@ -28,12 +28,7 @@ import { asTenderShape } from '@/utils/extraction'
 
 const sourceJob = ref<ExtractionJob | null>(null)
 const tenderItems = ref<TenderExtractionItem[]>([])
-const tenderMeta = reactive({
-  project_name: '',
-  project_code: '',
-  tender_date: '',
-  deadline: '',
-})
+const projectName = ref('')
 
 const recommending = ref(false)
 const recommendations = ref<SupplierRecommendation[]>([])
@@ -52,14 +47,16 @@ const canSave = computed(() => savedTenderId.value === null && selectedSupplierI
 // ─── Step 1: ingestion result ────────────────────────────────────────────
 function onExtracted(job: ExtractionJob) {
   sourceJob.value = job
-  // AUDIT-FIX M9: validated coercion via runtime guard, not a raw cast.
-  // Contract drift now produces a console.warn rather than silent undefined.
-  const shape = asTenderShape(job.result)
-  tenderMeta.project_name = shape.project_name
-  tenderMeta.project_code = shape.project_code
-  tenderMeta.tender_date = shape.tender_date
-  tenderMeta.deadline = shape.deadline
+  const shape = asTenderBidlistShape(job.result)
   tenderItems.value = shape.items
+  // Auto-populate brand requirements extracted from the tender document.
+  // Preserve any brands the user typed before upload.
+  if (shape.brandRequirements.length > 0) {
+    const existing = new Set(brandRequirements.value)
+    for (const b of shape.brandRequirements) {
+      if (!existing.has(b)) brandRequirements.value.push(b)
+    }
+  }
   // Reset downstream state
   recommendations.value = []
   selectedSupplierIds.value = []
@@ -73,7 +70,8 @@ function onExtracted(job: ExtractionJob) {
 function clearAll() {
   sourceJob.value = null
   tenderItems.value = []
-  Object.assign(tenderMeta, { project_name: '', project_code: '', tender_date: '', deadline: '' })
+  projectName.value = ''
+  brandRequirements.value = []
   recommendations.value = []
   selectedSupplierIds.value = []
   savedTenderId.value = null
@@ -138,12 +136,10 @@ async function saveInvitations() {
   try {
     const { data } = await inviteApi.save({
       job_id: sourceJob.value?.id,
-      project_name: tenderMeta.project_name || '未命名招标',
-      project_code: tenderMeta.project_code,
-      tender_date: tenderMeta.tender_date,
-      deadline: tenderMeta.deadline,
+      project_name: projectName.value || '未命名招标',
       items: tenderItems.value as unknown as Array<Record<string, unknown>>,
       supplier_ids: selectedSupplierIds.value,
+      brand_requirements: brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
     })
     savedTenderId.value = data.tender_id
     message.success(`已保存招标记录 #${data.tender_id}，邀请 ${data.invitations.length} 家供应商`)
@@ -184,17 +180,18 @@ function toggleSupplier(id: number) {
           </template>
           <IntakeUploader
             v-if="!sourceJob"
-            :type="'tender'"
-            hint="支持招标文件 PDF / 扫描件图片；上传后自动识别项目信息与材料清单"
+            :type="'tender_bidlist'"
+            hint="支持招标文件 PDF / 扫描件图片；自动识别招标清单及品牌要求"
             @extracted="onExtracted"
           />
           <div v-else>
-            <a-descriptions :column="2" size="small" bordered>
-              <a-descriptions-item label="项目名称">{{ tenderMeta.project_name || '—' }}</a-descriptions-item>
-              <a-descriptions-item label="招标编号">{{ tenderMeta.project_code || '—' }}</a-descriptions-item>
-              <a-descriptions-item label="招标日期">{{ tenderMeta.tender_date || '—' }}</a-descriptions-item>
-              <a-descriptions-item label="投标截止">{{ tenderMeta.deadline || '—' }}</a-descriptions-item>
-            </a-descriptions>
+            <a-form-item label="项目名称" style="margin-bottom:0">
+              <a-input
+                v-model:value="projectName"
+                placeholder="可选，用于保存记录时标识该招标"
+                allow-clear
+              />
+            </a-form-item>
           </div>
         </a-card>
 

@@ -1,6 +1,6 @@
 """Alembic environment — wired to the app's Base.metadata and DATABASE_URL.
 
-Design: docs/design/13-Alembic迁移引入.md (方案 B).
+Design: docs/design/13-alembic-migration-introduction.md (Plan B).
 
 - DB URL is taken from apps.api.core.database.DATABASE_URL (never hard-coded),
   unless an engine/connection is injected programmatically via

@@ -1,7 +1,12 @@
-# 原始数据索引
+# 原始数据索引（Legacy v0）
 
 > 由 `scripts/convert_excel_to_csv.py` 从 `docs/现有资料/材料汇总/` 下的 Excel 文件导出。
 > 每个 Excel 文件的每个 sheet 对应一个 CSV。完整机器可读索引见 `manifest.json`。
+>
+> 本目录根层 CSV 与 manifest 作为旧版快照冻结保留，不再原地覆盖。新的来源登记、
+> 版本化 raw CSV、清洗产物和业务发布规则见
+> [`docs/design/11-historical-price-governance.md`](../design/11-historical-price-governance.md)。
+> 当前 README 中的旧来源路径仅用于说明历史生成方式，不代表新的权威来源选择。
 
 ## 数据概览
 

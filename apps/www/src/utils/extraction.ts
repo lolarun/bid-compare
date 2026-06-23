@@ -10,6 +10,7 @@ import type {
   ExtractionJob,
   QuoteExtractionItem,
   TenderExtractionItem,
+  TenderBrandReq,
 } from '@/api/client'
 
 export interface TenderExtractionShape {
@@ -150,6 +151,60 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
     quote_date: asStr(result.quote_date),
     items,
   }
+}
+
+export interface TenderBidlistShape {
+  items: TenderExtractionItem[]
+  brandRequirements: string[]
+}
+
+/**
+ * Coerce TenderBidlistResult (type=tender_bidlist, TenderAnchor format) into
+ * the invite flow's working types:
+ *   items            → TenderExtractionItem[] (compatible with ExtractionEditor schema="tender")
+ *   brandRequirements → string[] (brand_cn || brand_en, deduplicated)
+ *
+ * TenderAnchor fields used: name, spec, unit, qty → quantity, remark.
+ * `category` is left empty — infer_categories on the backend detects it from `name`.
+ */
+export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
+  if (!isObj(result)) {
+    console.warn('[extraction] tender_bidlist result is not an object', result)
+    return { items: [], brandRequirements: [] }
+  }
+
+  const rawItems = result.items
+  const items: TenderExtractionItem[] = Array.isArray(rawItems)
+    ? rawItems.filter(isObj).map((it) => ({
+        name: asStr(it.name),
+        category: '',
+        spec: asStr(it.spec),
+        unit: asStr(it.unit),
+        quantity: asNumOrNull(it.qty ?? it.quantity),
+        remark: asStr(it.remark),
+        extended_attrs: {},
+      }))
+    : []
+
+  if (!Array.isArray(rawItems)) {
+    console.warn('[extraction] tender_bidlist result.items is not an array', rawItems)
+  }
+
+  const rawBrands = result.brand_requirement
+  const brandRequirements: string[] = []
+  const seen = new Set<string>()
+  if (Array.isArray(rawBrands)) {
+    for (const b of rawBrands) {
+      if (!isObj(b)) continue
+      const label = asStr((b as unknown as TenderBrandReq).brand_cn) || asStr((b as unknown as TenderBrandReq).brand_en)
+      if (label && !seen.has(label)) {
+        brandRequirements.push(label)
+        seen.add(label)
+      }
+    }
+  }
+
+  return { items, brandRequirements }
 }
 
 /** Convenience: dispatch on the job type. */

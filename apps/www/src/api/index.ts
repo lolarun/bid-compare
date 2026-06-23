@@ -297,6 +297,7 @@ export const inviteApi = {
     deadline?: string
     items: Array<Record<string, unknown>>
     supplier_ids: number[]
+    brand_requirements?: string[]
   }) =>
     api.post<SaveInvitationsResponse>('/invite/save', data),
   listTenders: (params?: Record<string, unknown>) =>

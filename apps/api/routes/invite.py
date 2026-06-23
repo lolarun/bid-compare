@@ -94,10 +94,16 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
             ),
         )
 
-    # Resolve recommendation context so saved rows carry rank/score
+    # Resolve recommendation context so saved rows carry rank/score.
+    # Pass brand_requirements so the stored rank matches what the user saw.
     rec_lookup: dict[int, dict] = {}
     if req.items:
-        recs = recommend_suppliers(db, req.items, top_n=max(len(req.supplier_ids), 5))
+        recs = recommend_suppliers(
+            db,
+            req.items,
+            top_n=max(len(req.supplier_ids), 5),
+            brand_requirements=req.brand_requirements or None,
+        )
         rec_lookup = {r["supplier_id"]: r for r in recs}
 
     saved: list[SavedInvitation] = []

@@ -1,5 +1,5 @@
 // MEMPAS 偏差色标三级化
-// 对应 docs/design/06-功能设计.md F5.1 / F6.2 与 07-技术设计.md §5.2
+// 对应 docs/design/06-functional-design-v2.md F5.1 / F6.2 与 07-technical-design-v2.md §5.2
 
 export type AlertLevel = 'normal' | 'yellow' | 'red'
 

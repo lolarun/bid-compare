@@ -9,7 +9,7 @@
 标记：@pytest.mark.e2e → 需要 DASHSCOPE_API_KEY + 真实 PDF。
 
 当前包含：
-  test_extract_quote_taikelong   — 泰科龙 53 页投标文件，89 行转置表
+  test_extract_quote_taikelong   — 泰科龙 53 页投标文件，A3 大宽表 89 行（~20 列，OCR 列分割易串位）
   # test_extract_tender_jingqiao  — 金桥招标 e2e（单独在 test_tender_pdf_extract.py）
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _build_provider():
     reason="泰科龙 PDF 或 golden fixture 不存在"
 )
 def test_extract_quote_taikelong():
-    """泰科龙投标文件 53 页转置表 → 89 行逐行验收。
+    """泰科龙投标文件 53 页 A3 大宽表（~20 列）→ 89 行逐行验收。
 
     验收顺序（§13）：
     1. 页数守恒（全 53 页处理，无截断）
@@ -129,7 +129,7 @@ def test_extract_quote_taikelong():
     assert not q.truncated, "PDF 被截断"
 
     # ── §2 商品行数量（REVIEW 档：系统正确识别缺失，不要求 100%）─────────
-    # 泰科龙是困难文档（转置表 + 部分页面 OCR 质量差），系统自动提取约 84-97%。
+    # 泰科龙是困难文档（A3 大宽表 ~20 列，列分割易串位 + qwen-vl-ocr 非确定性），系统自动提取约 84-97%。
     # 缺失行在 q.seq_missing 中明确列出，供人工复核（§14.2 REVIEW 档）。
     # 最低要求：≥75 行有效 seq（排除无 seq 的 false positive 行）。
     valid_seq_count = len(extracted_seqs)  # extracted_seqs 已在诊断阶段计算
@@ -182,7 +182,7 @@ def test_extract_quote_taikelong():
 
     # ── §4 有 seq 的行：字段存在性检查（不做值比对）─────────────────────
     # 注：字段值比对（qty/total_price 等）需要 PDF 与 Excel 完全一致的前提。
-    # 泰科龙 PDF 与 Excel 可能版本不同，转置表 tiling 也可能导致列偏移。
+    # 泰科龙 PDF 与 Excel 可能版本不同，大宽表 OCR 列分割串位也可能导致列偏移。
     # REVIEW 档 §14.2 要求：系统提供预填数据供人工核对，不要求自动完美准确。
     # 以下只验证"字段存在且可解析"（not null）。
     quote_lines = [r for r in draft.rows if r.row_type == "quote_line"]

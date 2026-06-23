@@ -1,503 +1,156 @@
-# CLAUDE.md - MEMPAS 开发与投产约束
+# CLAUDE.md — MEMPAS Engineering Charter
 
-本文是本仓库的最高优先级工程约束。最终目标是一套可审计、可复核、可持续泛化的招投标比价系统；同时承认「客户项目交付」与「产品投产泛化」是两条并行的轨道（见第 14 节），互不替代——近期可优先推进客户项目交付，但不得借此降低任何安全、来源、财务与质量要求。任何一条轨道都不靠掩盖缺陷的局部指标冒充完成，也不得把单案交付包装成系统已泛化。
+This file is loaded into **every** session, so it stays short and only holds what applies
+**everywhere**: project orientation, how to run things, and the cross-cutting invariants that
+have no narrower home. Per-domain detail lives in the path-scoped rules under `.claude/rules/`
+(loaded automatically when you touch matching files) and the design rationale in `docs/design/`.
 
-## 1. 产品目标
+**Single source of truth.** If a rule here and a rule in `.claude/rules/` or `docs/design/`
+disagree, fix the documents — never keep two contradicting requirements. Do not restate
+per-domain rules here; link to them instead.
 
-MEMPAS 的核心流程是：
+> Note: `docs/design/*.md` are in English (authoritative). `.claude/rules/*.md` remain in
+> Chinese and are authoritative for their path-scoped areas; this charter is the English entry point.
 
-```text
-招标文件 / 采购清单
-  -> 识别采购锚点
-  -> N 份供应商报价识别
-  -> 用户核对识别结果
-  -> 按采购锚点对齐各供应商报价
-  -> 用户确认待审项和缺报项
-  -> 生成比价矩阵、导出和建议
-```
+---
 
-V1 允许优先支持当前已有物料领域，但实现不得依赖具体项目、供应商、文件名、页码、序号或某份 PDF 的版式。
+## 1. What MEMPAS is
 
-投产目标：
-
-1. 采购清单和报价明细都能逐行追溯到原 PDF。
-2. 识别错误必须在进入比价前暴露，不能靠下游“猜对”。
-3. 采购清单是比价矩阵唯一主轴。
-4. N 份报价并行处理，每份报价形成独立投标暂存数据。
-5. 人工只确认疑难项，不负责重新录入整张表。
-6. 未通过质量门的数据不得生成推荐结论。
-
-### 1.1 文档处理分级（AUTO / REVIEW / BLOCKED）
-
-每份文档经识别后落入一个处理档位，决定它如何进入后续流程。分级只改变"自动化程度与人工介入方式"，**不降低任何来源、财务与隔离要求**：
-
-- **AUTO**：自动抽取通过质量门，仅需少量异常项复核。
-- **REVIEW**：系统已自动切片、定位表格区域并预填大部分字段，用户在 PDF 左右对照下核对修改，**不是重新录入整张表**。
-- **BLOCKED**：无法形成可靠结构（严重漏页、结构无法重建等），禁止入库、对齐与推荐，必须人工处理后才能重试。
-
-档位只决定人工介入方式，不改变第 5、6、9、14 节的安全、来源与质量要求。REVIEW 档文档的交付验收标准见第 14.2 节。系统的职责是把难度如实暴露、把候选预填到位、让人工在预填结果上高效修正，绝不为追求"自动化率"而静默填值或猜测。
-
-## 2. 固定范围
-
-当前版本必须完整覆盖：
-
-- 招标 PDF 中采购清单的发现、抽取、核对与确认。
-- PDF、图片、Excel、CSV 供应商报价的抽取、核对与确认。
-- 横向表、纵向/转置表、多级表头、合并单元格、跨页续表。
-- 文本 PDF、扫描 PDF、混合 PDF。
-- 含税/不含税单价、数量、合价、税率、小计、总计的区分。
-- 每行来源证据和文档级完整性报告。
-- 采购清单锚点 × N 个投标参与方的对齐核查和比价矩阵。
-- 待确认、已确认、缺报、排除、聚合等显式状态。
-- 页面与 Excel 导出口径一致。
-
-当前版本不追求：
-
-- 无人工复核地处理所有行业、所有 PDF。
-- 用更多领域关键词掩盖表格结构解析缺陷。
-- 自动把投标报价归档为正式历史价格。
-- 在比价流程中自动创建、合并或污染供应商主数据。
-
-## 3. 识别架构
-
-生产识别链路必须按以下层次实现：
+A bid-comparison (比价) system. The deliverable pipeline:
 
 ```text
-PDF 全页加载
-  -> 页面渲染
-  -> 页面角色识别
-  -> 表格区域识别
-  -> TableGrid 结构重建
-  -> 列语义映射
-  -> 行类型分类
-  -> 财务与完整性校验
-  -> 用户核对
-  -> Confirmed QuoteFact / TenderAnchor
+Tender document / procurement list
+  -> confirm TenderAnchor
+  -> recognize N BidSubmission quotes, with human review
+  -> align by Anchor
+  -> resolve pending / missing / excluded
+  -> produce the comparison matrix, exports, and evaluation explanations
 ```
 
-### 3.1 全页处理
-
-- 不得因默认 `MAX_PAGES`、超时或缓存而静默截断文档。
-- 如果主动限制页数，响应必须包含 `truncated=true`、已处理页数和总页数，并将结果标记为 `BLOCKED`。
-- 页面识别应支持并发，但必须受配置化并发数、API key 限流和重试策略约束。
-
-### 3.2 页面角色识别
-
-页面角色至少包括：
-
-- `cover`
-- `toc`
-- `brand_requirement`
-- `quote_table`
-- `subtotal_or_summary`
-- `technical_document`
-- `certificate`
-- `other`
-
-页面分类只能决定“哪些页面进入后续解析”，不能直接生成最终报价行。
-
-### 3.3 TableGrid 中间层
-
-OCR HTML 不能直接作为最终业务 JSON。必须先转换为结构化表格网格。
-
-每个单元格至少保留：
-
-```json
-{
-  "page": 6,
-  "table": 1,
-  "row": 12,
-  "column": 4,
-  "row_span": 1,
-  "col_span": 2,
-  "bbox": [0, 0, 0, 0],
-  "raw_text": "259.91"
-}
-```
-
-TableGrid 必须处理：
-
-- rowspan / colspan
-- 多行表头
-- 转置表
-- 跨页续表
-- 空白继承
-- 小计、合计、说明行
-- 一条物料跨多行表达
-
-解析失败允许进入通用回退路径，但必须记录 `fallback_reason`，不得静默退化。
-
-### 3.4 LLM 的职责
-
-LLM 用于语义理解，不替代结构解析：
-
-- 判断列含义。
-- 识别错别字、缩写和同义表达。
-- 判断行类型和跨行归属。
-- 在候选范围内完成采购项对齐。
-- 给出可供人工复核的简短证据。
-
-LLM 不得：
-
-- 发明价格、数量、合价、品牌或 ID。
-- 覆盖 OCR 原值而不保留修正前证据。
-- 在没有候选和来源证据时强行匹配。
-- 输出 chain-of-thought；只输出结构化结果和简短 `reason`。
-
-thinking 模型只用于疑难语义裁判。结构错误、漏页、错列和小计误识别必须由结构层与校验层解决。
-
-## 4. 标准数据模型
-
-报价明细需保留原始值、标准值和来源证据，不得只留下清洗后的结果。
-
-至少包括：
-
-- `raw_name`
-- `standard_name`
-- `raw_spec`
-- `spec`
-- `raw_unit`
-- `unit`
-- `quantity`
-- `unit_price_incl_tax`
-- `unit_price_excl_tax`
-- `tax_rate`
-- `total_price_incl_tax`
-- `total_price_excl_tax`
-- `brand`
-- `remark`
-- `row_type`
-- `canonical`
-- `source_ref`
-- `corrections`
-- `validation_flags`
-
-`row_type` 至少支持：
-
-- `quote_line`
-- `subtotal`
-- `grand_total`
-- `section_header`
-- `remark`
-- `invalid`
-
-小计、总计和说明行禁止作为商品报价进入比价。
-
-## 5. 来源证据
-
-进入比价的每条采购项和报价行必须可回溯。
-
-最低合格证据：
-
-```json
-{
-  "page": 6,
-  "table": 1,
-  "row": 12
-}
-```
-
-生产目标证据：
-
-```json
-{
-  "page": 6,
-  "table": 1,
-  "row": 12,
-  "bbox": [x1, y1, x2, y2],
-  "raw_cells": {}
-}
-```
-
-只有 `{"page": 6}` 不算完整逐行证据。前端核对和比价悬浮来源应使用同一份证据。
-
-## 6. 质量门
-
-每份文档必须输出 `DocumentQualityReport`，状态只有：
-
-- `PASS`：允许进入自动对齐。
-- `REVIEW`：允许人工核对，不得自动 finalize。
-- `BLOCKED`：禁止进入对齐和比价。
-
-报告至少包含：
-
-- PDF 总页数、处理页数、截断状态。
-- 候选表格页和实际抽取页。
-- 各页预期行数、抽取行数、解析模式和回退原因。
-- 报价行数、小计行数、总计行数。
-- `source_ref` 完整覆盖率。
-- 数量、单价、合价的解析成功率。
-- 算术一致率：`qty * unit_price ~= total_price`。
-- 含税/不含税口径一致性。
-- 声明总价与明细合计差异。
-- 序号缺失、重复和跨页连续性。
-- 极端金额、单行金额集中度和重复报价。
-
-质量门必须阻断以下情况：
-
-- 文档被静默截断。
-- 有报价数据但商品行提取为 0。
-- 全部行因 category 或 schema 问题被跳过。
-- 总计/小计被当作商品行。
-- 声明总价存在且差异超过配置阈值。
-- 关键金额行没有可定位来源。
-- 使用了错误的数据源或退回历史 Quote。
-
-阈值必须集中配置并有业务含义，不得散落魔法数字。
-
-## 7. 比价数据隔离
-
-比价流程与历史价格、供应商主数据严格隔离：
-
-- OCR 确认先写 `BidSubmission` / `BidQuoteLine` 暂存层。
-- 比价不得自动写 `Quote`、`Material` 或创建 `Supplier`。
-- `supplier_id` 是可空软引用，不是投标参与方身份。
-- 当前比价列身份以 `BidSubmission.id` 为准。
-- 显示名称以 `supplier_raw_name` 为准。
-- 只有用户明确执行“归档价格”后，才允许写正式历史价格。
-- 归档前必须显式选择有效供应商并通过数据质量门。
-
-多个报价文件默认对应多个 submission。是否合并为同一投标参与方必须由用户明确操作，不靠名称模糊匹配自动合并。
-
-## 8. 对齐与矩阵
-
-- 采购清单 `TenderAnchor` 是矩阵唯一主轴。
-- 矩阵行数必须等于已确认采购锚点数。
-- 列必须来自当前 session 的 `used_submission_ids`。
-- 显式 `submission_ids` 是唯一权威集合，禁止与历史 supplier 查询做 OR 合并。
-- 存在 active submission 但 `used_submission_ids` 为空时，禁止回退旧 `quotes` 表。
-- 对齐只能消费已确认的 TenderAnchor 和 BidQuoteLine。
-- 一条报价不得无审计地消费到多个锚点。
-- 聚合、拆分、替代品和缺报必须有明确状态和证据。
-
-单元格状态至少包括：
-
-- `quoted`
-- `aggregated`
-- `pending`
-- `missing`
-- `excluded`
-
-`pending` 可显示价格但不得参与最低价、合计、推荐和 AI 结论。
-
-## 9. 推荐门禁
-
-以下任一条件存在时，禁止生成主供推荐或调用 AI 综合建议：
-
-- 数据质量为 `REVIEW` 或 `BLOCKED`。
-- 存在未处理 pending。
-- 供应商报价覆盖率低于配置阈值。
-- 供应商有效报价为 0。
-- checksum / 声明总价校验失败。
-- 出现无法解释的极端价格或数量。
-- 矩阵数据源与当前 session 不一致。
-
-不得因 `avg_deviation=0` 推荐零报价供应商。`avg_deviation` 无数据时必须为 `null`。
-
-历史参考价必须匹配到相近物料、规格和口径。禁止用整个品类最低价作为所有物料的基准。
-
-## 10. 禁止硬编码
-
-生产代码、生产 prompt 和迁移逻辑中禁止出现：
-
-- 固定 project ID、session ID、submission ID。
-- 固定供应商名称或文件名。
-- 固定 PDF 页码。
-- 固定采购序号集合。
-- 针对某个样本的临时路径或缓存文件。
-- “第 N 行一定是数量/含税价”的样本版式假设。
-
-允许存在：
-
-- 领域词典和同义词表。
-- 可配置的类别 schema。
-- 可配置的阈值、模型、重试和并发参数。
-- 通过 fixture 表达的真实回归样本。
-
-判断标准：换一家公司、换一份 PDF、换页码后代码仍应工作。否则就是样本补丁。
-
-一次性审计或修复脚本必须位于 `scripts/`，默认 dry-run，明确标注非生产能力，不得被描述成通用修复。
-
-## 11. 开发方法
-
-遇到问题时先定位所属层：
-
-1. 文件加载 / 页数。
-2. 页面渲染。
-3. 页面角色分类。
-4. OCR。
-5. TableGrid 重建。
-6. 字段语义映射。
-7. 财务与完整性校验。
-8. 用户确认和落库。
-9. 对齐。
-10. 矩阵、导出和推荐。
-
-只修最早出现错误的层。不得在下游为上游错误增加越来越多补偿规则。
-
-非平凡修改按以下顺序：
-
-1. 复现并保存输入、实际输出和期望输出。
-2. 说明根因属于哪一层。
-3. 定义通用行为和不变量。
-4. 先加失败测试。
-5. 实现通用修复。
-6. 跑单元、集成和真实 PDF E2E。
-7. 展示修复前后逐行守恒报告。
-8. 再决定是否写数据库。
-
-不得用“测试通过”代替业务验收。测试必须覆盖真实失败模式。
-
-## 12. 数据库安全
-
-- 未经用户明确批准，不修改生产数据库或本地业务数据库。
-- 所有数据修复先备份、再 dry-run、再输出逐行变更计划。
-- 数据修复必须在单事务中执行，任一断言失败则 rollback。
-- 禁止直接物理删除污染数据；优先标记 `superseded`、`polluted`、`excluded_from_ref`。
-- 修复后必须提供守恒报告和验证命令。
-- 禁止把一次性数据库修复当作程序已修复。
-
-## 13. 测试分层
-
-### 单元测试
-
-覆盖：
-
-- 表格网格重建。
-- 横表、转置表、多级表头、合并单元格。
-- 行类型分类。
-- 价格口径和算术校验。
-- 对齐 validator。
-- 矩阵状态和推荐门禁。
-
-### 集成测试
-
-至少覆盖：
+Current focus: a shippable end-to-end tender-comparison flow **while preserving
+generalization**. Never trade generality for a project name, supplier name, file name, fixed
+page number, fixed row index, or single-sample layout to make a test pass.
+
+## 2. Repository map
 
 ```text
-batch-confirm
-  -> BidSubmission / BidQuoteLine
-  -> tender-list/match
-  -> anchor-review
-  -> finalize
-  -> bid-matrix
-  -> export
+apps/api/            FastAPI backend (Python >=3.11), app object: apps.api.main:app
+  routes/            HTTP layer: auth, params, transactions, response mapping only
+  services/          Domain/business logic (the authoritative layer)
+  intelligence/      Recognition pipeline: OCR, page-role classification, table extraction, LLM
+  models/            SQLAlchemy models
+  schemas/           Pydantic schemas
+  migrations/        Alembic migrations (see docs/design/13)
+  tests/             pytest (unit + replay + fresh E2E)
+apps/www/            Frontend: Vue 3 + Vite + Pinia + Ant Design Vue + ECharts
+docs/design/         Design docs / rationale (authoritative; numbered)
+docs/data/           Governed historical-price data (raw/ and curated/)
+docs/test/           E2E fixtures (tender PDFs + Excel golden + bid PDFs)
+scripts/             One-off / batch / audit scripts (must be parameterized — see rules)
+.claude/rules/       Path-scoped rules, auto-loaded when matching files are edited
 ```
 
-必须断言：
+## 3. Quickstart, environment & commands
 
-- 不写历史 Quote 和 Supplier。
-- `used_submission_ids` 精确等于请求集合。
-- 不出现 legacy 数据静默回退。
-- 页面矩阵和 Excel 导出一致。
+Environment: **Windows 11 / PowerShell**. Use POSIX syntax only inside the Bash tool.
 
-### 真实 PDF E2E
+Fixed ports — do not change; the Vite dev proxy targets `localhost:8000`:
 
-每次涉及识别链路时，必须使用多份不同版式的真实或脱敏 fixture：
+| Service  | Port | Start command |
+|----------|------|---------------|
+| Backend  | 8000 | `uvicorn apps.api.main:app --port 8000` |
+| Frontend | 3000 | `npm --prefix apps/www run dev -- --port 3000` |
 
-- 标准横表。
-- 转置表。
-- 多级表头。
-- 跨页续表。
-- 扫描件。
-- 包含小计/总计/技术附件的长文档。
-
-验收顺序：
-
-1. 页数和页面发现正确。
-2. 商品行完整。
-3. 行级来源完整。
-4. 数量、单价、合价和税口径正确。
-5. 明细与声明总价闭环。
-6. 才验证对齐率和矩阵。
-
-不得在 OCR 完整性未通过时使用“匹配率”“可比率”证明系统可投产。
-
-## 14. 完成定义（两条轨道，互不替代）
-
-「客户项目交付」与「产品投产」是两条并行轨道，标准不同且互不替代：达不到产品投产门不代表不能交付单案；完成单案交付也不代表系统已可发布。任何一条都不得用局部指标包装成完成。
-
-### 14.1 产品投产完成定义
-
-只有同时满足以下条件，才可称为“可发布”（本节为产品级泛化门，**不得降级**）：
-
-- 至少 3 种不同报价版式真实 E2E 通过。
-- 长 PDF 不截断。
-- 已确认商品行来源证据覆盖率 100%。
-- 有声明总价的文档，明细差异在配置阈值内。
-- 无总计/小计污染商品行。
-- 未确认数据不进入推荐。
-- 比价不污染历史价格和供应商主数据。
-- 矩阵与导出一致。
-- 单元、集成、前端类型检查和生产构建通过。
-- 数据迁移有备份、回滚和验证方案。
-- 临时脚本、调试文件和样本产物不进入发布提交。
-
-如果任一项未满足，报告必须明确写“未达到投产”，不能用局部指标包装成完成。
-
-### 14.2 困难文档客户交付验收（REVIEW 档）
-
-针对一组具体的招标 + N 份报价文档，REVIEW 档文档不要求“全自动准确”，但必须同时满足以下条件才算交付合格——这些是对完整性的保证，不是放松：
-
-- 所有页面均已处理，无静默截断。
-- 系统已定位表格区域和候选行（人工是在预填结果上核对修改，不是重新录入整张表）。
-- 每条确认数据有 `page` / `table` / `row` / `bbox`。
-- 用户的每次修正行为均留有审计记录（修正前后值、操作者、时间）。
-- 财务明细与声明总价闭环（差异在配置阈值内，或经人工确认并记录说明）。
-- 未确认数据不得进入比价和推荐。
-
-本节不替代 14.1，也不降低其任何一条；它仅定义“困难文档经人工复核后可交付”的最低完整性要求。
-
-## 15. 当前实施优先级
-
-交付主干优先：先保证困难文档能被人在预填结果上高效核对且可追溯，再用自适应抽取逐步减少人工量。按以下顺序收口：
-
-1. PDF 与识别表格左右对照的行级复核 UI（点击定位 bbox、字段可改、单页可重识别、修正留审计）。这是交付主干。
-2. 自适应切片与表格区域识别（通用切片、切片质量评分、多尺度重试）。
-3. TableGrid 合并与文档完整性报告。
-4. 泰科龙等真实文件端到端验证（先不下“某模型对某类表不可行”的结论，用多份不同版式 PDF 实测后再判断）。
-5. 确认数据后才允许重新 match 和生成矩阵。
-
-全页加载与页面角色发现（不漏页、不静默截断）是上述一切的前提，必须始终保持。不要同时推进多个未经验证的架构方向；每一阶段必须有可执行验收结果后再进入下一阶段。
-
-## 16. 本地开发
-
-后端从仓库根目录启动：
+Server lifecycle: **do not use `--reload`.** On a port conflict, kill the existing process
+first, then restart on the same fixed port. Do not start ad-hoc ports.
 
 ```powershell
-python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+# Backend tests (unit + replay; testpaths = apps/api/tests, tests)
+python -m pytest apps/api/tests -q
+
+# Frontend type-check and unit tests
+npm --prefix apps/www run type-check        # vue-tsc
+npm --prefix apps/www test                  # vitest
+
+# Database migrations (Alembic)
+alembic upgrade head
 ```
 
-前端：
+Evidence types are **not interchangeable** — name them separately when reporting:
+unit tests (local contracts) · snapshot **replay** (determinism) · **fresh** E2E (real model chain).
 
-```powershell
-cd apps/www
-npm run dev
-```
+## 4. Cross-cutting invariants
 
-常用验证：
+These apply across the whole repo. Domain specifics live in the linked rules.
 
-```powershell
-python -m pytest <target tests> -q
-cd apps/www
-npm run type-check
-npm run test:unit
-npm run build
-```
+- **Identity.** `TenderAnchor` is the only row axis for the procurement list and the matrix.
+  `BidSubmission.id` is a quote's column identity — never substitute `supplier_id` for
+  submission identity. API fields must distinguish `anchor_id` / `submission_id` /
+  `supplier_id` / `material_id`.
+- **Fact lifecycle.** Recognition output enters `ExtractionDraft`; it becomes an official
+  quote fact only after user confirmation.
+- **Quality tiers gate everything.** **AUTO** = structure/amounts/source/completeness pass →
+  may enter official alignment. **REVIEW** = system pre-fills and exposes doubts; pending /
+  review_candidate stay out of official quotes, evaluation totals, and recommendations
+  (conditional explanations allowed, final procurement confirmation not). **BLOCKED** = severe
+  page loss, no reliable structure, key amount conflict, or no valid quote → no storage,
+  alignment, or recommendation. Tiers must never be raised by silent fill or downstream
+  guessing; any auto-correction keeps the original value, its basis, and a flag.
+- **Isolation of comparison data.** Test / E2E / demo / draft / excluded / unconfirmed quotes
+  must never flow into official historical prices, supplier master data, supplier recall, or
+  brand evidence.
+- **One business result.** Pages, exports, recommendations, and AI explanations must consume
+  the **same** business-service result — they may not each recompute their own semantics.
+- **LLM stays explanatory.** The LLM explains deterministic results, evidence, and risk only.
+  It may not re-rank candidates, split line items, award bids, or fabricate evaluation facts.
+- **Thresholds centralized.** No magic numbers scattered in code; name and centralize them.
+- **Production prompts use fictional examples** — never real suppliers, brands, projects, file
+  names, or sample-specific column orders.
+- **Respect the workspace.** Do not modify or roll back workspace changes the user did not
+  authorize.
 
-生产部署和回滚以 `docs/DEPLOY.md` 为准。不得绕过 pre-commit 检查，不得使用 `--no-verify` 掩盖错误。
+## 5. Detailed rules (path-scoped) and design docs
 
-## 17. 工作报告要求
+Each rule file auto-loads when you edit a file it covers; read it before changing that area.
 
-每轮报告必须明确区分：
+| Area | Rule file | Primary design doc |
+|------|-----------|--------------------|
+| Recognition pipeline (OCR / page roles / table extraction / fallback / bbox / rendering) | `.claude/rules/recognition.md` | `04-unified-recognition-pipeline`, `08-tender-pdf-recognition-generalization`, `10-unified-table-recognition-base` |
+| Bid-compare backend (alignment / matrix / evaluation policy / readiness) | `.claude/rules/bid-compare-backend.md` | `05-bid-comparison-intelligence-layers`, `06-bid-flow-v2.3-rework`, `12-bid-backend-audit-remediation` |
+| Historical prices & supplier/brand evidence | `.claude/rules/historical-data.md` | `11-historical-price-governance` |
+| Database & repair-script safety | `.claude/rules/database-safety.md` | `13-alembic-migration-introduction` |
+| Tests & acceptance | `.claude/rules/tests.md` | — |
 
-- 已确认事实。
-- 推断。
-- 尚未验证。
-- 代码修复。
-- 一次性数据修复。
-- 单元测试结果。
-- 真实 PDF E2E 结果。
-- 剩余投产阻断项。
+## 6. Development workflow
 
-禁止使用“链路健康”“全部通过”“达到目标”等表述，除非对应的端到端验收条件确实全部满足。
+Before changing code:
+1. Read the real call path, data model, and existing tests.
+2. Find the earliest layer where things go wrong; do not keep patching downstream of bad data.
+3. State this round's stopping point and what is explicitly out of scope.
+
+After changing code:
+1. Run the directly relevant unit and integration tests.
+2. Run **replay** when the model chain is involved; run **fresh** E2E only when real-capability
+   evidence is required.
+3. Report the actual scope run, pass/fail, items not run, and residual risk.
+4. Never exclude directly relevant tests and then claim "all green" or "production-ready".
+
+## 7. Reporting format
+
+Every status report keeps these sections separate:
+Confirmed facts · Inferences and their basis · Unverified items · Code changes · Data changes ·
+Tests and E2E · Remaining blockers.
+
+Wrong conclusions must be explicitly retracted — never carried forward as a premise.
+
+## 8. Definition of delivery
+
+- Procurement list and quote detail complete; doubts explicitly **REVIEW** / **BLOCKED**.
+- Each quote independent; no pollution of historical prices or supplier master data.
+- Alignment results human-reviewable; pending rows excluded from official calculations.
+- Pages, exports, and evaluation explanations report consistent semantics.
+- Data operations have backup, audit, and rollback paths.
+
+Ongoing product goals (broader layout coverage, pixel-level bbox traceability, stable fresh
+E2E, versioned migrations) must be recorded honestly as gaps — never faked by repeatedly
+rewriting an already-passing chain.
