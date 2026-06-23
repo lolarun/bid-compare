@@ -178,7 +178,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
       </a-button>
     </div>
 
-    <a-row :gutter="16" align="stretch" class="invite-page__body">
+    <a-row :gutter="16" class="invite-page__body">
       <!-- ════════ 左侧：招标信息（容器卡 + 悬浮按钮卡） ════════ -->
       <a-col :xs="24" :lg="7" class="invite-page__col">
         <div class="tender-card">
@@ -217,7 +217,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
             </div>
 
             <!-- 3. 采购清单 -->
-            <div class="field">
+            <div class="field field--list">
               <label class="field__label">采购清单（{{ tenderItems.length }}项）</label>
 
               <a-empty v-if="tenderItems.length === 0" description="未识别到材料行" :image-style="{ height: '40px' }" style="padding:12px 0" />
@@ -459,6 +459,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   flex-wrap: wrap;
   gap: 6px;
 }
+
 
 // 采购清单：名称（规格）……数量单位（数量右对齐，对齐原型）
 .item-row {
