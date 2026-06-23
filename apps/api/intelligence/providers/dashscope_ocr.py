@@ -24,6 +24,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import dashscope
@@ -102,7 +103,7 @@ _QUOTE_S2_PROMPT = """你是机电材料报价单解析助理。下面是OCR识�
 当HTML表格格式为"每列对应一个产品、每行对应一个属性"时（最后一行全为连续整数序号，如 50/51/52），
 请按列提取，每列=一条报价明细。各行含义（从上到下）：
 - 行0: 系统分类（给水系统/排水系统/给排水）→ remark
-- 行1: 品牌（如"ALPHA阀门"）→ brand
+- 行1: 品牌（如"伯尔梅特"）→ brand
 - 行2: 含税合价（最上面的大数字行）→ total_price_incl_tax；unit_price_incl_tax = 含税合价÷数量
 - 行3: 税额 → tax_amount
 - 行4: 税率（13%）→ tax_rate=0.13
@@ -687,14 +688,18 @@ class DashScopeOCRProvider(LLMProvider):
         """
         mdl = model or _VISUAL_FLASH_MODEL
         n = len(thumbnails)
-        by_page: dict[int, dict] = {}
-        failures: list[dict] = []
+        # A档：预计算所有批次规格，并发发出全部 Flash 请求；
+        # _mm_call 已有 per-key 信号量限流，max_workers 设为批次数即可。
+        batch_specs: list[tuple[int, int, int, int]] = []
         start = 0
         while start < n:
             end = min(start + batch_size, n)
-            ctx_lo = max(0, start - overlap)
-            ctx_hi = min(n, end + overlap)
-            idxs = list(range(ctx_lo, ctx_hi))                 # 0-based
+            batch_specs.append((start, end, max(0, start - overlap), min(n, end + overlap)))
+            start = end
+
+        def _run_batch(spec: tuple[int, int, int, int]) -> tuple[list[dict], dict | None]:
+            _, _, ctx_lo, ctx_hi = spec
+            idxs = list(range(ctx_lo, ctx_hi))
             page_nums = [i + 1 for i in idxs]
             # Interleave PAGE N labels with images so the model can unambiguously
             # bind each image to its page number (prevents mis-attribution in batches).
@@ -707,25 +712,30 @@ class DashScopeOCRProvider(LLMProvider):
             try:
                 raw = self._mm_call(content, mdl, temperature=temperature)
                 data = json.loads(self._clean_json_text(raw))
-                pages = data.get("pages") or []
+                return data.get("pages") or [], None
             except Exception as e:
                 log.warning("visual classify batch %d-%d failed: %s", ctx_lo + 1, ctx_hi, e)
-                failures.append({"page_range": [ctx_lo + 1, ctx_hi], "error": str(e)})
-                start = end
-                continue
-            for entry in pages:
-                try:
-                    p = int(entry.get("page", 0))
-                except (TypeError, ValueError):
+                return [], {"page_range": [ctx_lo + 1, ctx_hi], "error": str(e)}
+
+        by_page: dict[int, dict] = {}
+        failures: list[dict] = []
+        with ThreadPoolExecutor(max_workers=len(batch_specs)) as ex:
+            for pages, err in ex.map(_run_batch, batch_specs):
+                if err:
+                    failures.append(err)
                     continue
-                if p < 1 or p > n:
-                    continue
-                # 重叠页：取 confidence 更高者
-                prev = by_page.get(p)
-                if prev is None or float(entry.get("confidence", 0)) > float(prev.get("confidence", 0)):
-                    entry["source"] = "flash"
-                    by_page[p] = entry
-            start = end
+                for entry in pages:
+                    try:
+                        p = int(entry.get("page", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if p < 1 or p > n:
+                        continue
+                    # 重叠页：取 confidence 更高者
+                    prev = by_page.get(p)
+                    if prev is None or float(entry.get("confidence", 0)) > float(prev.get("confidence", 0)):
+                        entry["source"] = "flash"
+                        by_page[p] = entry
         out = [by_page.get(p, {"page": p, "role": "unknown", "confidence": 0.0,
                                "contains_table": False, "orientation": 0,
                                "continues_from_page": None, "mixed_content": False,

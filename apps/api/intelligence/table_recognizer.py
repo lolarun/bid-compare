@@ -183,24 +183,73 @@ def _classify_pages(
     cls = [_remap_for_doc_type(VisualPageClassification.from_dict(d), doc_type) for d in flash]
     flash_cls = list(cls)  # Layer 0 快照
 
-    # ── Phase 2: Plus 复判（不做语义覆写，保持原始模型输出）────────────────
+    # ── Phase 2: Plus 复判（B档并发 + 收敛检查）──────────────────────────────
+    # 策略：用 Flash 快照的 chain_ctx 并发发出全部 Plus 请求；若某页被 Plus 改变了
+    # (role, orientation)，则对其后方所有复判页顺序重跑（通常 0 次额外调用）。
     plus_count = 0
-    for i, c in enumerate(cls):
-        if _needs_review(c, cls, i, table_roles):
-            neighbors = [thumbnails[j] for j in (i - 1, i + 1) if 0 <= j < len(thumbnails)]
+    review_indices = [i for i, c in enumerate(cls) if _needs_review(c, cls, i, table_roles)]
+
+    if review_indices:
+        flash_snap = list(cls)  # Flash 快照；并发期间不可变
+
+        # pypdfium2 PdfDocument 跨线程不安全；在主线程统一预渲染高清图再并发发 API。
+        page_imgs: dict[int, Any] = {
+            idx: (render_full(flash_snap[idx].page) if render_full is not None else None)
+            for idx in review_indices
+        }
+
+        def _run_plus(idx: int):
+            c = flash_snap[idx]
+            neighbors = [thumbnails[j] for j in (idx - 1, idx + 1) if 0 <= j < len(thumbnails)]
             chain_ctx = [
                 {"page": p.page, "role": p.role.value, "orientation": p.orientation}
-                for p in cls[:i] if p.role in table_roles
+                for p in flash_snap[:idx] if p.role in table_roles
             ]
-            # 懒渲染：Plus 复判才按需高清渲染该页（i+1 == c.page）；用完即释放。
-            # 字节与旧 images[i]（=to_images()[i]）一致 → review 快照不 miss。
-            page_img = render_full(c.page) if render_full is not None else None
             reviewed = provider.review_pages_visual(
-                page_img, neighbors, flash[i], c.page,
+                page_imgs[idx], neighbors, flash[idx], c.page,
                 chain_context=chain_ctx, model=_PLUS_MDL)
-            reviewed_cls = _remap_for_doc_type(VisualPageClassification.from_dict(reviewed), doc_type)
-            cls[i] = reviewed_cls
-            plus_count += 1
+            return _remap_for_doc_type(VisualPageClassification.from_dict(reviewed), doc_type)
+
+        with ThreadPoolExecutor(max_workers=len(review_indices)) as ex:
+            para_results: dict[int, Any] = dict(
+                zip(review_indices, ex.map(_run_plus, review_indices))
+            )
+
+        para_cls = list(cls)
+        for idx, result in para_results.items():
+            para_cls[idx] = result
+
+        # 收敛检查：找出 Plus 改变了 (role, orientation) 的页
+        flipped = [
+            idx for idx in review_indices
+            if (para_results[idx].role, para_results[idx].orientation)
+            != (flash_snap[idx].role, flash_snap[idx].orientation)
+        ]
+
+        cls = para_cls
+        plus_count = len(review_indices)
+
+        if flipped:
+            # 有翻转：对最早翻转页之后的所有复判页顺序重跑，使用已更新的 cls 作 chain_ctx
+            earliest_flip = min(flipped)
+            affected = [idx for idx in review_indices if idx > earliest_flip]
+            log.info(
+                "plus-parallel convergence: %d flipped=%s, sequential retry %d pages",
+                len(flipped), flipped, len(affected),
+            )
+            for idx in affected:
+                c = cls[idx]
+                neighbors = [thumbnails[j] for j in (idx - 1, idx + 1) if 0 <= j < len(thumbnails)]
+                chain_ctx = [
+                    {"page": p.page, "role": p.role.value, "orientation": p.orientation}
+                    for p in cls[:idx] if p.role in table_roles
+                ]
+                page_img = render_full(c.page) if render_full is not None else None
+                reviewed = provider.review_pages_visual(
+                    page_img, neighbors, flash[idx], c.page,
+                    chain_context=chain_ctx, model=_PLUS_MDL)
+                cls[idx] = _remap_for_doc_type(VisualPageClassification.from_dict(reviewed), doc_type)
+            plus_count += len(affected)
 
     after_plus_cls = list(cls)  # Layer 1 快照
 
