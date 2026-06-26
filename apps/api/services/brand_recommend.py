@@ -79,7 +79,7 @@ def recommend_brands(
             "tags":         tags,
         })
 
-    results.sort(key=lambda x: -x["sample_count"])
+    results.sort(key=lambda x: (0 if x["tier"] == "合资" else 1, -x["sample_count"]))
     return results[:top_n], categories
 
 
