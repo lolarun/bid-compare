@@ -10,10 +10,24 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+import math
+
 from apps.api.models import Material, Quote
 from apps.api.models.brand_tier import BrandTier
 from apps.api.services.quote_filters import valid_quote_filters
 from apps.api.services.supplier_recommend import infer_categories
+
+# Scoring constants — see docs/design/15-invite-brand-recommendation.md §2
+W_TIER = 0.30        # joint-venture soft preference
+W_DATA = 0.70        # data-confidence majority weight
+MAX_SAMPLES = 50     # normalisation ceiling for data_factor
+
+
+def _score(tier: str, sample_count: int) -> float:
+    tier_factor = 1.0 if tier == "合资" else 0.0
+    data_factor = math.log(sample_count + 1) / math.log(MAX_SAMPLES + 1)
+    data_factor = min(data_factor, 1.0)
+    return W_TIER * tier_factor + W_DATA * data_factor
 
 
 def recommend_brands(
@@ -23,8 +37,8 @@ def recommend_brands(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Return approved brand recommendations for the given tender items.
 
-    Returns (recommendations, categories) where recommendations are sorted
-    by sample_count desc (brands with more historical data ranked first).
+    Ranked by composite score: 0.30 × tier_factor + 0.70 × log-normalised sample_count.
+    See docs/design/15-invite-brand-recommendation.md §2.
     """
     categories = infer_categories(tender_items)
     if not categories:
@@ -77,9 +91,12 @@ def recommend_brands(
             "price_p10":    round(p10, 2)    if p10    is not None else None,
             "price_p90":    round(p90, 2)    if p90    is not None else None,
             "tags":         tags,
+            "_score":       _score(bt.tier, n),
         })
 
-    results.sort(key=lambda x: (0 if x["tier"] == "合资" else 1, -x["sample_count"]))
+    results.sort(key=lambda x: -x["_score"])
+    for r in results:
+        del r["_score"]
     return results[:top_n], categories
 
 

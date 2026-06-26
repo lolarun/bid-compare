@@ -31,6 +31,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR   = REPO_ROOT / "docs" / "data"
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
+import math as _math
+_W_TIER, _W_DATA, _MAX_S = 0.30, 0.70, 50
+
+def _brand_score(rec: dict) -> float:
+    tf = 1.0 if rec["tier"] == "合资" else 0.0
+    df = min(_math.log(rec["sample_count"] + 1) / _math.log(_MAX_S + 1), 1.0)
+    return _W_TIER * tf + _W_DATA * df
+
 # ─── known-brand seed specs: (brand_name, tier, category, n_quotes, price_range) ──
 _VALVE_BRANDS = [
     ("KITZ",     "合资", "阀门", 20, (500, 2000)),
@@ -306,20 +314,13 @@ class TestPhase2InviteFlow:
                 assert rec["price_p90"] is not None
                 assert rec["price_p10"] <= rec["price_median"] <= rec["price_p90"]
 
-        # 合资优先，同 tier 内按 sample_count 降序
-        # 桥架种子全是国产，所以 top-1 仍是样本最多的川汇
-        top1 = recs[0]
-        assert top1["brand_name"] == "川汇"
-        assert top1["sample_count"] == 25
-        # 合资始终排在国产前面
-        tiers = [r["tier"] for r in recs]
-        last_joint = max((i for i, t in enumerate(tiers) if t == "合资"), default=-1)
-        first_domestic = next((i for i, t in enumerate(tiers) if t == "国产"), len(tiers))
-        assert last_joint < first_domestic, "合资品牌应全部排在国产品牌之前"
-        # 同 tier 内 sample_count 降序
-        for i in range(len(recs) - 1):
-            if recs[i]["tier"] == recs[i + 1]["tier"]:
-                assert recs[i]["sample_count"] >= recs[i + 1]["sample_count"]
+        # 桥架种子全是国产，样本最多的川汇应排第一
+        assert recs[0]["brand_name"] == "川汇"
+        assert recs[0]["sample_count"] == 25
+        # 复合分数单调不增
+        scores = [_brand_score(r) for r in recs]
+        for i in range(len(scores) - 1):
+            assert scores[i] >= scores[i + 1], f"score[{i}]={scores[i]:.4f} < score[{i+1}]={scores[i+1]:.4f}"
 
     def test_save_creates_tender_document(self, seeded_client):
         """Brand-only save: TenderDocument created, invitations empty."""
@@ -414,20 +415,23 @@ class TestBrandRecommendation:
         assert recs["上海冠龙"]["sample_count"] == 0
         assert recs["上海冠龙"]["price_median"] is None
 
-    def test_sorted_joint_venture_first_then_sample_count(self, brand_client):
-        """合资品牌排在国产之前；同 tier 内 sample_count 降序。"""
+    def test_sorted_by_composite_score(self, brand_client):
+        """复合评分单调不增；有数据的国产可超越零样本合资。"""
         r = brand_client.post("/api/invite/recommend", json={
             "tender_items": [{"category": "阀门"}],
             "top_n": 10,
         })
         recs = r.json()["recommendations"]
-        tiers = [rec["tier"] for rec in recs]
-        last_joint = max((i for i, t in enumerate(tiers) if t == "合资"), default=-1)
-        first_domestic = next((i for i, t in enumerate(tiers) if t == "国产"), len(tiers))
-        assert last_joint < first_domestic, "合资品牌应全部排在国产之前"
-        for i in range(len(recs) - 1):
-            if recs[i]["tier"] == recs[i + 1]["tier"]:
-                assert recs[i]["sample_count"] >= recs[i + 1]["sample_count"]
+        scores = [_brand_score(rec) for rec in recs]
+        for i in range(len(scores) - 1):
+            assert scores[i] >= scores[i + 1], (
+                f"score[{i}] {recs[i]['brand_name']}={scores[i]:.4f} < "
+                f"score[{i+1}] {recs[i+1]['brand_name']}={scores[i+1]:.4f}"
+            )
+        # 上海良工（国产 15 样本, score≈0.48）应排在上海冠龙（国产 0 样本, score=0.00）之前
+        names = [r["brand_name"] for r in recs]
+        if "上海良工" in names and "上海冠龙" in names:
+            assert names.index("上海良工") < names.index("上海冠龙")
 
     def test_top_n_respected(self, brand_client):
         """top_n parameter caps the result list."""
