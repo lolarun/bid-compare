@@ -46,21 +46,57 @@ ALL_CATEGORIES = set(PROFESSION_MAP.keys())
 # Recency half-life: a quote N days old contributes exp(-N/180) of its weight.
 RECENCY_HALF_LIFE_DAYS = 180.0
 
+# Keyword → category map for items whose names don't contain the category string
+# literally (e.g. "截止阀" doesn't contain "阀门", "电缆桥架" fails the CJK
+# boundary check for "桥架").  Checked as simple substring after the direct
+# token-match attempt fails.  Longer / more specific keywords should come first
+# so they shadow shorter ambiguous ones.
+CATEGORY_KEYWORD_MAP: dict[str, str] = {
+    # ── 阀门 (valves & fittings) ──────────────────────────────────────────
+    "倒流防止器": "阀门",
+    "水锤消除器": "阀门",
+    "水锤吸纳器": "阀门",
+    "减压稳压":   "阀门",
+    "截止阀":     "阀门",
+    "止回阀":     "阀门",
+    "蝶  阀":     "阀门",  # allow occasional extra space in OCR output
+    "旋塞阀":     "阀门",
+    "调节阀":     "阀门",
+    "电动阀":     "阀门",
+    "电磁阀":     "阀门",
+    "安全阀":     "阀门",
+    "浮球阀":     "阀门",
+    "排气阀":     "阀门",
+    "排污阀":     "阀门",
+    "蝶阀":       "阀门",
+    "闸阀":       "阀门",
+    "球阀":       "阀门",
+    "角阀":       "阀门",
+    "平衡阀":     "阀门",
+    "减压阀":     "阀门",
+    "过滤器":     "阀门",   # Y型过滤器 is a valve fitting
+    # ── 桥架 (cable trays) ────────────────────────────────────────────────
+    # "电缆桥架", "梯式桥架" etc. fail the CJK boundary check; match directly
+    "桥架":       "桥架",
+    # ── 配电箱 ────────────────────────────────────────────────────────────
+    "配电柜":     "配电箱",
+    # ── 母线槽 (length ≥3 already matches, aliases for variant spellings) ──
+    "母线桥":     "母线槽",
+}
+
 
 def infer_categories(tender_items: list[dict[str, Any]]) -> list[str]:
     """Best-effort inference of categories present in the tender.
 
-    Rules:
-    1. Use `category` field verbatim if it matches a known category (exact)
-    2. Else: scan `name` for a known category KEYWORD — but only count it as
-       a match if the category string is found at a word/token boundary OR
-       at the start. This stops "止回阀门" → "阀门" false positives where
-       "阀门" appears as a SUFFIX of a longer compound term.
-
-       Concretely: we strip the matched substring and require what surrounds
-       it to NOT be another Chinese character that would make the term a
-       suffix of something else.
-    3. Deduplicate preserving insertion order.
+    Priority order per item:
+    1. `category` field — verbatim if it matches a known category.
+    2. Token-boundary match: category string found at start of `name` or
+       after a non-CJK character (avoids "止回阀门" → wrong "阀门" when
+       "阀门" appears only as suffix of a compound, but note this is only
+       relevant for 2-char categories since 3-char ones always substring-match).
+    3. CATEGORY_KEYWORD_MAP — substring match for device-type names that do
+       not contain the category string literally ("截止阀" → "阀门",
+       "电缆桥架" → "桥架" etc.).
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -72,11 +108,19 @@ def infer_categories(tender_items: list[dict[str, Any]]) -> list[str]:
                 seen.add(cand)
             continue
         name = (it.get("name") or it.get("material") or "").strip()
+        matched = False
         for cat in ALL_CATEGORIES:
             if _is_category_token_match(name, cat) and cat not in seen:
                 out.append(cat)
                 seen.add(cat)
+                matched = True
                 break
+        if not matched:
+            for kw, cat in CATEGORY_KEYWORD_MAP.items():
+                if kw in name and cat not in seen:
+                    out.append(cat)
+                    seen.add(cat)
+                    break
     return out
 
 

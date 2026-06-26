@@ -164,8 +164,9 @@ export interface TenderBidlistShape {
  *   items            → TenderExtractionItem[] (compatible with ExtractionEditor schema="tender")
  *   brandRequirements → string[] (brand_cn || brand_en, deduplicated)
  *
- * TenderAnchor fields used: name, spec, unit, qty → quantity, remark.
- * `category` is left empty — infer_categories on the backend detects it from `name`.
+ * TenderAnchor fields used: name, spec, unit, qty → quantity, remark, category.
+ * `category` is passed through when the pipeline set it; infer_categories on the
+ * backend falls back to keyword matching when the field is absent or empty.
  */
 export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
   if (!isObj(result)) {
@@ -177,7 +178,7 @@ export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
   const items: TenderExtractionItem[] = Array.isArray(rawItems)
     ? rawItems.filter(isObj).map((it) => ({
         name: asStr(it.name),
-        category: '',
+        category: asStr(it.category),
         spec: asStr(it.spec),
         unit: asStr(it.unit),
         quantity: asNumOrNull(it.qty ?? it.quantity),

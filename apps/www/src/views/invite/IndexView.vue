@@ -6,19 +6,17 @@ import {
   ThunderboltOutlined,
   CheckOutlined,
   PlusOutlined,
-  UserOutlined,
   HistoryOutlined,
   SendOutlined,
   FilePdfOutlined,
   InfoCircleOutlined,
-  SlidersOutlined,
 } from '@ant-design/icons-vue'
 import FileUploadCard from '@/components/FileUploadCard.vue'
 import { inviteApi } from '@/api'
 import type {
   ExtractionJob,
   TenderExtractionItem,
-  SupplierRecommendation,
+  BrandRecommendation,
 } from '@/api/client'
 import { asTenderBidlistShape } from '@/utils/extraction'
 
@@ -27,10 +25,9 @@ const tenderItems = ref<TenderExtractionItem[]>([])
 const projectName = ref('')
 
 const recommending = ref(false)
-const recommendations = ref<SupplierRecommendation[]>([])
+const recommendations = ref<BrandRecommendation[]>([])
 const categories = ref<string[]>([])
-const totalCandidates = ref(0)
-const selectedSupplierIds = ref<number[]>([])
+const selectedBrands = ref<string[]>([])
 
 const brandRequirements = ref<string[]>([])
 const saving = ref(false)
@@ -38,7 +35,7 @@ const savedTenderId = ref<number | null>(null)
 
 const hasItems = computed(() => tenderItems.value.length > 0)
 const canRecommend = computed(() => hasItems.value && !recommending.value)
-const canSave = computed(() => savedTenderId.value === null && selectedSupplierIds.value.length > 0)
+const canSave = computed(() => savedTenderId.value === null && recommendations.value.length > 0)
 
 // ─── Step 1: ingestion ─────────────────────────────────────────────────────
 function onExtracted(job: ExtractionJob) {
@@ -52,9 +49,8 @@ function onExtracted(job: ExtractionJob) {
     }
   }
   recommendations.value = []
-  selectedSupplierIds.value = []
+  selectedBrands.value = []
   savedTenderId.value = null
-  // Auto-fill project name from recognition if available
   const rawName = (job.result as Record<string, unknown> | null)?.project_name
   if (typeof rawName === 'string' && rawName && !projectName.value) projectName.value = rawName
 }
@@ -69,14 +65,12 @@ async function generateRecommendations() {
   try {
     const { data } = await inviteApi.recommend({
       tender_items: tenderItems.value as unknown as Array<Record<string, unknown>>,
-      top_n: 5,
+      top_n: 15,
       brand_requirements: brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
     })
     recommendations.value = data.recommendations
     categories.value = data.categories
-    totalCandidates.value = data.total_candidates
-    // 不默认勾选——仅在用户主动选择时才激活
-    selectedSupplierIds.value = []
+    selectedBrands.value = []
     savedTenderId.value = null
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -96,21 +90,18 @@ watch(tenderItems, () => {
 
 // ─── Step 3: save ───────────────────────────────────────────────────────────
 async function saveInvitations() {
-  if (selectedSupplierIds.value.length === 0) {
-    message.warning('请至少选择 1 家供应商')
-    return
-  }
   saving.value = true
   try {
     const { data } = await inviteApi.save({
       job_id: sourceJob.value?.id,
       project_name: projectName.value || '未命名招标',
       items: tenderItems.value as unknown as Array<Record<string, unknown>>,
-      supplier_ids: selectedSupplierIds.value,
-      brand_requirements: brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
+      brand_requirements: selectedBrands.value.length > 0
+        ? selectedBrands.value
+        : brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
     })
     savedTenderId.value = data.tender_id
-    message.success(`已保存招标记录 #${data.tender_id}，邀请 ${data.invitations.length} 家供应商`)
+    message.success(`已保存招标记录 #${data.tender_id}`)
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? '保存失败'
@@ -120,47 +111,41 @@ async function saveInvitations() {
   }
 }
 
-function toggleSupplier(id: number) {
-  const i = selectedSupplierIds.value.indexOf(id)
-  if (i >= 0) selectedSupplierIds.value.splice(i, 1)
-  else selectedSupplierIds.value.push(id)
+function toggleBrand(name: string) {
+  const i = selectedBrands.value.indexOf(name)
+  if (i >= 0) selectedBrands.value.splice(i, 1)
+  else selectedBrands.value.push(name)
 }
 
 // ─── Display helpers ──────────────────────────────────────────────────────
-// 徽标统一品牌蓝——与原型一致（非彩虹、非紫靛色）
-const AVATAR_COLORS = ['#1677ff']
+const AVATAR_COLORS = ['#1677ff', '#13c2c2', '#722ed1', '#eb2f96', '#fa8c16']
 function avatarColor(name: string): string {
   let h = 0
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffff
   return AVATAR_COLORS[h % AVATAR_COLORS.length]
 }
 
-function priceText(dev: number | null): string {
-  if (dev === null) return '—'
-  const v = (dev * 100).toFixed(1)
-  return dev > 0 ? `+${v}%` : `${v}%`
+function formatPrice(v: number | null): string {
+  if (v === null || v === undefined) return '—'
+  if (v >= 10000) return `${(v / 10000).toFixed(1)}万`
+  return v.toFixed(0)
 }
 
-function priceClass(dev: number | null): string {
-  if (dev === null) return 'metric-na'
-  return dev <= -0.03 ? 'metric-green' : dev >= 0.05 ? 'metric-orange' : 'metric-normal'
+function priceRangeText(r: BrandRecommendation): string {
+  if (!r.price_p10 && !r.price_p90) return '暂无价格数据'
+  const lo = formatPrice(r.price_p10)
+  const hi = formatPrice(r.price_p90)
+  const med = formatPrice(r.price_median)
+  return `¥${lo} ~ ¥${hi}（中位价 ¥${med}）`
 }
 
 const TAG_COLORS: Record<string, string> = {
-  '价格优势': 'green',
-  '长期合作': 'blue',
-  '新合作机会': 'cyan',
-  '稳定供应': 'geekblue',
-  '质量优秀': 'gold',
-  '品牌匹配': 'purple',
-  '补充邀标': 'default',
+  '合资品牌':   'purple',
+  '国产品牌':   'blue',
+  '数据充足':   'green',
+  '有参考价格': 'cyan',
 }
 function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
-
-function matchedBrands(r: SupplierRecommendation): string[] {
-  if (!brandRequirements.value.length) return []
-  return (r.reason.brands ?? []).filter((b) => brandRequirements.value.includes(b)).slice(0, 3)
-}
 </script>
 
 <template>
@@ -169,7 +154,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
       <div>
         <h1 class="invite-page__title">邀标建议</h1>
         <div class="invite-page__subtitle">
-          基于物料、历史价格、供应商画像 · AI 推荐本次招标可邀单位
+          基于采购品类 · 推荐审定品牌及历史价格参考
         </div>
       </div>
       <a-button disabled>
@@ -179,13 +164,12 @@ function matchedBrands(r: SupplierRecommendation): string[] {
     </div>
 
     <a-row :gutter="16" class="invite-page__body">
-      <!-- ════════ 左侧：招标信息（容器卡 + 悬浮按钮卡） ════════ -->
+      <!-- ════════ 左侧：招标信息 ════════ -->
       <a-col :xs="24" :lg="8" class="invite-page__col">
         <div class="tender-card">
           <div class="tender-card__title">招标信息</div>
-          <div class="tender-card__subtitle">上传招标文件，自动识别清单后生成邀标建议</div>
+          <div class="tender-card__subtitle">上传招标文件，自动识别清单后生成品牌建议</div>
 
-          <!-- 卡片式上传（点击上传 / 重新上传，传统 File 选择） -->
           <div class="tender-card__upload">
             <FileUploadCard
               :type="'tender_bidlist'"
@@ -195,9 +179,8 @@ function matchedBrands(r: SupplierRecommendation): string[] {
             />
           </div>
 
-          <!-- 识别后：项目名称 → 品牌要求 → 采购清单 -->
           <template v-if="sourceJob">
-            <!-- 1. 项目名称 -->
+            <!-- 项目名称 -->
             <div class="field">
               <label class="field__label">项目名称</label>
               <a-input
@@ -207,7 +190,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
               />
             </div>
 
-            <!-- 2. 品牌要求 -->
+            <!-- 品牌要求 -->
             <div class="field">
               <label class="field__label">品牌要求</label>
               <div v-if="brandRequirements.length" class="brand-tags">
@@ -216,10 +199,9 @@ function matchedBrands(r: SupplierRecommendation): string[] {
               <div v-else class="field__placeholder">未识别到品牌要求</div>
             </div>
 
-            <!-- 3. 采购清单 -->
+            <!-- 采购清单 -->
             <div class="field field--list">
               <label class="field__label">采购清单（{{ tenderItems.length }}项）</label>
-
               <a-empty v-if="tenderItems.length === 0" description="未识别到材料行" :image-style="{ height: '40px' }" style="padding:12px 0" />
               <div v-else class="item-list">
                 <div v-for="(it, idx) in tenderItems" :key="idx" class="item-row">
@@ -241,7 +223,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
           />
         </div>
 
-        <!-- 左侧悬浮按钮卡 -->
+        <!-- 左侧按钮 -->
         <div v-if="sourceJob" class="action-bar action-bar--left">
           <a-button
             type="primary"
@@ -251,105 +233,91 @@ function matchedBrands(r: SupplierRecommendation): string[] {
             @click="generateRecommendations"
           >
             <template #icon><ThunderboltOutlined /></template>
-            生成邀标建议
+            生成品牌建议
           </a-button>
         </div>
       </a-col>
 
-      <!-- ════════ 右侧：推荐供应商（无容器 + 悬浮按钮卡） ════════ -->
+      <!-- ════════ 右侧：推荐品牌 ════════ -->
       <a-col :xs="24" :lg="16" class="invite-page__col">
         <div class="reco-panel">
-          <!-- 信息条（常驻） -->
+          <!-- 信息条 -->
           <div class="reco-header">
             <div class="reco-header__meta">
               <InfoCircleOutlined class="reco-header__icon" />
-              <span v-if="recommendations.length && totalCandidates > 0">
-                已从优质供应商库中分析 <b>{{ totalCandidates }}</b> 家相关供应商
-                · 按 <b>价格优势 60%</b> + <b>履约评分 40%</b> 综合排序
+              <span v-if="recommendations.length">
+                已从审定品牌库推荐 <b>{{ recommendations.length }}</b> 个品牌 · 历史样本多者优先（价格参考更可靠）
               </span>
               <span v-else>
-                上传招标文件后，AI 将从优质供应商库按 <b>价格优势 60%</b> + <b>履约评分 40%</b> 推荐邀标单位
+                上传招标文件后，系统将从审定品牌库按品类推荐品牌及参考价格区间
               </span>
             </div>
-            <a-button v-if="recommendations.length" type="link" size="small" :loading="recommending" @click="generateRecommendations">
-              <template #icon><SlidersOutlined /></template>
-              调整权重
-            </a-button>
           </div>
 
-          <!-- 供应商卡片列表（无滚动条，随页面滚动） -->
+          <!-- 品牌卡片列表 -->
           <div v-if="recommendations.length" class="reco-list">
             <div
               v-for="r in recommendations"
-              :key="r.supplier_id"
+              :key="r.brand_name + r.category"
               class="reco-card"
-              :class="{ 'reco-card--selected': selectedSupplierIds.includes(r.supplier_id) }"
+              :class="{ 'reco-card--selected': selectedBrands.includes(r.brand_name) }"
             >
-              <!-- 左：徽标 + 名称 / 评分 / 指标 -->
+              <!-- 左：徽标 + 品牌名 + 类型 -->
               <div class="reco-card__left">
                 <div class="reco-card__head">
-                  <div class="reco-card__avatar" :style="{ background: avatarColor(r.supplier_name) }">{{ r.supplier_name[0] }}</div>
-                  <div class="reco-card__name">{{ r.supplier_name }}</div>
-                </div>
-                <div class="reco-card__score-block">
-                  <span class="reco-card__score-num">{{ r.score.toFixed(0) }}</span>
-                  <span class="reco-card__score-label">AI综合评分</span>
+                  <div class="reco-card__avatar" :style="{ background: avatarColor(r.brand_name) }">{{ r.brand_name[0] }}</div>
+                  <div>
+                    <div class="reco-card__name">{{ r.brand_name }}</div>
+                    <a-tag :color="r.tier === '合资' ? 'purple' : 'blue'" size="small" class="reco-card__tier">{{ r.tier }}</a-tag>
+                  </div>
                 </div>
                 <div class="reco-card__metrics">
                   <div class="reco-metric">
-                    <div class="reco-metric__label">合作次数</div>
-                    <div class="reco-metric__value">{{ r.reason.history_count }} 次</div>
+                    <div class="reco-metric__label">品类</div>
+                    <div class="reco-metric__value">{{ r.category }}</div>
                   </div>
                   <div class="reco-metric">
-                    <div class="reco-metric__label">价格优势</div>
-                    <div class="reco-metric__value" :class="priceClass(r.reason.avg_deviation_pct)">
-                      {{ priceText(r.reason.avg_deviation_pct) }}
+                    <div class="reco-metric__label">历史样本</div>
+                    <div class="reco-metric__value" :class="r.sample_count >= 20 ? 'metric-green' : r.sample_count >= 5 ? 'metric-normal' : 'metric-na'">
+                      {{ r.sample_count > 0 ? r.sample_count + ' 条' : '—' }}
                     </div>
-                  </div>
-                  <div class="reco-metric">
-                    <div class="reco-metric__label">按时交付率</div>
-                    <div class="reco-metric__value metric-na">—</div>
                   </div>
                 </div>
               </div>
 
-              <!-- 中：AI 推荐理由 -->
+              <!-- 中：价格区间 -->
               <div class="reco-card__main">
                 <div class="reco-card__reason-title">
                   <ThunderboltOutlined />
-                  AI 推荐理由
+                  历史价格参考
                 </div>
-                <div class="reco-card__reason">{{ r.reason.summary }}</div>
-
+                <div class="reco-card__price-range" :class="r.sample_count === 0 ? 'price-na' : ''">
+                  {{ priceRangeText(r) }}
+                </div>
                 <div class="reco-card__tags">
-                  <a-tag v-for="tag in r.reason.tags" :key="tag" :color="tagColor(tag)" size="small">{{ tag }}</a-tag>
-                  <a-tag v-for="b in matchedBrands(r)" :key="'brand-' + b" color="purple" size="small">{{ b }}</a-tag>
+                  <a-tag v-for="tag in r.tags" :key="tag" :color="tagColor(tag)" size="small">{{ tag }}</a-tag>
                 </div>
               </div>
 
               <!-- 右：操作按钮 -->
               <div class="reco-card__actions">
                 <a-button
-                  v-if="!selectedSupplierIds.includes(r.supplier_id)"
+                  v-if="!selectedBrands.includes(r.brand_name)"
                   type="primary"
                   size="small"
-                  @click="toggleSupplier(r.supplier_id)"
+                  @click="toggleBrand(r.brand_name)"
                 >
                   <template #icon><PlusOutlined /></template>
-                  加入邀标名单
+                  加入名单
                 </a-button>
                 <a-button
                   v-else
                   size="small"
                   class="btn-joined"
-                  @click="toggleSupplier(r.supplier_id)"
+                  @click="toggleBrand(r.brand_name)"
                 >
                   <template #icon><CheckOutlined /></template>
-                  已加入名单
-                </a-button>
-                <a-button type="link" size="small" disabled class="btn-profile">
-                  <template #icon><UserOutlined /></template>
-                  查看画像
+                  已选
                 </a-button>
               </div>
             </div>
@@ -357,7 +325,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
 
           <!-- 空态 -->
           <div v-else class="reco-empty">
-            <a-empty :description="hasItems ? '点击左侧「生成邀标建议」查看推荐供应商' : '上传招标文件后，这里展示推荐供应商'" />
+            <a-empty :description="hasItems ? '点击左侧「生成品牌建议」查看推荐品牌' : '上传招标文件后，这里展示推荐品牌'" />
           </div>
 
           <a-alert
@@ -370,10 +338,10 @@ function matchedBrands(r: SupplierRecommendation): string[] {
           />
         </div>
 
-        <!-- 右侧悬浮按钮卡（与左侧一致，sticky 固定在视口底部） -->
+        <!-- 右侧按钮 -->
         <div v-if="recommendations.length" class="action-bar action-bar--right">
           <span class="action-bar__count">
-            已选邀标供应商：<b>{{ selectedSupplierIds.length }}</b> / {{ recommendations.length }}
+            已选品牌：<b>{{ selectedBrands.length }}</b> / {{ recommendations.length }}
           </span>
           <a-space>
             <a-button :loading="saving" :disabled="!canSave" @click="saveInvitations">
@@ -438,7 +406,6 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   &__upload { position: relative; }
 }
 
-// 标签一行、组件一行，字段间距稍大
 .field {
   margin-top: 20px;
 
@@ -460,8 +427,6 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   gap: 6px;
 }
 
-
-// 采购清单：名称（规格）……数量单位（数量右对齐，对齐原型）
 .item-row {
   display: flex;
   align-items: center;
@@ -491,7 +456,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   &__unit { color: @text-color-secondary; }
 }
 
-// ════════ 右侧面板（无容器卡） ════════
+// ════════ 右侧面板 ════════
 .reco-panel {
   display: flex;
   flex-direction: column;
@@ -523,7 +488,7 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   padding: 48px 16px;
 }
 
-// ════════ 卡片列表 ════════
+// ════════ 品牌卡片 ════════
 .reco-list {
   display: flex;
   flex-direction: column;
@@ -539,7 +504,6 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   box-shadow: @shadow-1;
   transition: border-color 0.15s, box-shadow 0.15s;
 
-  // 激活态：清晰品牌蓝边框（1px 边 + 1px 描边环），无灰色投影干扰
   &--selected {
     border-color: @primary-color;
     box-shadow: 0 0 0 1px @primary-color;
@@ -548,24 +512,21 @@ function matchedBrands(r: SupplierRecommendation): string[] {
   &__left {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    width: 220px;
+    width: 200px;
     flex-shrink: 0;
     padding-right: 16px;
     border-right: 1px solid @border-color-split;
     margin-right: 16px;
   }
 
-  // 徽标 + 名称（顶部一行，名称紧邻徽标，垂直居中对齐）
   &__head {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     width: 100%;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
 
-  // 徽标：圆角方形（对齐原型）
   &__avatar {
     width: 36px;
     height: 36px;
@@ -583,40 +544,22 @@ function matchedBrands(r: SupplierRecommendation): string[] {
     font-size: 15px;
     font-weight: 600;
     color: @heading-color;
-    flex: 1;
-    min-width: 0;
     line-height: 1.3;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
-  &__score-block {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    margin-bottom: 14px;
+  &__tier {
+    margin-top: 4px;
   }
-  &__score-num {
-    font-size: 30px;
-    font-weight: 700;
-    color: #3fae6e;
-    line-height: 1;
-  }
-  &__score-label {
-    font-size: 11px;
-    color: @text-color-secondary;
-  }
+
   &__metrics {
     width: 100%;
     display: flex;
     justify-content: space-between;
+    gap: 8px;
   }
 
-  // 中：推荐理由
   &__main { flex: 1; min-width: 0; }
 
-  // 右：操作按钮（顶部右对齐）
   &__actions {
     flex-shrink: 0;
     display: flex;
@@ -630,15 +573,20 @@ function matchedBrands(r: SupplierRecommendation): string[] {
     font-size: 12px;
     font-weight: 600;
     color: @primary-color;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 
     .anticon { margin-right: 3px; }
   }
-  &__reason {
-    font-size: 13px;
-    color: @text-color-secondary;
+
+  &__price-range {
+    font-size: 14px;
+    color: @text-color;
     line-height: 1.6;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+
+    &.price-na {
+      color: @text-color-tertiary;
+    }
   }
 
   &__tags {
@@ -667,7 +615,6 @@ function matchedBrands(r: SupplierRecommendation): string[] {
 }
 
 .metric-green  { color: #52c41a; }
-.metric-orange { color: #fa8c16; }
 .metric-normal { color: @heading-color; }
 .metric-na     { color: rgba(0, 0, 0, 0.25); font-weight: 400; }
 
@@ -678,17 +625,12 @@ function matchedBrands(r: SupplierRecommendation): string[] {
 
   .anticon { color: #52c41a; }
 }
-.btn-profile {
-  height: auto;
-  padding: 0;
-  font-size: 12px;
-}
 
 .reco-saved {
   margin-top: 12px;
 }
 
-// ════════ 悬浮按钮卡（左右共用，sticky 固定在视口底部） ════════
+// ════════ 悬浮按钮卡 ════════
 .action-bar {
   position: sticky;
   bottom: 0;

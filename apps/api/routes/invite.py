@@ -1,8 +1,8 @@
-"""Invite/邀标 routes — recommend suppliers and persist invitation lists.
+"""Invite/邀标 routes — recommend brands and persist invitation lists.
 
 Endpoints:
-- POST /api/invite/recommend  — given tender items, return TOP-N supplier recos
-- POST /api/invite/save       — create TenderDocument + BidInvitation rows
+- POST /api/invite/recommend  — given tender items, return approved brand recos
+- POST /api/invite/save       — create TenderDocument (+ optional BidInvitation rows)
 - GET  /api/invite/tenders    — list previously saved tenders (admin/debug)
 - GET  /api/invite/tenders/{id} — fetch a saved tender + its invitations
 """
@@ -20,42 +20,31 @@ log = logging.getLogger(__name__)
 from apps.api.core.database import get_db
 from apps.api.models import BidInvitation, Supplier, TenderDocument
 from apps.api.schemas.invite import (
+    BrandRecommendation,
     RecommendRequest,
     RecommendResponse,
     SaveInvitationsRequest,
     SaveInvitationsResponse,
     SavedInvitation,
-    SupplierRecommendation,
 )
-from apps.api.services.supplier_recommend import (
-    infer_categories,
-    recommend_suppliers,
-)
+from apps.api.services.brand_recommend import recommend_brands
 
 router = APIRouter(prefix="/api/invite", tags=["invite"])
 
 
 @router.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest, db: Session = Depends(get_db)) -> RecommendResponse:
-    categories = infer_categories(req.tender_items)
-    recs, total_candidates = recommend_suppliers(
-        db,
-        req.tender_items,
-        top_n=max(1, req.top_n),
-        project_id=req.project_id,
-        brand_requirements=req.brand_requirements or None,
-    )
+    recs, categories = recommend_brands(db, req.tender_items, top_n=max(1, req.top_n))
     return RecommendResponse(
         categories=categories,
-        recommendations=[SupplierRecommendation(**r) for r in recs],
-        total_candidates=total_candidates,
+        recommendations=[BrandRecommendation(**r) for r in recs],
+        total_candidates=len(recs),
     )
 
 
 @router.post("/save", response_model=SaveInvitationsResponse)
 def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvitationsResponse:
-    if not req.supplier_ids:
-        raise HTTPException(status_code=400, detail="supplier_ids cannot be empty")
+    # supplier_ids is now optional; brand-only tenders save without invitations
 
     # Reuse existing tender or create new
     tender: TenderDocument | None = None
@@ -77,6 +66,12 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         db.add(tender)
         db.flush()
 
+    # When no supplier_ids are given (brand-only recommendation flow), just
+    # persist the TenderDocument and return with an empty invitations list.
+    if not req.supplier_ids:
+        db.commit()
+        return SaveInvitationsResponse(tender_id=tender.id, invitations=[])
+
     # Pre-validate supplier IDs so an all-invalid request fails cleanly
     # (rather than leaving an orphan tender + empty invitations behind).
     valid_suppliers = (
@@ -95,18 +90,7 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
             ),
         )
 
-    # Resolve recommendation context so saved rows carry rank/score.
-    # Pass brand_requirements so the stored rank matches what the user saw.
     rec_lookup: dict[int, dict] = {}
-    if req.items:
-        recs, _ = recommend_suppliers(
-            db,
-            req.items,
-            top_n=max(len(req.supplier_ids), 5),
-            brand_requirements=req.brand_requirements or None,
-        )
-        rec_lookup = {r["supplier_id"]: r for r in recs}
-
     saved: list[SavedInvitation] = []
     skipped_ids: list[int] = []
     for sid in req.supplier_ids:

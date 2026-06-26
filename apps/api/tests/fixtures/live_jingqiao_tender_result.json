@@ -1,0 +1,27 @@
+{
+  "project_name": "金桥地铁上盖 J9A-03 阀门材料采购",
+  "project_code": "J9A-03",
+  "tender_date": "2026-04-01",
+  "deadline": "2026-05-01",
+  "brand_requirements": ["KITZ", "WATTS", "BERMAD"],
+  "items": [
+    {"name": "Y型过滤器", "category": "阀门", "spec": "DN50",  "unit": "个", "quantity": 4,  "remark": "给水"},
+    {"name": "Y型过滤器", "category": "阀门", "spec": "DN65",  "unit": "个", "quantity": 2,  "remark": "给水"},
+    {"name": "Y型过滤器", "category": "阀门", "spec": "DN100", "unit": "个", "quantity": 3,  "remark": "给水"},
+    {"name": "截止阀",    "category": "阀门", "spec": "DN32",  "unit": "个", "quantity": 8,  "remark": "给水"},
+    {"name": "截止阀",    "category": "阀门", "spec": "DN50",  "unit": "个", "quantity": 5,  "remark": "给水"},
+    {"name": "截止阀",    "category": "阀门", "spec": "DN80",  "unit": "个", "quantity": 2,  "remark": "排水"},
+    {"name": "蝶阀",      "category": "阀门", "spec": "DN100", "unit": "个", "quantity": 2,  "remark": "给水"},
+    {"name": "蝶阀",      "category": "阀门", "spec": "DN150", "unit": "个", "quantity": 1,  "remark": "给水"},
+    {"name": "蝶阀",      "category": "阀门", "spec": "DN200", "unit": "个", "quantity": 1,  "remark": "排水"},
+    {"name": "闸阀",      "category": "阀门", "spec": "DN65",  "unit": "个", "quantity": 6,  "remark": "给水"},
+    {"name": "闸阀",      "category": "阀门", "spec": "DN80",  "unit": "个", "quantity": 4,  "remark": "排水"},
+    {"name": "止回阀",    "category": "阀门", "spec": "DN50",  "unit": "个", "quantity": 3,  "remark": "给水"},
+    {"name": "止回阀",    "category": "阀门", "spec": "DN80",  "unit": "个", "quantity": 2,  "remark": "排水"},
+    {"name": "倒流防止器","category": "阀门", "spec": "DN100", "unit": "个", "quantity": 1,  "remark": "给水"},
+    {"name": "减压阀",    "category": "阀门", "spec": "DN50",  "unit": "套", "quantity": 2,  "remark": ""},
+    {"name": "平衡阀",    "category": "阀门", "spec": "DN32",  "unit": "个", "quantity": 17, "remark": ""},
+    {"name": "压力表",    "category": "阀门", "spec": "DN20",  "unit": "个", "quantity": 10, "remark": ""},
+    {"name": "水锤消除器","category": "阀门", "spec": "DN50",  "unit": "个", "quantity": 1,  "remark": ""}
+  ]
+}

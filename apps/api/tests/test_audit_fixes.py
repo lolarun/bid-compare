@@ -707,10 +707,7 @@ class TestConcurrentInviteSave:
         # Step 2: patch BidInvitation queries to return None ONLY for the
         # exact existence-check call in the route. We do this by replacing
         # Query.filter_by's first() on a per-call basis via a sentinel.
-        import apps.api.routes.invite as invite_mod
-        original_recommend = invite_mod.recommend_suppliers
-        # Don't actually recompute recommendations — keep test fast
-        monkeypatch.setattr(invite_mod, "recommend_suppliers", lambda *a, **kw: [])
+        # (No recommend function in the save route — nothing to patch there.)
 
         # Patch the existence check inside the loop. We monkeypatch
         # `Session.query` to inject a wrapper that returns None for

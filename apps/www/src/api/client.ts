@@ -459,17 +459,20 @@ export interface RecommendReason {
   tags: string[]
 }
 
-export interface SupplierRecommendation {
-  supplier_id: number
-  supplier_name: string
-  score: number
-  rank: number
-  reason: RecommendReason
+export interface BrandRecommendation {
+  brand_name: string
+  tier: string        // 合资 | 国产
+  category: string
+  sample_count: number
+  price_median: number | null
+  price_p10: number | null
+  price_p90: number | null
+  tags: string[]
 }
 
 export interface RecommendResponse {
   categories: string[]
-  recommendations: SupplierRecommendation[]
+  recommendations: BrandRecommendation[]
   total_candidates: number
 }
 

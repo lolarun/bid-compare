@@ -1,27 +1,22 @@
-"""Integration tests for the invite flow.
+"""Integration tests for the invite flow (brand-based recommendation).
 
-Plan §11 / Phase 2 validation (backend API only):
-1. POST /api/intake/upload?type=tender returns job_id; job reaches DONE.
-2. POST /api/invite/recommend with tender_items → non-empty list,
-   TOP-1 is in top-3 historical winners for that category.
-3. POST /api/invite/save → bid_invitations rows persisted.
-
-Uses MockProvider (no LLM cost) + isolated SQLite DB.
-Seeds suppliers + quotes from docs/data/ CSVs so recommendations have
-real signal to work with.
+Test tiers:
+  L1 unit        — TestInferCategories (no DB, no server)
+  L2 integration — TestPhase2InviteFlow / TestBrandRecommendation /
+                   TestBrandRecommendJingqiao  (MockProvider + temp SQLite)
+  L3 e2e         — TestBrandRecommendE2E  (@pytest.mark.e2e, DASHSCOPE_API_KEY)
 """
-
 from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
-from sqlalchemy import func
 
 from apps.api.models import (
     Material,
@@ -30,24 +25,35 @@ from apps.api.models import (
     Supplier,
     PROFESSION_MAP,
 )
+from apps.api.models.brand_tier import BrandTier
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-DATA_DIR = REPO_ROOT / "docs" / "data"
+DATA_DIR   = REPO_ROOT / "docs" / "data"
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+# ─── known-brand seed specs: (brand_name, tier, category, n_quotes, price_range) ──
+_VALVE_BRANDS = [
+    ("KITZ",     "合资", "阀门", 20, (500, 2000)),
+    ("WATTS",    "合资", "阀门",  5, (300, 1500)),
+    ("上海良工", "国产", "阀门", 15, (200,  800)),
+    ("上海冠龙", "国产", "阀门",  0, None),
+]
+
+_BRIDGE_BRANDS = [
+    ("川汇", "国产", "桥架", 25, ( 50, 200)),
+    ("国强", "国产", "桥架", 10, ( 40, 150)),
+    ("中孚", "国产", "桥架",  3, ( 60, 180)),
+]
 
 
 # ─── seed helpers ──────────────────────────────────────────────────────────
-def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
-    """Import a subset of a real CSV into the test DB.
-
-    Lightweight version of scripts/import_data.py — just enough to give
-    the recommender real history to score against.
-    """
+def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80) -> int:
+    """Import a subset of a real CSV into the test DB for supplier-history."""
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
     df = df[df["序号"].notna()].head(max_rows).copy()
     if df.empty:
         return 0
 
-    # Find columns robustly
     def find(*keywords):
         for c in df.columns:
             cs = str(c)
@@ -55,10 +61,9 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
                 return c
         return None
 
-    name_col = find("项目名称") or find("名称")
+    name_col  = find("项目名称") or find("名称")
     brand_col = find("品牌")
-    qty_col = find("数量")
-    # Try multiple price columns
+    qty_col   = find("数量")
     price_col = find("价税合计") or find("含税单价") or find("单价")
 
     if not name_col:
@@ -88,7 +93,11 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
         db.add(mat)
         db.flush()
 
-        brand = str(row.get(brand_col)).strip() if brand_col and pd.notna(row.get(brand_col)) else ""
+        brand = (
+            str(row.get(brand_col)).strip()
+            if brand_col and pd.notna(row.get(brand_col))
+            else ""
+        )
         if brand and brand not in {"nan", "None"}:
             supplier = db.query(Supplier).filter_by(name=brand).first()
             if not supplier:
@@ -121,7 +130,6 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
             unit_price=price,
             quantity=qty,
             brand=brand,
-            # Fake deviation: every supplier gets ~3% over reasonable_low
             deviation_pct=(price - 100.0) / 100.0 if price else None,
         )
         db.add(q)
@@ -130,9 +138,58 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80):
     return count
 
 
+def _seed_brand_tiers(db, brand_specs: list[tuple]) -> None:
+    """Seed BrandTier rows (and matching Quote rows) for recommendation tests.
+
+    Each spec: (brand_name, tier, category, n_quotes, price_range | None)
+    Quotes are seeded without a supplier so they pass valid_quote_filters()
+    unconditionally (supplier_id IS NULL branch).
+    """
+    for brand_name, tier, category, n_quotes, price_range in brand_specs:
+        bt = BrandTier(
+            brand_name=brand_name,
+            tier=tier,
+            category=category,
+            is_approved=True,
+            canonical_name=brand_name,
+        )
+        db.add(bt)
+        db.flush()
+
+        if n_quotes and price_range:
+            lo, hi = price_range
+            mat = Material(
+                material_code=f"SEED-{brand_name}-{category}",
+                standard_name=f"测试{category}",
+                profession=PROFESSION_MAP.get(category, "其他"),
+                category=category,
+                sub_category="",
+                spec="",
+                unit="个",
+            )
+            db.add(mat)
+            db.flush()
+
+            project = Project(name=f"种子_{brand_name}")
+            db.add(project)
+            db.flush()
+
+            step = (hi - lo) / max(n_quotes - 1, 1)
+            for i in range(n_quotes):
+                db.add(Quote(
+                    material_id=mat.id,
+                    project_id=project.id,
+                    unit_price=lo + i * step,
+                    brand=brand_name,
+                    # supplier_id omitted → passes valid_quote_filters()
+                ))
+    db.commit()
+
+
+# ─── fixtures ──────────────────────────────────────────────────────────────
 @pytest.fixture
 def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
-    """TestClient with seeded DB + MockProvider + auth bypass."""
+    """TestClient with seeded DB (brand tiers + CSV history) + MockProvider + auth bypass."""
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
         "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -146,18 +203,41 @@ def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
         lambda: ExtractionPipeline(MockProvider(fixture_dir=fixture_dir)),
     )
 
-    # Seed DB BEFORE app boots (we use temp_db's engine)
     _, SessionLocal = temp_db
     db = SessionLocal()
     try:
-        # Cable trays (桥架) — biggest category
+        # Seed approved brand tiers (required for recommend_brands)
+        _seed_brand_tiers(db, _VALVE_BRANDS)
+        _seed_brand_tiers(db, _BRIDGE_BRANDS)
+        # Optionally seed historical CSV rows for broader signal
         bridge_csv = DATA_DIR / "桥架报价单格式模板_汇总.csv"
         if bridge_csv.exists():
-            _seed_from_csv(db, bridge_csv, "桥架", max_rows=120)
-        # Valves
+            _seed_from_csv(db, bridge_csv, "桥架", max_rows=60)
         valves_csv = DATA_DIR / "阀门询价格式_汇总.csv"
         if valves_csv.exists():
-            _seed_from_csv(db, valves_csv, "阀门", max_rows=80)
+            _seed_from_csv(db, valves_csv, "阀门", max_rows=40)
+    finally:
+        db.close()
+
+    from apps.api.main import app
+    from apps.api.routes.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def brand_client(temp_db, monkeypatch, tmp_path):
+    """Minimal TestClient: brand tiers only, no CSV seed, no MockProvider needed."""
+    _, SessionLocal = temp_db
+    db = SessionLocal()
+    try:
+        _seed_brand_tiers(db, _VALVE_BRANDS)
+        _seed_brand_tiers(db, _BRIDGE_BRANDS)
     finally:
         db.close()
 
@@ -178,9 +258,9 @@ def _png() -> bytes:
     return buf.getvalue()
 
 
-# ─── tests ─────────────────────────────────────────────────────────────────
+# ─── TestPhase2InviteFlow ───────────────────────────────────────────────────
 class TestPhase2InviteFlow:
-    """Plan §11 Phase 2 validation: 3 endpoints reachable + correct."""
+    """Phase 2 end-to-end: intake → brand recommend → save."""
 
     def test_intake_upload_tender_reaches_done(self, seeded_client):
         r = seeded_client.post(
@@ -191,19 +271,17 @@ class TestPhase2InviteFlow:
         assert r.status_code == 200, r.text
         job_id = r.json()["id"]
 
-        # Poll (TestClient awaits BackgroundTasks synchronously)
         r2 = seeded_client.get(f"/api/intake/jobs/{job_id}")
         body = r2.json()
         assert body["status"] == "done", body
         assert body["result"] is not None
         assert "items" in body["result"]
 
-    def test_recommend_returns_non_empty_with_correct_top1(self, seeded_client):
-        """TOP-1 must be in the top-3 historical winners for the category."""
-        # Construct tender items for 桥架 category
+    def test_recommend_returns_brands_for_category(self, seeded_client):
+        """Brand recommend: correct shape, non-empty, sorted by sample_count."""
         tender_items = [
-            {"name": "电缆桥架 300×200", "category": "桥架", "qty": 100, "unit": "米"},
-            {"name": "电缆桥架 200×100", "category": "桥架", "qty": 80, "unit": "米"},
+            {"name": "电缆桥架 300×200", "category": "桥架", "qty": 100},
+            {"name": "电缆桥架 200×100", "category": "桥架", "qty": 80},
         ]
         r = seeded_client.post(
             "/api/invite/recommend",
@@ -213,119 +291,282 @@ class TestPhase2InviteFlow:
         body = r.json()
         assert body["categories"] == ["桥架"]
         recs = body["recommendations"]
-        assert len(recs) > 0, "Should return ≥1 recommendation"
+        assert len(recs) > 0, "Should return ≥1 brand recommendation"
         assert len(recs) <= 5
 
-        # Ranks should be 1..N
-        assert [r["rank"] for r in recs] == list(range(1, len(recs) + 1))
-        # All scores should be 0..100
-        for r in recs:
-            assert 0 <= r["score"] <= 100
-            assert "summary" in r["reason"]
+        for rec in recs:
+            assert isinstance(rec["brand_name"], str)
+            assert rec["tier"] in {"合资", "国产"}
+            assert rec["category"] == "桥架"
+            assert isinstance(rec["sample_count"], int)
+            assert isinstance(rec["tags"], list)
+            # When prices exist, p10 ≤ median ≤ p90
+            if rec["price_median"] is not None:
+                assert rec["price_p10"] is not None
+                assert rec["price_p90"] is not None
+                assert rec["price_p10"] <= rec["price_median"] <= rec["price_p90"]
 
-        # TOP-1 must be in top-3 historical winners for 桥架 by quote count
-        from apps.api.core.database import SessionLocal
-        db = SessionLocal()
-        try:
-            top_historical = (
-                db.query(Supplier.id)
-                .join(Quote, Quote.supplier_id == Supplier.id)
-                .join(Material, Material.id == Quote.material_id)
-                .filter(Material.category == "桥架", Quote.unit_price > 0)
-                .group_by(Supplier.id)
-                .order_by(func.count(Quote.id).desc())
-                .limit(3)
-                .all()
-            )
-            top3_ids = {row[0] for row in top_historical}
-        finally:
-            db.close()
+        # 川汇 has 25 samples — should be top-1
+        top1 = recs[0]
+        assert top1["brand_name"] == "川汇"
+        assert top1["sample_count"] == 25
+        # Descending order
+        for i in range(len(recs) - 1):
+            assert recs[i]["sample_count"] >= recs[i + 1]["sample_count"]
 
-        top1_id = recs[0]["supplier_id"]
-        assert top1_id in top3_ids, (
-            f"TOP-1 recommended supplier {top1_id} ({recs[0]['supplier_name']}) "
-            f"not in top-3 historical winners {top3_ids}"
-        )
-
-    def test_save_persists_bid_invitations(self, seeded_client):
-        # Get recommendations first
-        r = seeded_client.post(
-            "/api/invite/recommend",
-            json={"tender_items": [{"name": "桥架300", "category": "桥架"}], "top_n": 3},
-        )
-        recs = r.json()["recommendations"]
-        assert recs, "Pre-requisite: recommend must return results"
-        supplier_ids = [x["supplier_id"] for x in recs[:2]]
-
+    def test_save_creates_tender_document(self, seeded_client):
+        """Brand-only save: TenderDocument created, invitations empty."""
         save_body = {
             "project_name": "Phase 2 测试项目",
             "project_code": "P2-TEST",
-            "items": [{"name": "桥架300", "category": "桥架", "quantity": 100}],
-            "supplier_ids": supplier_ids,
+            "items": [{"name": "电缆桥架 300×200", "category": "桥架"}],
+            "brand_requirements": ["川汇", "国强"],
         }
-        r2 = seeded_client.post("/api/invite/save", json=save_body)
-        assert r2.status_code == 200, r2.text
-        body = r2.json()
-        tender_id = body["tender_id"]
-        assert tender_id > 0
-        assert len(body["invitations"]) == 2
+        r = seeded_client.post("/api/invite/save", json=save_body)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["tender_id"] > 0
+        assert body["invitations"] == []
 
-        # Verify DB rows
+        # Verify DB state
         from apps.api.core.database import SessionLocal
-        from apps.api.models import BidInvitation, TenderDocument
+        from apps.api.models import TenderDocument
         db = SessionLocal()
         try:
-            tender = db.get(TenderDocument, tender_id)
+            tender = db.get(TenderDocument, body["tender_id"])
             assert tender is not None
-            assert tender.status == "invited"
-            invs = db.query(BidInvitation).filter_by(tender_id=tender_id).all()
-            assert len(invs) == 2
-            for inv in invs:
-                assert inv.supplier_id in supplier_ids
-                assert inv.score is not None
-                assert inv.rank is not None
-                assert inv.reason  # dict with summary etc.
+            assert tender.project_name == "Phase 2 测试项目"
+            assert tender.status == "draft"
         finally:
             db.close()
 
-    def test_idempotent_save_no_duplicates(self, seeded_client):
-        """Saving the same supplier twice for the same tender should not create duplicates."""
-        r = seeded_client.post(
-            "/api/invite/recommend",
-            json={"tender_items": [{"name": "阀门 DN50", "category": "阀门"}], "top_n": 2},
-        )
-        recs = r.json()["recommendations"]
-        if not recs:
-            pytest.skip("No 阀门 candidates in seeded data — skip duplicate test")
-        sup_id = recs[0]["supplier_id"]
-
-        body = {
+    def test_idempotent_save_reuses_tender(self, seeded_client):
+        """Saving with the same tender_id should not create a duplicate."""
+        r1 = seeded_client.post("/api/invite/save", json={
             "project_name": "Dedup Test",
             "items": [{"name": "阀门 DN50", "category": "阀门"}],
-            "supplier_ids": [sup_id],
-        }
-        r1 = seeded_client.post("/api/invite/save", json=body)
+        })
+        assert r1.status_code == 200, r1.text
         tender_id = r1.json()["tender_id"]
+        assert tender_id > 0
 
-        # Second save with same tender_id + same supplier
-        body2 = {**body, "tender_id": tender_id, "supplier_ids": [sup_id]}
-        r2 = seeded_client.post("/api/invite/save", json=body2)
-        assert r2.status_code == 200
+        # Re-save with explicit tender_id → same tender reused
+        r2 = seeded_client.post("/api/invite/save", json={
+            "tender_id": tender_id,
+            "project_name": "Dedup Test",
+            "items": [{"name": "阀门 DN50", "category": "阀门"}],
+        })
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["tender_id"] == tender_id
 
+
+# ─── TestBrandRecommendation ────────────────────────────────────────────────
+class TestBrandRecommendation:
+    """Detailed assertions on brand recommendation semantics."""
+
+    def test_approved_only(self, brand_client):
+        """Non-approved brands must not appear in recommendations."""
+        # Add an unapproved brand directly to DB
         from apps.api.core.database import SessionLocal
-        from apps.api.models import BidInvitation
         db = SessionLocal()
         try:
-            count = db.query(BidInvitation).filter_by(
-                tender_id=tender_id, supplier_id=sup_id
-            ).count()
-            assert count == 1, f"Expected 1 invitation row, got {count}"
+            db.add(BrandTier(
+                brand_name="测试未审核品牌",
+                tier="国产",
+                category="阀门",
+                is_approved=False,
+            ))
+            db.commit()
         finally:
             db.close()
 
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"name": "截止阀 DN50", "category": "阀门"}],
+            "top_n": 20,
+        })
+        assert r.status_code == 200
+        names = [rec["brand_name"] for rec in r.json()["recommendations"]]
+        assert "测试未审核品牌" not in names
 
+    def test_brands_with_quotes_have_prices(self, brand_client):
+        """Brands seeded with quotes must have non-null price_median."""
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"category": "阀门"}],
+            "top_n": 10,
+        })
+        assert r.status_code == 200
+        recs = {rec["brand_name"]: rec for rec in r.json()["recommendations"]}
+
+        # KITZ: 20 quotes → has prices
+        assert "KITZ" in recs
+        assert recs["KITZ"]["sample_count"] == 20
+        assert recs["KITZ"]["price_median"] is not None
+
+        # 上海冠龙: 0 quotes → no prices
+        assert "上海冠龙" in recs
+        assert recs["上海冠龙"]["sample_count"] == 0
+        assert recs["上海冠龙"]["price_median"] is None
+
+    def test_sorted_by_sample_count_desc(self, brand_client):
+        """Recommendations are sorted by sample_count descending."""
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"category": "阀门"}],
+            "top_n": 10,
+        })
+        recs = r.json()["recommendations"]
+        counts = [rec["sample_count"] for rec in recs]
+        assert counts == sorted(counts, reverse=True)
+
+    def test_top_n_respected(self, brand_client):
+        """top_n parameter caps the result list."""
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"category": "阀门"}],
+            "top_n": 2,
+        })
+        assert r.status_code == 200
+        assert len(r.json()["recommendations"]) <= 2
+
+    def test_data_sufficient_tag(self, brand_client):
+        """Brands with ≥20 samples should carry '数据充足' tag."""
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"category": "阀门"}],
+            "top_n": 10,
+        })
+        recs = {rec["brand_name"]: rec for rec in r.json()["recommendations"]}
+        assert "数据充足" in recs["KITZ"]["tags"]       # 20 samples
+        assert "有参考价格" in recs["WATTS"]["tags"]    # 5 samples
+        assert "数据充足" not in recs["上海冠龙"]["tags"]  # 0 samples
+
+    def test_no_categories_returns_empty(self, brand_client):
+        """Completely unrecognized item names → empty recommendations."""
+        r = brand_client.post("/api/invite/recommend", json={
+            "tender_items": [{"name": "完全不认识的东西XYZ"}],
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["categories"] == []
+        assert body["recommendations"] == []
+
+
+# ─── TestBrandRecommendJingqiao ─────────────────────────────────────────────
+class TestBrandRecommendJingqiao:
+    """Validate brand recommendation using the 金桥 J9A-03 fixture (18 valve items)."""
+
+    @pytest.fixture(autouse=True)
+    def _fixture(self, brand_client):
+        self.client = brand_client
+        with open(FIXTURE_DIR / "live_jingqiao_tender_result.json", encoding="utf-8") as f:
+            data = json.load(f)
+        self.items = data["items"]
+        self.brand_requirements = data.get("brand_requirements", [])
+
+    def test_infers_valve_category(self):
+        r = self.client.post("/api/invite/recommend", json={
+            "tender_items": self.items,
+            "top_n": 10,
+        })
+        assert r.status_code == 200
+        assert "阀门" in r.json()["categories"]
+
+    def test_kitz_in_top3(self):
+        """KITZ (20 samples) must rank in the top 3 for the 阀门 category."""
+        r = self.client.post("/api/invite/recommend", json={
+            "tender_items": self.items,
+            "top_n": 10,
+        })
+        top3_names = [rec["brand_name"] for rec in r.json()["recommendations"][:3]]
+        assert "KITZ" in top3_names, (
+            f"KITZ not in top-3; top-3 was {top3_names}"
+        )
+
+    def test_all_brand_requirements_returned(self):
+        """All three required brands (KITZ/WATTS/BERMAD) should appear in results.
+
+        Note: BERMAD is NOT seeded, so the assertion is relaxed to:
+        all seeded brands with is_approved=True appear.
+        """
+        r = self.client.post("/api/invite/recommend", json={
+            "tender_items": self.items,
+            "top_n": 10,
+        })
+        names = {rec["brand_name"] for rec in r.json()["recommendations"]}
+        # Only check seeded brands; BERMAD absent from seed = correctly absent
+        for seeded in ("KITZ", "WATTS", "上海良工", "上海冠龙"):
+            assert seeded in names, f"{seeded} missing from recommendations"
+
+    def test_kitz_price_data_present(self):
+        """KITZ (20 quotes seeded) must have price_median, p10, p90."""
+        r = self.client.post("/api/invite/recommend", json={
+            "tender_items": self.items,
+            "top_n": 10,
+        })
+        recs = {rec["brand_name"]: rec for rec in r.json()["recommendations"]}
+        kitz = recs["KITZ"]
+        assert kitz["sample_count"] == 20
+        assert kitz["price_median"] is not None
+        assert kitz["price_p10"] is not None
+        assert kitz["price_p90"] is not None
+        assert kitz["price_p10"] <= kitz["price_median"] <= kitz["price_p90"]
+
+
+# ─── TestBrandRecommendE2E ──────────────────────────────────────────────────
+@pytest.mark.e2e
+class TestBrandRecommendE2E:
+    """Fresh E2E: upload the real 金桥 PDF, parse tender items, then brand-recommend.
+
+    Requires DASHSCOPE_API_KEY. Skipped in CI unless the key is present.
+    Uses the actual recognition pipeline (no mock); validates that the real
+    LLM output produces 阀门 items that correctly map to 阀门 brand recommendations.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _check_key(self, seeded_client):
+        from apps.api.core.config import settings as s
+        if not getattr(s, "DASHSCOPE_API_KEY", None):
+            pytest.skip("DASHSCOPE_API_KEY not configured")
+        self.client = seeded_client
+
+    def test_upload_pdf_and_recommend(self):
+        tender_pdf = REPO_ROOT / "docs" / "test" / "金桥地体上盖招标文件.pdf"
+        if not tender_pdf.exists():
+            pytest.skip(f"Fixture PDF not found: {tender_pdf}")
+
+        with open(tender_pdf, "rb") as fh:
+            r = self.client.post(
+                "/api/intake/upload",
+                data={"type": "tender"},
+                files={"file": (tender_pdf.name, fh, "application/pdf")},
+            )
+        assert r.status_code == 200, r.text
+        job_id = r.json()["id"]
+
+        # Poll until done (real pipeline — allow up to 120s)
+        body = {}
+        for _ in range(60):
+            r2 = self.client.get(f"/api/intake/jobs/{job_id}")
+            body = r2.json()
+            if body["status"] == "done":
+                break
+            time.sleep(2)
+        assert body["status"] == "done", f"Job still {body['status']} after 120 s"
+        assert body["result"] and body["result"].get("items"), "No items in result"
+
+        items = body["result"]["items"]
+        r3 = self.client.post("/api/invite/recommend", json={
+            "tender_items": items,
+            "top_n": 10,
+        })
+        assert r3.status_code == 200, r3.text
+        rec_body = r3.json()
+        assert "阀门" in rec_body["categories"], (
+            f"Expected 阀门 in categories; got {rec_body['categories']}"
+        )
+        assert len(rec_body["recommendations"]) > 0, "No brand recommendations returned"
+
+
+# ─── TestInferCategories ────────────────────────────────────────────────────
 class TestInferCategories:
-    """Unit test of the category-inference helper."""
+    """Unit test of the category-inference helper (no DB, no server)."""
 
     def test_explicit_category(self):
         from apps.api.services.supplier_recommend import infer_categories
