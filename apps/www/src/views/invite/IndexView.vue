@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   SaveOutlined,
@@ -28,6 +28,28 @@ const recommending = ref(false)
 const recommendations = ref<BrandRecommendation[]>([])
 const categories = ref<string[]>([])
 const selectedBrands = ref<string[]>([])
+
+// 每张卡片高度（含 gap）约 135px；去掉顶导、页头、信息条、分页、底部操作栏等固定开销
+const CARD_H = 135
+const OVERHEAD = 320
+const windowHeight = ref(window.innerHeight)
+function _onResize() { windowHeight.value = window.innerHeight }
+onMounted(() => window.addEventListener('resize', _onResize))
+onUnmounted(() => window.removeEventListener('resize', _onResize))
+
+const pageSize = computed(() => Math.max(3, Math.floor((windowHeight.value - OVERHEAD) / CARD_H)))
+const currentPage = ref(1)
+
+// 窗口缩小时防止当前页超出范围
+watch(pageSize, (sz) => {
+  const maxPage = Math.ceil(recommendations.value.length / sz)
+  if (currentPage.value > maxPage) currentPage.value = Math.max(1, maxPage)
+})
+
+const pagedRecs = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return recommendations.value.slice(start, start + pageSize.value)
+})
 
 const brandRequirements = ref<string[]>([])
 const saving = ref(false)
@@ -65,13 +87,14 @@ async function generateRecommendations() {
   try {
     const { data } = await inviteApi.recommend({
       tender_items: tenderItems.value as unknown as Array<Record<string, unknown>>,
-      top_n: 15,
+      top_n: 100,
       brand_requirements: brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
     })
     recommendations.value = data.recommendations
     categories.value = data.categories
     selectedBrands.value = []
     savedTenderId.value = null
+    currentPage.value = 1
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? '推荐失败'
@@ -246,7 +269,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
             <div class="reco-header__meta">
               <InfoCircleOutlined class="reco-header__icon" />
               <span v-if="recommendations.length">
-                已从审定品牌库推荐 <b>{{ recommendations.length }}</b> 个品牌 · 历史样本多者优先（价格参考更可靠）
+                已从审定品牌库推荐 <b>{{ recommendations.length }}</b> 个品牌 · 合资优先，同类按样本量排序
               </span>
               <span v-else>
                 上传招标文件后，系统将从审定品牌库按品类推荐品牌及参考价格区间
@@ -257,7 +280,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
           <!-- 品牌卡片列表 -->
           <div v-if="recommendations.length" class="reco-list">
             <div
-              v-for="r in recommendations"
+              v-for="r in pagedRecs"
               :key="r.brand_name + r.category"
               class="reco-card"
               :class="{ 'reco-card--selected': selectedBrands.includes(r.brand_name) }"
@@ -323,8 +346,19 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
             </div>
           </div>
 
+          <!-- 分页 -->
+          <div v-if="recommendations.length > pageSize" class="reco-pagination">
+            <a-pagination
+              v-model:current="currentPage"
+              :total="recommendations.length"
+              :page-size="pageSize"
+              :show-size-changer="false"
+              size="small"
+            />
+          </div>
+
           <!-- 空态 -->
-          <div v-else class="reco-empty">
+          <div v-else-if="!recommendations.length" class="reco-empty">
             <a-empty :description="hasItems ? '点击左侧「生成品牌建议」查看推荐品牌' : '上传招标文件后，这里展示推荐品牌'" />
           </div>
 
@@ -624,6 +658,12 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
   background: @component-background;
 
   .anticon { color: #52c41a; }
+}
+
+.reco-pagination {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
 }
 
 .reco-saved {
