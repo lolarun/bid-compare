@@ -436,19 +436,73 @@ def recognize_tables(
     # 现在分类只用缩略图；全分辨率仅渲染 OCR/方向/Plus 真正需要的 ~12 页。
     _notify("视觉页面分类", 12)
     actual_page_count = DocumentLoader.get_page_count(file_path)
-    thumbnails = DocumentLoader.to_thumbnails(file_path, max_pages=MAX_PAGES_UNLIMITED)
-    rendered_pages = len(thumbnails)
-    truncated = rendered_pages < actual_page_count
-    total_pages = actual_page_count   # 真实页数，截断时 > rendered_pages
+
+    # ── PDF 文本预筛：零成本排除明显非表格页，减少视觉分类 API 调用 ──
+    from apps.api.intelligence.page_classifier import (
+        VisualPageClassification, VisualPageRole,
+    )
+    _pre_cls: dict[int, VisualPageClassification] = {}
+    _needs_visual: list[int] = []
+    try:
+        import pymupdf as _mu
+        _mu_doc = _mu.open(str(file_path))
+        _NON_TABLE_KW = {
+            "营业执照", "法定代表人", "资质证书", "安全生产许可证",
+            "开户许可证", "税务登记证", "授权委托书", "授权书",
+            "投标函", "投标书目录", "目录",
+            "社会保险", "缴纳证明", "审计报告",
+            "iso证书", "ISO证书", "质量管理体系",
+        }
+        _TABLE_KW = {"投标清单", "报价清单", "单价", "合价", "序号", "名称"}
+        for _pi in range(min(len(_mu_doc), actual_page_count)):
+            _txt = _mu_doc[_pi].get_text()[:2000]
+            _has_non_table = any(_kw in _txt for _kw in _NON_TABLE_KW)
+            _has_table = any(_kw in _txt for _kw in _TABLE_KW)
+            if _has_non_table and not _has_table:
+                _pre_cls[_pi + 1] = VisualPageClassification(
+                    page=_pi + 1, role=VisualPageRole.OTHER,
+                    confidence=1.0, orientation=0, has_line_items=False,
+                )
+            else:
+                _needs_visual.append(_pi + 1)
+        _mu_doc.close()
+    except Exception:
+        # 预筛失败（扫描件无文本层等）→ 全部走视觉分类
+        _needs_visual = list(range(1, actual_page_count + 1))
+
+    _skipped = len(_pre_cls)
+    if _skipped:
+        log.info("text pre-filter: %d/%d pages skipped visual classification",
+                 _skipped, actual_page_count)
 
     def _render_full(pno: int) -> bytes:
         """按需渲染单页全分辨率（字节与旧 to_images()[pno-1] 一致）。"""
         return DocumentLoader.render_pages(file_path, [pno])[pno]
 
-    page_cls, flash_pages, plus_pages = _classify_pages(
-        provider, thumbnails, adapter.doc_type, notify=_notify,
-        file_path=str(file_path), render_full=_render_full)
+    # 只渲染需要视觉分类的页的缩略图
+    if _skipped > 0 and _needs_visual:
+        # 预筛生效：渲染全部缩略图（后续需要），但只送需要分类的给视觉模型
+        thumbnails = DocumentLoader.to_thumbnails(file_path, max_pages=MAX_PAGES_UNLIMITED)
+        _visual_thumbs = [thumbnails[pn - 1] for pn in _needs_visual if pn - 1 < len(thumbnails)]
+        _notify(f"视觉分类{len(_visual_thumbs)}页(预筛跳过{_skipped}页)", 12)
+        _visual_cls, flash_pages, plus_pages = _classify_pages(
+            provider, _visual_thumbs, adapter.doc_type, notify=_notify,
+            file_path=str(file_path), render_full=_render_full)
+        # 合并预筛页 + 视觉分类页
+        page_cls = list(_pre_cls.values())
+        page_cls.extend(_visual_cls)
+        page_cls.sort(key=lambda c: c.page)
+    else:
+        # 无预筛或全筛：走原路径
+        thumbnails = DocumentLoader.to_thumbnails(file_path, max_pages=MAX_PAGES_UNLIMITED)
+        page_cls, flash_pages, plus_pages = _classify_pages(
+            provider, thumbnails, adapter.doc_type, notify=_notify,
+            file_path=str(file_path), render_full=_render_full)
     role_by_page = {c.page: c for c in page_cls}
+
+    rendered_pages = len(thumbnails)
+    truncated = rendered_pages < actual_page_count
+    total_pages = actual_page_count   # 真实页数，截断时 > rendered_pages
 
     table_roles = TENDER_TARGET_ROLES if adapter.doc_type == "tender" else QUOTE_TARGET_ROLES
 
@@ -631,6 +685,7 @@ def recognize_tables(
                 adapter,
                 page_rotations.get(page_no, 0),
                 inherited_header_by_page.get(page_no),   # cross-page header inheritance
+                page_no in recall_set,                     # is_recall: skip tiling for recall pages
             ): page_no
             for page_no in extract_pages
         }
@@ -1056,11 +1111,13 @@ def _process_page(
     adapter: RecognizeAdapter,
     rotation_applied: int = 0,
     inherited_header: list[str] | None = None,
+    is_recall: bool = False,
 ) -> tuple[list[DraftRow], PageMetric]:
     """单页完整处理：build_input → LLM → retry → tiling → DraftRow[]。
 
     方向纠正在 recognize_tables 文档级完成；rotation_applied 仅用于审计记录。
     inherited_header: 前一页的列头列表，供无表头续表页继承（见 html_to_table_grids）。
+    is_recall: 召回页（best-effort），跳过切片降级以避免浪费 API 调用。
     """
     from apps.api.intelligence.table_parser import html_to_table_grids
 
@@ -1080,6 +1137,16 @@ def _process_page(
     # ── 计数 table_count / row_count ──────────────────────────────────────
     table_count = html.count("<table")
     row_count = html.count("<tr")
+
+    # 跳过无表格结构的页：OCR HTML 无 <table> 且无 <tr> 且无价格信号 → 不调 LLM
+    if table_count == 0 and row_count == 0 and not _html_has_price(html):
+        metric = PageMetric(
+            page=page_no, page_index=page_idx, role=role,
+            table_count=0, row_count=0,
+            input_mode="html_fallback", fallback_reason="no_table_structure",
+            rotation_applied=rotation_applied,
+        )
+        return [], metric
 
     def _prompt(mode: str) -> str:
         if adapter.prompt_for_mode:
@@ -1119,7 +1186,7 @@ def _process_page(
         or (input_mode == "html_fallback" and len(raw_rows) == 0
             and _html_has_price(html))
     )
-    if should_tile:
+    if should_tile and not is_recall:
         log.info("Page %d: triggering adaptive tiling", page_no)
         tiled_rows, tile_count = _try_tiled_extraction(
             page_no, image, provider, adapter
@@ -1129,6 +1196,8 @@ def _process_page(
             tiled = True
             input_mode = "tiled"
             fallback_reason = ""
+    elif should_tile and is_recall:
+        log.info("Page %d: skipping tiling for recall page (best-effort)", page_no)
 
     # reuse pre-parsed grids; if tiled, full-page grids are irrelevant
     if tiled:
