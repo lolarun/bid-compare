@@ -519,34 +519,42 @@ def recognize_tables(
             continue
         log.info("chain %s-%s orientation=%d° (direct apply, probe cache %d pages)",
                  _chain[0], _chain[-1], _angle, len(_probe_cache))
+
+        # 收集需要 re-OCR 的非 sample 页（批量提交，provider 内部 ThreadPoolExecutor 并发）
+        _to_re_ocr: list[tuple[int, bytes]] = []
         for _p in _chain:
-            chain_orient[_p] = _angle   # 链方向决策（供召回页继承）——与实际应用结果分离
+            chain_orient[_p] = _angle
             if _p in _probe_cache:
-                # 探测阶段已 OCR：直接复用，无需重复调用
                 _new_html, _new_img = _probe_cache[_p]
-                _ok = True
-                log.info("  p%d reuse probe OCR → %d° (no re-OCR)", _p, _angle)
-            else:
-                # 非 sample 页：旋转后 OCR 一次，不再二次投票
-                _rot_img = _rotate_png_bytes(page_imgs[_p], _angle)
-                try:
-                    _res, _ = provider.ocr_pages_with_roles([_rot_img])
-                    if _res and _res[0][1]:
-                        _new_html, _new_img, _ok = _res[0][1], _rot_img, True
-                    else:
-                        _new_html, _new_img, _ok = page_htmls[_p - 1], page_imgs[_p], False
-                except Exception as _exc:
-                    log.warning("chain orient apply OCR failed p%d deg %d: %s",
-                                _p, _angle, _exc)
-                    _new_html, _new_img, _ok = page_htmls[_p - 1], page_imgs[_p], False
-            if _ok:
                 page_htmls[_p - 1] = _new_html
                 page_imgs[_p] = _new_img
-                page_rotations[_p] = _angle   # 仅成功才记审计
-                log.info("  p%d corrected → %d° (chain direct)", _p, _angle)
+                page_rotations[_p] = _angle
+                log.info("  p%d reuse probe OCR → %d° (no re-OCR)", _p, _angle)
             else:
-                # OCR 失败：保留原图，不记 rotation（审计不得谎称已旋转）
-                log.info("  p%d rotation NOT applied (OCR failed, kept original)", _p)
+                _rot_img = _rotate_png_bytes(page_imgs[_p], _angle)
+                _to_re_ocr.append((_p, _rot_img))
+
+        # 批量 re-OCR：provider.ocr_pages_with_roles 内部已用 ThreadPoolExecutor 并发，
+        # 受 per-key Semaphore 限流，不会触发 429
+        if _to_re_ocr:
+            _re_pages = [p for p, _ in _to_re_ocr]
+            _re_imgs = [img for _, img in _to_re_ocr]
+            try:
+                _re_results, _re_failures = provider.ocr_pages_with_roles(_re_imgs)
+            except Exception as _exc:
+                log.warning("chain orient batch OCR failed for pages %s deg %d: %s",
+                            _re_pages, _angle, _exc)
+                _re_results, _re_failures = [], []
+
+            for _idx, _p in enumerate(_re_pages):
+                _rot_img = _re_imgs[_idx]
+                if _idx < len(_re_results) and _re_results[_idx][1]:
+                    page_htmls[_p - 1] = _re_results[_idx][1]
+                    page_imgs[_p] = _rot_img
+                    page_rotations[_p] = _angle
+                    log.info("  p%d corrected → %d° (chain batch)", _p, _angle)
+                else:
+                    log.info("  p%d rotation NOT applied (OCR failed, kept original)", _p)
 
     # 召回页方向继承：继承紧邻前序页的链方向并直接 OCR 一次，不再二次投票。
     for _p in recall_pages:
@@ -724,31 +732,43 @@ def recognize_tables(
     if _pages_needing_tax_retry:
         log.info("tax-field retry triggered for page(s): %s", _pages_needing_tax_retry)
 
-        for _pno in _pages_needing_tax_retry:
-            _orig_rows, _orig_metric = results_by_page[_pno]
-            _orig_score = _page_tax_quality(_orig_rows)
-            try:
-                _retry_rows, _retry_metric = _process_page(
-                    _pno, _pno - 1,
-                    page_htmls[_pno - 1],
-                    page_imgs[_pno],
-                    role_by_page.get(_pno),
-                    provider,
-                    adapter,
-                    page_rotations.get(_pno, 0),
-                    inherited_header_by_page.get(_pno),
-                )
-                _retry_score = _page_tax_quality(_retry_rows)
-                _use_retry = _retry_score > _orig_score
-                log.info(
-                    "tax-field retry page %d: orig=%s retry=%s → %s",
-                    _pno, _orig_score, _retry_score,
-                    "using retry" if _use_retry else "keeping original",
-                )
-                if _use_retry:
-                    results_by_page[_pno] = (_retry_rows, _retry_metric)
-            except Exception as _exc:
-                log.warning("tax-field retry page %d failed: %s", _pno, _exc)
+        def _tax_retry_one(_pno: int):
+            """Run tax-field retry for a single page. Returns (page_no, retry_rows, retry_metric)."""
+            _retry_rows, _retry_metric = _process_page(
+                _pno, _pno - 1,
+                page_htmls[_pno - 1],
+                page_imgs[_pno],
+                role_by_page.get(_pno),
+                provider,
+                adapter,
+                page_rotations.get(_pno, 0),
+                inherited_header_by_page.get(_pno),
+            )
+            return _pno, _retry_rows, _retry_metric
+
+        _tax_workers = min(PAGE_CONCURRENCY, len(_pages_needing_tax_retry))
+        with ThreadPoolExecutor(max_workers=_tax_workers) as _tax_exc:
+            _tax_futs = {
+                _tax_exc.submit(_tax_retry_one, _pno): _pno
+                for _pno in _pages_needing_tax_retry
+            }
+            for _fut in as_completed(_tax_futs):
+                _pno = _tax_futs[_fut]
+                _orig_rows, _orig_metric = results_by_page[_pno]
+                _orig_score = _page_tax_quality(_orig_rows)
+                try:
+                    _, _retry_rows, _retry_metric = _fut.result()
+                    _retry_score = _page_tax_quality(_retry_rows)
+                    _use_retry = _retry_score > _orig_score
+                    log.info(
+                        "tax-field retry page %d: orig=%s retry=%s → %s",
+                        _pno, _orig_score, _retry_score,
+                        "using retry" if _use_retry else "keeping original",
+                    )
+                    if _use_retry:
+                        results_by_page[_pno] = (_retry_rows, _retry_metric)
+                except Exception as _exc:
+                    log.warning("tax-field retry page %d failed: %s", _pno, _exc)
 
     # 懒渲染内存释放：逐页 LLM/tiling/tax-retry 全部完成，高清图字节不再需要。
     # 必须在 tax-retry 块之后（retry 仍读 page_imgs[_pno]）。
@@ -1160,23 +1180,35 @@ def _try_tiled_extraction(
     provider: Any,
     adapter: RecognizeAdapter,
 ) -> tuple[list[dict], int]:
-    """切片 → 逐条 OCR+LLM → 合并去重。返回 (raw_items, n_tiles)。"""
+    """切片 → 并发 OCR+LLM → 合并去重。返回 (raw_items, n_tiles)。
+
+    4 个切片并发执行，每个切片需 1 次 OCR + 1 次 LLM 调用。
+    并发受 OCR provider 的 per-key Semaphore 保护，不会触发 429。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from apps.api.intelligence.adaptive_tiler import tile_page, dedup_raw_items
 
     tiles = tile_page(image)
     all_items: list[dict] = []
 
-    for tile in tiles:
-        try:
-            tile_html = _ocr_tile(provider, tile.image_bytes)
-            llm_input, _exp, _mode, _reason = _build_llm_input(tile_html, page_no)
-            tile_data, tile_items = _llm_extract(provider, adapter.row_prompt, llm_input)
-            # 把切片 bbox 信息附加到 item 上，供后续 source_ref 使用
-            for item in tile_items:
-                item["_tile_bbox"] = list(tile.bbox_pct)
-            all_items.extend(tile_items)
-        except Exception as exc:
-            log.warning("tile %d on page %d failed: %s", tile.tile_index, page_no, exc)
+    def _process_tile(tile):
+        tile_html = _ocr_tile(provider, tile.image_bytes)
+        llm_input, _exp, _mode, _reason = _build_llm_input(tile_html, page_no)
+        tile_data, tile_items = _llm_extract(provider, adapter.row_prompt, llm_input)
+        for item in tile_items:
+            item["_tile_bbox"] = list(tile.bbox_pct)
+        return tile_items
+
+    _tile_workers = min(PAGE_CONCURRENCY, len(tiles))
+    with ThreadPoolExecutor(max_workers=_tile_workers) as _tile_exc:
+        _tile_futs = {_tile_exc.submit(_process_tile, t): t for t in tiles}
+        for _fut in as_completed(_tile_futs):
+            tile = _tile_futs[_fut]
+            try:
+                all_items.extend(_fut.result())
+            except Exception as exc:
+                log.warning("tile %d on page %d failed: %s",
+                            tile.tile_index, page_no, exc)
 
     deduped = dedup_raw_items(all_items, name_key=adapter.name_key)
     log.info(

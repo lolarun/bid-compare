@@ -21,6 +21,7 @@ import itertools
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -38,7 +39,13 @@ from apps.api.intelligence.base import (
 log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 5
-_RETRY_DELAY = 3          # seconds; linear backoff: delay × attempt (3, 6, 9, 12, 15)
+_RETRY_BASE = 2          # exponential backoff base: 2, 4, 8, 16, 32 (with jitter)
+_RETRY_MAX = 30          # cap at 30s
+
+
+def _retry_wait(attempt: int) -> float:
+    """Exponential backoff with full jitter: min(base * 2^attempt, max) + uniform(0, 1)."""
+    return min(_RETRY_BASE * (2 ** attempt), _RETRY_MAX) + random.uniform(0, 1)
 # 每个 API key 同时打到 Qwen-VL-OCR 的最大并发调用数（真正的"OCR 并发识别数"）。
 # 这是所有 OCR 调用（批量识别/切片/方向探测）的硬上限。env 可调；注意 Qwen 账号本身
 # 有 QPS/并发限额，调太高会触发 429（有退避重试，但会拖慢）。多 key 时总并发 = 本值 × key数。
@@ -805,8 +812,8 @@ class DashScopeOCRProvider(LLMProvider):
             except Exception as e:
                 sem.release()
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_DELAY * (attempt + 1)
-                    log.warning("OCR connection error (attempt %d/%d), retry in %ds: %s",
+                    wait = _retry_wait(attempt)
+                    log.warning("OCR connection error (attempt %d/%d), retry in %.1fs: %s",
                                 attempt + 1, _MAX_RETRIES, wait, e)
                     time.sleep(wait)
                     continue
@@ -815,8 +822,8 @@ class DashScopeOCRProvider(LLMProvider):
 
             if resp.status_code == 429:
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_DELAY * (attempt + 1)
-                    log.warning("OCR 429 rate limited (attempt %d/%d), retry in %ds",
+                    wait = _retry_wait(attempt)
+                    log.warning("OCR 429 rate limited (attempt %d/%d), retry in %.1fs",
                                 attempt + 1, _MAX_RETRIES, wait)
                     time.sleep(wait)
                     continue
@@ -824,8 +831,8 @@ class DashScopeOCRProvider(LLMProvider):
 
             if resp.status_code != 200:
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_DELAY * (attempt + 1)
-                    log.warning("OCR %d error (attempt %d/%d), retry in %ds: %s",
+                    wait = _retry_wait(attempt)
+                    log.warning("OCR %d error (attempt %d/%d), retry in %.1fs: %s",
                                 resp.status_code, attempt + 1, _MAX_RETRIES, wait, resp.message)
                     time.sleep(wait)
                     continue
@@ -880,8 +887,8 @@ class DashScopeOCRProvider(LLMProvider):
             except openai.RateLimitError as e:
                 sem.release()
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_DELAY * (attempt + 1)
-                    log.warning("LLM 429 rate limited (attempt %d/%d), retry in %ds",
+                    wait = _retry_wait(attempt)
+                    log.warning("LLM 429 rate limited (attempt %d/%d), retry in %.1fs",
                                 attempt + 1, _MAX_RETRIES, wait)
                     time.sleep(wait)
                     continue
@@ -889,8 +896,8 @@ class DashScopeOCRProvider(LLMProvider):
             except Exception as e:
                 sem.release()
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_DELAY * (attempt + 1)
-                    log.warning("LLM connection error (attempt %d/%d), retry in %ds: %s",
+                    wait = _retry_wait(attempt)
+                    log.warning("LLM connection error (attempt %d/%d), retry in %.1fs: %s",
                                 attempt + 1, _MAX_RETRIES, wait, e)
                     time.sleep(wait)
                     continue
