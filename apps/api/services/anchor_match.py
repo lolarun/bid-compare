@@ -60,7 +60,7 @@ class _BQLMatProxy:
 from apps.api.core.domain_config import MATCH_SEQUENTIAL_SIM_THRESHOLD as SIM_THRESHOLD
 # 低于此标记为低置信、建议复核(写入 reason,前端可高亮)
 from apps.api.core.domain_config import MATCH_LOW_CONFIDENCE_THRESHOLD as LOW_CONF
-EMBED_MODEL = "text-embedding-v3"
+EMBED_MODEL = "text-embedding-v4"
 _EMBED_BATCH = 10
 
 

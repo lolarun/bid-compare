@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -31,6 +32,28 @@ MAX_EDGE_PX = get_settings().OCR_MAX_EDGE_PX      # downscale cap to stay within
 _PDF_RENDER_SEM = threading.Semaphore(
     max(1, int(os.getenv("PDF_RENDER_CONCURRENCY", "3")))
 )
+# Pages rendered in parallel within a single document.
+# pypdfium2 releases the GIL during C-level rendering, so threads achieve true parallelism
+# as long as each thread opens its own PdfDocument (no shared object).
+_RENDER_WORKERS = max(1, int(os.getenv("PDF_RENDER_WORKERS", "4")))
+
+
+def _render_one_thumb(file_path: str, index0: int, thumb_edge_px: int) -> bytes:
+    """Worker: open own PdfDocument, render one thumbnail, close, return PNG bytes."""
+    pdf = pdfium.PdfDocument(file_path)
+    try:
+        return DocumentLoader._render_thumb_png(pdf, index0, thumb_edge_px)
+    finally:
+        pdf.close()
+
+
+def _render_one_page(file_path: str, index0: int) -> bytes:
+    """Worker: open own PdfDocument, render one full-res page, close, return PNG bytes."""
+    pdf = pdfium.PdfDocument(file_path)
+    try:
+        return DocumentLoader._render_page_png(pdf, index0)
+    finally:
+        pdf.close()
 
 
 class DocumentLoader:
@@ -76,17 +99,18 @@ class DocumentLoader:
         if suffix == ".pdf":
             cap = max_pages or MAX_PAGES_UNLIMITED
             with _PDF_RENDER_SEM:
+                # 先取页数（不渲染），再按需并行渲染
                 pdf = pdfium.PdfDocument(str(path))
-                try:
-                    pages = min(len(pdf), cap)
-                    out: list[bytes] = []
-                    for i in range(pages):
-                        # 关键：逐页显式释放 PDFium page/bitmap + PIL，否则扫描件每页
-                        # 解码出的原生位图会累积（实测 53 页 ~1.5GB），等同把 OOM 搬到此阶段。
-                        out.append(DocumentLoader._render_thumb_png(pdf, i, thumb_edge_px))
-                    return out
-                finally:
-                    pdf.close()
+                pages = min(len(pdf), cap)
+                pdf.close()
+
+                workers = min(_RENDER_WORKERS, pages)
+                with ThreadPoolExecutor(max_workers=workers) as exc:
+                    results = list(exc.map(
+                        lambda i: _render_one_thumb(str(path), i, thumb_edge_px),
+                        range(pages),
+                    ))
+                return results
         if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             with Image.open(io.BytesIO(path.read_bytes())) as im:
                 return [DocumentLoader._downscale_png(im.convert("RGB"), thumb_edge_px)]
@@ -121,10 +145,13 @@ class DocumentLoader:
             pdf = pdfium.PdfDocument(str(path))
             try:
                 pages = min(len(pdf), max_pages)
-                images: list[bytes] = []
-                for i in range(pages):
-                    images.append(DocumentLoader._render_page_png(pdf, i))
-                return images
+                workers = min(_RENDER_WORKERS, pages)
+                with ThreadPoolExecutor(max_workers=workers) as exc:
+                    results = list(exc.map(
+                        lambda i: _render_one_page(str(path), i),
+                        range(pages),
+                    ))
+                return results
             finally:
                 pdf.close()
 
@@ -184,17 +211,20 @@ class DocumentLoader:
         if not wanted:
             return {}
         if suffix == ".pdf":
-            out: dict[int, bytes] = {}
             with _PDF_RENDER_SEM:
                 pdf = pdfium.PdfDocument(str(path))
-                try:
-                    n = len(pdf)
-                    for p in wanted:
-                        if p <= n:
-                            out[p] = DocumentLoader._render_page_png(pdf, p - 1)
-                    return out
-                finally:
-                    pdf.close()
+                n = len(pdf)
+                pdf.close()
+                valid = [p for p in wanted if p <= n]
+                if not valid:
+                    return {}
+                workers = min(_RENDER_WORKERS, len(valid))
+                with ThreadPoolExecutor(max_workers=workers) as exc:
+                    results = list(exc.map(
+                        lambda p: _render_one_page(str(path), p - 1),
+                        valid,
+                    ))
+                return dict(zip(valid, results))
         if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             return {1: DocumentLoader._normalize_image(path.read_bytes())} if 1 in wanted else {}
         raise ValueError(f"Unsupported file for render_pages: {suffix}")
