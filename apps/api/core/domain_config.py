@@ -65,6 +65,13 @@ INTEGRITY_DUPLICATE_BLOCKED_AMOUNT_RATIO: float = 0.10
 # 跨税基的 MATCH_ARITHMETIC_VAT_TOLERANCE —— 后者用于区分"税基不一致"而非"算错"。
 INTEGRITY_ARITHMETIC_TOLERANCE: float = 0.005
 
+# 明细合计 vs 文件声明总价的**入库阻断**阈值。
+# 声明总价是这份文件里唯一不依赖抽取质量的事实，明细之和理应与它吻合到舍入级别
+# （136 行两位小数的累积舍入在 2000 万上不到百万分之一）。超出即说明漏行或读错值。
+# 定在 0.5%：实测方向判错一页造成的偏差是 0.63%，必须能拦住；而旧的 5% 阈值会放行。
+# 声明总价含清单外项目（税费/优惠）时会误拦——那种情况走人工 ack，不放宽阈值。
+CHECKSUM_BLOCK_DELTA_RATIO: float = 0.005
+
 # 报价口径倍率识别容差：合价/(数量×单价) 落在某个简单倍数附近时按"口径选择"记录，
 # 不按算术错误处理。倍率是报价方式的选择，只能观测和标记，禁止据此修正原值。
 INTEGRITY_MULTIPLIER_TOLERANCE: float = 0.01

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select, update
 from PIL import Image
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,7 @@ SUPPLIER_A_QUOTE = {
             "unit": "个",
             "qty": 10,
             "unit_price": 720,
+            "total_price": 7200,        # 正常报价单原文就有合价列
         },
         {
             "material": "DN50 闸阀",
@@ -52,6 +54,7 @@ SUPPLIER_A_QUOTE = {
             "unit": "个",
             "qty": 20,
             "unit_price": 380,
+            "total_price": 7600,
         },
     ],
 }
@@ -67,6 +70,7 @@ SUPPLIER_B_QUOTE = {
             "unit": "个",
             "qty": 10,
             "unit_price": 690,
+            "total_price": 6900,
         },
         {
             "material": "DN50 闸阀",
@@ -75,6 +79,7 @@ SUPPLIER_B_QUOTE = {
             "unit": "个",
             "qty": 20,
             "unit_price": 400,
+            "total_price": 8000,
         },
     ],
 }
@@ -844,9 +849,9 @@ class TestQualityGate:
 
         db = SessionLocal()
         try:
-            db.query(BidQuoteLine).filter(
+            db.execute(update(BidQuoteLine).where(
                 BidQuoteLine.submission_id == sub_id
-            ).update({"unit_price": None})
+            ).values(unit_price=None))
             db.commit()
         finally:
             db.close()
@@ -906,9 +911,9 @@ class TestQualityGate:
         # 2 eligible 行中清零第一行 → coverage = 1/2 = 50% < 80%
         db = SessionLocal()
         try:
-            first = db.query(BidQuoteLine).filter(
+            first = db.scalar(select(BidQuoteLine).where(
                 BidQuoteLine.submission_id == sub_id
-            ).first()
+            ))
             first.unit_price = None
             db.commit()
         finally:
@@ -1008,7 +1013,7 @@ class TestExtendedQualityGate:
         # 将所有行的 total_price 乘以 3（偏差 = 200%，远超 VAT tolerance）
         db = SessionLocal()
         try:
-            rows = db.query(BidQuoteLine).filter(BidQuoteLine.submission_id == sub_id).all()
+            rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
             for row in rows:
                 if row.total_price:
                     row.total_price = row.total_price * 3.0
@@ -1039,7 +1044,7 @@ class TestExtendedQualityGate:
         # 将所有行的 total_price 改为 qty*unit_price*1.13（模拟不含税单价+含税合价列混用）
         db = SessionLocal()
         try:
-            rows = db.query(BidQuoteLine).filter(BidQuoteLine.submission_id == sub_id).all()
+            rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
             for row in rows:
                 if row.qty and row.unit_price:
                     row.total_price = round(row.qty * row.unit_price * 1.13, 2)
@@ -1070,7 +1075,7 @@ class TestExtendedQualityGate:
         # 将第一行 total_price 设为其他所有行总和的 10 倍（集中度 ≈ 91%）
         db = SessionLocal()
         try:
-            rows = db.query(BidQuoteLine).filter(BidQuoteLine.submission_id == sub_id).all()
+            rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
             other_sum = sum(r.total_price or 0 for r in rows[1:])
             rows[0].total_price = other_sum * 10  # ≈ 91% concentration
             db.commit()
@@ -1100,12 +1105,12 @@ class TestExtendedQualityGate:
         try:
             from apps.api.models.bid_submission import BidSubmission
             sub = db.get(BidSubmission, sub_id)
-            rows = db.query(BidQuoteLine).filter(BidQuoteLine.submission_id == sub_id).all()
+            rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
             actual_sum = sum(r.total_price or 0 for r in rows)
 
             # 将 ExtractionJob result._doc_meta.bid_total 设为 actual_sum 的 50%（巨大偏差）
             if sub.job_id:
-                job = db.query(ExtractionJob).filter(ExtractionJob.id == sub.job_id).first()
+                job = db.get(ExtractionJob, sub.job_id)
                 if job and isinstance(job.result, dict):
                     result = dict(job.result)
                     result.setdefault("_doc_meta", {})
@@ -1139,14 +1144,14 @@ class TestExtendedQualityGate:
         db = SessionLocal()
         try:
             sub = db.get(BidSubmission, sub_id)
-            rows = db.query(BidQuoteLine).filter(BidQuoteLine.submission_id == sub_id).all()
+            rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
 
             # 声明总价 = 100 yuan；将第一行 total_price 设为 50000 yuan（远超声明总价）
             declared = 100.0
             rows[0].total_price = 50000.0
 
             if sub.job_id:
-                job = db.query(ExtractionJob).filter(ExtractionJob.id == sub.job_id).first()
+                job = db.get(ExtractionJob, sub.job_id)
                 if job and isinstance(job.result, dict):
                     result = dict(job.result)
                     result.setdefault("_doc_meta", {})
@@ -1280,7 +1285,7 @@ class TestBatchConfirmRevive:
         db = SessionLocal()
         try:
             assert db.get(BidSubmission, sub_id).status == "pending", "复活后状态须回到 pending"
-            n = db.query(BidQuoteLine).filter_by(submission_id=sub_id).count()
+            n = db.scalar(select(func.count()).select_from(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id))
             assert n == 2, "旧行清空后按本次结果重建"
         finally:
             db.close()
@@ -1407,7 +1412,7 @@ def _bql_dicts(submission_id: int) -> list[dict]:
     from apps.api.models.bid_submission import BidQuoteLine
     db = SessionLocal()
     try:
-        rows = db.query(BidQuoteLine).filter_by(submission_id=submission_id).all()
+        rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == submission_id)).all()
         return [{
             "raw_name": r.raw_name, "qty": r.qty,
             "unit_price": r.unit_price, "unit_price_excl_tax": r.unit_price_excl_tax,
@@ -1512,9 +1517,14 @@ class TestPriceBasisBridgeContract:
         assert recovered[0]["total_price"] == 4408.11  # 合价不变
 
     def test_unknown_basis_blocks_comparison(self, compare_client):
-        """无任何价格 → unknown，effective 为 None，价格覆盖率门拦截 match（不自动入比价）。"""
+        """**明确不报价**的行 → 口径 unknown、effective 为 None，覆盖率门拦截 match。
+
+        夹具用「/」而不是"什么都不填"：两者语义不同——「/」是供应商明确不报此项
+        （合法事实，可入库、不参与金额比较），空白是"该有金额却没读到"（缺陷，
+        由派生金额门在入库前阻断）。这里要测的是前者之后的下游行为。
+        """
         draft = _draft_from_rows([
-            {"name": "DN50 闸阀", "spec": "Z45X", "qty": 2.0},
+            {"name": "DN50 闸阀", "spec": "Z45X", "qty": 2.0, "total_price": "/"},
         ])
         r, supplier_id, sub_id = _chain_draft_to_bql(compare_client, draft, "口径-未知")
         assert r.status_code == 200, r.text

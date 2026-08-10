@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import PROFESSION_MAP
+from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
 from apps.api.models import (
     BrandTier,
     ExtractionJob,
@@ -30,6 +31,7 @@ from apps.api.services.standardize import standardize_name
 from apps.api.intelligence.price_basis import derive_price_basis
 from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
 from apps.api.services.draft_integrity import (
+    AMOUNT_NOT_QUOTED,
     ARITHMETIC_FLAG,
     BLOCKED,
     COLUMN_SHIFT_FLAG,
@@ -37,6 +39,7 @@ from apps.api.services.draft_integrity import (
     REVIEW,
     TRUNCATION_FLAG,
     check_arithmetic,
+    classify_amount_cell,
     corroborate_truncation,
     detect_truncated_numbers,
     find_duplicate_rows,
@@ -51,7 +54,41 @@ _GRAND_TOTAL_NAME_RE = re.compile(
 
 
 def _num_or_none(v: Any) -> float | None:
-    return float(v) if v is not None else None
+    """转成数字，转不了就 None。
+
+    **不能抛异常**：原文写「/」表示不报价是合法的，抛出去会被行级 try 吞掉、
+    整行以"处理失败"被跳过——用户看到的是"这行没识别出来"，而不是"这行没报价"。
+    判断到底是"不报价"还是"读不到"交给 `classify_amount_cell`。
+    """
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_checksum(job, line_total_sum: float, line_count: int) -> dict:
+    """明细合价之和 vs 文件声明总价。
+
+    三态，**`unknown` 不等于通过**：文件没给声明总价时我们就是没有这个证据，
+    调用方不得把它当成"校验过了"。
+    """
+    doc_meta = (job.result or {}).get("_doc_meta") or {}
+    declared = doc_meta.get("bid_total")
+    try:
+        declared = float(declared) if declared is not None else None
+    except (TypeError, ValueError):
+        declared = None
+    if not declared or declared <= 0 or line_count <= 0:
+        return {"declared": declared, "line_sum": round(line_total_sum, 2),
+                "delta_pct": None, "status": "unknown",
+                "reason": "文件未给出声明总价，无法闭环校验"}
+    delta = abs(line_total_sum - declared) / declared
+    return {"declared": declared, "line_sum": round(line_total_sum, 2),
+            "delta_pct": round(delta * 100, 3),
+            "threshold_pct": round(CHECKSUM_BLOCK_DELTA_RATIO * 100, 3),
+            "status": "pass" if delta <= CHECKSUM_BLOCK_DELTA_RATIO else "fail"}
 
 
 def _integrity_row(items: list[dict], i: int, flags: list[str]) -> dict:
@@ -293,6 +330,33 @@ def confirm_batch(db: Session, body) -> dict:
                 "batch_confirm: idempotent hit, submission_id=%d batch=%s lines=%d",
                 prior_submission.id, batch_id, prior_line_count,
             )
+            # 幂等命中**不得成为门的旁路**。已入库的数据不能回滚删除（那会毁掉合法数据），
+            # 但必须按当前判据重新评估、并把结论如实带回响应——否则一份在门存在之前
+            # 写进去的、或经由其他路径写进去的数据，会永远以裸 "ok" 的形式被下游当成
+            # 已校验通过。
+            prior_sum = db.scalar(
+                select(func.coalesce(func.sum(BidQuoteLine.total_price), 0.0)).where(
+                    BidQuoteLine.submission_id == prior_submission.id
+                )
+            ) or 0.0
+            checksum = _build_checksum(job, float(prior_sum), prior_line_count)
+            if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
+                raise HTTPException(
+                    422,
+                    detail={
+                        "error": "declared_total_mismatch",
+                        "message": (
+                            f"该 job 已入库 {prior_line_count} 行，但明细合价之和 "
+                            f"{checksum['line_sum']:,.2f} 与声明总价 "
+                            f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
+                            f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%}。"
+                            f"**数据已在库中**，需人工核对后确认或重新识别。"
+                        ),
+                        "checksum": checksum,
+                        "already_stored": True,
+                        "submission_id": prior_submission.id,
+                    },
+                )
             if job.lifecycle != "confirmed":
                 job.lifecycle = "confirmed"
                 db.commit()
@@ -307,6 +371,7 @@ def confirm_batch(db: Session, body) -> dict:
                 "project_id": project.id if project else None,
                 "batch_id": batch_id,
                 "idempotent": True,
+                "checksum": checksum,
             }
         if _stale:
             deleted = db.execute(
@@ -376,6 +441,7 @@ def confirm_batch(db: Session, body) -> dict:
     unknown_brands: set[str] = set()
     line_total_sum: float = 0.0
     missing_total_rows: list[dict] = []   # 原文无合价、未经人工确认的行
+    not_quoted_rows: list[dict] = []      # 原文明确写"不报价"的行——合法，不阻断
 
     for idx, item in enumerate(items):
         try:
@@ -423,13 +489,13 @@ def confirm_batch(db: Session, body) -> dict:
                 else:
                     unknown_brands.add(brand)
 
-            qty = float(q) if (q := item.get("qty")) is not None else None
+            qty = _num_or_none(item.get("qty"))
 
             # 价格口径桥接（§4/§9）：现场 re-derive，不信任客户端回传的 price_basis
             basis_info = derive_price_basis(item)
             price_basis = basis_info["price_basis"]
-            confirmed_unit = float(cu) if (cu := item.get("unit_price")) is not None else None
-            confirmed_total = float(ct) if (ct := item.get("total_price")) is not None else None
+            confirmed_unit = _num_or_none(item.get("unit_price"))
+            confirmed_total = _num_or_none(item.get("total_price"))
             price = confirmed_unit if confirmed_unit is not None else basis_info["effective_unit_price"]
             total = confirmed_total if confirmed_total is not None else basis_info["effective_total_price"]
             # 权威合价只能来自原文或人工补写，**系统不得自行派生**（doc/19 §L2）。
@@ -446,11 +512,24 @@ def confirm_batch(db: Session, body) -> dict:
             if derived_candidate is None and raw_total_any is None and price and qty:
                 derived_candidate = round(price * qty, 4)
 
+            # 原文明确写了"不报价"（整格是 / — 无 N/A 之类）是**合法事实**，不是缺陷。
+            # 这类行合价保持 None、不参与金额比较、**不阻断**——把它当缺失会逼着用户
+            # 编一个金额出来，正好制造这套系统最该防的东西。
+            not_quoted = any(
+                classify_amount_cell(item.get(k)) == AMOUNT_NOT_QUOTED
+                for k in ("total_price", "total_price_incl_tax", "total_price_excl_tax")
+            ) or bool(item.get("not_quoted"))
+
             if raw_total_any is not None:
                 # 上游若已派生过，这里绝不能再当成 ocr —— 用 item 自带的标记判定
                 total_source = "manual" if item.get("total_is_manual") else "ocr"
                 total = float(confirmed_total if confirmed_total is not None
                               else basis_info["effective_total_price"] or raw_total_any)
+            elif not_quoted:
+                total_source = "not_quoted"
+                total = None
+                not_quoted_rows.append({"index": idx, "material": raw_name,
+                                        "spec": str(item.get("spec") or "")})
             else:
                 total_source = "missing"
                 total = None
@@ -574,6 +653,37 @@ def confirm_batch(db: Session, body) -> dict:
             f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
         )
 
+    # ── 声明总价闭环门（提交前，阻断）──────────────────────────────────────
+    # 2026-08-09 修正：这段原本在 db.commit() **之后**执行，阈值 5%，只写 job.result
+    # 不阻断。实测方向判错一页造成 0.63% 的偏差（129,532 元）会被判 pass 并正常入库——
+    # 等于没有门。现在移到提交前、收紧到 CHECKSUM_BLOCK_DELTA_RATIO，且失败即回滚。
+    #
+    # 声明总价是这份文件里**唯一不依赖抽取质量的事实**，必须当成不可动摇的证据；
+    # 对不上时要么是漏行、要么是读错值，两种都不该静默入库。
+    checksum = _build_checksum(job, line_total_sum, line_count)
+    if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
+        db.rollback()
+        raise HTTPException(
+            422,
+            detail={
+                "error": "declared_total_mismatch",
+                "message": (
+                    f"明细合价之和 {checksum['line_sum']:,.2f} 与文件声明总价 "
+                    f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
+                    f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%} 的允许范围。"
+                    f"通常意味着漏行或数值读错，请核对后再提交。"
+                ),
+                "checksum": checksum,
+            },
+        )
+
+    job.result = {**(job.result or {}), "_checksum": checksum}
+    ctx = dict(job.context or {})
+    if submission.supplier_id and ctx.get("supplier_id") != submission.supplier_id:
+        ctx["supplier_id"] = submission.supplier_id
+        job.context = ctx
+    db.add(job)
+
     write_domain_event(
         db, user="system", event_type=EVENT_BQL_CONFIRM,
         identity={
@@ -585,40 +695,11 @@ def confirm_batch(db: Session, body) -> dict:
             "supplier_name": display_name,
             "category": default_category,
             "batch_id": batch_id,
+            "checksum_status": checksum["status"],
         },
         meta={"skipped_count": skipped_count},
     )
     db.commit()
-
-    # checksum 回写到 job.result
-    try:
-        doc_meta = (job.result or {}).get("_doc_meta") or {}
-        declared = doc_meta.get("bid_total")
-        if declared and float(declared) > 0 and line_count > 0:
-            delta_pct = abs(line_total_sum - float(declared)) / float(declared) * 100
-            cs_status = "pass" if delta_pct <= 5 else "fail"
-            # 明细合计里掺了派生值时，"对得上"没有意义——可能只是刚好被凑出来的。
-            # 走到这里说明没有未确认的派生行（否则上面已 422），checksum 可如实判定
-        else:
-            delta_pct = None
-            cs_status = "unknown"
-        job.result = {
-            **(job.result or {}),
-            "_checksum": {
-                "declared": declared,
-                "line_sum": round(line_total_sum, 2),
-                "delta_pct": round(delta_pct, 1) if delta_pct is not None else None,
-                "status": cs_status,
-            },
-        }
-        ctx = dict(job.context or {})
-        if submission.supplier_id and ctx.get("supplier_id") != submission.supplier_id:
-            ctx["supplier_id"] = submission.supplier_id
-            job.context = ctx
-        db.add(job)
-        db.commit()
-    except Exception:
-        log.exception("batch_confirm: checksum write failed for job %s", body.job_id)
 
     return {
         "status": "ok",
@@ -626,6 +707,10 @@ def confirm_batch(db: Session, body) -> dict:
         "line_count": line_count,
         "skipped_count": skipped_count,
         "missing_total_rows": 0,
+        # 原文明确不报价的行：已入库、合价为 None、不参与金额比较。
+        # 必须报出来，否则下游会把"没有金额"误读成"漏识别"。
+        "not_quoted_rows": len(not_quoted_rows),
+        "not_quoted_detail": not_quoted_rows[:50],
         # 通过但被怀疑过的行：重复行已入库，但带着 duplicate_row 标记，
         # 前端应提示人工复核（REVIEW 不等于拒收——合法的重复真实存在）
         "integrity": integrity,

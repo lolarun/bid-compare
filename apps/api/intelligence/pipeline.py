@@ -47,7 +47,7 @@ extraction_log = logging.getLogger("mempas.extraction")
 
 # Used by category inference; matches apps/api/core/config.py ALL_CATEGORIES
 KNOWN_CATEGORIES = [
-    "桥架", "母线槽", "配电箱", "阀门", "不锈钢管",
+    "桥架", "母线槽", "配电箱", "电缆", "阀门", "不锈钢管",
     "水箱", "潜水泵", "风口风阀", "风机盘管", "空调泵",
 ]
 
@@ -180,15 +180,21 @@ class ExtractionPipeline:
                 "quality_blocking_reasons": draft.quality.blocking_reasons,
                 "page_count": draft.page_count,
                 "target_pages": draft.target_pages,
+                # 行数守恒台账（doc/19 §L3）：丢行必须随结果一起暴露，
+                # 否则调用方拿到的 200 无法区分"这份文档只有这些行"和"我们丢了行"。
+                "row_ledger": draft.ledger.to_dict() if draft.ledger else None,
             },
             tokens_used=0,
             duration_ms=int((_time.time() - t_start) * 1000),
         )
+        _ledger = draft.ledger
         log.info(
-            "draft_to_quote_response: quality=%s items=%d supplier=%r",
+            "draft_to_quote_response: quality=%s items=%d supplier=%r ledger=%s",
             draft.quality.status,
             len(processed.get("items") or []),
             processed.get("supplier_name"),
+            (f"{_ledger.recognized_rows}/{_ledger.expected_rows} rows, "
+             f"{len(_ledger.empty_pages)} empty pages") if _ledger else "n/a",
         )
         return resp
 
@@ -440,8 +446,23 @@ class ExtractionPipeline:
             price = _coerce_num(it.get("unit_price"))
             qty = _coerce_num(it.get("qty"))
             total = _coerce_num(it.get("total_price"))
+            # 「原文明确不报价」的标记必须在这里就固化下来。_coerce_num 把「/」「无」
+            # 「N/A」和空白一律变成 None，**两种语义就此不可分辨**——下游只能把合法的
+            # 不报价行当成缺陷，422 逼用户编一个金额。故在还看得到原始文本的这一层
+            # 判定一次，用布尔标记随行带走。
+            from apps.api.services.draft_integrity import (
+                AMOUNT_NOT_QUOTED, classify_amount_cell,
+            )
+            not_quoted = any(
+                classify_amount_cell(it.get(k)) == AMOUNT_NOT_QUOTED
+                for k in ("total_price", "total_price_incl_tax", "total_price_excl_tax")
+            )
+            # 不在识别阶段派生合价。上游一旦把 qty×price 填进 total_price，
+            # 下游 confirm 就无法区分"原文读到的"和"系统算的"，会误标成 ocr。
+            # 只给候选值供前端提示，权威字段保持 None（doc/19 §L2）。
+            derived_candidate = None
             if total is None and price is not None and qty is not None:
-                total = round(price * qty, 4)
+                derived_candidate = round(price * qty, 4)
             spec_str = (it.get("spec") or "").strip()
             material_type = (it.get("material_type") or "").strip()
             # Layer 1: OCR correction fields from LLM (raw text stays in material)
@@ -472,6 +493,7 @@ class ExtractionPipeline:
                 "total_price_excl_tax": total_excl,
                 "tax_rate": _coerce_num(it.get("tax_rate")),
                 "tax_amount": _coerce_num(it.get("tax_amount")),
+                "derived_total_candidate": derived_candidate,
             })
 
             cleaned.append({
@@ -488,6 +510,9 @@ class ExtractionPipeline:
                 "total_price_excl_tax": total_excl,
                 "tax_rate": _coerce_num(it.get("tax_rate")),
                 "tax_amount": _coerce_num(it.get("tax_amount")),
+                "derived_total_candidate": derived_candidate,
+                # 原文明确不报价（「/」「无」「N/A」…）。与"读不到"分开，见上方注释。
+                "not_quoted": not_quoted,
                 # 比价口径桥接结果
                 "price_basis": basis_info["price_basis"],
                 "effective_unit_price": basis_info["effective_unit_price"],

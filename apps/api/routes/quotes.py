@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,9 @@ class BatchConfirmRequest(BaseModel):
     """
 
     job_id: str
+    # 声明总价闭环门的显式放行：声明总价含清单外项目（税费/优惠）时才该用。
+    # 与 total_is_manual / integrity_ack 一样，系统绝不替用户做这个判断。
+    checksum_ack: bool = False
     supplier_id: int | None = None            # 可选：软引用已知供应商
     supplier_name: str = ""                   # 必填：比价显示名（unknown supplier 时为 OCR 原始名）
     project_id: int | None = None
@@ -61,35 +64,35 @@ def list_quotes(
     alert_level: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Quote).options(
+    stmt = select(Quote).options(
         selectinload(Quote.material),
         selectinload(Quote.supplier),
         selectinload(Quote.project),
     )
     if material_id:
-        q = q.filter(Quote.material_id == material_id)
+        stmt = stmt.where(Quote.material_id == material_id)
     if supplier_id:
-        q = q.filter(Quote.supplier_id == supplier_id)
+        stmt = stmt.where(Quote.supplier_id == supplier_id)
     if project_id:
-        q = q.filter(Quote.project_id == project_id)
+        stmt = stmt.where(Quote.project_id == project_id)
     if category:
-        q = q.join(Material, isouter=True).filter(Material.category == category)
+        stmt = stmt.join(Material, isouter=True).where(Material.category == category)
     if profession:
         if not category:
-            q = q.join(Material, isouter=True)
-        q = q.filter(Material.profession == profession)
+            stmt = stmt.join(Material, isouter=True)
+        stmt = stmt.where(Material.profession == profession)
     if keyword:
         if not category and not profession:
-            q = q.join(Material, isouter=True)
-        q = q.filter(
+            stmt = stmt.join(Material, isouter=True)
+        stmt = stmt.where(
             Material.standard_name.contains(keyword)
             | Material.spec.contains(keyword)
         )
     if alert_level:
-        q = q.filter(Quote.alert_level == alert_level)
+        stmt = stmt.where(Quote.alert_level == alert_level)
 
-    total = q.count()
-    items = q.order_by(Quote.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(Quote.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
 
     result_items = []
     for i in items:
@@ -121,23 +124,22 @@ def list_quotes(
 def list_batches(
     db: Session = Depends(get_db),
 ):
-    rows = (
-        db.query(
+    rows = db.execute(
+        select(
             Quote.batch_id,
             func.count(Quote.id).label("count"),
             func.min(Quote.created_at).label("created_at"),
             func.max(Quote.supplier_id).label("supplier_id"),
             func.max(Quote.project_id).label("project_id"),
         )
-        .filter(Quote.batch_id.isnot(None), Quote.batch_id != "")
+        .where(Quote.batch_id.isnot(None), Quote.batch_id != "")
         .group_by(Quote.batch_id)
         .order_by(func.min(Quote.created_at).desc())
-        .all()
-    )
+    ).all()
     items = []
     for r in rows:
-        supplier = db.query(Supplier).get(r.supplier_id) if r.supplier_id else None
-        project = db.query(Project).get(r.project_id) if r.project_id else None
+        supplier = db.get(Supplier, r.supplier_id) if r.supplier_id else None
+        project = db.get(Project, r.project_id) if r.project_id else None
         items.append({
             "batch_id": r.batch_id,
             "count": r.count,
@@ -152,7 +154,7 @@ def list_batches(
 
 @router.delete("/batches/{batch_id}")
 def delete_batch(batch_id: str, db: Session = Depends(get_db)):
-    count = db.query(Quote).filter(Quote.batch_id == batch_id).delete()
+    count = db.execute(delete(Quote).where(Quote.batch_id == batch_id)).rowcount
     db.commit()
     if count == 0:
         raise HTTPException(404, f"Batch {batch_id} not found")
@@ -169,7 +171,7 @@ _ACTIVE_SUBMISSION_STATUSES = ["superseded", "rejected"]
 @router.delete("/submissions/{submission_id}")
 def supersede_submission(submission_id: int, db: Session = Depends(get_db)):
     """逐个移除：把单条比价暂存 submission 标记 superseded（软删除，可复活）。"""
-    sub = db.query(BidSubmission).get(submission_id)
+    sub = db.get(BidSubmission, submission_id)
     if sub is None:
         raise HTTPException(404, f"Submission {submission_id} not found")
     if sub.status == "superseded":
@@ -190,23 +192,19 @@ def supersede_project_submissions(
     project_id: int = Query(...), db: Session = Depends(get_db)
 ):
     """一键移除：把某项目下全部 active submission 标记 superseded（软删除，可复活）。"""
-    subs = (
-        db.query(BidSubmission)
-        .filter(
+    subs = db.scalars(
+        select(BidSubmission).where(
             BidSubmission.project_id == project_id,
             BidSubmission.status.notin_(_ACTIVE_SUBMISSION_STATUSES),
         )
-        .all()
-    )
+    ).all()
     ids = [s.id for s in subs]
     job_ids = [s.job_id for s in subs if s.job_id]
     for s in subs:
         s.status = "superseded"
     # 同步对应 job 生命周期 → removed（在途 job 无 submission，不受影响）
     if job_ids:
-        db.query(ExtractionJob).filter(ExtractionJob.id.in_(job_ids)).update(
-            {ExtractionJob.lifecycle: "removed"}, synchronize_session=False
-        )
+        db.execute(update(ExtractionJob).where(ExtractionJob.id.in_(job_ids)).values(lifecycle="removed"))
     db.commit()
     log.info(
         "supersede_project_submissions: project_id=%d superseded %d submissions %s",
@@ -243,36 +241,34 @@ def quote_stats(
     db: Session = Depends(get_db),
 ):
     """Get aggregate quote statistics."""
-    q = db.query(Quote).filter(Quote.unit_price > 0)
+    stmt = select(Quote).where(Quote.unit_price > 0)
     if category:
-        q = q.join(Material).filter(Material.category == category)
+        stmt = stmt.join(Material).where(Material.category == category)
     if supplier_id:
-        q = q.filter(Quote.supplier_id == supplier_id)
+        stmt = stmt.where(Quote.supplier_id == supplier_id)
 
-    total = q.count()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if total == 0:
         return {"total": 0, "avg_price": None, "min_price": None, "max_price": None,
                 "alert_counts": {"normal": 0, "yellow": 0, "red": 0}}
 
-    base_q = db.query(
+    base_stmt = select(
         func.avg(Quote.unit_price),
         func.min(Quote.unit_price),
         func.max(Quote.unit_price),
-    ).filter(Quote.unit_price > 0)
+    ).where(Quote.unit_price > 0)
     if category:
-        base_q = base_q.join(Material).filter(Material.category == category)
+        base_stmt = base_stmt.join(Material).where(Material.category == category)
     if supplier_id:
-        base_q = base_q.filter(Quote.supplier_id == supplier_id)
-    avg_p, min_p, max_p = base_q.one()
+        base_stmt = base_stmt.where(Quote.supplier_id == supplier_id)
+    avg_p, min_p, max_p = db.execute(base_stmt).one()
 
-    alert_q = db.query(Quote.alert_level, func.count(Quote.id)).filter(
-        Quote.unit_price > 0
-    )
+    alert_stmt = select(Quote.alert_level, func.count(Quote.id)).where(Quote.unit_price > 0)
     if category:
-        alert_q = alert_q.join(Material).filter(Material.category == category)
+        alert_stmt = alert_stmt.join(Material).where(Material.category == category)
     if supplier_id:
-        alert_q = alert_q.filter(Quote.supplier_id == supplier_id)
-    alert_rows = alert_q.group_by(Quote.alert_level).all()
+        alert_stmt = alert_stmt.where(Quote.supplier_id == supplier_id)
+    alert_rows = db.execute(alert_stmt.group_by(Quote.alert_level)).all()
     alerts = {"normal": 0, "yellow": 0, "red": 0}
     for level, cnt in alert_rows:
         if level in alerts:
@@ -424,9 +420,9 @@ def archive_prices(body: ArchivePricesRequest, db: Session = Depends(get_db)):
             "请先在供应商管理中创建该供应商并重新入库。",
         )
 
-    lines = (
-        db.query(BidQuoteLine).filter_by(submission_id=submission.id).all()
-    )
+    lines = db.scalars(
+        select(BidQuoteLine).where(BidQuoteLine.submission_id == submission.id)
+    ).all()
 
     # Null-material lines can never be archived — include in skipped_lines with reason
     null_material_lines = [ln for ln in lines if ln.material_id is None]

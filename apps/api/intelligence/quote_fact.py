@@ -134,14 +134,32 @@ class QuoteFact:
     # ── extension (optional, batch-confirm ignores) ────────────────────────
     source_ref: dict | None = None          # {"sheet": "Sheet1", "row": 3}
 
-    # ── post-init: derive total_price if missing ──────────────────────────────
+    # ── 合价来源三态（doc/19 §L2）──────────────────────────────────────────
+    # ocr      原文读到
+    # manual   原文没有、用户明确补写
+    # missing  原文没有、也没人工补写 → 权威值保持 None，只留候选
+    total_source: str = ""                  # 由 __post_init__ 判定，不由构造方传入
+    derived_total_candidate: float | None = None   # 数量×单价的候选值，**不是权威金额**
+
+    # ── post-init: 判定合价来源，不写权威值 ─────────────────────────────────
     def __post_init__(self) -> None:
-        if (
-            self.total_price is None
-            and self.unit_price is not None
-            and self.qty is not None
-        ):
-            self.total_price = round(self.unit_price * self.qty, 4)
+        """原文没有合价时**只留候选，不写权威值**。
+
+        2026-08-09 修正：这里原本直接 `total_price = unit_price * qty`。派生发生在
+        构造函数里，任何创建 QuoteFact 的路径都会中招，而且写进去之后**事后无法分辨
+        这个数是读来的还是算的**——下游的算术校验 |qty×price − total| 因此恒为 0，
+        把列错位、漏读单元格这类真实缺陷全部洗白。
+
+        现在权威 `total_price` 保持 None，派生值只进 `derived_total_candidate`，
+        `total_source` 标 `missing`。入库门据此阻断并要求人工补写（doc/19 §L2）。
+        与 pipeline.py / rebuild_submission_lines.py 的三个派生入口保持同一口径。
+        """
+        if self.total_price is not None:
+            self.total_source = "ocr"
+            return
+        self.total_source = "missing"
+        if self.unit_price is not None and self.qty is not None:
+            self.derived_total_candidate = round(self.unit_price * self.qty, 4)
 
     def to_item_dict(self) -> dict:
         """Return a dict compatible with batch-confirm's expected item shape.
@@ -166,6 +184,10 @@ class QuoteFact:
             "validation_warning": self.validation_warning,
             "normalized_material": self.normalized_material,
             "ocr_correction_reason": self.ocr_correction_reason,
+            # 来源标记必须随行走。少了它，下游拿到 total_price=None 只知道"没有"，
+            # 不知道"原文就没有"还是"读丢了"，也拿不到候选值给人工参考。
+            "total_source": self.total_source,
+            "derived_total_candidate": self.derived_total_candidate,
         }
         if self.source_ref is not None:
             d["source_ref"] = self.source_ref

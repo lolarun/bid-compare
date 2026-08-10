@@ -100,10 +100,13 @@ class TestBatchConfirmIdempotency:
         canned = {
             "supplier_name": "TestSup",
             "items": [
+                # 正常报价单原文就有合价列。补上它不是"迎合门"，而是恢复夹具本意：
+                # 这些用例测的是幂等/形状守卫，不是"无合价时的行为"（那个由
+                # test_bql_e2e 的派生金额门用例覆盖）。
                 {"material": "桥架 A", "spec": "300×200", "brand": "良工",
-                 "qty": 10, "unit_price": 100},
+                 "qty": 10, "unit_price": 100, "total_price": 1000},
                 {"material": "桥架 B", "spec": "200×100", "brand": "良工",
-                 "qty": 20, "unit_price": 50},
+                 "qty": 20, "unit_price": 50, "total_price": 1000},
             ],
         }
 
@@ -190,8 +193,8 @@ class TestBatchConfirmShapeGuard:
         canned = {
             "supplier_name": "X",
             "items": [
-                {"material": "Good", "qty": 1, "unit_price": 10},
-                {"material": "Good2", "qty": 2, "unit_price": 20},
+                {"material": "Good", "qty": 1, "unit_price": 10, "total_price": 10},
+                {"material": "Good2", "qty": 2, "unit_price": 20, "total_price": 40},
             ],
         }
 
@@ -223,7 +226,7 @@ class TestBatchConfirmShapeGuard:
                 "supplier_name": "S",
                 "category": "阀门",
                 "overrides": [
-                    {"material": "OK", "qty": 1, "unit_price": 10},
+                    {"material": "OK", "qty": 1, "unit_price": 10, "total_price": 10},
                     "string not a dict",
                     None,
                 ],
@@ -264,10 +267,10 @@ class TestBatchConfirmShapeGuard:
             job.result = {
                 "supplier_name": "X",
                 "items": [
-                    {"material": "Good", "qty": 1, "unit_price": 10},
+                    {"material": "Good", "qty": 1, "unit_price": 10, "total_price": 10},
                     "not a dict",
                     None,
-                    {"material": "Good2", "qty": 2, "unit_price": 20},
+                    {"material": "Good2", "qty": 2, "unit_price": 20, "total_price": 40},
                 ],
             }
             db.commit()
@@ -393,7 +396,7 @@ class TestOrphanProjectGuard:
         )
         canned = {
             "supplier_name": "X",
-            "items": [{"material": "桥架 A", "qty": 1, "unit_price": 100}],
+            "items": [{"material": "桥架 A", "qty": 1, "unit_price": 100, "total_price": 100}],
         }
         monkeypatch.setattr(
             "apps.api.main._build_pipeline",
@@ -704,45 +707,22 @@ class TestConcurrentInviteSave:
         finally:
             db.close()
 
-        # Step 2: patch BidInvitation queries to return None ONLY for the
-        # exact existence-check call in the route. We do this by replacing
-        # Query.filter_by's first() on a per-call basis via a sentinel.
-        # (No recommend function in the save route — nothing to patch there.)
-
-        # Patch the existence check inside the loop. We monkeypatch
-        # `Session.query` to inject a wrapper that returns None for
-        # BidInvitation existence checks.
+        # Step 2: force the first SQLAlchemy 2.x scalar existence lookup to
+        # return None.  The route then attempts an insert, receives the
+        # unique-key IntegrityError, and must re-fetch the peer's row.
         from sqlalchemy.orm import Session
-        original_query = Session.query
+        original_scalar = Session.scalar
         lie_count = {"n": 0}
 
-        class LyingFirst:
-            def __init__(self, real_query):
-                self._q = real_query
+        def patched_scalar(self, statement, *args, **kw):
+            columns = getattr(statement, "column_descriptions", [])
+            entities = {item.get("entity") for item in columns}
+            if BidInvitation in entities and lie_count["n"] == 0:
+                lie_count["n"] += 1
+                return None
+            return original_scalar(self, statement, *args, **kw)
 
-            def filter_by(self, **kw):
-                self._kw = kw
-                return self
-
-            def first(self):
-                # Lie ONCE for the BidInvitation existence check
-                if (
-                    "tender_id" in self._kw
-                    and "supplier_id" in self._kw
-                    and lie_count["n"] == 0
-                ):
-                    lie_count["n"] += 1
-                    return None
-                return self._q.filter_by(**self._kw).first()
-
-        def patched_query(self, *entities, **kw):
-            real = original_query(self, *entities, **kw)
-            # Only intercept queries that look up BidInvitation
-            if entities and entities[0] is BidInvitation:
-                return LyingFirst(real)
-            return real
-
-        monkeypatch.setattr(Session, "query", patched_query)
+        monkeypatch.setattr(Session, "scalar", patched_scalar)
 
         # Step 3: call the route — it will try to add a duplicate, hit
         # IntegrityError, recover, and return the pre-existing row.

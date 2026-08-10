@@ -141,6 +141,43 @@ def check_column_alignment(header: list[str], rows: list[list],
 
 # ─── ② 重复行 ────────────────────────────────────────────────────────────────
 
+# ─── 金额单元格的三种语义 ────────────────────────────────────────────────────
+#
+# 「原文明确写了不报价」和「原文该有金额却没读到」是**完全不同的两件事**，
+# 必须分开：前者是合法事实，后者是缺陷。
+# 混为一谈的后果实测过——某份投标文件某一项写「/」表示不报此项，系统当成缺失合价
+# 触发 422，**逼着用户编一个金额出来**，正好制造了这套系统最该防的东西。
+
+AMOUNT_VALUE = "value"            # 是个数
+AMOUNT_NOT_QUOTED = "not_quoted"  # 原文明确表示不报价
+AMOUNT_EMPTY = "empty"            # 空白/读不到 —— 这才是缺陷
+
+# 整格只有这些符号之一才算「明确不报价」。**必须整格匹配**：
+# 「-」出现在数字中间是负号或连字符，只有独占一格时才是"不报"的意思。
+_NOT_QUOTED_MARKERS = {
+    "/", "／", "\\", "－", "—", "–", "-", "—", "×", "x", "X",
+    "无", "不报", "不报价", "未报", "未报价", "不含", "不适用",
+    "n/a", "na", "n.a.", "nil", "none", "not quoted",
+}
+
+
+def classify_amount_cell(raw) -> str:
+    """判断一个金额单元格是数值、明确不报价、还是空白。
+
+    只看**原始文本**——值一旦被 float() 解析过，"/" 和空白就都变成 None 了。
+    """
+    if raw is None:
+        return AMOUNT_EMPTY
+    if isinstance(raw, (int, float)):
+        return AMOUNT_VALUE
+    s = str(raw).strip()
+    if not s:
+        return AMOUNT_EMPTY
+    if _num(s) is not None:
+        return AMOUNT_VALUE
+    return AMOUNT_NOT_QUOTED if s.lower() in _NOT_QUOTED_MARKERS else AMOUNT_EMPTY
+
+
 _SPEC_NOISE = re.compile(r"[\s　]")
 
 
@@ -151,11 +188,19 @@ def normalize_key_text(s) -> str:
     return t.replace("×", "*").replace("X", "*")
 
 
+_NUM_NOISE = re.compile(r"[,，¥￥$\s　]")
+
+
 def _num(x):
+    """宽松取数：去千分位、货币符号、空白后再解析。
+
+    金额单元格带 ¥ 或全角逗号是常见写法；不去掉就会被判成"读不到"，
+    而"读不到"是缺陷、要阻断——把一个正常单元格误判成缺陷比漏判更糟。
+    """
     if x is None or x == "":
         return None
     try:
-        return round(float(str(x).replace(",", "")), 4)
+        return round(float(_NUM_NOISE.sub("", str(x))), 4)
     except (TypeError, ValueError):
         return None
 
