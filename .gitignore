@@ -66,8 +66,13 @@ tmp_*.txt
 # OCR snapshots in outputs/ are transient; controlled fixtures are in tests/fixtures/
 outputs/ocr_snapshots/
 
-# Developer diagnostic / one-off scripts (not production code; keep local only)
-scripts/
+# scripts/ 自 2026-08-10 起入库（此前为 keep local only）。
+# 理由：诊断脚本承载了识别链路的实验方法——单变量 A/B 台架、方向固定、
+# 打分口径——这些不入库，下一个人只能重做一遍已经做过的实验。
+# 约束仍按 .claude/rules/database-safety.md：脚本必须参数化，禁止写死
+# 本机路径与密钥；默认只读，写模式需显式参数。
+# 一次性中间产物不入库：
+scripts/**/*.json
 
 # Local data directory and temp directories
 tmp/
