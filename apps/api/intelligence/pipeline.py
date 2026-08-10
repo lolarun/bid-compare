@@ -32,6 +32,7 @@ from typing import Any, Callable
 
 from PIL import Image
 
+from apps.api.core.config import get_settings
 from apps.api.intelligence.aggregator import ResultAggregator
 from apps.api.intelligence.base import (
     LLMProvider, ExtractionResponse, ProviderError, ContentModerationError,
@@ -56,6 +57,14 @@ BATCH_SIZE = 1          # legacy export; extraction now uses one page per call
 # 单一来源：table_recognizer 从此处 import，避免两处硬编码漂移。
 PAGE_CONCURRENCY = max(1, int(os.getenv("PAGE_CONCURRENCY", "5")))
 ProgressCallback = Callable[[str, int], None]
+
+
+def _vl_direct_enabled() -> bool:
+    """报价识别器是否选了 vl_direct。读配置而非常量，便于灰度与回退。"""
+    try:
+        return (get_settings().QUOTE_RECOGNIZER or "legacy").strip().lower() == "vl_direct"
+    except Exception:                                   # noqa: BLE001
+        return False
 
 
 class ExtractionPipeline:
@@ -104,6 +113,24 @@ class ExtractionPipeline:
     ) -> ExtractionResponse:
         _notify(progress_cb, "渲染PDF", 10)
         t_start = time.time()
+
+        # VL-direct：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
+        # 与 legacy 是不同的输入契约（legacy 需要 provider 的 OCR + JSON 能力），
+        # 故用独立开关而非换模型名。provider 不具备多图调用能力时回落 legacy——
+        # 静默按 legacy 跑并不危险（结果仍是合法 draft），但必须记日志说明为什么。
+        if _vl_direct_enabled() and hasattr(self.provider, "vl_extract_csv"):
+            from apps.api.intelligence.vl_direct import recognize_quote_vl
+            s = get_settings()
+            draft = recognize_quote_vl(
+                file_path,
+                vl_call=lambda imgs, prompt: self.provider.vl_extract_csv(
+                    imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+                orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
+                    [b for _t, b in parts], prompt,
+                    model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+                progress_cb=progress_cb,
+            )
+            return self._draft_to_quote_response(draft, context or {}, t_start)
 
         if (hasattr(self.provider, "ocr_pages_with_roles")
                 and hasattr(self.provider, "_llm_call_json")):
@@ -166,6 +193,14 @@ class ExtractionPipeline:
                 "validation_flags": list(row.validation_flags or []),
                 "raw_qty": f.get("qty"),
                 "suggested_qty": f.get("arith_suggested_qty"),
+                # 行位证据：顺序直连按位置对齐锚点要用，定向重读要用它回到具体页。
+                # 缺了它，`_doc_order` 的三态逻辑拿不到输入，只能退回载入顺序。
+                "document_row_index": f.get("document_row_index"),
+                "page_row_index": f.get("page_row_index"),
+                "source_page": row.source_ref.page or None,
+                "copy_no": f.get("copy_no") or "",
+                # 「原文明确不报价」——合法事实，与"读不到"分开，入库门据此不阻断
+                "not_quoted": bool(f.get("not_quoted")),
             })
         data_in = {
             "supplier_name": (draft.meta or {}).get("supplier_name") or "",
@@ -528,6 +563,11 @@ class ExtractionPipeline:
                 "normalized_material": norm_material,
                 "ocr_correction_reason": ocr_reason,
                 "source_ref": it.get("source_ref"),  # {page, table, row} from TableGrid
+                # 行位证据。**这里是白名单重建，不加就会丢** —— 丢了之后顺序直连
+                # 只能退回载入顺序，定向重读也回不到具体页。
+                "source_page": it.get("source_page"),
+                "page_row_index": it.get("page_row_index"),
+                "copy_no": it.get("copy_no") or "",
             })
         apply_arithmetic_validation(cleaned)
         # 全局文档行序（1..N，按 page→table→row 的抽取顺序）。顺序直连对齐用它做行身份，

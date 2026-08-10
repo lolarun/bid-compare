@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
     DASHSCOPE_LLM_MODEL: str = "qwen3.6-flash"
 
+    # ── 报价识别器选择 ──────────────────────────────────────────────────────
+    # legacy    OCR → HTML → TableGrid → LLM（现行默认）
+    # vl_direct 整份页面图像 → 视觉模型 → CSV → ExtractionDraft
+    #
+    # 两者是**不同的输入契约**，不是换个模型名就能切换：legacy 依赖 provider 的
+    # ocr_pages_with_roles + _llm_call_json，vl_direct 直接送页面图像。故用独立开关，
+    # 且**不复用 DASHSCOPE_LLM_MODEL**——那是通用文本模型，改它会影响其它调用方。
+    QUOTE_RECOGNIZER: str = "legacy"
+    DASHSCOPE_QUOTE_VL_MODEL: str = "qwen3.7-plus"
+    # 方向预检模型。判定的是"这页要不要转"，与抽取分开配置。
+    DASHSCOPE_QUOTE_ORIENT_MODEL: str = "qwen3.7-plus"
+    # 方向预检投票轮数。实测单轮不稳（同份同配置跑出 3/10、10/10、10/10）；
+    # 但投票只降低崩塌概率、不消除，无过半共识的页一律不转并标 REVIEW。
+    QUOTE_ORIENT_VOTES: int = 3
+
     # OCR PDF render quality (Layer 0). Higher = clearer small-font scanned tables
     # (reduces 形近字 OCR errors like 闸阀→阀阀, 橡胶瓣→橡胶海). Defaults preserve
     # prior behavior (2.0 / 2400); raise via env after A/B confirms improvement.
