@@ -16,6 +16,11 @@ MATCH_PRICE_COVERAGE_THRESHOLD: float = 0.80
 # Max fraction of evaluable rows allowed to have a hard arithmetic error
 MATCH_ARITHMETIC_MAX_ERROR_RATE: float = 0.05
 
+# Max fraction of eligible rows whose 合价 was derived (qty×unit_price) rather than
+# read from the document. Derived rows carry no arithmetic evidence and cannot back
+# a comparison total; above this share the submission must be reviewed by a human.
+MATCH_DERIVED_TOTAL_MAX_RATE: float = 0.05
+
 # VAT deviation tolerance: 11.5% (≈13%/113%) + 1% rounding allowance
 MATCH_ARITHMETIC_VAT_TOLERANCE: float = 0.125
 
@@ -39,3 +44,52 @@ MATCH_ARITHMETIC_PASS_THRESHOLD: float = 0.90
 
 # Row-level arithmetic tolerance: qty×price vs total_price deviation ratio
 MATCH_PRICE_ARITHMETIC_TOLERANCE: float = 0.05
+
+
+# ── Pre-ingest structural gates (draft_integrity) ───────────────────────────
+# 来源：2026-08-09 七份 VL 直出实测。两类缺陷下游都察觉不到——错位后的金额仍是
+# "合法的数字"，重复行仍能通过逐行算术校验。故必须在入库前用结构判据拦下。
+
+# 单元格数 ≠ 表头列数的行占比，超过即整份 BLOCKED（实测右移影响 86/90 行）。
+# 低于此比例仍逐行 BLOCKED 那些行本身，只是不牵连整份。
+INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO: float = 0.02
+
+# 同上：绝对行数下限，避免小表被比例稀释。
+INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT: int = 3
+
+# 重复行金额占比超过此值 → BLOCKED（实测某份重复使金额虚增 42%）。
+# 与 _ARITH_MISMATCH_BLOCKED_AMOUNT_RATIO 同量级：金额层面的错误按 10% 划线。
+INTEGRITY_DUPLICATE_BLOCKED_AMOUNT_RATIO: float = 0.10
+
+# 同口径下 数量×单价 与合价的允许偏差。同一税基内这是纯舍入误差，容差应远小于
+# 跨税基的 MATCH_ARITHMETIC_VAT_TOLERANCE —— 后者用于区分"税基不一致"而非"算错"。
+INTEGRITY_ARITHMETIC_TOLERANCE: float = 0.005
+
+# 报价口径倍率识别容差：合价/(数量×单价) 落在某个简单倍数附近时按"口径选择"记录，
+# 不按算术错误处理。倍率是报价方式的选择，只能观测和标记，禁止据此修正原值。
+INTEGRITY_MULTIPLIER_TOLERANCE: float = 0.01
+
+# ── 块级对齐（block_alignment）─────────────────────────────────────────────
+# 报价清单的物理顺序不等于招标清单顺序：实测某份投标文件把普通电缆印在前（PDF 2-7 页）、
+# 矿物电缆印在后（8-10 页），而采购清单的序号是矿物 1-44、普通 45-136。直接按文档行序
+# 对齐会整段错位（实测严格位置命中 0%）。故先做块级对应，再在块内按行序对齐。
+
+# 块指派的数量序列相似度下限。低于此值不算确定性结论，交 LLM 或人工判块级对应。
+# 用数量而非金额：招标清单只给序号/名称/规格/单位/数量，价格是各家自己报的，
+# 拿价格对块等于用答案对答案。
+BLOCK_QTY_SIMILARITY_MIN: float = 0.70
+
+# 最优与次优候选的相似度差距下限。差距过小说明两个块都像，属于歧义，不做确定性判定。
+BLOCK_ASSIGN_AMBIGUITY_MARGIN: float = 0.05
+
+# 块内按行序对齐后，允许的逐行冲突占比；超过说明这一块的对应关系本身就不对。
+BLOCK_ROW_CONFLICT_MAX_RATE: float = 0.30
+
+
+# ── 数值截断检测（按列自校准，不假定任何固定宽度或列名）──────────────────
+# 判据：某数值列存在硬宽度上限，且卡在上限的值小数位少于该列自身的常见小数位。
+# 下面三个是统计有效性护栏，不是格式假设。
+INTEGRITY_TRUNCATION_MIN_SAMPLES: int = 20      # 少于此数量的数值样本不下结论
+INTEGRITY_TRUNCATION_MIN_SUSPECTS: int = 3      # 疑似截断值少于此数不报（避免个例噪声）
+# 第三条判据不需要常数：宽度上限处是否**堆积**，靠上限与次宽两档的实际计数相比即可
+# （自然分布向上递减，被截断的列会在上限处堆起来）。见 detect_truncated_numbers。
