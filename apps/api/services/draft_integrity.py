@@ -26,6 +26,8 @@ from apps.api.core.domain_config import (
     INTEGRITY_ARITHMETIC_TOLERANCE,
     INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT,
     INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO,
+    INTEGRITY_MISSING_CELL_BLOCKED_COUNT,
+    INTEGRITY_MISSING_CELL_BLOCKED_RATIO,
     INTEGRITY_DUPLICATE_BLOCKED_AMOUNT_RATIO,
     INTEGRITY_MULTIPLIER_TOLERANCE,
     INTEGRITY_TRUNCATION_MIN_SAMPLES,
@@ -108,7 +110,9 @@ def check_column_alignment(header: list[str], rows: list[list],
     尾列补空串，那不是缺陷。
 
     整份的结论按占比/绝对数升级（阈值见 domain_config），避免一行异常牵连整份，
-    也避免大面积错位被小占比洗白。
+    也避免大面积错位被小占比洗白。**两类各自独立升级，取较严的那个**——
+    此前只有 extra 能升级、missing 无论多少行都停在 REVIEW，实测一份 279 行的
+    文档里 38 行（13.6%）结构解析失败仍以"人工复核"身份放行，金额短 124 万。
     """
     expected = len(header)
     report = ColumnAlignmentReport(header=list(header), total_rows=len(rows))
@@ -130,12 +134,23 @@ def check_column_alignment(header: list[str], rows: list[list],
                                         kind=kind, preview=preview))
 
     extra = len(report.extra_rows)
+    missing = len(report.missing_rows)
+    total = max(len(rows), 1)
+    verdicts: list[str] = []
     if extra:
         widespread = (extra >= INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT
-                      or extra / max(len(rows), 1) > INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO)
-        report.verdict = BLOCKED if widespread else REVIEW
-    elif report.missing_rows:
-        report.verdict = REVIEW
+                      or extra / total > INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO)
+        verdicts.append(BLOCKED if widespread else REVIEW)
+    if missing:
+        # 格数不足也必须能升级。此前无论多少行都只判 REVIEW，实测一份 279 行的
+        # 文档里 38 行（13.6%）结构解析失败仍被放行——那不是"有疑点"，是没有
+        # 可靠结构。比例与行数**同时**满足才升级（与 extra 的 or 不同）：
+        # 格数不足可能合法，比例负责"大面积"、行数负责"不是个例"。
+        widespread = (missing >= INTEGRITY_MISSING_CELL_BLOCKED_COUNT
+                      and missing / total > INTEGRITY_MISSING_CELL_BLOCKED_RATIO)
+        verdicts.append(BLOCKED if widespread else REVIEW)
+    if verdicts:
+        report.verdict = _worst(*verdicts)
     return report
 
 

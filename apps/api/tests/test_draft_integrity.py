@@ -355,3 +355,43 @@ def test_read_table_rows_preserves_ragged_shape(tmp_path):
     assert [len(r) for r in rows] == [3, 4, 2]
     # 3 行里 1 行多格 → 占比远超阈值，按整份阻断（小表不该被比例稀释）
     assert check_column_alignment(header, rows).verdict == BLOCKED
+
+
+# ─── 缺格行的整份升级（2026-08-10 上海浦东）────────────────────────────────────
+#
+# 实测：模型在 CSV 中途开始"出声思考"（写下疑问、切成竖线分隔、边写边推翻自己），
+# 279 行里 38 行不再是 CSV。这些行格数不足，而当时 missing_cells 无论多少行都只
+# 判 REVIEW，于是一份 13.6% 结构解析失败、金额短 124 万的文件以"人工复核"身份
+# 放行。BLOCKED 的定义是"无可靠结构"——13.6% 解析失败正是它。
+
+def _rows(full: int, short: int, wide: int = 0) -> list[list]:
+    return ([["a", "b", "c"]] * full + [["a"]] * short
+            + [["a", "b", "c", "d", "e"]] * wide)
+
+
+def test_widespread_missing_cells_blocks_the_document():
+    r = check_column_alignment(["a", "b", "c"], _rows(241, 38))    # 13.6%
+    assert r.verdict == "blocked"
+
+
+def test_isolated_short_row_stays_review():
+    """注释行、只有两个字段的小计行本来就短——个别短行不能牵连整份。"""
+    r = check_column_alignment(["a", "b", "c"], _rows(89, 1))      # 1.1%
+    assert r.verdict == "review"
+
+
+def test_missing_cell_escalation_is_ratio_only_not_absolute_count():
+    """合法短行的数量随文档规模增长（每个分部一行小计）；固定行数阈值会在长
+    文档上误报。10 行短行在 1000 行文档里是 1%，不该阻断。"""
+    r = check_column_alignment(["a", "b", "c"], _rows(990, 10))
+    assert r.verdict == "review"
+
+
+def test_extra_and_missing_escalate_independently_worst_wins():
+    """两类性质不同，各自判各自的，取较严者——否则一类会掩盖另一类。"""
+    r = check_column_alignment(["a", "b", "c"], _rows(200, 1, wide=10))
+    assert r.verdict == "blocked", "大量多格行必须阻断，不因缺格行只有 1 行而降级"
+
+
+def test_clean_table_is_ok():
+    assert check_column_alignment(["a", "b", "c"], _rows(90, 0)).verdict == "ok"
