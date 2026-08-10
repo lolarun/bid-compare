@@ -200,7 +200,13 @@ Recommendation: wrap `get_current_confirmed_session(project_id, category)`; forb
 
 ### P1-6 Business thresholds scattered
 
-(done 2026-06-22 per TODO.md — `domain_config.py` now holds all ten `MATCH_*` domain thresholds, including `MATCH_SEQUENTIAL_SIM_THRESHOLD`, `MATCH_ARITHMETIC_PASS_THRESHOLD`, `MATCH_PRICE_ARITHMETIC_TOLERANCE`. The env layer (`PAGE_CONCURRENCY` / `PDF_RENDER_CONCURRENCY` / `MAX_PAGES`, etc.) is intentionally kept in env per the three-layer model.)
+(done 2026-06-22 per TODO.md — `domain_config.py` now holds all ten `MATCH_*` domain thresholds, including `MATCH_SEQUENTIAL_SIM_THRESHOLD`, `MATCH_ARITHMETIC_PASS_THRESHOLD`, `MATCH_PRICE_ARITHMETIC_TOLERANCE`. The env layer (`PAGE_CONCURRENCY` / `MAX_PAGES`, etc.) is intentionally kept in env per the three-layer model.
+
+Amended 2026-08-10: `PDF_RENDER_CONCURRENCY` was removed. PDFium is not thread-safe,
+so PDF rendering is now serialized behind a process-global lock; the degree of
+concurrency is a correctness constraint, not a tuning knob, and must not be
+exposed as configuration. Measured cost: rendering is ~1% of per-document
+wall-clock, and an 8-thread stress test showed no throughput loss vs serial.)
 
 Match thresholds, checksum, sequence/similarity, page concurrency, and the page-count cap are scattered across route, service, env, and module constants.
 
