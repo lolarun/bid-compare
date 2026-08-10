@@ -25,7 +25,8 @@
 
 ## 1. 当前实测基线
 
-配置：**qwen3.7-plus 抽取 + qwen3.7-flash 方向预检 + 3 轮投票**，整份一次调用。
+配置：**qwen3.7-plus 抽取 + 同模型方向预检 + 3 轮投票**，整份一次调用。
+方向预检**不能换快模型**，原因见 §2。
 
 ```bash
 python scripts/vl_direct_bakeoff.py --auto-rotate --jobs 7 --out tmp/vl_plus_rot
@@ -86,7 +87,16 @@ python scripts/block_align_report.py --out tmp/vl_plus_rot
 - **/Rotate 元数据不可用**：实测 7 页报价表全部 180° 倒置而 `/Rotate` 全是 0；页面是纯
   扫描图，`get_text()` 为空。
 - **投影法/墨迹能量免费定轴向**：已否决（表格框线压过文字行信号），别再试。
-- 方向结论按 **PDF 内容哈希**缓存（`tmp/orientation_cache/`），重跑直接命中。
+- **方向预检必须用主模型**。试过换 flash 省时间（它的载荷是大头：53 页 × 4 旋转 ×
+  3 轮 = 636 张缩略图），实测不成立：某份的 270° 是 flash 无中生有（主模型判 90° 正确），
+  该份金额差从 ±0.00 变成 **−874,443**；另一份 7 页 180° 倒置它这次没判出来、上次判出来了。
+  **三轮投票会一致收敛到错误答案**——投票压得住随机噪声，压不住系统性偏差。
+  省下的约 100 秒不值这个代价。
+- 方向结论按 **PDF 内容哈希**缓存（`tmp/orientation_cache/`），但**只在每一页都达成共识时
+  才写盘**。曾经缓存过一次电脑休眠期间产生的坏结论（检测全崩 → 被当成"全都不用转"），
+  之后两份文档的金额差从 ±0.00 变成 −71 万和 −20 万。
+  注意这道门只挡得住"检测崩了"，**挡不住"检测一致地错了"**——换模型那次就是共识 100%
+  却全错。缓存前最好人工抽查一页。
 - 意外收获：某份 53 页文档转正后**内容审核误杀消失**，整份一次通过，不再需要分段。
 
 ### 提示词
@@ -136,7 +146,7 @@ python scripts/block_align_report.py --out tmp/vl_plus_rot
 | `apps/api/services/block_alignment.py` | **两级对齐**：块级对应（数量序列 → LLM → 顺序回退）+ 块内保序对齐 + 冲突行 pending |
 | `apps/api/tests/test_draft_integrity.py` | 34 条，含泛化陷阱：整数列不得命中截断、稀疏截断仍须发现、税基不得跨组、倍率不得修正 |
 | `apps/api/tests/test_block_alignment.py` | 16 条，含：段落顺序相反、一章被切多块、价格不得影响对齐、resolver 拒答/抛异常都不丢行 |
-| `scripts/vl_direct_bakeoff.py` | 主模型 3.7-plus、方向预检 flash+缓存、并行、OpenAI 兼容通路、PDF 直传（已否决保留） |
+| `scripts/vl_direct_bakeoff.py` | 主模型 3.7-plus、方向预检（同模型）+ 全共识才缓存、并行、OpenAI 兼容通路、PDF 直传（已否决保留） |
 | `scripts/model_bakeoff_compare.py` | 多模型横向：行数/逐字段/保序率/耗时 |
 | `scripts/block_align_report.py` | 块级对齐验证（锚点侧不含价格） |
 
