@@ -43,6 +43,17 @@ _RETRY_BASE = 2          # exponential backoff base: 2, 4, 8, 16, 32 (with jitte
 _RETRY_MAX = 30          # cap at 30s
 
 
+class _StreamedResponse:
+    """把流式分片拼好后伪装成一次性响应，让 _mm_call 的重试逻辑不必分叉。"""
+
+    __slots__ = ("text",)
+    status_code = 200
+    message = ""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
 def _retry_wait(attempt: int) -> float:
     """Exponential backoff with full jitter: min(base * 2^attempt, max) + uniform(0, 1)."""
     return min(_RETRY_BASE * (2 ** attempt), _RETRY_MAX) + random.uniform(0, 1)
@@ -627,6 +638,8 @@ class DashScopeOCRProvider(LLMProvider):
     @staticmethod
     def _mm_text(resp) -> str:
         """Extract concatenated text from a MultiModalConversation response."""
+        if isinstance(resp, _StreamedResponse):   # 分片已在 _mm_stream 里拼好
+            return resp.text
         text = ""
         if resp.output and resp.output.choices:
             choice = resp.output.choices[0]
@@ -638,35 +651,72 @@ class DashScopeOCRProvider(LLMProvider):
                         text += part["text"] or ""
         return text
 
+    def _mm_stream(self, *, api_key: str, model: str, content: list[dict],
+                   temperature: float):
+        """Streaming variant — returns an object shaped like a non-stream response.
+
+        为什么必须流式：报价清单的抽取是**长生成**（136 行 CSV ≈ 一两万 token），
+        一次性响应会撞上 SDK 的 300s read timeout，而 read timeout 是"多久没收到
+        字节"，不是"总共花了多久"。实测远东/上海浦东两份就是这么失败的，且重试
+        5 次全部撞同一堵墙——重试一个必然超时的请求纯属浪费（每份白烧 25 分钟）。
+        调大超时只是把墙往后挪，下一份更大的文档照样撞；流式让超时取决于
+        **token 间隔**而不是生成总长，才是与文档大小无关的解法。
+        """
+        chunks: list[str] = []
+        got_any = False
+        for resp in dashscope.MultiModalConversation.call(
+                api_key=api_key, model=model,
+                messages=[{"role": "user", "content": content}],
+                temperature=temperature, stream=True, incremental_output=True):
+            if getattr(resp, "status_code", 200) != 200:
+                return resp                      # 交给调用方按 429/其它错误处理
+            got_any = True
+            chunks.append(self._mm_text(resp) or "")
+
+        if not got_any:
+            # 空流当作可重试的失败，而不是"识别出零行"——后者会被下游当成
+            # 合法的空报价单，把一次网络问题变成一条业务结论。
+            raise ProviderError("VL stream produced no chunks")
+        return _StreamedResponse("".join(chunks))
+
     def _mm_call(self, content: list[dict], model: str,
-                 temperature: float = _VISUAL_TEMPERATURE) -> str:
+                 temperature: float = _VISUAL_TEMPERATURE,
+                 stream: bool = False) -> str:
         """Multimodal call with key rotation + retry; returns raw text. Reuses
-        the same retry/concurrency infra as _ocr_page."""
+        the same retry/concurrency infra as _ocr_page.
+
+        `stream` 只对长生成有意义（见 _mm_stream）；短响应（页面角色分类等）
+        保持非流式，避免为几十个 token 引入分片重组的失败面。
+        """
         for attempt in range(_MAX_RETRIES):
             key = self._next_key()
             sem = self._per_key_sem[key]
             sem.acquire()
             try:
-                resp = dashscope.MultiModalConversation.call(
-                    api_key=key, model=model,
-                    messages=[{"role": "user", "content": content}],
-                    temperature=temperature,
-                )
+                if stream:
+                    resp = self._mm_stream(api_key=key, model=model,
+                                           content=content, temperature=temperature)
+                else:
+                    resp = dashscope.MultiModalConversation.call(
+                        api_key=key, model=model,
+                        messages=[{"role": "user", "content": content}],
+                        temperature=temperature,
+                    )
             except Exception as e:
                 sem.release()
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL call failed after {_MAX_RETRIES} retries: {e}") from e
             sem.release()
             if resp.status_code == 429:
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL 429 after {_MAX_RETRIES} retries")
             if resp.status_code != 200:
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL error {resp.status_code}: {resp.message}")
             return self._mm_text(resp)
@@ -782,6 +832,68 @@ class DashScopeOCRProvider(LLMProvider):
             fallback = dict(flash_result)
             fallback["source"] = "plus_failed"
             return fallback
+
+    def vl_extract_csv(
+        self,
+        images: list[bytes],
+        prompt: str,
+        *,
+        model: str | None = None,
+        labels: list[str] | None = None,
+        max_pixels: int = 8_000_000,
+        temperature: float = 0.0,
+    ) -> str:
+        """VL-direct：一次调用送 N 张页图，返回模型原始文本（CSV）。
+
+        整份送而非逐页：续页表头在前页、重复副本要跨页才看得见、序号连续性也只有
+        整份才能校验。
+
+        `labels` 用于在每张图前插一段文本标签（如 PAGE_3_ROT_90）。方向预检必须交错
+        标签——不交错模型会串页（视觉分类稳定性 v4 的教训）。
+
+        复用 `_mm_call` 的多 key 轮换与限流；**不解析、不清洗**，原样返回给调用方，
+        解析规则属于识别器而不是 provider。
+        """
+        mdl = model or os.getenv("DASHSCOPE_QUOTE_VL_MODEL", _VISUAL_PLUS_MODEL)
+        content: list[dict] = []
+        for i, img in enumerate(images):
+            if labels and i < len(labels):
+                content.append({"text": labels[i]})
+            content.append(self._img_part(img, max_pixels=max_pixels))
+        content.append({"text": prompt})
+        # 流式：整份报价清单是长生成，非流式会撞 SDK 的 300s read timeout（见 _mm_stream）。
+        raw = self._mm_call(content, mdl, temperature=temperature, stream=True)
+        return (raw or "").replace("```csv", "").replace("```", "").strip()
+
+    def _extract_structured_experimental(
+        self,
+        page_image: bytes,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_pixels: int = 8_000_000,
+        temperature: float = 0.0,
+    ) -> tuple[dict, str, int]:
+        """Experimental VL-direct page extraction.
+
+        This bypasses Stage-1 OCR HTML and asks a visual-language model to
+        return the same JSON shape consumed by the quote/tender post-processors.
+        It is intentionally not used by the production recognizer yet; scripts
+        can call it to compare VL->JSON against OCR HTML->LLM.
+        """
+        mdl = model or os.getenv("DASHSCOPE_VL_STRUCTURED_MODEL", _VISUAL_PLUS_MODEL)
+        content = [
+            self._img_part(page_image, max_pixels=max_pixels),
+            {"text": prompt},
+        ]
+        raw = self._mm_call(content, mdl, temperature=temperature)
+        clean = self._clean_json_text(raw)
+        try:
+            return json.loads(clean), raw, 0
+        except Exception as exc:
+            raise ProviderError(
+                f"VL structured JSON parse failed: {exc}\nRaw: {raw[:300]}"
+            ) from exc
 
     def _ocr_page(self, page_bytes: bytes) -> tuple[str, int]:
         """Qwen-VL-OCR table_parsing on one page. Retries on 429 / connection errors."""
