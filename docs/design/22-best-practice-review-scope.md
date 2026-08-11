@@ -10,6 +10,53 @@
 > (too large to fold into the batch that also did C/D/F/G/N) — see each batch's
 > commit message for what was and wasn't done and why.
 >
+> **E1/E2/E3 — resolved 2026-08-11**: `apps/api/core/errors.py` introduced
+> (`DomainError`/`ValidationError`/`NotFoundError`/`ConflictError`/
+> `ReviewRequiredError` + `register_exception_handlers`); services now raise
+> typed domain errors instead of `fastapi.HTTPException` (E2). Status-code
+> policy narrowed per-site after re-reading each one — 2 of the review's 4
+> "no confirmed session" sites turned out to be GET/query endpoints where 404
+> is correct REST semantics, not the same "write blocked" semantic as the
+> other 2 (E1). `/tender-list/match`'s quality-gate response moved 409→422;
+> its catch-all no longer leaks `type(e).__name__` to the client (E3). The
+> other three E3 sub-items (ValueError→status-code mapping, bare-string vs
+> dict `detail`, `export.py` "almost no error contract") were each read
+> endpoint-by-endpoint and judged **not a real defect** — see commit
+> `e401212` for the per-item reasoning; no code changed for those three.
+>
+> **E4 — Tier 1 + Tier 2 resolved 2026-08-11**, per a user-specified 3-tier
+> split by frontend-coupling depth rather than a flat pass over all 22
+> `analysis.py`/`quotes.py` endpoints lacking `response_model`:
+> - **Tier 1** (batch, shallow verify — route builds the dict itself, frontend
+>   already has a TS type or is unused/internal): 14 endpoints wired in one
+>   commit (`refresh-baselines`, `bid-alignment/groups/{id}` DELETE,
+>   `anchor-review` GET/confirm/item-confirm/bulk-confirm/finalize,
+>   `tender-list/preview`/`reconcile`/`confirm`/`current-sessions`/
+>   `current` (GET+DELETE)/`versions`, `compare-state`). One real hidden-coupling
+>   hit: `GET /anchor-review`'s `bid_quote_line_id` isn't in the frontend TS
+>   type but `test_bql_e2e.py` asserts on it — added to the schema.
+> - **Tier 2** (named endpoints, same verification depth, with an explicit
+>   stop-loss rule): `tender-list/llm-fill`, `tender-list/match`,
+>   `/api/quotes/batch-confirm`. The user predicted these would trip the
+>   stop-loss (particularly llm-fill's 19-key response); verification found
+>   the opposite — all three have **zero real frontend consumers** for their
+>   extra/undeclared fields (llm-fill's `tenderListLlmFill` wrapper is called
+>   from nowhere in `apps/www/src`; `tender-list/match`'s `readiness_list`/
+>   `per_supplier_stats` and `batch-confirm`'s `checksum`/`integrity`/
+>   `missing_total_rows`/`not_quoted_rows`/`not_quoted_detail` are all unread
+>   by the strictly-typed `.vue` call sites). No stop-loss trigger; all three
+>   got full schemas in one commit. `batch-confirm`'s prior `response_model=dict`
+>   was replaced with a real schema — audit/gate fields kept even though unread
+>   today, per CLAUDE.md §4's evidence-chain requirement, not dropped to match
+>   the narrower existing TS type.
+> - **Tier 3** (`bid-matrix`, `bid-matrix/save`, `bid-matrix/versions`,
+>   `bid-matrix/versions/{id}`, `bid-matrix/versions/{id}/approve`): **not
+>   scheduled as its own round** — merged into a future **B3** (identity-key
+>   rename) pass. `SupplierCell.supplier_id`/`MatrixTotal.supplier_id` are the
+>   exact wrong-named fields B3 exists to fix; adding `response_model` now
+>   would cement the wrong contract and force the frontend through two
+>   migrations instead of one.
+>
 > **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
 > `vl_tender.py`; "direct" was a contrast name against legacy, which no longer
 > exists). Persisted labels (`parser_mode`/`input_mode`/`recognizer` = `"vl_direct"`)
