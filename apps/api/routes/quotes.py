@@ -21,7 +21,7 @@ from apps.api.models import (
     BidSubmission,
     BidQuoteLine,
 )
-from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
+from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult, BatchConfirmResult
 from apps.api.services.ingestion.import_service import import_csv_data, _gen_code
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
@@ -375,7 +375,7 @@ async def import_file(
 
 
 # ─── Batch confirm (P0 新版): ExtractionJob.result → BidSubmission + BidQuoteLine ──
-@router.post("/batch-confirm", response_model=dict)
+@router.post("/batch-confirm", response_model=BatchConfirmResult)
 def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(get_db)):
     """将 OCR 提取结果暂存为 BidSubmission + BidQuoteLine（P0 新版）。
 

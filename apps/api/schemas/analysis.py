@@ -767,3 +767,120 @@ class CompareStateInflightJobOut(BaseModel):
 class CompareStateResult(BaseModel):
     submissions: list[CompareStateSubmissionOut]
     inflight_jobs: list[CompareStateInflightJobOut]
+
+
+# ─── tender-list/llm-fill ───────────────────────────────────────────────────
+# 评审 E4 Tier 2：用户预判该端点响应字段多、易触发止损规则；核实后发现前端
+# analysisApi.tenderListLlmFill 从未被任何 .vue/.ts 调用(grep 全 www/src 零命中，
+# 仅 CSS 里两个孤儿类名)，backend 测试(test_llm_fill_endpoint.py /
+# test_llm_fill_persistence.py) 也都是直接调用路由函数或 _persist_llm_fill，
+# 不经过 TestClient HTTP 层，response_model 序列化对它们零影响。
+# 结论：这是"零消费方"端点，不存在止损规则针对的隐藏耦合，可以按 Python 实际
+# 返回值直接建完整 schema，不必因为字段多而拆去 Tier 3。
+# dropped_audit/missing_audit/false_positive_audit 是审计明细，各 supplier 的
+# "reason" 分支形状不同(不同错误类型携带不同附加键)，故意保留为 list[dict] 而
+# 非强 schema，避免为一个无人消费的调试字段编造不存在的稳定契约。
+
+class SupplierFillSummaryOut(BaseModel):
+    supplier_id: int
+    supplier_name: str
+    quoted: int
+    aggregated: int
+    pending: int
+    excluded: int
+    residue: int
+    residue_high_cos: int
+    dropped: int
+    tokens_used: int
+    duration_ms: int
+    error: str | None = None
+
+
+class LlmFillReadinessOut(BaseModel):
+    can_finalize: bool
+    false_positive_align_count: int
+    missing_without_evidence_count: int
+    supplier_error_count: int
+    warnings: list[str] = []
+
+
+class LlmFillResult(BaseModel):
+    anchors_total: int
+    comparable_2plus: int
+    comparable_2plus_quoted: int
+    three_way: int
+    anchors_covered: int
+    comparable_2plus_embedding_baseline: int
+    per_supplier_fill: list[SupplierFillSummaryOut] = []
+    finalization_invalidated: bool
+    dropped_audit: list[dict] = []
+    missing_audit: list[dict] = []
+    missing_audit_total: int = 0
+    missing_audit_truncated: bool = False
+    false_positive_audit: list[dict] = []
+    false_positive_align_count: int
+    readiness: LlmFillReadinessOut
+    matrix_distribution: MatrixDistribution | None = None
+
+
+# ─── tender-list/match ──────────────────────────────────────────────────────
+# 评审 E4 Tier 2：核实后同样是"零隐藏耦合"——前端 tenderMatchSummary 是严格
+# ref<AnchorMatchSummary>，编译期已保证只读 TS 声明的 8 个基础字段 + category；
+# 后端 HTTP 测试(test_bql_e2e.py/test_compare_integration.py/
+# test_vl_direct_api_e2e.py)在 match 响应本身上也只断言 status_code，字段级
+# 断言全部落在别的端点(如 GET tender-list/current 的 used_submission_ids，
+# 已在 Tier 1 覆盖)。readiness_list/per_supplier_stats 是路由自己拼的审计
+# 附加信息，前后端都不读，同 llm-fill 一样保留为松散 dict，不为无人消费的字段
+# 编造精确契约。
+
+class TenderMatchResult(BaseModel):
+    anchors_total: int
+    anchors_covered: int
+    comparable_2plus: int
+    three_way: int
+    matched_quotes: int
+    total_quotes: int
+    low_conf: int
+    residue: int
+    category: str | None = None
+    readiness_list: list[dict] = []
+    per_supplier_stats: dict = {}
+    model_config = {"extra": "ignore"}
+
+
+# ─── /api/quotes/batch-confirm ──────────────────────────────────────────────
+# 评审 E4 Tier 2：此前 response_model=dict——语法上"有"，实际零校验/零文档
+# 价值，评审把它归为"缺契约"是对的。核实前端 quoteApi.batchConfirm 的 3 个
+# 调用点（compare/IndexView.vue ×2、import/IndexView.vue ×1），均严格走既有
+# 的 BatchConfirmResult TS 类型，无 Record<string,any> 或 as any 旁路读取。
+# 但 confirm_batch() 实际有 3 条返回路径（幂等命中 / 空 items / 正常写入），
+# 并集比前端 TS 类型多 5 个字段：checksum(幂等路径)、missing_total_rows/
+# not_quoted_rows/not_quoted_detail/integrity(正常写入路径)——这些是价格闭环
+# 门和结构完整性门(doc/19 §L4)的审计结果，属于 CLAUDE.md §4"任何自动修正必
+# 须保留原值/依据/标记"要求的证据链，即使当前前端不读也不能让 response_model
+# 把它们从响应体里悄悄吃掉，故补全字段而非按 TS 类型精简。checksum/integrity
+# 内部形状来自 _build_checksum/_gate_integrity，服务层返回裸 dict，未强 schema
+# 化，这里保持一致(dict)不重复发明。
+
+class BatchConfirmErrorOut(BaseModel):
+    row: int
+    reason: str
+
+
+class BatchConfirmResult(BaseModel):
+    status: str
+    submission_id: int
+    line_count: int
+    skipped_count: int
+    errors: list[BatchConfirmErrorOut] = []
+    unknown_brands: list[str] = []
+    supplier_id: int | None = None
+    project_id: int | None = None
+    batch_id: str
+    idempotent: bool | None = None
+    checksum: dict | None = None
+    missing_total_rows: int | None = None
+    not_quoted_rows: int | None = None
+    not_quoted_detail: list[dict] | None = None
+    integrity: dict | None = None
+    model_config = {"extra": "ignore"}

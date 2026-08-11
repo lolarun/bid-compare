@@ -27,6 +27,8 @@ from apps.api.schemas import (
     TenderListConfirmResult, TenderListCurrentSessionsResult,
     TenderListCurrentResult, TenderListDeactivateResult, TenderListVersionOut,
     CompareStateResult,
+    LlmFillResult,
+    TenderMatchResult,
 )
 from apps.api.services.history.comparison import compare_price
 from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
@@ -930,7 +932,7 @@ def anchor_review_confirm(
         return {"ok": True, "group_id": body.group_id, "status": "deleted"}
 
 
-@router.post("/tender-list/match")
+@router.post("/tender-list/match", response_model=TenderMatchResult)
 async def tender_list_match(
     file: UploadFile | None = File(None),
     project_id: int = Form(...),
@@ -1627,7 +1629,7 @@ def _select_suspect_anchor_seqs(anchors, results, supplier_ids: list[int]) -> se
     return suspect
 
 
-@router.post("/tender-list/llm-fill")
+@router.post("/tender-list/llm-fill", response_model=LlmFillResult)
 async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)):
     """N 个供应商填表 LLM 代理(replace 模式)。
 

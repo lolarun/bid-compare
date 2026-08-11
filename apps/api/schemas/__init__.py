@@ -47,6 +47,9 @@ from apps.api.schemas.analysis import (
     TenderListCurrentSessionOut, TenderListCurrentSessionsResult,
     TenderListCurrentResult, TenderListDeactivateResult, TenderListVersionOut,
     CompareStateSubmissionOut, CompareStateInflightJobOut, CompareStateResult,
+    SupplierFillSummaryOut, LlmFillReadinessOut, LlmFillResult,
+    TenderMatchResult,
+    BatchConfirmErrorOut, BatchConfirmResult,
 )
 
 __all__ = [
