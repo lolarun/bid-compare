@@ -28,6 +28,7 @@ import type {
   SourceReconcileResult,
   PageDiagnostic,
   PdfQualityMetrics,
+  QualityMeta,
 } from '@/api/client'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
@@ -35,7 +36,7 @@ import StatCard from '@/components/StatCard.vue'
 import BidMatrix from './components/BidMatrix.vue'
 import AnchorReviewMatrix from './components/AnchorReviewMatrix.vue'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
-import { asQuoteShape } from '@/utils/extraction'
+import { asQuoteShape, asQualityMeta } from '@/utils/extraction'
 
 // Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
 const STEP_RESULTS = 4
@@ -522,6 +523,7 @@ interface BatchFileEntry {
   finalSupplierName: string      // user-editable display name (always takes precedence)
   matchedSupplierId: number | null  // set when user selects from dropdown; null = stranger
   items: QuoteExtractionItem[]
+  quality: QualityMeta | null   // 评审 R2：BLOCKED/REVIEW 横幅 + 台账，job.result._quality
   confirmedSupplierId: number | null    // null for unknown suppliers
   confirmedSubmissionId: number | null  // always set on confirm success
   confirmed: boolean
@@ -1024,6 +1026,12 @@ function goBack() {
 }
 
 // ─── Step 2: per-supplier upload handlers ────────────────────────────────
+// 评审 R2：legacy 模式（单供应商 tab）的质量分层横幅数据源——slot.job 已存了完整
+// ExtractionJob，直接从 job.result._quality 取，不需要像批量模式那样额外存字段。
+function slotQuality(supplierId: number): QualityMeta | null {
+  return asQualityMeta(supplierUploads[supplierId]?.job?.result ?? null)
+}
+
 function onExtracted(supplierId: number, job: ExtractionJob) {
   // AUDIT-FIX M9: runtime guard instead of unchecked cast
   const items = asQuoteShape(job.result).items
@@ -1100,6 +1108,7 @@ function handleBatchFile(file: File) {
       finalSupplierName: '',
       matchedSupplierId: null,
       items: [],
+      quality: null,
       confirmedSupplierId: null,
       confirmedSubmissionId: null,
       confirmed: false,
@@ -1231,6 +1240,7 @@ function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
   entry.progressPct = 100
   const shape = asQuoteShape(job.result)
   entry.items = shape.items
+  entry.quality = asQualityMeta(job.result)
   entry.detectedSupplierName = shape.supplier_name || ''
   // Auto-match against known suppliers; initialize finalSupplierName from OCR
   if (entry.detectedSupplierName) {
@@ -1269,6 +1279,7 @@ async function restoreBatchFiles(pid: number) {
       finalSupplierName: s.supplier_raw_name,
       matchedSupplierId: s.supplier_id,
       items: [],
+      quality: null,
       confirmedSupplierId: s.supplier_id,
       confirmedSubmissionId: s.submission_id,
       confirmed: true, error: '', pollTimer: null,
@@ -1284,6 +1295,7 @@ async function restoreBatchFiles(pid: number) {
       jobId: j.job_id,
       detectedSupplierName: '', finalSupplierName: '', matchedSupplierId: null,
       items: [],
+      quality: null,
       confirmedSupplierId: null, confirmedSubmissionId: null,
       confirmed: false, error: '', pollTimer: null,
     })
@@ -1989,6 +2001,35 @@ async function runMatrix() {
             <div v-if="f.error" style="color:#ff4d4f;font-size:12px;margin-top:4px">{{ f.error }}</div>
 
             <div v-if="f.status === 'done' && !f.confirmed" class="batch-card__body">
+              <!-- 评审 R2：识别质量分层横幅——此前 BLOCKED/REVIEW 完全静默，
+                   人工只有在提交被 422 拒绝时才第一次知道有问题。 -->
+              <a-alert
+                v-if="f.quality?.quality_status && f.quality.quality_status !== 'PASS'"
+                :type="f.quality.quality_status === 'BLOCKED' ? 'error' : 'warning'"
+                show-icon
+                style="margin-bottom:8px"
+                :message="f.quality.quality_status === 'BLOCKED'
+                  ? '识别质量：BLOCKED —— 存在严重问题，不建议直接入库'
+                  : '识别质量：REVIEW —— 建议逐行核对后再入库'"
+              >
+                <template v-if="(f.quality.quality_blocking_reasons?.length ?? 0) > 0" #description>
+                  <ul style="margin:4px 0 0;padding-left:18px;font-size:12px">
+                    <li v-for="(r, i) in f.quality.quality_blocking_reasons" :key="i">{{ r }}</li>
+                  </ul>
+                </template>
+              </a-alert>
+              <div
+                v-if="(f.quality?.row_ledger?.dropped_rows ?? 0) > 0"
+                style="font-size:12px;color:#faad14;margin-bottom:8px"
+              >
+                ⚠ 识别 {{ f.quality!.row_ledger!.recognized_rows }}/{{ f.quality!.row_ledger!.expected_rows }} 行，
+                {{ f.quality!.row_ledger!.dropped_rows }} 行未识别到
+                <span v-if="f.quality!.row_ledger!.empty_pages.length">
+                  （{{ f.quality!.row_ledger!.empty_pages.length }} 页零产出）</span
+                ><span v-if="f.quality!.row_ledger!.short_pages.length">
+                  （{{ f.quality!.row_ledger!.short_pages.length }} 页产出不足）</span
+                >
+              </div>
               <div class="batch-card__supplier-row">
                 <span style="font-size:12px;color:rgba(0,0,0,0.55)">识别供应商：</span>
                 <a-auto-complete
@@ -2037,7 +2078,24 @@ async function runMatrix() {
               />
 
               <div v-if="(supplierUploads[s.id]?.items?.length ?? 0) > 0" style="margin-top:14px">
+                <!-- 评审 R2：同批量模式的质量分层横幅，legacy 模式（单供应商 tab）也接上 -->
                 <a-alert
+                  v-if="slotQuality(s.id)?.quality_status && slotQuality(s.id)!.quality_status !== 'PASS'"
+                  :type="slotQuality(s.id)!.quality_status === 'BLOCKED' ? 'error' : 'warning'"
+                  show-icon
+                  style="margin-bottom:10px"
+                  :message="slotQuality(s.id)!.quality_status === 'BLOCKED'
+                    ? '识别质量：BLOCKED —— 存在严重问题，不建议直接入库'
+                    : '识别质量：REVIEW —— 建议逐行核对后再入库'"
+                >
+                  <template v-if="(slotQuality(s.id)?.quality_blocking_reasons?.length ?? 0) > 0" #description>
+                    <ul style="margin:4px 0 0;padding-left:18px;font-size:12px">
+                      <li v-for="(r, i) in slotQuality(s.id)!.quality_blocking_reasons" :key="i">{{ r }}</li>
+                    </ul>
+                  </template>
+                </a-alert>
+                <a-alert
+                  v-else
                   type="info"
                   show-icon
                   message="识别完成，请核对后点击「校对入库」"

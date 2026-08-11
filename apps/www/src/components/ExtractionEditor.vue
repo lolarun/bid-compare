@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, SwapOutlined, LinkOutlined, FileSearchOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, SwapOutlined, LinkOutlined, FileSearchOutlined, WarningOutlined } from '@ant-design/icons-vue'
 
 // Arithmetic conflict threshold: 11.5% = 13%/113% (VAT misread) + 1% rounding.
 // Rows at ≤ this threshold are VAT-level warnings; rows above are hard errors.
@@ -196,6 +196,9 @@ const tenderColumns = [
 ]
 
 const quoteColumns = [
+  // 评审 R2：validation_flags 此前全程随行透传但从未渲染——复核者看不到系统
+  // 已经标出的列错位/重复行/算术不符/截断疑点，直到入库门拒绝才第一次得知。
+  { title: '', dataIndex: '_warn', width: 40, align: 'center' as const },
   { title: '材料名称', dataIndex: 'material' },
   { title: '规格', dataIndex: 'spec', width: 130 },
   { title: '品牌', dataIndex: 'brand', width: 110 },
@@ -234,6 +237,19 @@ const PRICE_BASIS_LABELS: Record<string, { text: string; color: string }> = {
   dual_tax: { text: '含税(双)', color: 'green' },
   unspecified: { text: '未注明', color: 'default' },
   unknown: { text: '未知', color: 'red' },
+}
+/** 评审 R2：validation_flags 逐行标记的人话翻译。未知 flag 走兜底分支，不吞掉。 */
+const VALIDATION_FLAG_LABELS: Record<string, { title: string; color: string }> = {
+  column_shift: { title: '列错位：本行单元格数与表头不符，取值可能整体串位', color: '#ff4d4f' },
+  duplicate_row: { title: '疑似重复行：与其他行内容高度重合，请核对是否重复报价', color: '#faad14' },
+  arithmetic_mismatch: { title: '数量×单价与合价不符，超出容差', color: '#faad14' },
+  value_truncated: { title: '数值疑似被截断（原文位数与识别结果不符）', color: '#ff4d4f' },
+  derived_total: { title: '合价由数量×单价推算，非原文直接读取', color: '#1677ff' },
+}
+function rowWarnings(row: Row): { title: string; color: string }[] {
+  const flags = (row as QuoteRow).validation_flags
+  if (!flags || flags.length === 0) return []
+  return flags.map((f) => VALIDATION_FLAG_LABELS[f] || { title: f, color: '#faad14' })
 }
 function priceBasisTag(row: Row): { text: string; color: string } | null {
   if (props.schema !== 'quote') return null
@@ -449,7 +465,12 @@ const columns = computed(() => {
         </template>
 
         <template v-else-if="column.dataIndex === '_warn'">
-          <!-- kept for backward compat — now _dev column does the heavy lifting -->
+          <a-tooltip v-if="rowWarnings(record as Row).length > 0">
+            <template #title>
+              <div v-for="(w, i) in rowWarnings(record as Row)" :key="i">{{ w.title }}</div>
+            </template>
+            <WarningOutlined :style="{ color: rowWarnings(record as Row)[0].color, fontSize: '15px', cursor: 'default' }" />
+          </a-tooltip>
         </template>
         <template v-else-if="column.dataIndex === 'extended_attrs'">
           <div v-if="(record as TenderRow).extended_attrs && Object.keys((record as TenderRow).extended_attrs!).length > 0" class="ext-attrs">

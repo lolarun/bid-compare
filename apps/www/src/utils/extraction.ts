@@ -11,6 +11,7 @@ import type {
   QuoteExtractionItem,
   TenderExtractionItem,
   TenderBrandReq,
+  QualityMeta,
 } from '@/api/client'
 
 export interface TenderExtractionShape {
@@ -213,4 +214,16 @@ export function asExtractionShape(
   job: ExtractionJob,
 ): TenderExtractionShape | QuoteExtractionShape {
   return job.type === 'tender' ? asTenderShape(job.result) : asQuoteShape(job.result)
+}
+
+/**
+ * Extract the `_quality` metadata block (评审 R2) from a job result.
+ * Returns null when absent — older jobs recognized before the backend fix
+ * (or jobs whose pipeline never set it) simply have no signal to show;
+ * callers must treat null as "unknown", not as "PASS".
+ */
+export function asQualityMeta(result: unknown): QualityMeta | null {
+  if (!isObj(result)) return null
+  const q = result._quality
+  return isObj(q) ? (q as unknown as QualityMeta) : null
 }

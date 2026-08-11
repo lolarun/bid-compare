@@ -481,6 +481,41 @@ export interface ExtractionJob {
   updated_at: string | null
 }
 
+// 前端评审 R2（第1块）：quality_status/quality_blocking_reasons/row_ledger/
+// orientation_unresolved 此前在 document_ingestion.py 就被丢弃，从未到达
+// job.result。后端已修复（_merge_quality_metadata，写入 job.result._quality），
+// 这里补上对应的 TS 类型，供 R2 后续几块的质量分层横幅/行标记使用。
+export interface RowLedgerPageDrop {
+  page: number
+  role?: string
+  reason: string
+  expected: number
+  extracted?: number
+  lost?: number
+  rotation_applied?: boolean
+}
+
+export interface RowLedger {
+  target_pages: number
+  expected_rows: number
+  recognized_rows: number
+  dropped_rows: number
+  empty_pages: RowLedgerPageDrop[]
+  short_pages: RowLedgerPageDrop[]
+}
+
+export interface QualityMeta {
+  doc_type?: string
+  quality_status?: 'PASS' | 'REVIEW' | 'BLOCKED' | string
+  quality_blocking_reasons?: string[]
+  page_count?: number
+  target_pages?: number[]
+  row_ledger?: RowLedger | null
+  rotations?: Record<string, number> | null
+  orientation_unresolved?: number[] | null
+  recognizer?: string
+}
+
 export interface TenderExtractionItem {
   name: string
   category: string
