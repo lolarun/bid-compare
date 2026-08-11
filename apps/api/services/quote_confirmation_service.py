@@ -81,14 +81,36 @@ def _build_checksum(job, line_total_sum: float, line_count: int) -> dict:
     except (TypeError, ValueError):
         declared = None
     if not declared or declared <= 0 or line_count <= 0:
+        log.info("checksum_sample status=unknown line_count=%s line_sum=%.2f declared=%s",
+                 line_count, line_total_sum, declared)
         return {"declared": declared, "line_sum": round(line_total_sum, 2),
-                "delta_pct": None, "status": "unknown",
+                "delta_pct": None, "status": "unknown", "line_count": line_count,
                 "reason": "文件未给出声明总价，无法闭环校验"}
-    delta = abs(line_total_sum - declared) / declared
+    abs_delta = line_total_sum - declared
+    delta = abs(abs_delta) / declared
+    status = "pass" if delta <= CHECKSUM_BLOCK_DELTA_RATIO else "fail"
+
+    # 埋点（docs/design/20 §5）。现行阈值是**比例**，而合法残差来自逐行两位小数的
+    # 舍入——那随行数增长、不随金额增长。要换成按行数给容差，先得知道真实分布，
+    # 而这个分布现在拿不到：七份离线样本既不含清单外项目（税费/优惠/暂列金）的
+    # 情形，也不代表生产文档的构成。
+    #
+    # 故先只记录、不改判定：绝对差、行数、每行摊到多少，三样都要有。
+    # 只记 delta_pct 是不够的——它正是被质疑的那个口径。
+    log.info(
+        "checksum_sample status=%s line_count=%d declared=%.2f line_sum=%.2f "
+        "abs_delta=%.2f delta_pct=%.4f per_row_delta=%.4f",
+        status, line_count, declared, line_total_sum, abs_delta,
+        delta * 100, abs_delta / line_count,
+    )
     return {"declared": declared, "line_sum": round(line_total_sum, 2),
             "delta_pct": round(delta * 100, 3),
             "threshold_pct": round(CHECKSUM_BLOCK_DELTA_RATIO * 100, 3),
-            "status": "pass" if delta <= CHECKSUM_BLOCK_DELTA_RATIO else "fail"}
+            # 下面两个字段供分布分析用，不参与判定（判定仍只看 delta_pct）
+            "line_count": line_count,
+            "abs_delta": round(abs_delta, 2),
+            "per_row_delta": round(abs_delta / line_count, 4),
+            "status": status}
 
 
 def _integrity_row(items: list[dict], i: int, flags: list[str]) -> dict:
