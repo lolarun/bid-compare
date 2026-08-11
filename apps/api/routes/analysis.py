@@ -29,13 +29,13 @@ from apps.api.services.statistics import (
     get_dashboard_bubble,
 )
 from apps.api.services.bid_insight import generate_bid_insight
+from apps.api.services.draft_integrity import check_row_arithmetic
 from apps.api.core.config import get_settings
 from apps.api.core.utils import parse_id_csv
 from apps.api.core.domain_config import (
     MATCH_PRICE_COVERAGE_THRESHOLD,
     MATCH_ARITHMETIC_MAX_ERROR_RATE,
     MATCH_DERIVED_TOTAL_MAX_RATE,
-    MATCH_ARITHMETIC_VAT_TOLERANCE,
     MATCH_VAT_MISMATCH_BLOCK_RATE,
     MATCH_MAX_LINE_CONCENTRATION,
     MATCH_DECLARED_TOTAL_TOLERANCE,
@@ -1031,44 +1031,30 @@ async def tender_list_match(
                 _tls_b.brand_requirement, _tls_b.supplier_brand_map
             )
 
-    # ── 硬闸门 v4.1：submission_ids 显式传入时三重校验 ─────────────────────────
-    # 1. 属于当前项目且 status 非 rejected/superseded
-    # 2. 在当前品类下存在 BQL（防止 category 空导致静默跳过）
-    # 3. 数量必须与传入集合完全一致（防止 resolve 多返）
+    # ── 硬闸门 v4.1：submission_ids 显式传入时双重校验 ─────────────────────────
+    # 1. 归属 + 状态 + BQL 存在，权威实现是 bid_submission_resolve.resolve_active_
+    #    submissions（评审 D3：此前这里手写两条 where 子句，与该函数各自独立
+    #    维护、docstring 明写"MUST call this function"却没人调用，容易再次分叉）。
+    # 2. 综合数据质量门
     if sub_ids:
-        from apps.api.models.bid_submission import BidSubmission as _BSM, BidQuoteLine as _BQLM
+        from apps.api.models.bid_submission import BidQuoteLine as _BQLM
+        from apps.api.services.bid_submission_resolve import resolve_active_submissions
         _cat_for_check = category or ""
 
-        # 校验 1：归属 + 状态
-        _valid_subs: set[int] = set(db.scalars(select(_BSM.id).where(
-            _BSM.id.in_(sub_ids),
-            _BSM.project_id == project_id,
-            _BSM.status.notin_(["rejected", "superseded"]),
-        )).all())
-        _invalid = [sid for sid in sub_ids if sid not in _valid_subs]
+        _valid_map = resolve_active_submissions(
+            db, project_id, _cat_for_check, submission_ids=sub_ids,
+        )
+        _invalid = [sid for sid in sub_ids if sid not in _valid_map]
         if _invalid:
             raise HTTPException(
                 409,
-                f"以下 submission 不属于当前项目或已被废弃（rejected/superseded）：{_invalid}。",
+                f"以下 submission 不可用：{_invalid}。可能原因——不属于当前项目、"
+                f"已被废弃（rejected/superseded），或在品类「{_cat_for_check}」下无 "
+                "BidQuoteLine（入库时 category 传空被静默跳过）。请确认归属与状态，"
+                "或重新执行「校对入库」（确认品类非空）后再对齐。",
             )
 
-        # 校验 2：BQL 存在
-        _subs_with_bql: set[int] = set(db.scalars(
-            select(_BSM.id).join(_BQLM, _BSM.id == _BQLM.submission_id).where(
-                _BSM.id.in_(sub_ids),
-                _BQLM.category == _cat_for_check,
-            )
-        ).all())
-        _missing_bql = [sid for sid in sub_ids if sid not in _subs_with_bql]
-        if _missing_bql:
-            raise HTTPException(
-                409,
-                f"以下 submission 在品类「{_cat_for_check}」下无 BidQuoteLine "
-                f"（入库时 category 传空被静默跳过）：{_missing_bql}。"
-                "请重新执行「校对入库」（确认品类非空）后再对齐。",
-            )
-
-        # 校验 3：综合数据质量门
+        # 校验 2：综合数据质量门
         # 检查项：price_coverage / arithmetic_error_rate / systematic_vat_mismatch /
         #         line_concentration / declared_total_mismatch / line_exceeds_declared_total
         from apps.api.models.extraction_job import ExtractionJob as _EJM
@@ -1086,7 +1072,7 @@ async def tender_list_match(
 
         _quality_failures = []
         for _sid in sub_ids:
-            _sub_obj = db.get(_BSM, _sid)
+            _sub_obj = _valid_map.get(_sid)
 
             # 统一资格判据（submission_eligibility）：状态 / 声明总价闭环 / 列错位 /
             # 合价来源 / 价格覆盖率。此前这里完全不看 checksum——一份闭环失败的报价
@@ -1155,11 +1141,7 @@ async def tender_list_match(
                         or "derived_total" in (meta.get("validation_flags") or []))
 
             _derived = [b for b in _eligible if _is_derived_total(b)]
-            _evaluable = [
-                b for b in _eligible
-                if (b.qty or 0) > 0 and (b.unit_price or 0) > 0 and (b.total_price or 0) > 0
-                and not _is_derived_total(b)
-            ]
+            _non_derived = [b for b in _eligible if not _is_derived_total(b)]
 
             # 派生行本身也是问题：原文没有合价，系统替它算了一个。占比过高时
             # 这份报价的金额不可作为比价依据。
@@ -1177,23 +1159,30 @@ async def tender_list_match(
                         for b in _derived[:5]
                     ],
                 })
-            _hard_errors, _vat_suspects = [], []
-            for _b in _evaluable:
-                _calc = _b.qty * _b.unit_price
-                _denom = max(abs(_b.total_price), abs(_calc))
-                _dev = abs(_b.total_price - _calc) / _denom if _denom else 0.0
-                if _dev > MATCH_ARITHMETIC_VAT_TOLERANCE:
-                    _hard_errors.append({
-                        "bql_id": _b.id,
-                        "raw_name": _b.raw_name,
-                        "qty": _b.qty,
-                        "unit_price": _b.unit_price,
-                        "total_price": _b.total_price,
-                        "calc": round(_calc, 2),
-                        "deviation": round(_dev, 4),
-                    })
-                elif _dev > 0.01:
-                    _vat_suspects.append(_b.id)
+
+            # 算术闭合：唯一实现是 draft_integrity.check_row_arithmetic（评审 C2/D2）。
+            # 此前这里是一份独立副本，与共享实现三处分叉：容差硬编码 0.01 而非具名
+            # INTEGRITY_ARITHMETIC_TOLERANCE(0.005)；不识别"报价口径倍率"（按束/按根
+            # 报价，合价≈数量×单价×整数倍），会把合法的倍率关系误计成算术错误；
+            # 只传 unit_price/total_price 通用列——这在 BidQuoteLine 上其实是对的
+            # （二者已是确认时价格口径桥接后的 effective 值，见 quote_confirmation_
+            # service.py），传给共享实现后也自然只会命中它的通用列分支，行为一致。
+            # unit_price_excl_tax 是原始列但没有配对的 total_price_excl_tax 列，
+            # 因此不传它——传了也会因缺一半而被共享实现跳过，等价于不传。
+            _arith = {b.id: check_row_arithmetic(
+                {"qty": b.qty, "unit_price": b.unit_price, "total_price": b.total_price}
+            ) for b in _non_derived}
+            _evaluable = [b for b in _non_derived if _arith[b.id].status != "not_evaluable"]
+            _hard_errors = [
+                {"bql_id": b.id, "raw_name": b.raw_name, "qty": b.qty,
+                 "unit_price": b.unit_price, "total_price": b.total_price,
+                 "calc": (None if _arith[b.id].computed is None
+                          else round(_arith[b.id].computed, 2)),
+                 "deviation": round(_arith[b.id].deviation, 4)}
+                for b in _evaluable if _arith[b.id].status == "mismatch"
+            ]
+            _vat_suspects = [b.id for b in _evaluable
+                             if _arith[b.id].status == "tax_basis_suspect"]
 
             if _evaluable:
                 _arith_err_rate = len(_hard_errors) / len(_evaluable)

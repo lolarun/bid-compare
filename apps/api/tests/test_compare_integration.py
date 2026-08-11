@@ -1010,13 +1010,17 @@ class TestExtendedQualityGate:
         state = self._base_setup(compare_client, "算术错误供应商", "算术错误测试")
         sub_id = state["sub_id"]
 
-        # 将所有行的 total_price 乘以 3（偏差 = 200%，远超 VAT tolerance）
+        # 将所有行的 total_price 乘以 2.6（偏差 = 160%，远超 VAT tolerance）。
+        # 不用整数倍（×2/×3/×4等）——那些是 check_row_arithmetic 认得的"报价口径
+        # 倍率"（按束/按根报价），会被归类为 multiplier 而非 mismatch，不参与
+        # arithmetic_error_rate（评审 C2 修复：共享实现比这条测试原先假设的更精确，
+        # 用非整数倍保持"真实算术错误"这个测试意图不变）。
         db = SessionLocal()
         try:
             rows = db.scalars(select(BidQuoteLine).where(BidQuoteLine.submission_id == sub_id)).all()
             for row in rows:
                 if row.total_price:
-                    row.total_price = row.total_price * 3.0
+                    row.total_price = row.total_price * 2.6
             db.commit()
         finally:
             db.close()
