@@ -18,16 +18,28 @@
    提示词要求用 `父列_子列` 拍平（通用做法，不是为这份样本定制），本模块再把
    `材质_*` 收进 `materials` 字典——`_draft_row_to_anchor` 正是这么读的。
 
-## 品牌页不在这里
+## 一次解析，两个消费方
 
-`brand_requirement` / `supplier_brands` 来自另一页、另一种版式，属于独立的抽取任务。
-本模块只出清单锚点；品牌页仍走既有路径，见 `services/tender_pdf.py`。
+招标（比价）与邀标对**招标文件解析能力的要求是一致的**：都要采购清单，也都要封面
+四标量（项目名称/编号/日期/截止时间）。差别只在下游怎么用——比价把清单转成
+TenderAnchor，邀标把标量存进招标记录。所以解析只有一份
+（`parse_tender_document`），两个入口各自映射输出。
+
+封面标量在比价链路里**目前没有消费方**，但仍然抽取并返回：供应商推荐将来会用到，
+而"现在没人读"不是不抽的理由——一份解析器对同一种文档应当产出同样的东西。
+
+## 品牌页还不在这里
+
+`brand_requirement` / `supplier_brands` 来自另一页、另一种版式，属于独立的抽取任务，
+VL 侧尚未实现。走 VL 时它们是空的——这是**已知能力缺口**，不是"仍走既有路径"。
+见 `services/tender_pdf.py` 与 docs/design/21。
 """
 from __future__ import annotations
 
 import io
 import logging
 import re
+from dataclasses import dataclass
 from typing import Sequence
 
 from apps.api.core.config import get_settings
@@ -124,22 +136,43 @@ def build_tender_draft(text: str, *, file_path: str, page_count: int,
     )
 
 
-def recognize_tender_vl(file_path: str, *, vl_call: VLCall,
-                        orient_call: OrientCall | None = None,
-                        progress_cb=None, votes: int | None = None,
-                        target_pages: list[int] | None = None) -> ExtractionDraft:
-    """生产入口：招标 PDF → ExtractionDraft（锚点行）。
+@dataclass
+class TenderParseResult:
+    """一次招标文件解析的全部产出。
+
+    比价与邀标共用它，各取所需——**不给两条流程各写一个解析器**，那样两边会慢慢
+    漂移，同一份 PDF 在两个入口给出不同的清单。
+    """
+    draft: ExtractionDraft                  # 采购清单（锚点行）
+    meta: dict                              # 封面四标量
+    rotations: dict
+    unresolved_pages: list
+
+
+def parse_tender_document(file_path: str, *, vl_call: VLCall,
+                          orient_call: OrientCall | None = None,
+                          progress_cb=None, votes: int | None = None,
+                          target_pages: list[int] | None = None,
+                          with_meta: bool = True) -> TenderParseResult:
+    """招标 PDF → 采购清单 + 封面标量。**渲染只做一次**，两项共用同一批图像。
 
     `target_pages` 是用户手动指定的清单页（1-based）。不指定就整份送——招标文件
     通常几十页而清单只占几页，但**页面角色分类尚未在 VL 侧实现**，整份送是当前
     唯一诚实的做法：宁可多花钱，不要靠猜跳过页（见 docs/design/21 §2.4）。
+
+    指定了清单页时，封面页仍会额外渲染——封面通常不在清单页里，漏掉它就等于
+    静默丢掉四个标量。
     """
     from PIL import Image
 
     s = get_settings()
     votes = votes if votes is not None else int(getattr(s, "QUOTE_ORIENT_VOTES", 3))
     page_count = DocumentLoader.get_page_count(file_path)
-    pages = [p for p in (target_pages or range(1, page_count + 1)) if 1 <= p <= page_count]
+    list_pages = [p for p in (target_pages or range(1, page_count + 1))
+                  if 1 <= p <= page_count]
+    meta_pages = ([p for p in range(1, META_PAGES + 1) if p <= page_count]
+                  if with_meta else [])
+    need = sorted(set(list_pages) | set(meta_pages))
 
     def _notify(stage: str, pct: int) -> None:
         if progress_cb:
@@ -147,8 +180,8 @@ def recognize_tender_vl(file_path: str, *, vl_call: VLCall,
 
     _notify("渲染页面", 15)
     images: dict[int, bytes] = {}
-    for start in range(0, len(pages), RENDER_BATCH):
-        images.update(DocumentLoader.render_pages(file_path, pages[start:start + RENDER_BATCH]))
+    for start in range(0, len(need), RENDER_BATCH):
+        images.update(DocumentLoader.render_pages(file_path, need[start:start + RENDER_BATCH]))
 
     rotations: dict[int, int] = {}
     unresolved: list[int] = []
@@ -162,11 +195,72 @@ def recognize_tender_vl(file_path: str, *, vl_call: VLCall,
                 images[p] = buf.getvalue()
 
     _notify("识别采购清单", 55)
-    text = vl_call([images[p] for p in pages if p in images], PROMPT_TENDER_CSV)
+    text = vl_call([images[p] for p in list_pages if p in images], PROMPT_TENDER_CSV)
+
+    _notify("读取封面信息", 80)
+    meta = (extract_tender_meta([images[p] for p in meta_pages if p in images], vl_call)
+            if with_meta else {k: "" for k in _META_KEYS})
 
     _notify("整理结果", 90)
-    return build_tender_draft(
+    draft = build_tender_draft(
         text, file_path=file_path, page_count=page_count,
-        processed_pages=[p for p in pages if p in images],
+        processed_pages=[p for p in list_pages if p in images],
         rotations=rotations, unresolved_pages=unresolved,
     )
+    draft.meta["tender_meta"] = meta
+    return TenderParseResult(draft=draft, meta=meta,
+                             rotations=rotations, unresolved_pages=unresolved)
+
+
+def recognize_tender_vl(file_path: str, **kw) -> ExtractionDraft:
+    """只要清单时的薄封装。保留是因为它是 `extract_bidlist` 的直接调用形态。"""
+    return parse_tender_document(file_path, **kw).draft
+
+
+# ─── 封面元信息 ──────────────────────────────────────────────────────────────
+#
+# 与采购清单是**两件事**：清单是表格、逐行；封面元信息是几个文档级标量，散落在
+# 首页的标题与落款里。硬塞进同一个 CSV 会让两者互相拖累——清单的行数校验对标量
+# 无意义，标量的缺失也不该让整份清单降级。
+#
+# 这几个字段有真实消费方（邀标流程 /invite/save 会存），所以 `extract_tender`
+# 切到 VL 时**必须一并提供**，否则就是静默清空。
+
+PROMPT_TENDER_META = """这是一份招标文件的首页。请告诉我下面四项，每行一个，格式 key: value：
+
+project_name  项目名称
+project_code  项目编号/招标编号
+tender_date   招标日期
+deadline      投标截止时间
+
+文档上没写的就留空，不要推测。只返回这四行，不要其他说明。"""
+
+_META_KEYS = ("project_name", "project_code", "tender_date", "deadline")
+# 首页够了。招标文件常有几十页，为四个标量把整份送进去是纯浪费；
+# 取前两页是为了容忍封面之后紧跟一页"招标公告"的排版。
+META_PAGES = 2
+
+
+def parse_tender_meta(text: str) -> dict[str, str]:
+    """`key: value` 逐行 → 字典。认不出的行忽略，**不猜**。"""
+    out = {k: "" for k in _META_KEYS}
+    for line in (text or "").splitlines():
+        if ":" not in line and "：" not in line:
+            continue
+        key, _, value = line.replace("：", ":").partition(":")
+        key = key.strip().lower()
+        if key in out:
+            out[key] = value.strip()
+    return out
+
+
+def extract_tender_meta(images: list[bytes], vl_call: VLCall) -> dict[str, str]:
+    """首页 → 四个文档级标量。失败不抛异常——**清单才是主线**，
+    元信息缺失应当留空并可见，不该让整份识别失败。"""
+    if not images:
+        return {k: "" for k in _META_KEYS}
+    try:
+        return parse_tender_meta(vl_call(images[:META_PAGES], PROMPT_TENDER_META))
+    except Exception:                                            # noqa: BLE001
+        log.warning("招标封面元信息抽取失败，四个标量留空", exc_info=True)
+        return {k: "" for k in _META_KEYS}

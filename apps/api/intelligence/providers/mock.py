@@ -50,10 +50,19 @@ class MockProvider(LLMProvider):
             pages = sorted({int(m.group(1)) for l in labels
                             if (m := re.match(r"PAGE_(\d+)_ROT_", l))})
             return "\n".join(f"{p},0" for p in pages)
+        # 招标文件解析有两种调用：采购清单（CSV）与封面标量（key: value）。
+        # **必须按提示词区分**——它们的产出形状完全不同，混用会让招标任务拿到
+        # 报价形状的数据（实测：封面四标量全空，邀标流程存不进招标记录）。
+        if "key: value" in prompt:
+            return self._canned_tender_meta()
+        is_tender = "采购清单" in prompt or "招标文件" in prompt
+
         if self.vl_csv is not None:
             return self.vl_csv
         if self.fixture_dir and (self.fixture_dir / "quote_vl.csv").exists():
             return (self.fixture_dir / "quote_vl.csv").read_text(encoding="utf-8")
+        if is_tender:
+            return self._tender_csv_from_canned(images)
 
         # 默认从 `self.extract()` 派生 —— **同一个数据源，两种表达**。
         #
@@ -76,6 +85,41 @@ class MockProvider(LLMProvider):
         body = [f"detail,模拟材料{i},SPEC-{i},米,{i + 1},10.00,{(i + 1) * 10:.2f},1,{i + 1}"
                 for i in range(len(images))]
         return "\n".join([head, *body])
+
+    def _tender_data(self) -> dict:
+        """招标 canned 数据。与报价同理，走 self.extract 以尊重子类覆盖。"""
+        try:
+            from apps.api.intelligence.schemas import TENDER_SCHEMA
+            return (self.extract([], TENDER_SCHEMA, "").data or {})
+        except Exception:                                        # noqa: BLE001
+            return {}
+
+    def _canned_tender_meta(self) -> str:
+        """封面四标量 → `key: value` 逐行。取自与清单**同一份** canned 数据。"""
+        d = self._tender_data()
+        return "\n".join(
+            f"{k}: {d.get(k) or ''}"
+            for k in ("project_name", "project_code", "tender_date", "deadline")
+        )
+
+    def _tender_csv_from_canned(self, images: list[bytes]) -> str:
+        """招标采购清单 CSV。序号按顺序生成——**它是行轴**，canned 数据里没有就得有。"""
+        items = self._tender_data().get("items") or []
+        if not items:
+            head = "row_type,序号,项目名称,规格,计量单位,数量,page"
+            return "\n".join([head] + [
+                f"detail,{i + 1},模拟材料{i},SPEC-{i},个,{i + 1},{i + 1}"
+                for i in range(len(images))])
+        head = "row_type,序号,项目名称,规格,计量单位,数量,备注,page"
+
+        def cell(v) -> str:
+            return "" if v is None else str(v).replace(",", "、")
+
+        return "\n".join([head] + [
+            ",".join(["detail", str(i + 1), cell(it.get("name")), cell(it.get("spec")),
+                      cell(it.get("unit")), cell(it.get("quantity")),
+                      cell(it.get("remark")), "1"])
+            for i, it in enumerate(items)])
 
     @staticmethod
     def _items_to_csv(items: list[dict]) -> str:

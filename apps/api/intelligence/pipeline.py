@@ -73,11 +73,75 @@ class ExtractionPipeline:
     ) -> ExtractionResponse:
         _notify(progress_cb, "渲染PDF", 10)
         t_start = time.time()
+
+        # 招标（比价）与邀标对**招标文件解析能力的要求是一致的**：都要采购清单，
+        # 也都要封面四标量。故两个入口共用 `parse_tender_document`，只在输出映射上
+        # 不同——本方法映射成 TENDER_SCHEMA，`extract_tender_bidlist` 映射成
+        # TenderAnchor。给两条流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
+        if hasattr(self.provider, "vl_extract_csv"):
+            from apps.api.intelligence.vl_tender import parse_tender_document
+
+            s = get_settings()
+            parsed = parse_tender_document(
+                file_path,
+                vl_call=lambda imgs, prompt: self.provider.vl_extract_csv(
+                    imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+                orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
+                    [b for _t, b in parts], prompt,
+                    model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+                progress_cb=progress_cb,
+            )
+            return self._tender_draft_to_response(parsed, t_start)
+
+        log.warning(
+            "provider %s 没有 vl_extract_csv，招标文件走逐页批量兜底。",
+            type(self.provider).__name__,
+        )
         images = DocumentLoader.to_images(file_path)
         resp = self._run_batched(images, TENDER_SCHEMA, TENDER_PROMPT, "tender", progress_cb)
         _notify(progress_cb, "整理结果", 95)
         resp.data = self._postprocess_tender(resp.data)
         self._log_extraction("tender", file_path, images, resp, t_start)
+        return resp
+
+    def _tender_draft_to_response(self, parsed, t_start: float) -> ExtractionResponse:
+        """TenderParseResult → TENDER_SCHEMA 形状的 ExtractionResponse。
+
+        与 `extract_tender_bidlist` 读的是**同一个 draft**，只是取的字段不同：
+        这里要 TENDER_SCHEMA 的 name/category/spec/unit/quantity/remark，
+        那边要 TenderAnchor 的 seq/pressure/materials/canonical。
+        """
+        draft = parsed.draft
+        items = [
+            {
+                "name": r.fields.get("name") or "",
+                # 品类由 _postprocess_tender 的既有推断补齐，识别侧不猜
+                "category": "",
+                "spec": r.fields.get("spec") or "",
+                "unit": r.fields.get("unit") or "",
+                "quantity": r.fields.get("qty"),
+                "remark": r.fields.get("remark") or "",
+                # 未落槽位的列原样带出——换个品类（桥架的表面处理等）全靠它
+                "extended_attrs": dict(r.extra_fields or {}),
+            }
+            for r in draft.rows if r.row_type == "quote_line"
+        ]
+        data = {**parsed.meta, "items": items}
+        resp = ExtractionResponse(
+            data=self._postprocess_tender(data),
+            raw_text="", confidence=1.0, tokens_used=0,
+            provider=getattr(self.provider, "name", ""),
+            duration_ms=int((time.time() - t_start) * 1000),
+            metadata={
+                "doc_type": "tender",
+                "recognizer": "vl_direct",
+                "quality_status": draft.quality.status,
+                "quality_blocking_reasons": list(draft.quality.blocking_reasons or []),
+                "row_ledger": draft.ledger.to_dict() if draft.ledger else None,
+                "rotations": parsed.rotations,
+                "orientation_unresolved": parsed.unresolved_pages,
+            },
+        )
         return resp
 
     def extract_tender_bidlist(

@@ -120,3 +120,102 @@ def test_build_tender_fields_never_invents_values():
     """空就是空。招标清单的缺失值不得被补齐——它是行轴的一部分，猜错就是串行。"""
     f = build_tender_fields(lambda _s: "", {}, {})
     assert f["name"] == "" and f["qty"] is None and f["materials"] == {}
+
+
+# ─── 一份解析器，两个消费方 ──────────────────────────────────────────────────
+#
+# 招标（比价）与邀标对招标文件解析能力的要求**一致**：都要采购清单，也都要封面
+# 四标量。给两条流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
+
+import re  # noqa: E402
+
+from apps.api.intelligence.vl_tender import (  # noqa: E402
+    parse_tender_document,
+    parse_tender_meta,
+)
+
+_META_TEXT = ("project_name: 示例项目A标段\nproject_code: XX-2026-001\n"
+              "tender_date: 2026-03-01\ndeadline: 2026-03-20")
+_LIST_CSV = ("row_type,序号,项目名称,规格,计量单位,数量,page\n"
+             "detail,1,闸阀,DN100,个,10,1\ndetail,2,蝶阀,DN50,个,20,1")
+
+
+class _FakeVL:
+    """按提示词区分三种调用：方向 / 清单 / 封面。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, images, prompt, **_kw):
+        kind = "meta" if "key: value" in prompt else "list"
+        self.calls.append((kind, len(images)))
+        return _META_TEXT if kind == "meta" else _LIST_CSV
+
+    def orient(self, parts, _prompt):
+        self.calls.append(("orient", len(parts)))
+        return "\n".join(f"{int(m.group(1))},0" for _l, _b in parts
+                         for m in [re.match(r"PAGE_(\d+)_ROT_", _l)] if m)
+
+
+@pytest.fixture
+def tender_pdf():
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[3] / "docs/test/金桥地体上盖招标文件.pdf"
+    if not p.exists():
+        pytest.skip(f"招标夹具缺失：{p}")
+    return str(p)
+
+
+def test_one_parse_yields_both_list_and_cover_scalars(tender_pdf):
+    vl = _FakeVL()
+    r = parse_tender_document(tender_pdf, vl_call=vl, target_pages=[5])
+    assert len(r.draft.rows) == 2
+    assert r.meta["project_name"] == "示例项目A标段"
+    assert r.meta["deadline"] == "2026-03-20"
+    assert r.draft.meta["tender_meta"] == r.meta
+
+
+def test_cover_pages_are_rendered_even_when_list_pages_are_pinned(tender_pdf):
+    """指定清单页时封面通常不在其中；漏渲染它就等于静默丢掉四个标量。"""
+    vl = _FakeVL()
+    parse_tender_document(tender_pdf, vl_call=vl, target_pages=[5])
+    kinds = dict(vl.calls)
+    assert kinds["list"] == 1, "清单只送指定的那一页"
+    assert kinds["meta"] >= 1, "封面页必须另外渲染并送检"
+
+
+def test_render_happens_once_for_both_extractions(tender_pdf):
+    """清单与封面共用同一批图像——渲染两次是纯浪费，且两次结果可能不一致。"""
+    from apps.api.intelligence import vl_tender as vt
+    calls = {"n": 0}
+    real = vt.DocumentLoader.render_pages
+
+    def counting(path, pages):
+        calls["n"] += 1
+        return real(path, pages)
+
+    vt.DocumentLoader.render_pages = staticmethod(counting)
+    try:
+        parse_tender_document(tender_pdf, vl_call=_FakeVL(), target_pages=[5])
+    finally:
+        vt.DocumentLoader.render_pages = staticmethod(real)
+    assert calls["n"] == 1, f"渲染被调用 {calls['n']} 次，应为 1"
+
+
+def test_meta_failure_does_not_sink_the_list(tender_pdf):
+    """清单才是主线。封面读不出应当留空并可见，不该让整份识别失败。"""
+    def flaky(images, prompt, **_kw):
+        if "key: value" in prompt:
+            raise RuntimeError("meta down")
+        return _LIST_CSV
+
+    r = parse_tender_document(tender_pdf, vl_call=flaky, target_pages=[5])
+    assert len(r.draft.rows) == 2
+    assert r.meta == {"project_name": "", "project_code": "",
+                      "tender_date": "", "deadline": ""}
+
+
+def test_meta_parser_ignores_unknown_lines_and_never_guesses():
+    m = parse_tender_meta("project_name: A\n随便一行没有冒号\nunknown_key: B\ndeadline：C")
+    assert m["project_name"] == "A" and m["deadline"] == "C"
+    assert m["project_code"] == "" and m["tender_date"] == ""

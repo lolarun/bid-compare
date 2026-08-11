@@ -300,10 +300,10 @@ def extract_bidlist(
     use_vl = hasattr(provider, "vl_extract_csv") and xlsx_path is None
     if use_vl:
         from apps.api.core.config import get_settings
-        from apps.api.intelligence.vl_tender import recognize_tender_vl
+        from apps.api.intelligence.vl_tender import parse_tender_document
 
         s = get_settings()
-        draft = recognize_tender_vl(
+        parsed = parse_tender_document(
             file_path,
             vl_call=lambda imgs, prompt: provider.vl_extract_csv(
                 imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
@@ -313,6 +313,7 @@ def extract_bidlist(
             progress_cb=progress_cb,
             target_pages=bidlist_pages or None,
         )
+        draft = parsed.draft
     else:
         if not (hasattr(provider, "ocr_pages_with_roles")
                 and hasattr(provider, "_llm_call_json")):
@@ -372,7 +373,13 @@ def extract_bidlist(
     _cat_counts = Counter(item["category"] for item in items_out if item.get("category"))
     detected_category = _cat_counts.most_common(1)[0][0] if _cat_counts else ""
 
+    # 封面四标量。比价链路目前不消费它们，但仍然返回——供应商推荐将来会用到，
+    # 且**同一份解析器对同一种文档应当产出同样的东西**，不该因为下游暂时不读就不给。
+    tender_meta = (draft.meta or {}).get("tender_meta") or {}
+
     return {
+        **{k: tender_meta.get(k, "") for k in
+           ("project_name", "project_code", "tender_date", "deadline")},
         "items": items_out,
         "brand_requirement": brand_requirement,
         "supplier_brands": supplier_brands,
