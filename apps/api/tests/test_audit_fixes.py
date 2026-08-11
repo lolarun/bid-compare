@@ -91,7 +91,7 @@ class TestContextAwareIdempotency:
 # ─── Backend audit-fix B: batch_confirm idempotency ────────────────────────
 class TestBatchConfirmIdempotency:
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
             "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -115,8 +115,6 @@ class TestBatchConfirmIdempotency:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -184,7 +182,7 @@ class TestBatchConfirmShapeGuard:
     editor would hit the guard."""
 
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
             "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -203,8 +201,6 @@ class TestBatchConfirmShapeGuard:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -345,7 +341,7 @@ class TestCategoryTokenMatch:
 # ─── Backend audit-fix H5: invite/save with all-invalid supplier_ids ───────
 class TestInviteSaveValidation:
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
             "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -356,8 +352,6 @@ class TestInviteSaveValidation:
             lambda: ExtractionPipeline(MockProvider()),
         )
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -389,7 +383,7 @@ class TestOrphanProjectGuard:
     batch-confirm must NOT silently null it; it should 400."""
 
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
             "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -403,8 +397,6 @@ class TestOrphanProjectGuard:
             lambda: ExtractionPipeline(MockProvider(canned=canned)),
         )
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -528,10 +520,8 @@ class TestSupplierDeletionGuard:
     """Policy: suppliers referenced by quotes/invitations cannot be deleted."""
 
     @pytest.fixture
-    def client(self, temp_db):
+    def client(self, temp_db, auth_override):
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 

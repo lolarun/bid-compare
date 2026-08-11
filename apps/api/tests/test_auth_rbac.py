@@ -494,3 +494,49 @@ class TestRBACOtherEndpoints:
             "value": {"a": 0.5, "b": 0.5},
         })
         assert resp.status_code == 403
+
+
+# ── 8. Global auth dependency wiring (main.py) ───────────────────────────────
+#
+# 评审 G1：main.py 给除 auth 路由外的一切路由挂了全局鉴权依赖
+# （`for router in all_routers: ... else: app.include_router(router,
+# dependencies=[Depends(get_current_user)])`），但这条全局装配本身从未被独立
+# 测过——已有的 401 用例（TestAuthMe.test_me_without_token_returns_401、
+# TestUserCRUD_RBAC.test_create_user_without_token_returns_401）都长在
+# /api/auth 或 /api/users 自己的路由文件里，测的是那个端点，不是全局装配。
+# 且多个测试文件曾各自手写 `app.dependency_overrides[get_current_user] = ...`
+# 从不清理（G1 的另一半），使得鉴权在实践中"总是绿的"，掩盖了这条全局装配
+# 从未被验证过的事实。这里选一个与 auth/users 无关的路由（/api/suppliers）
+# 直接验证装配本身：无 token 必须 401，有效 token 必须放行。
+class TestGlobalAuthDependency:
+    def test_unrelated_route_401s_without_token(self, client):
+        """/api/suppliers 与 auth/users 路由无关，验证的是 main.py 的全局装配
+        本身，不是某个路由自己写的鉴权检查。"""
+        resp = client.get("/api/suppliers")
+        assert resp.status_code == 401
+
+    def test_unrelated_route_succeeds_with_valid_token(self, client, temp_engine):
+        _, SessionLocal = temp_engine
+        db = SessionLocal()
+        _create_user(db, "admin", "admin123", ROLE_ADMIN, nickname="管理员")
+        db.close()
+
+        token = self._login_token(client, "admin", "admin123")
+        resp = client.get("/api/suppliers", headers=_auth_header(token))
+        assert resp.status_code == 200
+
+    def test_auth_router_itself_is_not_gated(self, client):
+        """/api/auth/login 必须不需要 token 就能访问——否则谁都登不进去。
+
+        故意用不存在的用户名：无论如何都会 401，但来源必须是登录路由自己的
+        "用户名或密码错误"，而不是全局鉴权依赖在进路由前就先拒绝了请求
+        （那样 detail 会是 FastAPI 标准的 "Not authenticated"）。
+        """
+        resp = client.post("/api/auth/login", json={"username": "nobody", "password": "x"})
+        assert resp.status_code == 401
+        assert "用户名或密码错误" in resp.json()["detail"]
+
+    @staticmethod
+    def _login_token(client, username, password):
+        resp = _login(client, username, password)
+        return resp.json()["access_token"]

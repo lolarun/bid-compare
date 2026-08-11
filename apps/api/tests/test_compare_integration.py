@@ -111,7 +111,7 @@ class _CycleProvider(MockProvider):
 
 
 @pytest.fixture
-def compare_client(temp_db, monkeypatch, tmp_path):
+def compare_client(temp_db, monkeypatch, tmp_path, auth_override):
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
         "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
@@ -124,8 +124,6 @@ def compare_client(temp_db, monkeypatch, tmp_path):
         lambda: ExtractionPipeline(cycle_provider),
     )
     from apps.api.main import app
-    from apps.api.routes.auth import get_current_user
-    app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
 
     with TestClient(app) as c:
         yield c

@@ -15,8 +15,18 @@ from PIL import Image
 
 
 @pytest.fixture
-def client(temp_db, monkeypatch, fixture_dir, tmp_path):
-    """Build app with MockProvider + isolated DB + tmp uploads dir."""
+def client(temp_db, monkeypatch, fixture_dir, tmp_path, auth_override):
+    """Build app with MockProvider + isolated DB + tmp uploads dir.
+
+    Explicitly depends on `auth_override` (评审 G1): intake routes carry the
+    same global auth dependency as everything else (main.py). This file used
+    to set no override at all and still pass — only because some other test
+    file that ran earlier in the same process (alphabetically, mostly
+    test_compare_integration.py) left `app.dependency_overrides` dirty and
+    never cleaned it up. Run this file alone and all 7 tests 401. These tests
+    are about upload/job-lifecycle behavior, not auth, so they authenticate
+    explicitly rather than relying on ambient state from an unrelated file.
+    """
     # Force mock provider regardless of env
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
