@@ -78,3 +78,18 @@ scripts/**/*.json
 tmp/
 data/test_*/
 data/debug_*/
+
+# ── 2026-08-11：以下目录此前未被忽略，`git add .` 会把它们写进历史 ──────────
+# data/ 达 1.1GB：*.db 已被忽略，但**备份 *.db.bak 没有**，而备份里是真实客户数据。
+# data/ 下默认全忽略——里面有生产库拉取（data/prod-pull/*.db）、备份、诊断产物。
+# **只放行 golden**：它是测试夹具，此前一直未跟踪，导致干净克隆跑不了
+# test_cable_golden.py 的 A 层。
+data/*
+!data/golden/
+!data/golden/**
+# 工具与临时产物
+.tmp/
+.workbuddy/
+output/
+# Office 打开文档时生成的锁文件
+~$*
