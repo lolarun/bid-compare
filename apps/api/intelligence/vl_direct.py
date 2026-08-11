@@ -96,12 +96,75 @@ PROMPT_ORIENT = """下面每一页给了 4 个旋转版本，标签形如 PAGE_<
 对每一页，挑出文字正立、可以正常阅读的那个角度。
 只返回 CSV 两列：page,rotation。"""
 
+# ─── 报价封面元信息（声明总价 / 投标单位 / 税率）─────────────────────────────
+#
+# 与采购清单是两件事：清单逐行、封面是文档级标量。这几个字段喂给两处生产判据：
+# 声明总价核对门（quote_confirmation_service._build_checksum）和供应商识别。
+# 此前 VL 路径从不产出——门本身在 §A3 已验证逻辑正确，只是从未接到过输入，
+# 生产上对任何 PDF 报价都是 unknown/不阻断，见 docs/design/21 §2.2/§2.3。
+PROMPT_QUOTE_META = """这是一份投标文件的首页或汇总页。请告诉我下面四项，每行一个，格式 key: value：
+
+supplier_name      投标单位/报价单位全称
+bid_total          投标总价（只要数字，不要货币符号和单位）
+bid_total_basis    该总价是否含税：tax_included / tax_excluded / unknown
+tax_rate           税率，小数形式（如 13% 写 0.13）
+
+文档上没写的就留空，不要推测。只返回这四行，不要其他说明。"""
+
+QUOTE_META_PAGES = 2   # 首页够了，为四个标量渲染整份是纯浪费
+
+
+def parse_quote_meta(text: str) -> dict:
+    """`key: value` 逐行 → 字典。与 vl_tender.parse_tender_meta 同一形态，
+    分开实现是因为字段集合不同（供应商/总价 vs 项目名称/日期）。
+
+    数值字段（bid_total/tax_rate）缺省是 **None 不是空串**：下游
+    `declared_total_diff`（extraction_draft.py）拿它跟明细之和做减法，
+    传空串会直接 TypeError——这不是防御性编程，是类型契约。
+    """
+    out: dict = {"supplier_name": "", "bid_total": None,
+                "bid_total_basis": "unknown", "tax_rate": None}
+    for line in (text or "").splitlines():
+        if ":" not in line and "：" not in line:
+            continue
+        key, _, value = line.replace("：", ":").partition(":")
+        key = key.strip().lower()
+        if key not in out:
+            continue
+        value = value.strip()
+        if key == "bid_total":
+            out[key] = _num(value)
+        elif key == "tax_rate":
+            out[key] = _num(value)
+        else:
+            out[key] = value
+    if out["bid_total_basis"] not in ("tax_included", "tax_excluded", "unknown"):
+        out["bid_total_basis"] = "unknown"
+    return out
+
+
+def extract_quote_meta(images: list[bytes], vl_call: VLCall) -> dict:
+    """封面 1-2 页 → 声明总价等四项。失败留空——清单才是主线，
+    不该让整份识别因为封面读不出而失败。"""
+    empty = parse_quote_meta("")   # 单一来源的"空"形状，不在两处各写一份
+    if not images:
+        return empty
+    try:
+        return parse_quote_meta(vl_call(images[:QUOTE_META_PAGES], PROMPT_QUOTE_META))
+    except Exception:                                            # noqa: BLE001
+        log.warning("报价封面元信息抽取失败，四项留空", exc_info=True)
+        return empty
+
 # 列名映射。**不假定固定列名**——提示词有意让模型用文档自己的表头（这正是泛化要的），
 # 消费方必须自己映射。中英都认：同一个模型在不同文档上会自发切换表头语言。
-# 「这是不含税列」的判据。实测模型写法不受控：excl / ex_tax / exclusive / 税前 都出现过，
-# 漏一种就意味着不含税的值被装进含税槽位，偏差恰好等于税率。
+#
+# 「这是不含税列」/「这是含税列」的判据。实测模型写法不受控：excl / ex_tax /
+# exclusive / 税前 都出现过，漏一种就意味着不含税的值被装进含税槽位，偏差恰好
+# 等于税率。
 _EXCL = ("不含税", "未含税", "税前",
          "excl", "ex_tax", "ex-tax", "extax", "pre_tax", "pretax", "net_of_tax")
+_INCL = ("含税", "价税合计", "incl", "inc_tax", "in-tax", "intax", "with_tax")
+
 _SLOTS: dict[str, list[tuple[str, ...]]] = {
     "name":        [("名称",), ("品名",), ("材料",), ("name",)],
     "spec":        [("规格",), ("型号",), ("spec",), ("model",)],
@@ -110,14 +173,18 @@ _SLOTS: dict[str, list[tuple[str, ...]]] = {
     "brand":       [("品牌",), ("厂家",), ("brand",)],
     # 中英模式必须**对称**：模型在不同文档上会自发切换表头语言（实测），
     # 只在一种语言里认得出税基，等于在另一种语言下静默丢失税基。
-    "unit_price":  [("含税单价",), ("单价", "含税"), ("综合单价",), ("单价",),
-                    ("unit_price", "incl"), ("unit_price", "inc_tax"),
-                    ("unit_price", "with_tax"), ("price", "inc_tax"),
-                    ("unit_price",), ("unit", "price"), ("price",)],
-    "total_price": [("价税合计",), ("含税合价",), ("含税金额",), ("合价",), ("金额",),
-                    ("总价",), ("total", "incl"), ("total", "inc_tax"),
-                    ("total", "with_tax"), ("amount", "inc_tax"),
-                    ("total_price",), ("total", "amount"), ("amount",)],
+    #
+    # 含税/不含税槽位在字典里排在通用槽位**之前**是有意的：`map_columns` 逐槽位
+    # 认领列，先到先得。若通用 unit_price/total_price 先跑，"含税单价" 会因为
+    # 含"单价"子串被通用槽位吞掉——那正是曾经发生的 bug（见 domain_config 同名
+    # 常量旁的注释）：通用槽位拿到含税值，derive_price_basis 却因为看不到
+    # unit_price_incl_tax 而判成 excl_tax，比价系统性偏低整段税率。
+    "unit_price_incl_tax":  [("含税单价",), ("单价", "含税"),
+                             ("unit_price", "incl"), ("unit_price", "inc_tax"),
+                             ("unit_price", "with_tax"), ("price", "inc_tax")],
+    "total_price_incl_tax": [("价税合计",), ("含税合价",), ("含税金额",),
+                             ("total", "incl"), ("total", "inc_tax"),
+                             ("total", "with_tax"), ("amount", "inc_tax")],
     "unit_price_excl_tax":  [("不含税单价",), ("单价", "不含税"),
                              ("unit_price", "excl"), ("unit_price", "ex_tax"),
                              ("unit_price", "pre_tax"), ("price", "excl"),
@@ -126,6 +193,13 @@ _SLOTS: dict[str, list[tuple[str, ...]]] = {
                              ("total", "excl"), ("total", "ex_tax"),
                              ("total", "pre_tax"), ("amount", "excl"),
                              ("amount", "ex_tax"), ("subtotal", "net")],
+    # 通用槽位：**只吸收既非含税也非不含税标注的列**（如"单价""合价"这种单一价格列）。
+    # 与 legacy 提示词的"若表头已区分，则留null"是同一条契约——见下面 _TAX_SENSITIVE
+    # 的 _INCL/_EXCL 双向排斥。
+    "unit_price":  [("综合单价",), ("单价",),
+                    ("unit_price",), ("unit", "price"), ("price",)],
+    "total_price": [("合价",), ("金额",), ("总价",),
+                    ("total_price",), ("total", "amount"), ("amount",)],
     "tax_rate":    [("税率",), ("tax_rate",)],
     "tax_amount":  [("税额",), ("tax_amount",)],
     "remark":      [("备注",), ("remark",), ("note",)],
@@ -134,14 +208,31 @@ _SLOTS: dict[str, list[tuple[str, ...]]] = {
     "copy_no":     [("copy_no",)],
     "page":        [("page",), ("页码",), ("页",)],
 }
+# 通用槽位对 _EXCL 与 _INCL 都要排斥——单向排斥（只挡 excl）正是 A2 缺陷的成因：
+# "含税单价" 不含 _EXCL 关键词，会被通用槽位放行、抢在 unit_price_incl_tax 之前
+# 认领掉该列（"含税单价"含"单价"子串，能匹配通用槽位的宽松 tier）。
 _TAX_SENSITIVE = {"unit_price", "total_price"}
+
+# 子串匹配还带来另一个坑：**"不含税单价" 本身包含 "含税单价" 这个子串**（不 + 含税单价），
+# 所以 unit_price_incl_tax 的 tier ("含税单价",) 会误吃"不含税"列。必须让 incl_tax
+# 槽位反过来排斥 _EXCL 标记——不对称是有意的：
+#   - unit_price/total_price（通用槽位）要挡两个方向：既不能吞"含税单价"（那是
+#     A2 缺陷本体），也不能吞"不含税单价"（那是修复前就有的旧防线）。
+#   - unit_price_incl_tax 只需挡 _EXCL：它自己的 tier 就是"含税"字样，不会误配到
+#     别的不相关列。
+#   - unit_price_excl_tax **不能**挡 _INCL：_INCL 含"含税"，而"不含税"本身就
+#     包含"含税"子串——挡了就等于挡了它自己要匹配的列，实测复现过这个反向坑。
+_EXCL_GUARDED = {"unit_price", "total_price",
+                 "unit_price_incl_tax", "total_price_incl_tax"}
+_INCL_GUARDED = {"unit_price", "total_price"}
 
 # 「税额」列绝不能落进任何价格槽位。它危险的地方在于**下游察觉不到**：
 # 税额 ≈ 不含税合价 × 税率，本身自洽，逐行算术校验照样通过，只是整份金额偏小。
 # 触发路径实测存在：末档模式 ("amount",) 会命中 tax_amount。
 _TAX_AMOUNT_MARKERS = ("税额", "tax_amount", "taxamount", "tax amt", "vat_amount")
 _PRICE_SLOTS = {"unit_price", "total_price",
-                "unit_price_excl_tax", "total_price_excl_tax"}
+                "unit_price_excl_tax", "total_price_excl_tax",
+                "unit_price_incl_tax", "total_price_incl_tax"}
 
 
 def map_columns(headers: Sequence[str], *,
@@ -160,7 +251,9 @@ def map_columns(headers: Sequence[str], *,
                     continue
                 if slot in _PRICE_SLOTS and any(x in lo for x in _TAX_AMOUNT_MARKERS):
                     continue
-                if slot in _TAX_SENSITIVE and any(x in lo for x in _EXCL):
+                if slot in _EXCL_GUARDED and any(x in lo for x in _EXCL):
+                    continue
+                if slot in _INCL_GUARDED and any(x in lo for x in _INCL):
                     continue
                 if all(k in lo for k in tier):
                     out[slot] = h
@@ -195,6 +288,12 @@ def build_quote_fields(cell, _raw_cells: dict, _cmap: dict) -> dict:
         "total_price": _num(cell("total_price")),
         "unit_price_excl_tax": _num(cell("unit_price_excl_tax")),
         "total_price_excl_tax": _num(cell("total_price_excl_tax")),
+        # A2 修复：VL 此前从不产出这两个字段（槽位表只有通用/不含税，没有含税），
+        # 导致双列（含税+不含税）文档在 derive_price_basis 里判成 excl_tax，
+        # 评标价系统性取了不含税值——下游（pipeline.py:229/232）早就在读这两个
+        # 字段，只是识别层从没填过。
+        "unit_price_incl_tax": _num(cell("unit_price_incl_tax")),
+        "total_price_incl_tax": _num(cell("total_price_incl_tax")),
         "tax_rate": _num(cell("tax_rate")),
         "tax_amount": _num(cell("tax_amount")),
     }
@@ -202,7 +301,7 @@ def build_quote_fields(cell, _raw_cells: dict, _cmap: dict) -> dict:
     # 一律变成 None，两种语义就此不可分辨（前者合法，后者是缺陷）。
     fields["not_quoted"] = any(
         classify_amount_cell(cell(s)) == AMOUNT_NOT_QUOTED
-        for s in ("total_price", "total_price_excl_tax")
+        for s in ("total_price", "total_price_excl_tax", "total_price_incl_tax")
     )
     return fields
 
@@ -542,7 +641,16 @@ def recognize_quote_vl(file_path: str, *, vl_call: VLCall,
     _notify("识别报价清单", 55)
     text = vl_call([images[p] for p in pages if p in images], PROMPT_QUOTE_CSV)
 
+    # 封面元信息（声明总价等）：复用已渲染的前两页，不重新渲染。
+    _notify("读取封面信息", 80)
+    meta = extract_quote_meta(
+        [images[p] for p in range(1, QUOTE_META_PAGES + 1) if p in images], vl_call)
+
     _notify("整理结果", 90)
-    return build_draft(text, file_path=file_path, page_count=page_count,
-                       processed_pages=[p for p in pages if p in images],
-                       rotations=rotations, unresolved_pages=unresolved)
+    draft = build_draft(text, file_path=file_path, page_count=page_count,
+                        processed_pages=[p for p in pages if p in images],
+                        rotations=rotations, unresolved_pages=unresolved,
+                        supplier_name=meta.get("supplier_name") or "",
+                        declared_total=meta.get("bid_total"))
+    draft.meta["quote_meta"] = meta
+    return draft

@@ -456,3 +456,25 @@ def test_seq_text_variants_are_tolerated():
     r = check_sequence_continuity([{"seq": "1"}, {"seq": "2."}, {"seq": "No.3"},
                                    {"seq": "4"}, {"seq": "5"}])
     assert r.verdict == "ok"
+
+
+def test_hierarchical_numbering_does_not_misjudge_chapter_gaps():
+    """章节.序号形态（如 1.1..1.8, 2.1..2.8, 5.1..5.8）不能塌缩成 1/2/5 后
+    误判"缺第 3/4 章"。这不是重复也不是丢行，是这套算法不支持的编号形态——
+    如实说没有判据，不要输出一个自信但错误的 BLOCKED。
+
+    实测：七份基准全是纯整数序号，没能测出这个盲区；按专业/分部分项组织的
+    招标文件用这种编号并不罕见。
+    """
+    items = [{"seq": f"{ch}.{i}"} for ch in (1, 2, 5) for i in range(1, 9)]
+    r = check_sequence_continuity(items)
+    assert r.verdict == "not_applicable"
+    assert r.missing == []
+
+
+def test_single_hyphen_pair_below_threshold_still_gap_checked():
+    """极少量的分段编号混在纯整数里不该触发降级——阈值是"大量"而不是"存在"。"""
+    items = [{"seq": str(i)} for i in range(1, 30) if i != 15]
+    items.append({"seq": "1-2"})  # 一条分段编号混入，占比远低于 30%
+    r = check_sequence_continuity(items)
+    assert r.verdict != "not_applicable", "个别分段编号不该让整份判定失效"

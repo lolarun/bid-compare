@@ -1093,10 +1093,20 @@ class TestExtendedQualityGate:
         assert "line_concentration" in checks, f"应触发 line_concentration，实际 checks={checks}"
 
     def test_declared_total_mismatch_blocked(self, compare_client):
-        """明细合计与声明总价偏差>3%（通过 _doc_meta.bid_total）→ 409。"""
+        """明细合计与声明总价偏差>3%（通过 _doc_meta.bid_total）→ 409。
+
+        必须用 flag_modified 显式标脏：JSON 列做"浅拷贝顶层 dict → 就地改嵌套
+        dict → 整体重赋值"这套操作时，若嵌套 key（_doc_meta）已经存在（VL 路径
+        接入声明总价抽取后就是如此），浅拷贝出的嵌套 dict 与 job.result 里的是
+        **同一个对象**——原地改它，"新值"和 SQLAlchemy 认为的"历史值"其实指向
+        同一份已被改过的数据，== 比较判不出差异，UPDATE 不会发出，改动看似成功
+        实则从未落盘。这不是猜测：直接复现过（mutation 后立即读到新值，换一个
+        全新 session 读，读到的还是旧值）。
+        """
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
         from apps.api.models.extraction_job import ExtractionJob
+        from sqlalchemy.orm.attributes import flag_modified
 
         state = self._base_setup(compare_client, "声明总价供应商", "声明总价测试")
         sub_id = state["sub_id"]
@@ -1116,6 +1126,7 @@ class TestExtendedQualityGate:
                     result.setdefault("_doc_meta", {})
                     result["_doc_meta"]["bid_total"] = actual_sum * 0.5  # 100% deviation
                     job.result = result
+                    flag_modified(job, "result")
                     db.commit()
         finally:
             db.close()
@@ -1133,10 +1144,14 @@ class TestExtendedQualityGate:
         )
 
     def test_single_line_exceeds_declared_total_blocked(self, compare_client):
-        """单行金额超过声明总价 → 数学不可能，必须被拦截。"""
+        """单行金额超过声明总价 → 数学不可能，必须被拦截。
+
+        flag_modified 的必要性同 test_declared_total_mismatch_blocked 上方注释。
+        """
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
         from apps.api.models.extraction_job import ExtractionJob
+        from sqlalchemy.orm.attributes import flag_modified
 
         state = self._base_setup(compare_client, "超限行供应商", "超限行测试")
         sub_id = state["sub_id"]
@@ -1157,6 +1172,7 @@ class TestExtendedQualityGate:
                     result.setdefault("_doc_meta", {})
                     result["_doc_meta"]["bid_total"] = declared
                     job.result = result
+                    flag_modified(job, "result")
             db.commit()
         finally:
             db.close()

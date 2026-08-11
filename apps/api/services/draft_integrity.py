@@ -698,6 +698,14 @@ def _seq_int(raw) -> int | None:
     return int(m.group()) if m else None
 
 
+# 多段编号（章节.序号，如"1.1""2.3"）的识别。取第一段数字会把同一章的全部行
+# 塌缩成同一个数——"1.1..1.8"全变成 1、"2.1..2.8"全变成 2——线性缺口检测会把
+# "本招标没有第 3/4 章"这种正常的章节跳号误判成"丢了行"（实测：三章各 8 行、
+# 章号 1/2/5，被误判 BLOCKED、"缺口 [3,4]"）。这类清单在按专业/分部分项组织的
+# 招标文件里并不罕见，而七份基准恰好全是纯整数序号，没能测出这个盲区。
+_MULTI_SEGMENT = re.compile(r"\d+[.\-]\d+")
+
+
 def check_sequence_continuity(
     items: list[dict], *, seq_key: str = "seq",
     coverage_min: float = SEQ_COVERAGE_MIN,
@@ -724,6 +732,18 @@ def check_sequence_continuity(
     for s in seqs:
         seen[s] = seen.get(s, 0) + 1
     rep.duplicated = sorted(k for k, n in seen.items() if n > 1)
+
+    # 多段编号识别：重复率高 + 原始文本大量带"数字.数字"或"数字-数字"，说明
+    # 塌缩到第一段数字已经失真，不能再用线性区间找缺口——那会把章节跳号当成丢行。
+    # 如实报告"这个形态没有判据"，而不是继续算出一个自信但错误的 BLOCKED。
+    multi_seg_raw = sum(1 for it in items
+                        if _MULTI_SEGMENT.search(str(it.get(seq_key) or "")))
+    if rep.duplicated and multi_seg_raw / max(len(seqs), 1) > 0.3:
+        rep.verdict = "not_applicable"
+        rep.reason = (f"检测到多段编号（如 {items[0].get(seq_key)!r} 这类章节.序号形态），"
+                      f"当前只支持顶层整数序号连续性判定；行数守恒缺独立判据")
+        return rep
+
     # 只在观测到的区间内找缺口——不猜这份文档"应该"有多少行
     rep.missing = [n for n in range(rep.observed_min, rep.observed_max + 1)
                    if n not in seen]

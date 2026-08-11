@@ -257,6 +257,11 @@ class ExtractionPipeline:
             "items": items,
         }
         processed = self._postprocess_quote(data_in, context)
+        # 声明总价核对门的输入（quote_confirmation_service._build_checksum 读
+        # job.result["_doc_meta"]，由 document_ingestion.py:236 从这里搬运）。
+        # 此前 VL 路径从不产出这个键——门本身逻辑是对的，只是从未接到过输入，
+        # 生产上对任何 PDF 报价都判 unknown、不阻断（docs/design/21 §2.2/§2.3）。
+        quote_meta = (draft.meta or {}).get("quote_meta")
         resp = ExtractionResponse(
             data=processed,
             metadata={
@@ -268,6 +273,7 @@ class ExtractionPipeline:
                 # 行数守恒台账（doc/19 §L3）：丢行必须随结果一起暴露，
                 # 否则调用方拿到的 200 无法区分"这份文档只有这些行"和"我们丢了行"。
                 "row_ledger": draft.ledger.to_dict() if draft.ledger else None,
+                **({"doc_meta": quote_meta} if quote_meta else {}),
             },
             tokens_used=0,
             duration_ms=int((_time.time() - t_start) * 1000),

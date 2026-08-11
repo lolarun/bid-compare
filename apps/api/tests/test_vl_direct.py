@@ -39,11 +39,31 @@ def test_maps_english_headers():
 
 
 def test_never_maps_excl_tax_column_to_incl_slot():
-    """含税/不含税分列时选错就是把税前税后混为一谈，偏差恰好等于税率。"""
+    """含税/不含税分列时选错就是把税前税后混为一谈，偏差恰好等于税率。
+
+    2026-08-11 A2 修复：曾经这里断言"价税合计"落进通用 total_price——那正是
+    生产实际发生过的 bug（derive_price_basis 因为看不到 total_price_incl_tax
+    而判成 excl_tax，评标价系统性偏低整段税率，实测凯硕/泰科龙偏差 11.5%~11.7%）。
+    """
     m = map_columns(["单价（元）不含税", "合计（元）不含税", "税率", "价税合计（元）"])
-    assert m["total_price"] == "价税合计（元）"
+    assert m["total_price_incl_tax"] == "价税合计（元）"
+    assert m.get("total_price") is None, "含税列不得落进通用槽位，那会让税基信息消失"
     assert m.get("unit_price") != "单价（元）不含税"
     assert m["unit_price_excl_tax"] == "单价（元）不含税"
+
+
+def test_dual_unit_price_columns_both_captured_a2_regression():
+    """A2 的最小复现：同时印"含税单价"与"不含税单价"两列时，两者必须分别落进
+    unit_price_incl_tax / unit_price_excl_tax，通用槽位必须留空。
+
+    修复前：含税单价（因含"单价"子串）被通用槽位吞掉，derive_price_basis 判成
+    excl_tax、取了不含税值——评标价静默偏低一个税率点，没有任何测试或结构门能
+    发现（逐行算术校验照样通过，因为 合价=数量×不含税单价 本身自洽）。
+    """
+    m = map_columns(["名称", "规格", "不含税单价", "含税单价"])
+    assert m["unit_price_excl_tax"] == "不含税单价"
+    assert m["unit_price_incl_tax"] == "含税单价"
+    assert m.get("unit_price") is None
 
 
 # ─── 解析与来源 ──────────────────────────────────────────────────────────────
@@ -289,8 +309,9 @@ _TAX_EN = ["row_type", "item_name", "spec", "unit", "quantity",
 ])
 def test_tax_basis_survives_either_header_language(headers, incl, excl):
     m = map_columns(headers)
-    assert m["total_price"] == incl
+    assert m["total_price_incl_tax"] == incl
     assert m["total_price_excl_tax"] == excl
+    assert m.get("total_price") is None, "含税/不含税已分列时通用槽位必须留空"
 
 
 @pytest.mark.parametrize("headers", [_TAX_CN, _TAX_EN,

@@ -1006,8 +1006,9 @@ async def tender_list_match(
                 })
 
             file_name = (file.filename or "") if file is not None else ""
+            from apps.api.services import tender_session_service
             for cat, anchors_json in groups.items():
-                s = _save_tender_session(
+                s = tender_session_service.save_session(
                     db, project_id, cat, file_name, anchors_json, confirmed_by=None,
                 )
                 db.flush()
