@@ -1,22 +1,20 @@
-"""v2.4 pipeline unit tests (24 tests, zero real API calls).
+"""v2.4 pipeline unit tests (zero real API calls).
 
 Tests cover:
-  - canonical.py: extract_valve_canonical + canonical_match_score (tests 1-8)
-  - pipeline._validate_items (tests 9-11)
-  - page_classifier.classify_page (tests 12-18, including HTML fixtures)
-  - anchor_match.match_anchors canonical hard-filter (tests 19-21)
-  - quote_readiness.assess_readiness (tests 22-24)
+  - canonical.py: extract_valve_canonical + canonical_match_score
+  - anchor_match.match_anchors canonical hard-filter
+  - quote_readiness.assess_readiness
+
+pipeline._validate_items and page_classifier.classify_page coverage removed
+2026-08-11 with the legacy modules they tested (best-practice review F1/F2) —
+both were production-unreachable (page_classifier.py deleted entirely;
+_validate_items was a test-only backward-compat shim over quote_fact.py,
+which still carries the real logic and its own tests).
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,133 +173,7 @@ def test_canonical_score_family_blocks_real_conflicts():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  9-11: pipeline._validate_items
-# ─────────────────────────────────────────────────────────────────────────────
-
-from apps.api.intelligence.pipeline import ExtractionPipeline
-
-
-def test_validate_items_ok():
-    items = [{"qty": 10.0, "unit_price": 100.0, "total_price": 1000.0, "validation_warning": ""}]
-    ExtractionPipeline._validate_items(items)
-    assert items[0]["validation_warning"] == ""
-
-
-def test_validate_items_bad():
-    # 10 × 100 = 1000, but total_price = 900 → >5% diff → flag
-    items = [{"qty": 10.0, "unit_price": 100.0, "total_price": 900.0, "validation_warning": ""}]
-    ExtractionPipeline._validate_items(items)
-    assert items[0]["validation_warning"] != ""
-    assert "金额不符" in items[0]["validation_warning"]
-
-
-def test_validate_items_null():
-    # None fields → skip (no warning)
-    items = [{"qty": None, "unit_price": 100.0, "total_price": 900.0, "validation_warning": ""}]
-    ExtractionPipeline._validate_items(items)
-    assert items[0]["validation_warning"] == ""
-
-    items2 = [{"qty": 10.0, "unit_price": None, "total_price": 900.0, "validation_warning": ""}]
-    ExtractionPipeline._validate_items(items2)
-    assert items2[0]["validation_warning"] == ""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  12-18: page_classifier.classify_page
-# ─────────────────────────────────────────────────────────────────────────────
-
-from apps.api.intelligence.page_classifier import PageRole, classify_page
-
-
-def test_page_classifier_quote():
-    html = """<table>
-    <tr><th>名称</th><th>规格</th><th>单位</th><th>数量</th><th>含税单价</th></tr>
-    <tr><td>截止阀</td><td>DN25 PN16</td><td>个</td><td>10</td><td>280</td></tr>
-    <tr><td>闸阀</td><td>DN50 PN10</td><td>个</td><td>5</td><td>650</td></tr>
-    <tr><td>止回阀</td><td>DN32 PN16</td><td>个</td><td>8</td><td>320</td></tr>
-    </table>"""
-    cls = classify_page(html)
-    assert cls.primary_role == PageRole.QUOTE_TABLE
-
-
-def test_page_classifier_not_killed_by_total():
-    # A quote page's last rows contain "合计" and "盖章" — must still be QUOTE_TABLE
-    html = """<table>
-    <tr><th>名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th><th>合价</th></tr>
-    <tr><td>截止阀</td><td>DN25 PN16</td><td>个</td><td>10</td><td>280</td><td>2800</td></tr>
-    <tr><td>球阀</td><td>DN50 PN10</td><td>个</td><td>5</td><td>550</td><td>2750</td></tr>
-    <tr><td>合计</td><td></td><td></td><td></td><td></td><td>5550</td></tr>
-    </table>
-    <p>投标总价：5550元</p>
-    <p>（盖章）</p>"""
-    cls = classify_page(html)
-    assert cls.primary_role == PageRole.QUOTE_TABLE
-
-
-def test_page_classifier_cover():
-    html = """<html><body>
-    <h1>投标文件</h1>
-    <p>投标单位：上海绵存设备有限公司</p>
-    <p>投标总价：¥1,258,000.00</p>
-    </body></html>"""
-    cls = classify_page(html)
-    assert cls.primary_role == PageRole.COVER
-
-
-def test_page_classifier_no_false_cover():
-    # "盖章" alone without 投标总价+投标单位 must NOT be COVER
-    html = """<html><body>
-    <p>以上报价如有问题请联系我司。</p>
-    <p>（盖章）</p>
-    <p>日期：2026年5月</p>
-    </body></html>"""
-    cls = classify_page(html)
-    assert cls.primary_role != PageRole.COVER
-
-
-def test_page_classifier_summary():
-    html = """<html><body>
-    <h2>报价汇总表</h2>
-    <table>
-    <tr><th>品类</th><th>金额</th></tr>
-    <tr><td>阀门</td><td>1200000</td></tr>
-    </table>
-    </body></html>"""
-    cls = classify_page(html)
-    assert cls.primary_role == PageRole.SUMMARY
-
-
-def test_page_classifier_flags():
-    # A quote page that also mentions 投标总价 → QUOTE_TABLE primary, has_doc_total=True
-    html = """<table>
-    <tr><th>名称</th><th>规格</th><th>单位</th><th>数量</th><th>单价</th></tr>
-    <tr><td>截止阀</td><td>DN25 PN16</td><td>个</td><td>10</td><td>280</td></tr>
-    <tr><td>闸阀</td><td>DN50 PN10</td><td>个</td><td>5</td><td>650</td></tr>
-    <tr><td>投标总价</td><td colspan="4">5550</td></tr>
-    </table>"""
-    cls = classify_page(html)
-    assert cls.primary_role == PageRole.QUOTE_TABLE
-    assert cls.has_doc_total is True
-
-
-def test_page_classifier_fixtures():
-    expected = {
-        "cover_page.html": PageRole.COVER,
-        "quote_table_page.html": PageRole.QUOTE_TABLE,
-        "quote_last_page.html": PageRole.QUOTE_TABLE,  # NOT killed by 合计/盖章
-        "summary_page.html": PageRole.SUMMARY,
-        "certificate_page.html": PageRole.OTHER,
-    }
-    for fname, expected_role in expected.items():
-        html = (FIXTURE_DIR / fname).read_text(encoding="utf-8")
-        cls = classify_page(html)
-        assert cls.primary_role == expected_role, (
-            f"{fname}: expected {expected_role}, got {cls.primary_role}"
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  19-21: anchor_match.match_anchors canonical hard-filter
+#  anchor_match.match_anchors canonical hard-filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 from apps.api.services.anchor_match import match_anchors, SIM_THRESHOLD
@@ -376,7 +248,7 @@ def test_anchor_match_compat():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  22-24: quote_readiness.assess_readiness
+#  quote_readiness.assess_readiness
 # ─────────────────────────────────────────────────────────────────────────────
 
 from apps.api.services.quote_readiness import assess_readiness

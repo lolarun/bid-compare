@@ -145,17 +145,6 @@ class MockProvider(LLMProvider):
         ]
         return "\n".join([head, *rows])
 
-    def ocr_pages_with_roles(
-        self, images: list[bytes],
-    ) -> tuple[list[tuple[Any, str]], list]:
-        """Stub: every page classified as QUOTE_TABLE with empty HTML."""
-        from apps.api.intelligence.page_classifier import (
-            PageRole, PageClassification,
-        )
-        stub_html = "<table><tr><td>mock</td></tr></table>"
-        cls = PageClassification(primary_role=PageRole.QUOTE_TABLE)
-        return [(cls, stub_html) for _ in images], []
-
     def extract_doc_meta(self, meta_htmls: list[str]) -> dict:
         return {"supplier_name": None, "bid_total": None,
                 "bid_total_basis": "unknown", "tax_rate": None}

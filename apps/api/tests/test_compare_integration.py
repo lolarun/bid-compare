@@ -1353,23 +1353,6 @@ from apps.api.intelligence.extraction_draft import (
 )
 from apps.api.intelligence.pipeline import ExtractionPipeline
 
-_SNAP_DIR = Path(__file__).resolve().parent.parent.parent.parent / "tests" / "fixtures" / "ocr_snapshots"
-_DOCS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "test"
-_FIXTURES = {
-    # doc_name → (pdf, expected_rows, expected_effective_total)
-    "quote_miancun": (_DOCS_DIR / "上海绵存投标文件.pdf", 89, 1_667_051.0),
-    "quote_kaishuo": (_DOCS_DIR / "凯硕新正投标文件.pdf", 89, 932_154.0),
-    "quote_taikelong": (_DOCS_DIR / "泰科龙投标文件.pdf", 89, 1_067_616.40),
-}
-
-
-def _available_fixtures():
-    return [
-        (n, *rest) for n, rest in _FIXTURES.items()
-        if (_SNAP_DIR / f"{n}.json").exists() and rest[0].exists()
-    ]
-
-
 def _draft_from_rows(field_rows: list[dict], flags_per_row: dict | None = None) -> ExtractionDraft:
     """构造一个最小合成 ExtractionDraft（全部 quote_line），供桥接契约测试。"""
     rows = []
@@ -1565,62 +1548,12 @@ class TestPriceBasisBridgeContract:
         assert rm.status_code == 409, f"unknown 口径行应被质量门拦截: {rm.text}"
 
 
-@pytest.mark.skipif(not _available_fixtures(), reason="无 OCR 快照（先跑 scripts/run_baseline.py）")
-class TestPriceBasisBridgeFixtures:
-    """三份真实 fixture 重放 → 全链路入库，验证 89 行与 effective 总额。"""
-
-    def _replay_draft(self, doc_name: str, pdf: Path):
-        from apps.api.intelligence.snapshot_provider import SnapshotProvider
-        from apps.api.intelligence.table_recognizer import recognize_tables
-        from apps.api.intelligence.pipeline import _get_quote_adapter
-        snap = _SNAP_DIR / f"{doc_name}.json"
-        provider = SnapshotProvider(None, snap, mode="replay")
-        draft = recognize_tables(str(pdf), provider, _get_quote_adapter())
-        assert draft.quality.failed_target_pages == [], (
-            f"{doc_name}: 重放目标页失败 {draft.quality.failed_target_pages}"
-        )
-        return draft
-
-    @pytest.mark.parametrize("doc_name,pdf,expected_rows,expected_total", _available_fixtures())
-    def test_fixture_chain_rows_and_effective_total(
-        self, compare_client, doc_name, pdf, expected_rows, expected_total
-    ):
-        draft = self._replay_draft(doc_name, pdf)
-        r, _sid, sub_id = _chain_draft_to_bql(compare_client, draft, f"{doc_name}-供应商")
-        assert r.status_code == 200, r.text
-        rows = _bql_dicts(sub_id)
-        assert len(rows) == expected_rows, (
-            f"{doc_name}: 入库行数={len(rows)} 期望={expected_rows}"
-        )
-        eff_total = sum(x["total_price"] or 0.0 for x in rows)
-        assert abs(eff_total - expected_total) <= 0.05, (
-            f"{doc_name}: effective 总额={eff_total:.2f} 期望={expected_total:.2f}"
-        )
-        # 含税比价单价覆盖率必须 100%（泰科龙缺含税单价的行经合价÷数量还原）→ 过价格覆盖门
-        unit_ok = sum(1 for x in rows if x["unit_price"] is not None and x["unit_price"] > 0)
-        assert unit_ok == expected_rows, (
-            f"{doc_name}: 比价单价覆盖 {unit_ok}/{expected_rows}（应全覆盖，含还原）"
-        )
-
-    def test_kaishuo_review_fields_fully_persisted(self, compare_client):
-        """凯硕含算术异常行（seq89 qty 误读）→ validation_flags/raw_qty/suggested_qty/
-        source_ref/price_basis 必须完整落入 extraction_meta（REVIEW 可追溯）。"""
-        if not (_SNAP_DIR / "quote_kaishuo.json").exists():
-            pytest.skip("无凯硕快照")
-        pdf = _FIXTURES["quote_kaishuo"][0]
-        draft = self._replay_draft("quote_kaishuo", pdf)
-        r, _sid, sub_id = _chain_draft_to_bql(compare_client, draft, "凯硕-审计供应商")
-        assert r.status_code == 200, r.text
-        rows = _bql_dicts(sub_id)
-        assert len(rows) == 89
-
-        flagged = [
-            x for x in rows
-            if "qty_arithmetic_mismatch" in (x["extraction_meta"].get("validation_flags") or [])
-        ]
-        assert len(flagged) >= 1, "凯硕应至少有一行 qty_arithmetic_mismatch（seq89）"
-        meta = flagged[0]["extraction_meta"]
-        assert meta.get("raw_qty") is not None, "raw_qty 必须保存"
-        assert meta.get("suggested_qty") is not None, "suggested_qty 必须保存"
-        assert meta.get("source_ref") and meta["source_ref"].get("page"), "source_ref.page 必须保存"
-        assert meta.get("price_basis") == "dual_tax", "凯硕为含税/不含税双口径"
+# TestPriceBasisBridgeFixtures（三份真实 fixture 重放）删除于 2026-08-11（最佳实践
+# 评审 F1）：它靠已删除的 legacy 链路（SnapshotProvider + recognize_tables +
+# _get_quote_adapter）重放 OCR HTML 快照，随 legacy 一起失效。TestPriceBasisBridgeContract
+# 保留了口径本身的合成契约覆盖（含泰科龙"含税合价还原单价"的形态，见
+# test_incl_unit_recovered_from_total_when_missing）；损失的是三份真实历史文档的
+# 全链路 89 行/总额回归，以及凯硕 qty_arithmetic_mismatch 字段落库的真实数据验证。
+# 要补回需要用 scripts/record_vl_snapshots.py 为 miancun/kaishuo/taikelong 录制
+# VL 快照（真实 API 调用，需人工触发），当前 tests/fixtures/vl_snapshots/ 只有四份
+# 电缆文档，未覆盖这三份阀门文档。

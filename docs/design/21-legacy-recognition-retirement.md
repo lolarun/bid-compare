@@ -1,8 +1,20 @@
 # Retiring the Legacy Recognition Path
 
-> **Status — draft, 2026-08-10. Not implemented.** Planning document for replacing the
-> OCR → HTML → (TableGrid | LLM) → ExtractionDraft path with VL-direct.
-> Needs sign-off before any step is executed.
+> **Status — superseded, 2026-08-11.** Phase 3's recommendation below ("do not delete, demote
+> to cross-check", §5.3) was overtaken by facts discovered during the best-practice review
+> (F1): both shipped providers (`DashScopeOCRProvider`, `MockProvider`) implement
+> `vl_extract_csv` unconditionally, so the legacy branch was **never reachable in production**
+> — there was no live second source to disagree with the VL path, so it supplied none of the
+> cross-check value this section argued for. "Not reachable" is not the same claim as
+> "reachable but degraded"; the argument below assumed the latter. On confirming this, legacy
+> (`table_recognizer.py`, `table_parser.py`, `page_classifier.py`, `adaptive_tiler.py`,
+> `aggregator.py`, `prompts.py`, `intelligence/snapshot_provider.py`, `splitter.py`, plus the
+> dead call sites in `pipeline.py`/`tender_pdf.py`/`dashscope_ocr.py`) was physically deleted,
+> not demoted. `.claude/rules/recognition.md` still needs the rewrite flagged in Phase 3 below
+> (batch 4 of the review remediation) — its TableGrid/bbox language is now stale.
+>
+> The rest of this document (§1-§4, §5.1-§5.2, §5.4-§5.5, §6) is retained as the historical
+> record of the VL-direct migration's reasoning and is otherwise still accurate.
 >
 > Basis: CLAUDE.md §4 / §6 / §8, `.claude/rules/recognition.md`, `.claude/rules/tests.md`.
 > Companion: `docs/design/20` (checksum threshold), `HANDOFF.md` §0 (retracted conclusions).
@@ -177,12 +189,22 @@ Copy selection therefore moved to the consumer: take the lowest `copy_no`. Selec
 closest to the declared total" was rejected as circular — it would pick the data using the
 conclusion under test.
 
-**Not yet done** — two more suites replay legacy OCR snapshots and need the same treatment:
-- `test_e2e_snapshot.py` (the PR-blocking deterministic replay)
-- `test_compare_integration.py:1340,1557`
+**Superseded, not done as VL conversion** — `test_e2e_snapshot.py` and
+`test_compare_integration.py::TestPriceBasisBridgeFixtures` (formerly :1340,1557) replayed
+legacy OCR snapshots through `SnapshotProvider`/`recognize_tables`, both deleted 2026-08-11
+along with legacy. Rather than convert these to VL snapshots, they were deleted outright —
+converting them would have meant recording new real-API VL snapshots for 3 more documents
+(miancun/kaishuo/taikelong; only the 4 cable documents have VL snapshots so far), which needs
+an explicit user-triggered run of `scripts/record_vl_snapshots.py`, not something to do
+silently inside a legacy-retirement batch. This is a real, tracked coverage gap: full-stack
+89-row/effective-total regression on 3 real historical documents, and 泰科龙's dedicated
+`test_extract_quote_taikelong` fresh-E2E (also deleted, same reason). The synthetic contract
+tests in `TestPriceBasisBridgeContract` still cover the price_basis logic itself, including the
+exact 泰科龙 "含税合价还原单价" shape (`test_incl_unit_recovered_from_total_when_missing`).
 
-`tests/fixtures/ocr_snapshots/` holds 7 files / 3.9 MB, of which only 4 are tracked in git.
-These must not be deleted while legacy exists.
+`tests/fixtures/ocr_snapshots/` (7 files / 3.9 MB, 4 tracked in git) has no remaining reader
+and can be deleted whenever someone wants the disk space back — not done here to keep this
+batch to code, not fixture housekeeping.
 
 ## 5. Decisions taken 2026-08-10
 
@@ -223,7 +245,7 @@ rows from cover or certificate pages.
 Recorded as a known risk: a certificate or annex page containing a table could contribute
 phantom rows. Revisit if such an instance appears.
 
-### 5.3 Legacy: demote to cross-check, do not delete — **decided, gated on Phases 0-2**
+### 5.3 Legacy: demote to cross-check, do not delete — **superseded 2026-08-11, see status banner**
 
 The two paths fail differently (legacy on OCR quality and table structure, VL on orientation
 and output format), so disagreement between them is itself a signal. Deleting legacy would
@@ -232,6 +254,15 @@ the single source has unstable failure modes (orientation 3/10 vs 10/10 on ident
 extraction variance of 0.18% on 亨通 with identical orientation).
 
 The cost — two paths and two test suites to maintain — is accepted.
+
+**What actually happened**: this reasoning presupposed legacy was a *reachable, degraded*
+second source. The best-practice review (F1) established it was unreachable — `hasattr(provider,
+"vl_extract_csv")` was true for every shipped provider, so the `else` branch was dead code, not
+a live fallback. A document VL marked BLOCKED was never actually re-read by legacy in
+production; the "disagreement is a signal" mechanism described here could not fire. Deleting
+unreachable code does not trade away a cross-check that was already absent. Physically deleted
+2026-08-11; the orientation/extraction-variance risks named above are unaffected by this
+correction and remain open (§6).
 
 ### 5.4 Checksum threshold: instrument now, change with the flip — **implemented (part 1)**
 

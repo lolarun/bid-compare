@@ -9,7 +9,6 @@ import pytest
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
-from apps.api.intelligence.prompts import TENDER_PROMPT
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.models import ExtractionJob
 from apps.api.services.document_ingestion import (

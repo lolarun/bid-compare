@@ -157,61 +157,8 @@ _META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件�
 - supplier_name：优先从"投标单位"/"报价单位"/"投标人"字段取；若为营业执照页，从"名称"/"称"字段取公司全名（即使列标题因OCR截断只剩"称"）；不要填经销商授权书中的品牌商名称。
 - 若该页没有相关信息，对应字段返回null或空字符串。"""
 
-# Stage 2 prompt for structured TableGrid JSON input (replaces raw HTML when available)
-_QUOTE_S2_TABLE_PROMPT = """你是机电材料报价单解析助理。以下是 OCR 识别后按页面表格整理的结构化数据（JSON 格式）。
-
-请从所有 row_type="quote_line" 的行中提取每一条报价明细。每条明细必须包含该行的 table_index 和 row_index（直接从输入复制，不要修改）。
-row_type 为 subtotal/grand_total/header/empty/note 的行忽略不提取。
-
-要求：
-- 【完整性】所有 row_type=quote_line 的行都要提取，一行不能遗漏
-- 【价格口径】表头含"含税"/"综合单价"时→unit_price_incl_tax；表头含"不含税"/"税前"时→unit_price_excl_tax；表头无税种区分时才→unit_price；表头已明确区分时unit_price留null
-- 【严禁推算】不得自行用×1.13或÷1.13推导含税/不含税价，文档没有的字段留null；只有一个价格字段时填unit_price_incl_tax（含税）或unit_price_excl_tax（不含税）按表头映射，不填unit_price
-- 对阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等）额外填写 canonical 对象：valve_type/dn/pn/material/connection
-- material_type：若表格有独立材质列按原文填；否则从规格型号中提取；无则留空字符串
-- 总价若表格已标注使用原值，否则留 null（不要自己计算）
-- 税率用小数如 0.13 表示 13%
-- supplier_name：若当前页面有明确供应商/投标单位名称则填，否则留空字符串
-- 无法识别的字段返回空字符串或 null，不要猜测
-
-OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR 错误时（如"阀阀"→闸阀、"橡胶海"→橡胶瓣）：
-- normalized_material: 纠错后的正确名称（确信时填，否则留空字符串）
-- ocr_correction_reason: 纠错依据（词表命中+相邻行规格连续性），无纠错时留空字符串
-合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
-material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
-
-【价格字段——按表头文字严格映射，不按列顺序推断】
-  unit_price_excl_tax（不含税单价）：表头含"不含税"/"税前"时填此字段
-  unit_price_incl_tax（含税单价）：表头含"含税"/"综合单价"时填此字段
-  unit_price（单价，仅表头无含税/不含税区分时才填）
-  total_price_excl_tax（不含税合计）：表头含"不含税合计"/"金额(不含税)"时填
-  total_price_incl_tax（含税合计）：表头含"价税合计"/"含税合计"/"合价(含税)"时填
-  total_price（合计，仅表头无含税/不含税区分时才填）
-  tax_amount（税额）：表头含"税额"/"增值税额"时填；无此列留null
-  model（型号）：表头独立"型号"列时填；规格型号合并在一列时归入spec
-
-返回 JSON 格式（table_index 和 row_index 必须包含）：
-{"supplier_name": "供应商名称或空字符串", "items": [{"table_index": 0, "row_index": 2, "seq": "序号或空字符串", "material": "材料名称", "spec": "规格型号", "model": "型号或空字符串", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": null或单价（仅表头无税种标注时才填，否则留null）, "unit_price_excl_tax": null或不含税单价, "unit_price_incl_tax": null或含税单价, "total_price": null或合计（仅表头无税种标注时才填，否则留null）, "total_price_excl_tax": null或不含税合计, "total_price_incl_tax": null或含税合计, "tax_rate": 税率, "tax_amount": null或税额, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
-
-没有报价明细时返回 {"items": []}"""
-
 # Max cover/summary pages to process for supplier name / bid total extraction
 MAX_META_PAGES = 5
-
-# ── Cover-page supplier-name fallback prompt ─────────────────────────────
-_SUPPLIER_NAME_PROMPT = """从以下HTML内容中，找出【投标人/投标单位（卖方报价方）的公司全称】。
-
-投标文件里常出现4类公司，只要"投标人"，其余三类一律排除：
-- 【投标人=要的】卖方/报价方。【必须】有明确标签："投标单位名称""投标人""（盖章）投标单位"或报价单落款盖章处。
-- 【招标人=排除】买方/甲方/采购方。出现在封面顶部、"致：XX公司"（投标书抬头）、"招标人""招标单位"处。
-- 【厂家/品牌商=排除】产品制造商。出现在"厂家""制造商""生产企业""品牌""授权"等处（如某品牌/某阀门等产品制造商对应的公司）。它只是货品来源，不是投标人。
-- 【代理商=排除】除非它同时是盖章的投标单位。
-
-规则：
-- 公司全称含"有限公司/集团/实业/设备/科技/贸易/工程"等机构后缀。
-- 【关键】只有当公司名旁有明确的"投标单位名称/投标人/（盖章）"标签时才返回；若本页是封面、投标书抬头、厂家资质/授权页（只有招标人或厂家名），一律返回空字符串。
-只返回投标人公司全称（字符串），不确定就返回 ""。不要JSON，不要任何解释。"""
-
 
 # ── 视觉页面分类（qwen3-vl-flash / plus）────────────────────────────────────
 _VISUAL_FLASH_MODEL = "qwen3-vl-flash"
@@ -396,44 +343,6 @@ class DashScopeOCRProvider(LLMProvider):
                 self._llm_clients[key] = OpenAI(api_key=key, base_url=self.base_url)
             return self._llm_clients[key]
 
-    # ─── page classification (single OCR pass, HTML cached) ──────────────
-
-    def ocr_pages_with_roles(
-        self, images: list[bytes],
-    ) -> tuple[list[tuple["PageClassification", str]], list[dict]]:
-        """Stage 1 for all pages: OCR → HTML → classify role.
-
-        Returns:
-            (page_roles, failed_pages)
-            - page_roles: list of (PageClassification, html) in page order
-            - failed_pages: list of {"page": 1-based, "error": str} for failed OCR calls
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from apps.api.intelligence.page_classifier import classify_page, PageClassification, PageRole
-
-        n = len(images)
-        out: list[tuple[PageClassification, str] | None] = [None] * n
-        failures: list[dict] = []
-        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), n)
-
-        def _ocr_one(idx: int, image: bytes):
-            html, _ = self._ocr_page(image)
-            return idx, (classify_page(html), html), None
-
-        with ThreadPoolExecutor(max_workers=workers) as exc:
-            futs = {exc.submit(_ocr_one, i, img): i for i, img in enumerate(images)}
-            for fut in as_completed(futs):
-                idx = futs[fut]
-                try:
-                    idx, result, _ = fut.result()
-                    out[idx] = result
-                except Exception as e:
-                    log.warning("OCR page %d failed: %s", idx + 1, e)
-                    out[idx] = (PageClassification(primary_role=PageRole.UNKNOWN), "")
-                    failures.append({"page": idx + 1, "error": str(e)})
-
-        return out, failures  # type: ignore[return-value]
-
     # ─── public API (called per-page by pipeline) ─────────────────────────
 
     def extract(
@@ -443,16 +352,20 @@ class DashScopeOCRProvider(LLMProvider):
         prompt: str,
         timeout: int = 90,
         page_html: str | None = None,
-        table_grids=None,  # list[TableGrid] | None — structured input from table_parser
+        table_grids=None,  # unused — kept for LLMProvider signature compatibility
     ) -> ExtractionResponse:
-        """Two-stage extraction for a single page image.
+        """Two-stage extraction for a single page image (abstract LLMProvider.extract).
 
-        If page_html is provided (pre-computed from ocr_pages_with_roles),
-        Stage 1 OCR is skipped and the cached HTML is used directly.
+        No production caller remains — VL-direct (vl_extract_csv) replaced the
+        per-page OCR→HTML→LLM chain this served (best-practice review F1/F2,
+        2026-08-11). Kept because `LLMProvider.extract` is `@abstractmethod`
+        (base.py) — removing this implementation would make the class
+        uninstantiable. The table_grids structured-input path
+        (table_parser.grids_to_llm_json) was deleted with the legacy chain
+        that was its only producer.
 
-        If table_grids is also provided (and doc_type is 'quote'), the Stage-2
-        LLM receives structured TableGrid JSON instead of raw HTML, which reduces
-        hallucination and enables row-level source_ref tracking.
+        If page_html is provided, Stage 1 OCR is skipped and the cached HTML
+        is used directly.
         """
         if not images:
             raise ProviderError("extract() requires at least one image")
@@ -477,17 +390,7 @@ class DashScopeOCRProvider(LLMProvider):
             )
 
         doc_type = self._guess_doc_type(prompt)
-
-        if table_grids and doc_type == "quote":
-            # Structured path: TableGrid JSON → LLM (lower token cost, row-level source_ref)
-            from apps.api.intelligence.table_parser import grids_to_llm_json
-            grid_json = grids_to_llm_json(table_grids)
-            data, raw_text, llm_tokens = self._llm_call_json(
-                _QUOTE_S2_TABLE_PROMPT, grid_json
-            )
-        else:
-            data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
-
+        data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
         total_tokens += llm_tokens
 
         return ExtractionResponse(
@@ -555,72 +458,6 @@ class DashScopeOCRProvider(LLMProvider):
             "bid_total_basis": data.get("bid_total_basis") or "unknown",
             "tax_rate": data.get("tax_rate"),
         }
-
-    def extract_supplier_name_from_cover(
-        self, cover_images: list[bytes], max_pages: int = 10,
-    ) -> str:
-        """Fallback: scan the front pages for the bidder (投标人) company name.
-
-        Runs all candidate pages in parallel, returns the result from the
-        earliest page that yields a confident bidder name.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from apps.api.intelligence.aggregator import _pick_supplier_name
-
-        pages = cover_images[:max_pages]
-        if not pages:
-            return ""
-
-        def _try_page(idx: int, page_bytes: bytes) -> tuple[int, str]:
-            try:
-                html, _ = self._ocr_page(page_bytes)
-                if not html.strip():
-                    return idx, ""
-                key = self._next_key()
-                client = self._get_client(key)
-                sem = self._per_key_sem[key]
-                sem.acquire()
-                try:
-                    resp = client.chat.completions.create(
-                        model=self.llm_model,
-                        messages=[
-                            {"role": "system", "content": _SUPPLIER_NAME_PROMPT},
-                            {"role": "user", "content": html},
-                        ],
-                        temperature=0.0,
-                        max_tokens=100,
-                        extra_body={"enable_thinking": False},
-                    )
-                finally:
-                    sem.release()
-                name = (resp.choices[0].message.content or "").strip()
-                if "</think>" in name:
-                    name = name.split("</think>")[-1].strip()
-                name = name.strip('"').strip("'").strip()
-                if name and name not in {"无", "找不到", "null", "None", ""}:
-                    return idx, _pick_supplier_name([name], set()) or ""
-            except Exception as e:
-                log.warning("Supplier name cover fallback error (page %d): %s", idx + 1, e)
-            return idx, ""
-
-        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), len(pages))
-        found: dict[int, str] = {}
-        with ThreadPoolExecutor(max_workers=workers) as exc:
-            futs = {exc.submit(_try_page, i, img): i for i, img in enumerate(pages)}
-            for fut in as_completed(futs):
-                try:
-                    idx, name = fut.result()
-                    if name:
-                        found[idx] = name
-                except Exception:
-                    pass
-
-        # Return earliest-page confident result
-        for i in range(len(pages)):
-            if found.get(i):
-                log.info("Supplier name recovered from cover page %d: %r", i + 1, found[i])
-                return found[i]
-        return ""
 
     # ─── Stage 1: OCR ─────────────────────────────────────────────────────
 

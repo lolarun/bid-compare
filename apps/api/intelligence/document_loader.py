@@ -20,7 +20,8 @@ from PIL import Image
 
 from apps.api.core.config import get_settings
 
-MAX_PAGES = 12          # default cap for _run_batched (old path); role-aware path ignores this
+MAX_PAGES = 12          # default cap for to_images() (legacy per-page path, no production caller
+                        # since 2026-08-11 — VL-direct uses get_page_count/render_pages instead)
 MAX_PAGES_UNLIMITED = 200  # high ceiling for role-aware path that classifies all pages
 # Layer 0: render quality is env-driven (OCR_RENDER_SCALE / OCR_MAX_EDGE_PX).
 RENDER_SCALE = get_settings().OCR_RENDER_SCALE   # PDF render DPI multiplier

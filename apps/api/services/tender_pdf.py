@@ -1,6 +1,12 @@
 """招标文件 PDF → 投标清单锚点 + 品牌映射抽取。
 
-公共入口 extract_bidlist 签名不变；内部改用 recognize_tables 公共骨架。
+公共入口 extract_bidlist 签名不变；内部为 VL-direct（apps/api/intelligence/vl_tender.py）。
+
+**legacy 分支（OCR→HTML→RecognizeAdapter→recognize_tables）已删除**（2026-08-11，
+最佳实践评审 F1）：两个 shipped provider（DashScopeOCRProvider、MockProvider）都
+实现 vl_extract_csv，legacy 分支在生产从未可达；design/21 判定"不可达"不等于
+"可交叉校验保留"，予以物理删除而非继续携带。provider 不具备 vl_extract_csv 时
+直接报错，不再静默降级到一条已证明拿不到调用的路径。
 
 输出 dict（兼容 ExtractionJob.result）：
 {
@@ -19,170 +25,13 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 
-from apps.api.intelligence.prompts import TENDER_BIDLIST_PROMPT, TENDER_BRANDTABLE_PROMPT
-from apps.api.intelligence.table_recognizer import RecognizeAdapter, recognize_tables
 from apps.api.intelligence.extraction_draft import DraftRow
 from apps.api.services.tender_list import TenderAnchor, anchor_to_json
 from apps.api.services.canonical import extract_valve_canonical
 
 log = logging.getLogger(__name__)
-
-_DN_RE = re.compile(r"DN\s*\d", re.IGNORECASE)
-
-
-# ─── 页范围评分（多信号，非关键词二值）────────────────────────────────────────
-
-def _score_page(html: str) -> tuple[float, float]:
-    """Score a page's OCR HTML for bidlist vs brand-table likelihood.
-
-    Returns (bidlist_score, brand_score) each in [0.0, 1.0].
-    """
-    if not html:
-        return 0.0, 0.0
-
-    bs = 0.0
-    if "投标清单" in html:                                          bs += 0.5
-    if "<table" in html:                                            bs += 0.2
-    if "序号" in html and ("项目名称" in html or "名称" in html):   bs += 0.2
-    if "工作压力" in html:                                          bs += 0.3
-    if any(kw in html for kw in ("阀体", "密封圈", "阀芯")):        bs += 0.2
-    if _DN_RE.search(html):                                         bs += 0.2
-    if "给排水" in html:                                            bs += 0.1
-    bs = min(bs, 1.0)
-
-    br = 0.0
-    if "招标情况表" in html:                                         br += 0.8
-    if "参与品牌" in html or "业主招标品牌" in html:                 br += 0.5
-    if "投标单位" in html and "品牌" in html:                        br += 0.3
-    br = min(br, 1.0)
-
-    return bs, br
-
-
-def _is_brand_page(html: str) -> bool:
-    bs, br = _score_page(html)
-    return br >= 0.5 and br > bs
-
-
-def _is_bidlist_page(html: str) -> bool:
-    bs, br = _score_page(html)
-    return bs >= 0.35 and not (br >= 0.5 and br > bs)
-
-
-def _tender_detect_pages(htmls: list[str]) -> list[int]:
-    """TenderAdapter 用：只返回投标清单页（品牌页由 extract_meta 另处理）。"""
-    bidlist: list[int] = []
-    for i, html in enumerate(htmls):
-        page_no = i + 1
-        bs, br = _score_page(html)
-        is_brand = br >= 0.5 and br > bs
-        is_bidlist = bs >= 0.35 and not is_brand
-        if is_bidlist:
-            bidlist.append(page_no)
-            log.debug("Page %d → bidlist (bs=%.2f br=%.2f)", page_no, bs, br)
-        elif is_brand:
-            log.debug("Page %d → brand   (br=%.2f)", page_no, br)
-        else:
-            log.debug("Page %d → skip    (bs=%.2f br=%.2f)", page_no, bs, br)
-    return bidlist
-
-
-def _tender_extract_meta(
-    non_target_htmls: list[tuple[int, str]],
-    provider,
-) -> dict:
-    """从非清单页提取品牌表数据。返回 meta dict，含 brand_page。"""
-    brand_requirement: list[dict] = []
-    supplier_brands: list[dict] = []
-    material_class = ""
-    brand_page: int | None = None
-
-    for page_no, html in non_target_htmls:
-        if _is_brand_page(html) and brand_page is None:
-            brand_page = page_no
-            if html.strip():
-                try:
-                    bdata, _raw, _tok = provider._llm_call_json(
-                        TENDER_BRANDTABLE_PROMPT, html, enable_thinking=True
-                    )
-                    brand_requirement = bdata.get("brand_requirement") or []
-                    supplier_brands = bdata.get("supplier_brands") or []
-                    material_class = str(bdata.get("material_class") or "")
-                except Exception as exc:
-                    log.warning("tender brand table extract failed: %s", exc)
-
-    return {
-        "brand_requirement": brand_requirement,
-        "supplier_brands": supplier_brands,
-        "material_class": material_class,
-        "brand_page": brand_page,
-    }
-
-
-# ─── 向后兼容：保留旧签名供现有测试调用 ─────────────────────────────────────
-
-def _detect_pages(page_htmls: list[str]) -> tuple[list[int], int | None]:
-    """旧签名 → (bidlist_pages, brand_page)，测试仍在用。"""
-    brand_page: int | None = None
-    bidlist: list[int] = []
-    for i, html in enumerate(page_htmls):
-        page_no = i + 1
-        bs, br = _score_page(html)
-        is_brand = br >= 0.5 and br > bs
-        is_bidlist = bs >= 0.35 and not is_brand
-        if is_brand:
-            if brand_page is None:
-                brand_page = page_no
-        elif is_bidlist:
-            bidlist.append(page_no)
-    return bidlist, brand_page
-
-
-def _row_to_anchor(row: dict, page_no: int) -> TenderAnchor | None:
-    """旧签名 → TenderAnchor（接受 raw dict），测试仍在用。"""
-    name = str(row.get("name") or "").strip()
-    seq = row.get("seq")
-    if not name or seq in (None, ""):
-        return None
-    materials = row.get("materials") or {}
-    materials = {
-        k: str(v).strip()
-        for k, v in materials.items()
-        if isinstance(v, str) and v.strip()
-    }
-    try:
-        qty = float(row.get("qty")) if row.get("qty") not in (None, "") else None
-    except (TypeError, ValueError):
-        qty = None
-    anchor = TenderAnchor(
-        seq=seq, name=name,
-        spec=str(row.get("spec") or "").strip(),
-        model=str(row.get("model") or "").strip(),
-        pressure=str(row.get("pressure") or "").strip(),
-        materials=materials,
-        unit=str(row.get("unit") or "").strip(),
-        qty=qty,
-        brand=str(row.get("brand") or "").strip(),
-        profession=str(row.get("profession") or "").strip(),
-        remark=str(row.get("remark") or "").strip(),
-        source_ref={"page": page_no, "row": seq},
-    )
-    anchor.canonical = extract_valve_canonical(
-        anchor.name, anchor.spec, anchor.pressure, anchor.material_text()
-    )
-    return anchor
-
-
-TENDER_ADAPTER = RecognizeAdapter(
-    doc_type="tender",
-    detect_pages=_tender_detect_pages,
-    row_prompt=TENDER_BIDLIST_PROMPT,
-    name_key="name",
-    extract_meta=_tender_extract_meta,
-)
 
 
 # ─── DraftRow → TenderAnchor ─────────────────────────────────────────────────
@@ -289,66 +138,54 @@ def extract_bidlist(
 
     Args:
         file_path: PDF 路径。
-        provider: DashScopeOCRProvider（需有 ocr_pages_with_roles + _llm_call_json）。
+        provider: 需具备 vl_extract_csv（DashScopeOCRProvider / MockProvider）。
         bidlist_pages / brand_page: 1-based 手动指定页（用户修正用）；None 则自动定位。
         default_category: 强制品类（本类招标文件单品类，默认阀门）。
         xlsx_path: 可选 Excel 清单路径；传入时自动运行 source reconciliation。
     """
-    # VL-direct 优先。招标侧与报价侧共用同一套解析与结构门，差异只在列表与字段
-    # （apps/api/intelligence/vl_tender.py）。legacy 只留给不具备多图调用的 provider。
+    # VL-direct 是唯一路径。招标侧与报价侧共用同一套解析与结构门，差异只在列表与
+    # 字段（apps/api/intelligence/vl_tender.py）。
     #
     # **Excel 不是降级理由。** 先前把 `xlsx_path` 作为落回 legacy 的条件是错的：
-    # `_reconcile_vs_excel` 只吃 DraftRow，与识别器无关，VL 的行同样能对账。而且
+    # excel_reconcile 只吃 DraftRow，与识别器无关，VL 的行同样能对账。而且
     # 有些招标文件的 PDF 里**根本没有采购清单**，清单以 Excel 附件形式给出——
     # 那时 Excel 是唯一来源而非交叉校验，更不该因为它的存在而降级 PDF 识别。
-    use_vl = hasattr(provider, "vl_extract_csv")
-    if use_vl:
-        from apps.api.core.config import get_settings
-        from apps.api.intelligence.vl_tender import parse_tender_document
+    if not hasattr(provider, "vl_extract_csv"):
+        raise RuntimeError(
+            "tender_pdf.extract_bidlist 需要具备 vl_extract_csv 的 provider。"
+            "legacy OCR→HTML 识别链已于 2026-08-11 删除（最佳实践评审 F1：两个"
+            "生产 provider 均实现 vl_extract_csv，该分支在生产从未可达）。"
+            "请配置 DASHSCOPE_API_KEY 或使用具备 vl_extract_csv 的 provider。"
+        )
 
-        s = get_settings()
-        parsed = parse_tender_document(
-            file_path,
-            vl_call=lambda imgs, prompt: provider.vl_extract_csv(
-                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
-            orient_call=lambda parts, prompt: provider.vl_extract_csv(
-                [b for _t, b in parts], prompt,
-                model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
-            progress_cb=progress_cb,
-            target_pages=bidlist_pages or None,
-        )
-        draft = parsed.draft
-        # Excel 对账：与识别器无关（只吃 DraftRow），legacy 路径在 recognize_tables
-        # 内部做，VL 路径在这里做。失败只记录不抛——对账是校验，不是识别本身。
-        if xlsx_path:
-            from apps.api.intelligence.table_recognizer import _reconcile_vs_excel
-            try:
-                draft.reconcile = _reconcile_vs_excel(
-                    "tender", draft.rows, xlsx_path, TENDER_ADAPTER.name_key)
-            except Exception as exc:                             # noqa: BLE001
-                log.error("VL 路径 Excel 对账失败: %s", exc)
-                draft.reconcile = {"error": str(exc)}
-    else:
-        if not (hasattr(provider, "ocr_pages_with_roles")
-                and hasattr(provider, "_llm_call_json")):
-            raise RuntimeError(
-                "tender_pdf.extract_bidlist 需要具备 vl_extract_csv 的 provider，"
-                "或 DashScopeOCRProvider（OCR 能力）。请配置 DASHSCOPE_API_KEY。"
-            )
-        log.info("招标清单走 legacy：provider=%s xlsx_path=%s",
-                 type(provider).__name__, bool(xlsx_path))
-        draft = recognize_tables(
-            file_path=file_path,
-            provider=provider,
-            adapter=TENDER_ADAPTER,
-            progress_cb=progress_cb,
-            xlsx_path=xlsx_path,
-            target_pages=bidlist_pages or None,
-        )
+    from apps.api.core.config import get_settings
+    from apps.api.intelligence.vl_tender import parse_tender_document
+
+    s = get_settings()
+    parsed = parse_tender_document(
+        file_path,
+        vl_call=lambda imgs, prompt: provider.vl_extract_csv(
+            imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+        orient_call=lambda parts, prompt: provider.vl_extract_csv(
+            [b for _t, b in parts], prompt,
+            model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+        progress_cb=progress_cb,
+        target_pages=bidlist_pages or None,
+    )
+    draft = parsed.draft
+    # Excel 对账：与识别器无关（只吃 DraftRow）。失败只记录不抛——对账是校验，
+    # 不是识别本身。
+    if xlsx_path:
+        from apps.api.intelligence.excel_reconcile import reconcile_vs_excel
+        try:
+            draft.reconcile = reconcile_vs_excel(
+                "tender", draft.rows, xlsx_path, "name")
+        except Exception as exc:                             # noqa: BLE001
+            log.error("VL 路径 Excel 对账失败: %s", exc)
+            draft.reconcile = {"error": str(exc)}
 
     # ── 招标要求（品牌等）────────────────────────────────────────────────
-    # legacy 由 extract_meta 填进 draft.meta；VL 由 parse_tender_document 填进
-    # draft.meta["tender_requirements"]。两条路的键名一致，此处统一取。
+    # parse_tender_document 填进 draft.meta["tender_requirements"]。
     meta = draft.meta or {}
     reqs = meta.get("tender_requirements") or {}
     brand_requirement = reqs.get("brand_requirement") or meta.get("brand_requirement") or []

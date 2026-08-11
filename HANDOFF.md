@@ -1,10 +1,14 @@
 # HANDOFF — 识别链路现状与交接
 
-> 更新：2026-08-11（第四轮）· 分支 `codex/agent-rebuild`
+> 更新：2026-08-11（最佳实践评审批次2）· 分支 `codex/agent-rebuild`
 >
-> **一句话**：VL-direct 已是**报价与招标两侧的唯一识别路径**，走通了生产 HTTP
-> API 全链路（上传→任务→确认→对齐→矩阵→导出）；legacy 的报价分支已归档、
-> `QUOTE_RECOGNIZER` 开关移除。**但方向判定仍不稳定**（同配置同文档跑出 3/10 与
+> **一句话**：VL-direct 是**报价与招标两侧唯一的识别路径**，走通了生产 HTTP
+> API 全链路（上传→任务→确认→对齐→矩阵→导出）；legacy 报价/招标分支（含
+> `table_recognizer.py`/`table_parser.py`/`page_classifier.py`/`adaptive_tiler.py`/
+> `aggregator.py`/`prompts.py`/`intelligence/snapshot_provider.py`/`splitter.py`）
+> **已物理删除**（最佳实践评审 F1：两个生产 provider 都实现 `vl_extract_csv`，
+> legacy 分支在生产从未可达，"demote to cross-check" 的前提本身不成立，见
+> docs/design/21 状态横幅）。**但方向判定仍不稳定**（同配置同文档跑出 3/10 与
 > 10/10），且抽取本身有 0.18% 的运行间方差——两者都还没有解法，只有门在兜底。
 >
 > **不要把本文任何数字当作系统能力承诺。** 准确率数字来自单次或少数几次运行；
@@ -16,14 +20,16 @@
 
 | 链路 | 识别器 | 最近一次实测 |
 |---|---|---|
-| 投标报价 | VL-direct | 电缆四份 136/136；阀门三份 89/89 |
-| 招标采购清单 | VL-direct | 89/89，序号 1..89 全中，数量总量 1,644 一致 |
-| 招标封面四标量 | VL-direct | 招标与邀标共用同一份解析器 |
-| 招标要求（品牌等） | VL-direct | 声明为数据，加一项 = 加一条配置 |
+| 投标报价 | VL-direct（唯一路径） | 电缆四份 136/136；阀门三份 89/89 |
+| 招标采购清单 | VL-direct（唯一路径） | 89/89，序号 1..89 全中，数量总量 1,644 一致 |
+| 招标封面四标量 | VL-direct（唯一路径） | 招标与邀标共用同一份解析器 |
+| 招标要求（品牌等） | VL-direct（唯一路径） | 声明为数据，加一项 = 加一条配置 |
 | Excel 交叉校验 | 与识别器无关 | VL 的行同样对账 |
 
-legacy（`recognize_tables` 及其依赖）仅剩两处用途：provider 不具备多图调用时的
-逐页批量兜底，以及它自身的内部路径。物理删除的前提见 docs/design/21 Phase 3。
+legacy 已删除，不再是"仅剩两处用途"——那两处用途（provider 不具备多图调用时的
+逐页批量兜底、`services/tender_pdf.py` 的内部路径）经核实全部不可达，删除前逐一
+验证过（见 [22-best-practice-review-scope 批次2 commit]）。`.claude/rules/recognition.md`
+仍保留 TableGrid/bbox 相关的规范性表述，待最佳实践评审批次4 一并改写。
 
 **当前已知的两个不稳定源**（都不是代码缺陷，是模型行为）：
 1. 方向判定：同输入多次运行结论不同，未解决，靠"无过半共识则不转并标 REVIEW"兜底。
