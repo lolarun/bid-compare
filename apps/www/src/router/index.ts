@@ -3,11 +3,14 @@ import type { RouteRecordRaw } from 'vue-router'
 import NProgress from 'nprogress'
 import 'nprogress/nprogress.css'
 import BasicLayout from '@/layouts/BasicLayout.vue'
+import { useUserStore } from '@/stores/user'
+import type { Role } from '@/types/role'
 
 NProgress.configure({ showSpinner: false })
 
 /** Routes rendered inside BasicLayout (sidebar menu)
- *  group meta drives sidebar grouping; icon is an @ant-design/icons-vue component name. */
+ *  group meta drives sidebar grouping; icon is an @ant-design/icons-vue component name.
+ *  roles meta restricts access to specific roles (undefined = all roles). */
 const appRoutes: RouteRecordRaw[] = [
   // ─── 工作台 ────────────────────────────────────────────────────────────
   {
@@ -27,13 +30,13 @@ const appRoutes: RouteRecordRaw[] = [
     path: '/invite',
     name: 'Invite',
     component: () => import('@/views/invite/IndexView.vue'),
-    meta: { title: '邀标建议', icon: 'SolutionOutlined', group: '业务功能' },
+    meta: { title: '邀标建议', icon: 'SolutionOutlined', group: '业务功能', roles: ['管理员', '比价员'] as Role[] },
   },
   {
     path: '/compare',
     name: 'Compare',
     component: () => import('@/views/compare/IndexView.vue'),
-    meta: { title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能' },
+    meta: { title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能', roles: ['管理员', '比价员'] as Role[] },
   },
   // ─── 数据管理 ──────────────────────────────────────────────────────────
   {
@@ -64,32 +67,32 @@ const appRoutes: RouteRecordRaw[] = [
     path: '/import',
     name: 'Import',
     component: () => import('@/views/import/IndexView.vue'),
-    meta: { title: '采购价格导入', icon: 'CloudUploadOutlined', group: '数据管理' },
+    meta: { title: '采购价格导入', icon: 'CloudUploadOutlined', group: '数据管理', roles: ['管理员', '比价员'] as Role[] },
   },
   {
     path: '/batches',
     name: 'Batches',
     component: () => import('@/views/batches/IndexView.vue'),
-    meta: { title: '清单管理', icon: 'ContainerOutlined', group: '数据管理' },
+    meta: { title: '清单管理', icon: 'ContainerOutlined', group: '数据管理', roles: ['管理员', '比价员'] as Role[] },
   },
   // ─── 系统管理 ──────────────────────────────────────────────────────────
   {
     path: '/system/users',
     name: 'SystemUsers',
     component: () => import('@/views/system/UsersView.vue'),
-    meta: { title: '用户管理', icon: 'UserOutlined', group: '系统管理' },
+    meta: { title: '用户管理', icon: 'UserOutlined', group: '系统管理', roles: ['管理员'] as Role[] },
   },
   {
     path: '/system/logs',
     name: 'SystemLogs',
     component: () => import('@/views/system/LogsView.vue'),
-    meta: { title: '操作日志', icon: 'FileSearchOutlined', group: '系统管理' },
+    meta: { title: '操作日志', icon: 'FileSearchOutlined', group: '系统管理', roles: ['管理员'] as Role[] },
   },
   {
     path: '/system/settings',
     name: 'SystemSettings',
     component: () => import('@/views/system/SettingsView.vue'),
-    meta: { title: '系统设置', icon: 'SettingOutlined', group: '系统管理' },
+    meta: { title: '系统设置', icon: 'SettingOutlined', group: '系统管理', roles: ['管理员'] as Role[] },
   },
 ]
 
@@ -107,6 +110,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '登录', public: true },
   },
   {
+    path: '/403',
+    name: 'Forbidden',
+    component: () => import('@/views/exception/403.vue'),
+    meta: { title: '无权限', public: true },
+  },
+  {
     path: '/',
     name: 'Layout',
     component: BasicLayout,
@@ -118,7 +127,7 @@ const routes: RouteRecordRaw[] = [
         path: '/compare/:projectId/:step?',
         name: 'CompareDeep',
         component: () => import('@/views/compare/IndexView.vue'),
-        meta: { title: '招标比价分析', public: false },
+        meta: { title: '招标比价分析', public: false, roles: ['管理员', '比价员'] as Role[] },
       },
       // Legacy path redirects — inside layout so auth guard runs before redirect
       { path: '/quotes', redirect: '/analysis' },
@@ -140,17 +149,43 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 })
 
-/* ── Route guard: auth check ─────────────────────────────────────────── */
-const whiteList = ['Login', 'NotFound']
+/* ── Route guard: auth + role check ─────────────────────────────────── */
+const whiteList = ['Login', 'NotFound', 'Forbidden']
+let refreshedToken = ''
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   NProgress.start()
   document.title = `${to.meta?.title || ''} - MEMPAS`.replace(/^ - /, '')
 
   const token = localStorage.getItem('mempas_token')
+
+  // 1. Auth check: redirect to login if no token
   if (!token && !whiteList.includes(to.name as string) && !to.meta?.public) {
     return { name: 'Login', query: { redirect: encodeURIComponent(to.fullPath) } }
   }
+
+  // Refresh role data once per browser token before evaluating route access.
+  // Server-side RBAC remains authoritative; this prevents stale localStorage
+  // from showing routes after an administrator changes a user's role.
+  const userStore = useUserStore()
+  if (token && token !== refreshedToken) {
+    refreshedToken = token
+    await userStore.fetchMe()
+    if (!userStore.isLoggedIn()) {
+      refreshedToken = ''
+      return { name: 'Login', query: { redirect: encodeURIComponent(to.fullPath) } }
+    }
+  }
+
+  // 2. Role check: verify user has required role for this route
+  const requiredRoles = to.meta?.roles as Role[] | undefined
+  if (requiredRoles && requiredRoles.length > 0) {
+    const userRole = userStore.userInfo?.role
+    if (userRole && !requiredRoles.includes(userRole as Role)) {
+      return { name: 'Forbidden' }
+    }
+  }
+
   return true
 })
 

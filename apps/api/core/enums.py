@@ -40,3 +40,9 @@ RT_GRAND_TOTAL = "grand_total"
 # Row types that must not be included in quote-line counts or eval totals
 RT_NON_QUOTE = frozenset({RT_SECTION_HEADER, RT_REMARK, RT_INVALID,
                            RT_SUBTOTAL, RT_GRAND_TOTAL})
+
+# ── User roles ───────────────────────────────────────────────────────────────
+ROLE_ADMIN = "管理员"
+ROLE_BUYER = "比价员"
+ROLE_VIEWER = "查看者"
+ALL_ROLES = frozenset({ROLE_ADMIN, ROLE_BUYER, ROLE_VIEWER})

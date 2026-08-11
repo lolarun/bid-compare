@@ -2,6 +2,8 @@
 import { computed, h, type VNode } from 'vue'
 import { useRoute, useRouter, type RouteRecordRaw } from 'vue-router'
 import * as Icons from '@ant-design/icons-vue'
+import { useUserStore } from '@/stores/user'
+import type { Role } from '@/types/role'
 
 const props = defineProps<{
   collapsed: boolean
@@ -9,6 +11,7 @@ const props = defineProps<{
 
 const router = useRouter()
 const route = useRoute()
+const userStore = useUserStore()
 
 interface MenuItem {
   key: string
@@ -24,6 +27,13 @@ interface MenuGroup {
 
 const GROUP_ORDER = ['工作台', '业务功能', '数据管理', '系统管理'] as const
 
+function hasRouteAccess(routeRoles: unknown): boolean {
+  if (!routeRoles || !Array.isArray(routeRoles) || routeRoles.length === 0) return true
+  const userRole = userStore.userInfo?.role
+  if (!userRole) return false
+  return (routeRoles as Role[]).includes(userRole as Role)
+}
+
 const groups = computed<MenuGroup[]>(() => {
   const layoutRoute = router.getRoutes().find((r) => r.name === 'Layout')
   if (!layoutRoute) return []
@@ -31,6 +41,8 @@ const groups = computed<MenuGroup[]>(() => {
   const map = new Map<string, MenuItem[]>()
   for (const r of children) {
     if (!r.meta?.title || r.meta?.hideInMenu) continue
+    // Role-based filtering: skip routes the user can't access
+    if (!hasRouteAccess(r.meta.roles)) continue
     const group = (r.meta.group as string) || '其他'
     const path = r.path.startsWith('/') ? r.path : `/${r.path}`
     const item: MenuItem = {
