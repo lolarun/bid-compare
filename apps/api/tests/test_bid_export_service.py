@@ -12,7 +12,7 @@ Regression coverage for two defects found during the review:
 from __future__ import annotations
 
 import pytest
-from apps.api.core.errors import ValidationError
+from apps.api.core.errors import ConflictError
 
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.services.matrix import bid_export_service
@@ -35,7 +35,11 @@ def _mk_session(db, *, project_id, category, status, anchors_json=None):
 
 
 def test_export_rejects_unconfirmed_session(db_session, monkeypatch):
-    """A preview (never-confirmed) session must not be exportable — 400, not silently used."""
+    """A preview (never-confirmed) session must not be exportable — 409, not silently used.
+
+    409 (not 400): 评审 E1 —— "无已确认采购清单" 与 build_anchor_review_matrix/
+    analysis.py:208 是同一语义，统一到 ConflictError(409)。
+    """
     _mk_session(
         db_session, project_id=1, category="阀门", status="preview",
         anchors_json=[{"seq": 1, "name": "闸阀"}],
@@ -47,10 +51,10 @@ def test_export_rejects_unconfirmed_session(db_session, monkeypatch):
         lambda *a, **kw: called.__setitem__("build_anchor_matrix", True) or {},
     )
 
-    with pytest.raises(ValidationError) as exc:
+    with pytest.raises(ConflictError) as exc:
         bid_export_service.get_bid_matrix_for_export(db_session, 1, "阀门", [])
 
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 409
     assert called["build_anchor_matrix"] is False
 
 

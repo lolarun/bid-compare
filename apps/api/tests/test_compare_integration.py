@@ -805,7 +805,7 @@ class TestSubmissionResolver:
 # ── Quality gate tests ────────────────────────────────────────────────────────
 
 class TestQualityGate:
-    """price coverage 质量门：eligible 行中 unit_price>0 比率 < 80% → 409。"""
+    """price coverage 质量门：eligible 行中 unit_price>0 比率 < 80% → 422。"""
 
     def _make_sub_project(self, client, supplier_name: str, project_name: str) -> dict:
         """上传 + batch-confirm + 确认招标清单。返回 {project_id, supplier_id, sub_id}。"""
@@ -838,7 +838,7 @@ class TestQualityGate:
         return {"project_id": project_id, "supplier_id": supplier_id, "sub_id": sub_id}
 
     def test_low_price_coverage_blocks_match(self, compare_client):
-        """全部 BQL 清零 unit_price → 覆盖率 0% < 80%，match 返回 409。"""
+        """全部 BQL 清零 unit_price → 覆盖率 0% < 80%，match 返回 422。"""
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
 
@@ -859,7 +859,7 @@ class TestQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(sub_id),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         assert isinstance(detail, dict), f"detail 应为 dict，实际：{detail!r}"
         assert detail.get("error") == "submission_quality_gate_failed"
@@ -899,7 +899,7 @@ class TestQualityGate:
         assert r.status_code == 200, f"含合计行时不应被质量门拦截: {r.text}"
 
     def test_quality_gate_failure_carries_structured_metrics(self, compare_client):
-        """409 详情结构含 submission_id / eligible / price_ok / coverage / threshold。"""
+        """422 详情结构含 submission_id / eligible / price_ok / coverage / threshold。"""
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
 
@@ -922,7 +922,7 @@ class TestQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(sub_id),
         })
-        assert r.status_code == 409
+        assert r.status_code == 422
         failures = r.json()["detail"]["failures"]
         f = failures[0]
         assert f["submission_id"] == sub_id
@@ -956,6 +956,9 @@ class TestQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(sub_a_id),
         })
+        # 409（不是 422）：superseded 触发的是归属/状态校验（D3 的 resolve_active_
+        # submissions gate），不是本文件测的 _quality_failures 数据质量门——
+        # 两者恰好都在 match 路由里，前者先判、409 未受评审 E1 的 422 统一影响。
         assert r.status_code == 409, r.text
 
     def test_full_coverage_passes_quality_gate(self, compare_client):
@@ -1028,7 +1031,7 @@ class TestExtendedQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(state["sub_id"]),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         checks = [i["check"] for i in detail["failures"][0]["issues"]]
         assert "arithmetic_error_rate" in checks or "line_concentration" in checks, (
@@ -1036,7 +1039,7 @@ class TestExtendedQualityGate:
         )
 
     def test_systematic_vat_mismatch_blocked(self, compare_client):
-        """超过20%的行 total_price = qty×unit_price×1.13（系统性VAT混用）→ 409。"""
+        """超过20%的行 total_price = qty×unit_price×1.13（系统性VAT混用）→ 422。"""
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
 
@@ -1059,7 +1062,7 @@ class TestExtendedQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(state["sub_id"]),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         checks = [i["check"] for i in detail["failures"][0]["issues"]]
         assert "systematic_vat_mismatch" in checks, (
@@ -1067,7 +1070,7 @@ class TestExtendedQualityGate:
         )
 
     def test_single_line_exceeds_60pct_of_total_blocked(self, compare_client):
-        """单行金额占总金额 >60% → 疑似章节小计被误识别为单行产品 → 409。"""
+        """单行金额占总金额 >60% → 疑似章节小计被误识别为单行产品 → 422。"""
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
 
@@ -1089,13 +1092,13 @@ class TestExtendedQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(state["sub_id"]),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         checks = [i["check"] for i in detail["failures"][0]["issues"]]
         assert "line_concentration" in checks, f"应触发 line_concentration，实际 checks={checks}"
 
     def test_declared_total_mismatch_blocked(self, compare_client):
-        """明细合计与声明总价偏差>3%（通过 _doc_meta.bid_total）→ 409。
+        """明细合计与声明总价偏差>3%（通过 _doc_meta.bid_total）→ 422。
 
         必须用 flag_modified 显式标脏：JSON 列做"浅拷贝顶层 dict → 就地改嵌套
         dict → 整体重赋值"这套操作时，若嵌套 key（_doc_meta）已经存在（VL 路径
@@ -1138,7 +1141,7 @@ class TestExtendedQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(state["sub_id"]),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         checks = [i["check"] for i in detail["failures"][0]["issues"]]
         assert "declared_total_mismatch" in checks, (
@@ -1184,7 +1187,7 @@ class TestExtendedQualityGate:
             "supplier_ids": str(state["supplier_id"]),
             "submission_ids": str(state["sub_id"]),
         })
-        assert r.status_code == 409, r.text
+        assert r.status_code == 422, r.text
         detail = r.json()["detail"]
         checks = [i["check"] for i in detail["failures"][0]["issues"]]
         assert "line_exceeds_declared_total" in checks or "declared_total_mismatch" in checks, (
@@ -1534,7 +1537,7 @@ class TestPriceBasisBridgeContract:
         assert row["total_price"] is None
         assert row["extraction_meta"]["price_basis"] == "unknown"
 
-        # 招标清单 + match：unknown 行价格覆盖率 0% → 质量门 409（证明不自动入比价）
+        # 招标清单 + match：unknown 行价格覆盖率 0% → 质量门 422（证明不自动入比价）
         # 需要 project_id；从 batch-confirm 响应取
         project_id = r.json()["project_id"]
         anchors = [{"seq": "1", "name": "DN50 闸阀", "spec": "Z45X", "unit": "个", "qty": 2, "category": "阀门"}]
@@ -1547,7 +1550,7 @@ class TestPriceBasisBridgeContract:
             "project_id": str(project_id), "category": "阀门",
             "supplier_ids": str(supplier_id), "submission_ids": str(sub_id),
         })
-        assert rm.status_code == 409, f"unknown 口径行应被质量门拦截: {rm.text}"
+        assert rm.status_code == 422, f"unknown 口径行应被质量门拦截: {rm.text}"
 
 
 # TestPriceBasisBridgeFixtures（三份真实 fixture 重放）删除于 2026-08-11（最佳实践

@@ -8,7 +8,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.core.errors import ConflictError, ValidationError
+from apps.api.core.errors import ConflictError
 from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 from apps.api.services.tender.tender_session_service import (
     get_current_confirmed_session,
@@ -36,7 +36,9 @@ def get_bid_matrix_for_export(
 
     session = get_current_confirmed_session(db, project_id, category)
     if not session or not session.anchors_json:
-        raise ValidationError(
+        # 评审 E1：与 build_anchor_review_matrix/analysis.py:208 的"无已确认采购
+        # 清单"是同一语义，统一 409（此前这里独立判 400，三处三个码）。
+        raise ConflictError(
             f"项目 {project_id} / 品类 {category} 尚无已确认采购清单（TenderListSession）。"
             "请先完成采购清单上传和确认步骤后再导出。"
         )

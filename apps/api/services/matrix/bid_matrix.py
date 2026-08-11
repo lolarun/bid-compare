@@ -10,6 +10,7 @@ from apps.api.core.enums import (
     CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING, CELL_EXCLUDED, CELL_MISSING,
     REC_BLOCKED,
 )
+from apps.api.core.errors import ConflictError, ValidationError
 from apps.api.services.matrix.bid_evaluation import (
     _anchor_spec, _canon_family, _pending_is_qty_only, _evaluate_cell, _EVAL_QTY_TOL,
 )
@@ -882,9 +883,13 @@ def build_anchor_review_matrix(
     from apps.api.services.tender.tender_list import rebuild_anchors
     from apps.api.services.tender.tender_session_service import get_current_confirmed_session
 
+    # 评审 E1：与 bid_export_service.py 的"无已确认采购清单"是同一语义，统一 409
+    # （此前这里是裸 ValueError，被路由的 except ValueError 统一映射成 409——
+    # 但同一个 except 块还兜着下面"submission_ids 不可为空"这个完全不同的语义，
+    # 会被同一个 409 误盖；分开成两种 DomainError 后路由不用再猜是哪一种）。
     session = get_current_confirmed_session(db, project_id, category)
     if not session:
-        raise ValueError(f"No current TenderListSession for project {project_id} / {category}")
+        raise ConflictError(f"No current TenderListSession for project {project_id} / {category}")
 
     anchors = rebuild_anchors(session)
 
@@ -895,7 +900,9 @@ def build_anchor_review_matrix(
     elif supplier_ids:
         ids = sorted(set(supplier_ids))
     else:
-        raise ValueError(
+        # 与 routes/analysis.py 里 "missing_submission_ids" 内联检查是同一语义，
+        # 统一 400（评审 E1）。
+        raise ValidationError(
             "submission_ids 不可为空 — 比价流程禁止扫历史全量供应商。"
             "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。"
         )

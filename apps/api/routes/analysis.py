@@ -533,13 +533,13 @@ def anchor_review_matrix(
                        "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。",
         })
 
-    try:
-        if _use_submission:
-            result = build_anchor_review_matrix(db, project_id, category, submission_ids=sids)
-        else:
-            result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)  # legacy
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    # build_anchor_review_matrix 现在抛 DomainError（评审 E1：ConflictError=无已确认
+    # session / ValidationError=submission_ids 为空），由 core/errors.py 的全局
+    # handler 统一映射，不用在这里再猜一次状态码。
+    if _use_submission:
+        result = build_anchor_review_matrix(db, project_id, category, submission_ids=sids)
+    else:
+        result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)  # legacy
     return result
 
 
@@ -1266,8 +1266,11 @@ async def tender_list_match(
                 })
 
         if _quality_failures:
+            # 评审 E1：与 quote_confirmation_service.py 的结构完整性/声明总价等
+            # 数据质量门是同一类语义（数据被接受但需要人工复核才能继续），
+            # 统一 422（此前这里是 409，那边是 422，同一语义两个码）。
             raise HTTPException(
-                409,
+                422,
                 {
                     "error": "submission_quality_gate_failed",
                     "message": "以下 submission 未通过数据质量门，禁止对齐",
