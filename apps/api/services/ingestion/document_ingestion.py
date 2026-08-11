@@ -68,6 +68,29 @@ def _hash_context(context: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _merge_quality_metadata(data: dict, metadata: dict) -> dict:
+    """把 ExtractionResponse.metadata 里的质量/台账/方向信号并入 job.result。
+
+    评审 R2：此前这里只取 `resp.data`，`resp.metadata` 里的 quality_status/
+    quality_blocking_reasons/row_ledger/page_count/target_pages/rotations/
+    orientation_unresolved 全部被丢弃——不是"前端没接"，是这些字段从未到达
+    过 job.result，API 层拿不到，前端不可能显示。这里改为整体保留（除
+    doc_meta，它已单独落 `_doc_meta`，避免与 quote_confirmation_service 的
+    checksum 门读取路径重复/冲突），前缀 `_quality`，与既有 `_doc_meta`/
+    `_checksum` 的命名约定一致（下划线前缀 = 元数据，不是识别出的报价字段，
+    不会被误当成一行数据渲染）。`JobResponse.result` 是裸 dict，新增键无需
+    改 schema 即可透传到前端。
+    """
+    quality_meta = {k: v for k, v in metadata.items() if k != "doc_meta"}
+    if not quality_meta:
+        return data
+    merged = dict(data)
+    merged["_quality"] = quality_meta
+    if metadata.get("doc_meta"):
+        merged["_doc_meta"] = metadata["doc_meta"]
+    return merged
+
+
 def _get_upload_dir() -> Path:
     """Resolve upload dir at call time so tests can monkeypatch UPLOAD_DIR."""
     return UPLOAD_DIR
@@ -221,7 +244,7 @@ class DocumentIngestionService:
                         job.file_path,
                         progress_cb=update_progress,
                     )
-                    result = resp.data
+                    result = _merge_quality_metadata(resp.data, resp.metadata)
                     job.tokens_used = resp.tokens_used
                     job.duration_ms = resp.duration_ms
                     job.provider = resp.provider
@@ -232,10 +255,7 @@ class DocumentIngestionService:
                         job.context or {},
                         progress_cb=update_progress,
                     )
-                    result = resp.data
-                    if resp.metadata.get("doc_meta"):
-                        result = dict(result)
-                        result["_doc_meta"] = resp.metadata["doc_meta"]
+                    result = _merge_quality_metadata(resp.data, resp.metadata)
                     job.tokens_used = resp.tokens_used
                     job.duration_ms = resp.duration_ms
                     job.provider = resp.provider
