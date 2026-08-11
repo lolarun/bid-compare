@@ -1290,8 +1290,11 @@ async def tender_list_match(
         raise HTTPException(400, str(e))
     except Exception as e:
         import traceback, logging
+        # 评审 E3：异常类名（type(e).__name__）此前直接拼进客户端可见的 detail——
+        # 服务端实现细节不该泄给客户端。完整信息（含类名）仍进日志，客户端只看到
+        # 通用消息，需要排查时查服务端日志。
         logging.error("tender-list/match error: %s\n%s", e, traceback.format_exc())
-        raise HTTPException(500, f"招标清单匹配失败：{type(e).__name__}: {e}")
+        raise HTTPException(500, "招标清单匹配失败，请稍后重试或联系管理员")
 
     # Enrich per_supplier (now keyed by submission_id) with names and doc_meta
     from apps.api.models import ExtractionJob, Supplier as SupplierModel
