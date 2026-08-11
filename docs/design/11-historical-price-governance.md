@@ -218,7 +218,7 @@ quality_flags
 
 The price baseline must be computed over similar materials, specs, units, tax bases, and time ranges. When the sample is insufficient it returns no baseline; it must not degrade to the all-category minimum price.
 
-> (corrected 2026-06-23: the `historical_price_fact` contract above is not yet a persisted model. The same-spec baseline behavior it requires IS implemented today in `apps/api/services/comparison.py`, which keys deviation off `(valve_family, DN, PN, unit, tax_basis)` and returns no baseline when samples are insufficient — see `spec_baseline_from_index`. The general baseline path uses IQR-filtered "reasonable low" from the `Material.ref_price_*` fields refreshed by `apps/api/services/statistics.py::refresh_material_baselines`.)
+> (corrected 2026-06-23: the `historical_price_fact` contract above is not yet a persisted model. The same-spec baseline behavior it requires IS implemented today in `apps/api/services/history/comparison.py`, which keys deviation off `(valve_family, DN, PN, unit, tax_basis)` and returns no baseline when samples are insufficient — see `spec_baseline_from_index`. The general baseline path uses IQR-filtered "reasonable low" from the `Material.ref_price_*` fields refreshed by `apps/api/services/history/statistics.py::refresh_material_baselines`.)
 
 ### 7.2 Supplier performance evidence
 
@@ -259,13 +259,13 @@ status
 
 The invitation-to-bid page must display the evidence level. `quoted`, `claimed`, and `inferred` must not be presented as "formal agency brand."
 
-> (corrected 2026-06-23: this graded supplier-brand-evidence model is not implemented. No `evidence_level` column or `SupplierBrandEvidence` table exists in `apps/api/models/`. Today, brand evidence is derived ad hoc from `Quote.brand` — exactly the `quoted`-level signal — and `apps/api/services/supplier_recommend.py::_get_supplier_brands` returns the distinct `Quote.brand` values a supplier has quoted, with no level distinction. This is the gap §9 warns against, still open.)
+> (corrected 2026-06-23: this graded supplier-brand-evidence model is not implemented. No `evidence_level` column or `SupplierBrandEvidence` table exists in `apps/api/models/`. Today, brand evidence is derived ad hoc from `Quote.brand` — exactly the `quoted`-level signal — and `apps/api/services/supplier/supplier_recommend.py::_get_supplier_brands` returns the distinct `Quote.brand` values a supplier has quoted, with no level distinction. This is the gap §9 warns against, still open.)
 
 ## 8. Business-service boundaries
 
 Historical procurement prices need to expose domain services, not just CRUD.
 
-> (corrected 2026-06-23: none of the four services named below — `HistoricalPriceService`, `SupplierEvidenceService`, `SupplierBrandEvidenceService`, `InviteRecommendationService` — exist as code. The names appear only in design docs 11 and 12. Today's closest equivalents are `apps/api/services/comparison.py` (price baselines), `apps/api/services/supplier_recommend.py` (invitee recommendation), and `apps/api/services/statistics.py` (dashboard/category aggregates). These query `Quote` directly through the shared `valid_quote_filters()` rather than through the façade described here.)
+> (corrected 2026-06-23: none of the four services named below — `HistoricalPriceService`, `SupplierEvidenceService`, `SupplierBrandEvidenceService`, `InviteRecommendationService` — exist as code. The names appear only in design docs 11 and 12. Today's closest equivalents are `apps/api/services/history/comparison.py` (price baselines), `apps/api/services/supplier/supplier_recommend.py` (invitee recommendation), and `apps/api/services/history/statistics.py` (dashboard/category aggregates). These query `Quote` directly through the shared `valid_quote_filters()` rather than through the façade described here.)
 
 ### 8.1 HistoricalPriceService
 
@@ -344,7 +344,7 @@ The recommendation result must explain:
 - After any historical fact is re-cleaned or re-released, the price baseline and supplier/brand evidence must be rebuildable and reconcilable.
 - When a service returns an empty result, the caller must show "insufficient evidence" and must not fall back to an unscoped whole-database statistic.
 
-> (corrected 2026-06-23: `valid_quote_filters()` exists at `apps/api/services/quote_filters.py` and IS the shared minimal filter — it excludes non-`active` suppliers (`Supplier.merge_status != 'active'`) and quotes flagged `polluted` / `excluded_from_ref` (`Quote.bid_status`). It is correctly reused by `statistics.py`, `supplier_recommend.py`, and the baseline refresh. The remaining unmet rules: (a) `supplier_recommend.py::_get_supplier_brands` treats `Quote.brand` aggregation as brand signal, contrary to bullet 2; (b) there is no unified service façade, so callers query `Quote` directly; (c) the dashboard heatmap/bubble queries in `statistics.py` do NOT apply `valid_quote_filters()` — they filter only on `Quote.bid_status != "未中标"`, an inconsistency with bullet 1.)
+> (corrected 2026-06-23: `valid_quote_filters()` exists at `apps/api/services/history/quote_filters.py` and IS the shared minimal filter — it excludes non-`active` suppliers (`Supplier.merge_status != 'active'`) and quotes flagged `polluted` / `excluded_from_ref` (`Quote.bid_status`). It is correctly reused by `statistics.py`, `supplier_recommend.py`, and the baseline refresh. The remaining unmet rules: (a) `supplier_recommend.py::_get_supplier_brands` treats `Quote.brand` aggregation as brand signal, contrary to bullet 2; (b) there is no unified service façade, so callers query `Quote` directly; (c) the dashboard heatmap/bubble queries in `statistics.py` do NOT apply `valid_quote_filters()` — they filter only on `Quote.bid_status != "未中标"`, an inconsistency with bullet 1.)
 
 ## 10. Release and database writes
 

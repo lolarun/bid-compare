@@ -154,7 +154,7 @@ This is critical to the cost of the 342 material categories: **otherwise every t
 
 In the prudent order of "quantify first, productionize later":
 
-1. ✅ **List parser** (`apps/api/services/tender_list.py`) — measured: valve list 90/90 rows, total 1745 exact, material disambiguation correct (gate valve DN20 splits 不锈钢#45/UPVC#55)
+1. ✅ **List parser** (`apps/api/services/tender/tender_list.py`) — measured: valve list 90/90 rows, total 1745 exact, material disambiguation correct (gate valve DN20 splits 不锈钢#45/UPVC#55)
 2. ✅ **Anchor-matching measurement** (`scripts/measure_anchor_alignment.py`, embedding recall + DN check, no LLM no lexicon) — see §9.1 measurements
 3. **Production endpoint (in progress)**: upload list → build anchors → embedding match → land `BidAlignmentGroup` → bid-comparison matrix. **Gate ② LLM review + cache deferred**, added later once real usage shows the review volume (avoid over-design). Decided 2026-06-08.
 4. (Deferred) Gate ② LLM review + canonical-mapping cache + frontend residue queue

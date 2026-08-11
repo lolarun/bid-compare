@@ -33,7 +33,7 @@ Three root causes:
 
 ## Plan
 
-### 1. Category classifier (new) `apps/api/services/category_classify.py`
+### 1. Category classifier (new) `apps/api/services/ingestion/category_classify.py`
 
 ```python
 def classify_category(name: str, spec: str = "", pressure: str = "", material: str = "") -> str:
@@ -99,10 +99,10 @@ For multi-category: match creates a session per category and matches per categor
 
 | File | Change |
 |---|---|
-| `apps/api/services/category_classify.py` | new classifier |
-| `apps/api/services/tender_list.py` | tag anchor with category after parse (or at preview) |
+| `apps/api/services/ingestion/category_classify.py` | new classifier |
+| `apps/api/services/tender/tender_list.py` | tag anchor with category after parse (or at preview) |
 | `apps/api/routes/analysis.py` | rework preview / confirm / match (three places) |
-| `apps/api/services/anchor_match.py` | match supports auto-persist session + per-category |
+| `apps/api/services/alignment/anchor_match.py` | match supports auto-persist session + per-category |
 | `apps/www/src/views/compare/IndexView.vue` | category-recognition display + multi-category split prompt + downstream category switcher |
 | `apps/api/tests/` | classifier unit tests + multi-category E2E |
 

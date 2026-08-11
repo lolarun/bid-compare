@@ -5,7 +5,7 @@
 > changes what production refuses to store, so it needs sign-off before implementation.
 >
 > Scope: `CHECKSUM_BLOCK_DELTA_RATIO` in `apps/api/core/domain_config.py`, consumed by
-> `_build_checksum` / `_gate_integrity` in `apps/api/services/quote_confirmation_service.py`.
+> `_build_checksum` / `_gate_integrity` in `apps/api/services/submission/quote_confirmation_service.py`.
 > Basis: CLAUDE.md §4 (quality tiers), `.claude/rules/bid-compare-backend.md`.
 
 ## 1. What the gate is for

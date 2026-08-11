@@ -43,7 +43,7 @@ Directory splitting should serve these boundaries, not be a big refactor for the
 
 (corrected 2026-06-23: fixed — the legacy `build_bid_matrix()` / `_build_alignment_row()` path and the `first_qt` reference have been removed from `bid_matrix.py`; no `first_qt` / `first_data` / `_build_alignment_row` symbols remain.)
 
-Location: `apps/api/services/bid_matrix.py:369`
+Location: `apps/api/services/matrix/bid_matrix.py:369`
 
 The `_build_alignment_row()` local variable is `first_data`, but the return value references a nonexistent `first_qt.material_id`. Once this branch processes a confirmed alignment group it fails outright.
 
@@ -59,7 +59,7 @@ Recommendation:
 
 (corrected 2026-06-23: fixed — `get_evaluation_policy(project_id)` now returns `UNKNOWN_EVALUATION_POLICY` (`method="unknown"`, `award_mode="unknown"`, `weights=None`, `final_decision_requires_committee=True`) for all projects until tender-document policy persistence exists.)
 
-Location: `apps/api/services/evaluation_policy.py:39-44,81-87`
+Location: `apps/api/services/matrix/evaluation_policy.py:39-44,81-87`
 
 `get_evaluation_policy(project_id)` completely ignores `project_id`; all projects return:
 
@@ -76,7 +76,7 @@ Recommendation: establish an `EvaluationPolicyService` that prefers a confirmed 
 
 (corrected 2026-06-23: fixed — the candidate recall query in `supplier_recommend.py` now applies `valid_quote_filters()`, and the cold-start pool is restricted to `Supplier.merge_status == "active"`; `statistics.recommended_brands` now joins `Supplier` and applies `valid_quote_filters()`.)
 
-Location: `apps/api/services/supplier_recommend.py:234-253`
+Location: `apps/api/services/supplier/supplier_recommend.py:234-253`
 
 Supplier-score aggregation uses `valid_quote_filters()`, but the upfront candidate-recall query does not, nor does it restrict to active suppliers. The result is:
 
@@ -84,7 +84,7 @@ Supplier-score aggregation uses `valid_quote_filters()`, but the upfront candida
 - merged/inactive suppliers can enter candidates;
 - even if scored low afterward, the candidate identity itself is already polluted.
 
-Location: `apps/api/services/statistics.py:189-194`
+Location: `apps/api/services/history/statistics.py:189-194`
 
 `recommended_brands` reads `Quote.brand` directly, with no `Supplier` join and no `valid_quote_filters()`. This writes test quotes, invalid suppliers, and quote-stated brands back into the material's recommended brands.
 

@@ -240,7 +240,7 @@ Layers 1–6 unique hit: return the `supplier_id` directly.
 Layers 1–6 no hit, layer 7 has candidates: return `{"error": "supplier_ambiguous", "candidates": [...]}` — user chooses manually.
 Layer 7 also no hit: return `{"error": "supplier_not_found"}` — the frontend prompts the user to create it in supplier management; creation is forbidden within the bid-comparison flow.
 
-> _(corrected 2026-06-23: the implemented service is `apps/api/services/supplier_resolve.py`, function `resolve_supplier()` (no leading underscore), returning a `ResolveResult` dataclass (`supplier` / `candidates` / `matched_layer` / `normalized`) rather than the raw `{"error": ...}` dicts described here. The layer ordering also differs: layer 1 is `Supplier.name` exact (case-insensitive), layer 2 is `Supplier.short_name` exact, and layers 3–6 are the four `SupplierAlias` types — the explicit "supplier_id passed in directly" is handled by the caller, not inside the function. Routes map the dataclass to HTTP responses.)_
+> _(corrected 2026-06-23: the implemented service is `apps/api/services/supplier/supplier_resolve.py`, function `resolve_supplier()` (no leading underscore), returning a `ResolveResult` dataclass (`supplier` / `candidates` / `matched_layer` / `normalized`) rather than the raw `{"error": ...}` dicts described here. The layer ordering also differs: layer 1 is `Supplier.name` exact (case-insensitive), layer 2 is `Supplier.short_name` exact, and layers 3–6 are the four `SupplierAlias` types — the explicit "supplier_id passed in directly" is handled by the caller, not inside the function. Routes map the dataclass to HTTP responses.)_
 
 **Alias seed data** (written via a migration script, not hard-coded in business if/else):
 
@@ -423,7 +423,7 @@ ALTER TABLE suppliers ADD COLUMN merged_into_supplier_id INTEGER REFERENCES supp
 
 **Problem**: `refresh_material_baselines()`, supplier recommendation, historical-price statistics, and deviation calculation each query all of `quotes` directly, cannot jointly exclude polluted records, and are maintained in scattered places.
 
-**Solution**: define a shared query builder in `apps/api/services/quote_filters.py` (new); every module touching reference prices calls this function and must not query the raw `quotes` table directly.
+**Solution**: define a shared query builder in `apps/api/services/history/quote_filters.py` (new); every module touching reference prices calls this function and must not query the raw `quotes` table directly.
 
 Query condition (expressed in SQLAlchemy):
 
@@ -441,7 +441,7 @@ All of the following must call this shared function (no bypassing):
 - supplier recommendation (`BidInvitation` scoring)
 - the `ref_price_*` fields returned by `GET /materials/{id}`
 
-> _(corrected 2026-06-23: implemented in `apps/api/services/quote_filters.py` as `valid_quote_filters()` (plus a `valid_quote_query(db)` convenience). The implemented filter excludes `bid_status IN ('polluted','excluded_from_ref')` and requires `Supplier.merge_status == 'active'`; it does NOT include the `'test'` bid_status exclusion nor the `unit_price > 0` clause from this draft — those conditions are applied (or not) by individual callers rather than baked into the shared filter.)_
+> _(corrected 2026-06-23: implemented in `apps/api/services/history/quote_filters.py` as `valid_quote_filters()` (plus a `valid_quote_query(db)` convenience). The implemented filter excludes `bid_status IN ('polluted','excluded_from_ref')` and requires `Supplier.merge_status == 'active'`; it does NOT include the `'test'` bid_status exclusion nor the `unit_price > 0` clause from this draft — those conditions are applied (or not) by individual callers rather than baked into the shared filter.)_
 
 ---
 
@@ -462,7 +462,7 @@ if (!tenderCategory.value && r.detected_category) {
 // r.material_class is used only for the "tender raw category" display on the Step 2 conclusion card
 ```
 
-> _(corrected 2026-06-23: `detected_category` is implemented and the frontend `IndexView.vue` assigns `tenderCategory` from `detected_category` (around lines 128/236), confirming the fix. The majority-vote is implemented in `apps/api/services/category_classify.py` and surfaced both in `tender_pdf.py` (`most_common(1)`) and `analysis.py`; whether the strict >60% threshold and the `""` fallback are enforced may differ from this draft — the category is derived from the item names/specs, not the discipline column.)_
+> _(corrected 2026-06-23: `detected_category` is implemented and the frontend `IndexView.vue` assigns `tenderCategory` from `detected_category` (around lines 128/236), confirming the fix. The majority-vote is implemented in `apps/api/services/ingestion/category_classify.py` and surfaced both in `tender_pdf.py` (`most_common(1)`) and `analysis.py`; whether the strict >60% threshold and the `""` fallback are enforced may differ from this draft — the category is derived from the item names/specs, not the discipline column.)_
 
 ---
 
@@ -525,7 +525,7 @@ After Phase 1 completes, immediately run the supplier audit script (`audit_suppl
 
 **A full E2E must be run before go-live** (see §7 acceptance criteria); no functional gap is allowed.
 
-> _(corrected 2026-06-23: this is implemented, with the endpoint-shape difference noted in §3/§4.5. `confirm_batch` lives in `apps/api/services/quote_confirmation_service.py` (the route delegates to it), the resolver is `resolve_supplier()` in `apps/api/services/supplier_resolve.py`, and `analysis.py` match reads `bid_quote_line_id` with `quote_id` fallback as described.)_
+> _(corrected 2026-06-23: this is implemented, with the endpoint-shape difference noted in §3/§4.5. `confirm_batch` lives in `apps/api/services/submission/quote_confirmation_service.py` (the route delegates to it), the resolver is `resolve_supplier()` in `apps/api/services/supplier/supplier_resolve.py`, and `analysis.py` match reads `bid_quote_line_id` with `quote_id` fallback as described.)_
 
 ---
 
@@ -1086,13 +1086,13 @@ All must pass before the Phase 2/3 migration task may be closed:
 | DDL: 3 new tables + BidAlignmentItem rebuild | `database.py` / migration script | Phase 1 |
 | Alias seed-data migration | `scripts/seed_supplier_aliases.py` | Phase 1 |
 | `suppliers` two-column ADD COLUMN | `database.py` | Phase 1 |
-| `quote_filters.py` (valid-historical-quote query) | `apps/api/services/quote_filters.py` (new) | Phase 2/3 |
-| `_resolve_supplier()` 7-layer lookup | `apps/api/services/supplier_resolve.py` (new) | Phase 2/3 |
+| `quote_filters.py` (valid-historical-quote query) | `apps/api/services/history/quote_filters.py` (new) | Phase 2/3 |
+| `_resolve_supplier()` 7-layer lookup | `apps/api/services/supplier/supplier_resolve.py` (new) | Phase 2/3 |
 | `batch-confirm` rework (write the staging layer) | `apps/api/routes/quotes.py` | Phase 2/3 |
 | `archive-prices` endpoint | `apps/api/routes/quotes.py` | Phase 2/3 |
-| `tender_pdf.py` `detected_category` | `apps/api/services/tender_pdf.py` | Phase 2/3 |
+| `tender_pdf.py` `detected_category` | `apps/api/services/tender/tender_pdf.py` | Phase 2/3 |
 | `match` reads BidQuoteLine | `apps/api/routes/analysis.py` | Phase 2/3 |
-| matrix/review/export fallback compatibility | `apps/api/services/bid_matrix.py` / `routes/export.py` | Phase 2/3 |
+| matrix/review/export fallback compatibility | `apps/api/services/matrix/bid_matrix.py` / `routes/export.py` | Phase 2/3 |
 | `refresh_material_baselines` uses `quote_filters` | `apps/api/services/` | Phase 2/3 |
 | supplier-recommendation scoring uses `quote_filters` | `apps/api/services/` | Phase 2/3 |
 | frontend supplier-selection UX | `apps/www/src/views/compare/IndexView.vue` | Phase 2/3 |

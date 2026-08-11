@@ -1,7 +1,7 @@
 # Invite Brand Recommendation Design
 
 > **Status — 2026-06-26, initial.** Covers the brand recommendation scoring model for the
-> invite (邀标) flow. Related: `apps/api/services/brand_recommend.py`,
+> invite (邀标) flow. Related: `apps/api/services/supplier/brand_recommend.py`,
 > `apps/api/routes/invite.py`.
 
 ---
@@ -58,14 +58,14 @@ a zero-sample joint-venture brand.
 ### 2.4 Constants location
 
 All constants (`W_TIER`, `W_DATA`, `MAX_SAMPLES`) are defined at module top-level in
-`apps/api/services/brand_recommend.py` and must not be scattered elsewhere.
+`apps/api/services/supplier/brand_recommend.py` and must not be scattered elsewhere.
 
 ---
 
 ## 3. Category inference
 
 Categories are inferred from tender item names via `infer_categories()` in
-`apps/api/services/supplier_recommend.py`:
+`apps/api/services/supplier/supplier_recommend.py`:
 
 1. **Token-boundary match** — item name contains the exact category string (e.g., "桥架").
 2. **Keyword alias map (`CATEGORY_KEYWORD_MAP`)** — fallback for sub-types not containing the
