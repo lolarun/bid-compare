@@ -14,16 +14,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from apps.api.core.enums import RT_INVALID, RT_GRAND_TOTAL, RT_SUBTOTAL
+from apps.api.core.enums import RT_INVALID, RT_GRAND_TOTAL, RT_QUOTE_LINE, RT_SUBTOTAL
 from apps.api.intelligence.document_loader import DocumentLoader, MAX_PAGES_UNLIMITED
 from apps.api.intelligence.extraction_draft import (
     ExtractionDraft, DraftRow, PageMetric, SourceRef,
-    compute_quality, _EXPECTED_ROWS_MIN_RATIO,
+    compute_quality, build_row_ledger, _EXPECTED_ROWS_MIN_RATIO,
 )
 
 log = logging.getLogger(__name__)
@@ -444,8 +445,8 @@ def recognize_tables(
     _pre_cls: dict[int, VisualPageClassification] = {}
     _needs_visual: list[int] = []
     try:
-        import pymupdf as _mu
-        _mu_doc = _mu.open(str(file_path))
+        import pypdfium2 as _pdfium
+        _pdf_doc = _pdfium.PdfDocument(str(file_path))
         _NON_TABLE_KW = {
             "营业执照", "法定代表人", "资质证书", "安全生产许可证",
             "开户许可证", "税务登记证", "授权委托书", "授权书",
@@ -454,8 +455,16 @@ def recognize_tables(
             "iso证书", "ISO证书", "质量管理体系",
         }
         _TABLE_KW = {"投标清单", "报价清单", "单价", "合价", "序号", "名称"}
-        for _pi in range(min(len(_mu_doc), actual_page_count)):
-            _txt = _mu_doc[_pi].get_text()[:2000]
+        for _pi in range(min(len(_pdf_doc), actual_page_count)):
+            _page = _pdf_doc[_pi]
+            try:
+                _text_page = _page.get_textpage()
+                try:
+                    _txt = _text_page.get_text_range()[:2000]
+                finally:
+                    _text_page.close()
+            finally:
+                _page.close()
             _has_non_table = any(_kw in _txt for _kw in _NON_TABLE_KW)
             _has_table = any(_kw in _txt for _kw in _TABLE_KW)
             if _has_non_table and not _has_table:
@@ -465,7 +474,7 @@ def recognize_tables(
                 )
             else:
                 _needs_visual.append(_pi + 1)
-        _mu_doc.close()
+        _pdf_doc.close()
     except Exception:
         # 预筛失败（扫描件无文本层等）→ 全部走视觉分类
         _needs_visual = list(range(1, actual_page_count + 1))
@@ -566,6 +575,8 @@ def recognize_tables(
     # 按【连续表链】逐链确定方向，续页继承——不依赖波动的目标页集合（见 §11/根因层）。
     no_rot_tgt = [p for p in tgt if not page_rotations.get(p)]
     chain_orient: dict[int, int] = {}   # page -> 所属链方向角（供召回页继承）
+    # 原图快照：逐页兜底必须能从原图出发试遍四个绝对方向，否则链级转错后无法撤销。
+    _orig_imgs: dict[int, bytes] = {p: page_imgs[p] for p in tgt if p in page_imgs}
     for _chain in _contiguous_runs(no_rot_tgt):
         _angle, _probe_cache = _detect_chain_orientation(
             _chain, page_htmls, page_imgs, provider, adapter.doc_type)
@@ -575,15 +586,20 @@ def recognize_tables(
                  _chain[0], _chain[-1], _angle, len(_probe_cache))
 
         # 收集需要 re-OCR 的非 sample 页（批量提交，provider 内部 ThreadPoolExecutor 并发）
+        # 续页自身无表头，评分需带链内表头，否则转前转后同为 0 分、择优永远判"没变好"
+        _chain_hdr = _first_own_header(_chain, page_htmls)
         _to_re_ocr: list[tuple[int, bytes]] = []
         for _p in _chain:
             chain_orient[_p] = _angle
             if _p in _probe_cache:
                 _new_html, _new_img = _probe_cache[_p]
-                page_htmls[_p - 1] = _new_html
-                page_imgs[_p] = _new_img
-                page_rotations[_p] = _angle
-                log.info("  p%d reuse probe OCR → %d° (no re-OCR)", _p, _angle)
+                if _accept_rotation(_p, page_htmls[_p - 1], _new_html, adapter.doc_type, _chain_hdr):
+                    page_htmls[_p - 1] = _new_html
+                    page_imgs[_p] = _new_img
+                    page_rotations[_p] = _angle
+                    log.info("  p%d reuse probe OCR → %d° (no re-OCR)", _p, _angle)
+                else:
+                    log.info("  p%d kept 0° (chain %d° not better for this page)", _p, _angle)
             else:
                 _rot_img = _rotate_png_bytes(page_imgs[_p], _angle)
                 _to_re_ocr.append((_p, _rot_img))
@@ -602,13 +618,50 @@ def recognize_tables(
 
             for _idx, _p in enumerate(_re_pages):
                 _rot_img = _re_imgs[_idx]
-                if _idx < len(_re_results) and _re_results[_idx][1]:
+                if (_idx < len(_re_results) and _re_results[_idx][1]
+                        and _accept_rotation(_p, page_htmls[_p - 1],
+                                             _re_results[_idx][1], adapter.doc_type,
+                                             _chain_hdr)):
                     page_htmls[_p - 1] = _re_results[_idx][1]
                     page_imgs[_p] = _rot_img
                     page_rotations[_p] = _angle
                     log.info("  p%d corrected → %d° (chain batch)", _p, _angle)
                 else:
                     log.info("  p%d rotation NOT applied (OCR failed, kept original)", _p)
+
+    # ── 逐页兜底（doc/19 §L1）────────────────────────────────────────────────
+    # 链角度只是廉价的第一猜测，不再是最终裁决：应用之后仍不达标的页单独探测自己的
+    # 候选角度。这修的是「整链被判正立、少数错向页永不纠正」这一类静默丢页。
+    for _p in (tgt if _ORIENT_V2 else []):
+        _score = _orientation_score(page_htmls[_p - 1], _p, adapter.doc_type)
+        if not _orient_candidates(_score, adapter.doc_type):
+            continue
+        # 从**原图**出发试其余三个绝对方向。用当前图叠加的话，链级转错后候选集里
+        # 没有"撤销"，页面永远回不到 0°（宏胜 p4/p7/p8 实测就是这样丢光的）。
+        _cur = page_rotations.get(_p, 0) % 360
+        _cands = tuple(d for d in (0, 90, 180, 270) if d != _cur)
+        _best_deg, _best_score, _best = _cur, _score_key(_score), None
+        for _deg in _cands:
+            try:
+                _base_img = _orig_imgs.get(_p, page_imgs[_p])
+                _cand_img = _rotate_png_bytes(_base_img, _deg) if _deg else _base_img
+                _res, _ = provider.ocr_pages_with_roles([_cand_img])
+                if not (_res and _res[0][1]):
+                    continue
+                _cand_key = _score_key(
+                    _orientation_score(_res[0][1], _p, adapter.doc_type))
+                if _cand_key > _best_score:
+                    _best_deg, _best_score, _best = _deg, _cand_key, (_res[0][1], _cand_img)
+            except Exception as _exc:
+                log.warning("straggler orient probe failed p%d deg %d: %s", _p, _deg, _exc)
+        if _best:
+            page_htmls[_p - 1], page_imgs[_p] = _best
+            page_rotations[_p] = _best_deg      # 绝对角度，非累加
+            log.info("  p%d straggler corrected → %d° absolute (was %d°, score %s→%s)",
+                     _p, _best_deg, _cur, _score_key(_score), _best_score)
+        else:
+            log.info("  p%d straggler probe found nothing better (candidates=%s, score=%s)",
+                     _p, _cands, _score_key(_score))
 
     # 召回页方向继承：继承紧邻前序页的链方向并直接 OCR 一次，不再二次投票。
     for _p in recall_pages:
@@ -642,12 +695,12 @@ def recognize_tables(
 
     # ── 跨页表头继承预扫（顺序，无 API 调用）────────────────────────────────
     # 对 tgt 中每一页解析 HTML，记录最近一次成功的 col header list。
-    # 只对视觉分类为 *_continuation 角色的页面传递 inherited_header，
-    # 确保有自有表头的 header/新起页面行为不变（防止 snapshot cache miss）。
+    # 无表头续页继承前一页的表头；判据是确定性的「本页有无自有表头」（见下方注释）。
     inherited_header_by_page: dict[int, list[str] | None] = {}
     _running_header: list[str] | None = None
     from apps.api.intelligence.table_parser import html_to_table_grids as _parse_grids
     for _p in sorted(tgt):
+        _g: list = []
         try:
             _g = _parse_grids(page_htmls[_p - 1], _p)   # no hint — only detect own header
             if _g:
@@ -656,8 +709,13 @@ def recognize_tables(
                     _running_header = _best.header
         except Exception:
             pass
-        # Only propagate to continuation pages (visual role contains "continuation").
-        # Header/cover/other pages retain their own extraction behavior unchanged.
+        # 只对视觉分类为 *_continuation 的页传递 inherited_header。
+        # 2026-08-09 复核结论：这道门控**不是**远东丢行的原因——远东那些页的 role
+        # 本来就是 quote_table_continuation，门控放行了。真正的卡点在方向：未纠正时
+        # OCR 输出的列数参差（[1,8,8,…]），与继承表头的列数对不上，解析层的严格列数
+        # 相等条件因此失败。转到正确角度后列数一致（9==9），继承立刻生效并产出全部行
+        # （见 tests/test_header_inheritance_fixture.py）。
+        # 故保留此门控：放宽它无助于远东，且未经验证会波及有自有表头的页。
         _role_obj = role_by_page.get(_p)
         _role_val = str(getattr(getattr(_role_obj, "role", None), "value", "") or "")
         _is_continuation = "continuation" in _role_val.lower()
@@ -911,6 +969,16 @@ def recognize_tables(
             log.error("recognize_tables: excel reconcile failed: %s", exc)
             reconcile_result = {"error": str(exc)}
 
+    # ── 行数守恒台账（doc/19 §L3）─────────────────────────────────────────
+    ledger = build_row_ledger(page_metrics, tgt, len(all_rows))
+    if ledger.empty_pages or ledger.short_pages:
+        log.warning(
+            "row ledger: expected=%d recognized=%d dropped=%d | empty pages=%s | short pages=%s",
+            ledger.expected_rows, ledger.recognized_rows, ledger.dropped_rows,
+            [(d.page, d.reason, d.rotation_applied) for d in ledger.empty_pages],
+            [(d.page, d.reason, d.lost) for d in ledger.short_pages],
+        )
+
     _notify("完成", 98)
     return ExtractionDraft(
         doc_type=adapter.doc_type,
@@ -923,6 +991,7 @@ def recognize_tables(
         quality=quality,
         reconcile=reconcile_result,
         review_candidates=review_candidates,
+        ledger=ledger,
     )
 
 
@@ -937,11 +1006,19 @@ _QUOTE_CORE_SLOTS  = {"name", "spec", "unit", "qty",
 _QUOTE_PRICE_SLOTS = {"unit_price", "unit_price_excl_tax", "total_price"}
 _TENDER_CORE_SLOTS = {"name", "spec", "unit", "qty"}
 _ORIENT_MIN_GOOD = 3            # 核心列覆盖 ≥ 此值视为方向正常
-_ORIENT_ROTATIONS = (90, 270)   # 仅尝试两个 90° 方向（180° 对表格罕见）
 _ORIENT_SAMPLE_K = 4            # 文档级检测抽样页数
 
+# 算术一致性（doc/19 §L2）：列覆盖度对 180° 天然失明——翻转保留列名集合、只打乱取值，
+# 所以倒置页的覆盖度分和正立页一样高。qty × 单价 ≈ 合价 是唯一能识别翻转/列错位的信号，
+# 且从已解析的 TableGrid 直接算，零额外 API 成本。
+_ARITH_TOL_REL  = 0.01          # 相对容差（分位舍入、含税差额）
+_ARITH_TOL_ABS  = 1.0           # 绝对容差（元）
+_ARITH_MIN_ROWS = 3             # 少于此行数不足以判定，视为"无证据"而非"不通过"
+_ARITH_MIN_OK   = 0.7           # 成立比例低于此值 → 疑似翻转/列错位
 
-def _orientation_quality(html: str, page_no: int, doc_type: str = "quote") -> int:
+
+def _orientation_quality(html: str, page_no: int, doc_type: str = "quote",
+                         inherited_header: list[str] | None = None) -> int:
     """方向质量 = 最大表格的核心列语义覆盖数；无 grids 返回 0。
 
     信号按文档类型拆分（item 3）：
@@ -950,7 +1027,7 @@ def _orientation_quality(html: str, page_no: int, doc_type: str = "quote") -> in
     """
     from apps.api.intelligence.table_parser import html_to_table_grids
     try:
-        grids = html_to_table_grids(html, page_no)
+        grids = html_to_table_grids(html, page_no, inherited_header=inherited_header)
     except Exception:
         return 0
     if not grids:
@@ -969,6 +1046,92 @@ def _orientation_quality(html: str, page_no: int, doc_type: str = "quote") -> in
                 score = min(score, 1)
         best = max(best, score)
     return best
+
+
+def _grid_arithmetic(html: str, page_no: int,
+                     inherited_header: list[str] | None = None) -> tuple[int, float]:
+    """算术一致性 = (可判定行数, qty×单价≈合价 的成立比例)。
+
+    可判定行数 < _ARITH_MIN_ROWS 时比例返回 1.0，表示"无证据"——不得因为无法判定
+    就把一页判成方向错误。仅对有价格列的报价表有意义。
+    """
+    from apps.api.intelligence.table_parser import html_to_table_grids
+    from apps.api.services.tabular_ingestion import _parse_number
+
+    try:
+        grids = html_to_table_grids(html, page_no, inherited_header=inherited_header)
+    except Exception:
+        return 0, 1.0
+
+    evaluable = ok = 0
+    for g in grids:
+        slot_headers: dict[str, str] = {}
+        for header, slot in g.col_map.items():
+            slot_headers.setdefault(slot, header)
+        for r in g.rows:
+            if r.row_type != RT_QUOTE_LINE:
+                continue
+
+            def _val(slot: str) -> float | None:
+                h = slot_headers.get(slot)
+                return _parse_number(r.cells.get(h)) if h else None
+
+            qty = _val("qty")
+            price = _val("unit_price") or _val("unit_price_excl_tax")
+            total = _val("total_price")
+            if not qty or not price or not total:
+                continue
+            evaluable += 1
+            if abs(qty * price - total) <= max(_ARITH_TOL_ABS, _ARITH_TOL_REL * abs(total)):
+                ok += 1
+
+    if evaluable < _ARITH_MIN_ROWS:
+        return evaluable, 1.0
+    return evaluable, ok / evaluable
+
+
+def _orientation_score(html: str, page_no: int, doc_type: str,
+                       inherited_header: list[str] | None = None) -> tuple[int, int, float]:
+    """方向评分 = (列覆盖度, 可判定行数, 算术成立比例)。
+
+    比较时按 (覆盖度, 算术比例) 字典序：某个角度只有在不牺牲算术的前提下才算更优。
+    """
+    if not _ORIENT_V2:
+        return _orientation_quality(html, page_no, doc_type), 0, 1.0
+    coverage = _orientation_quality(html, page_no, doc_type, inherited_header)
+    if doc_type == "tender":
+        return coverage, 0, 1.0     # 招标清单无价格列，保持仅覆盖度评分
+    evaluable, ratio = _grid_arithmetic(html, page_no, inherited_header)
+    return coverage, evaluable, ratio
+
+
+# doc/19 §L1 的四向懒探/算术判据/逐页兜底默认**关闭**。
+# 2026-08-09：这套逻辑在客户新样本（远东、宏胜）上方向判定明显更优，但会让泰科龙
+# replay 快照从 89 行掉到 79 行，五轮二分未能定位到具体触发点。在用离线夹具
+# （apps/api/tests/fixtures/ocr_html/）把泰科龙一并纳入、能秒级复现之前，不默认启用。
+_ORIENT_V2 = os.getenv("ORIENT_V2", "0") == "1"
+
+
+def _orient_candidates(score: tuple[int, int, float], doc_type: str) -> tuple[int, ...]:
+    """按 0° 的表现决定要探测哪些角度（doc/19 §L1 懒探）。
+
+    覆盖度差   → 轴不对        → 探 90 / 270
+    覆盖度好但算术不成立 → 翻转/列错位 → 只探 180
+    两者都过   → 正立          → 不探测（正立文档成本不变）
+    """
+    coverage, evaluable, ratio = score
+    if coverage < _ORIENT_MIN_GOOD:
+        return (90, 270)
+    if (_ORIENT_V2 and doc_type != "tender"
+            and evaluable >= _ARITH_MIN_ROWS and ratio < _ARITH_MIN_OK):
+        return (180,)
+    return ()
+
+
+def _score_key(score: tuple[int, int, float]) -> tuple[int, float]:
+    """(覆盖度, 算术比例) —— 用于角度之间的字典序比较。"""
+    coverage, _evaluable, ratio = score
+    return coverage, ratio
 
 
 def _orientation_signal(html: str, doc_type: str) -> bool:
@@ -999,55 +1162,113 @@ def _contiguous_runs(pages: list[int]) -> list[list[int]]:
     return runs
 
 
+def _accept_rotation(page_no: int, old_html: str, new_html: str, doc_type: str,
+                     inherited_header: list[str] | None = None) -> bool:
+    """链角度对整条链成立，不代表对其中每一页都成立——逐页择优，不做无条件覆盖。
+
+    2026-08-09 实测两个方向的教训：
+      · 无条件应用 → 宏胜本已正常的 p4/p7/p8 被转坏，行数 81→23；
+      · 反过来"已自证正立的页直接跳过" → 泰科龙同链内一部分转一部分没转，
+        p10/p12/p13/p14 解析失败，行数 89→79。
+    两者都错在把决定下在页之外。这里只问一件事：这一页转完是不是真的更好。
+    """
+    if not _ORIENT_V2:
+        return True     # 关闭时保持原行为：链角度无条件应用
+    return (_score_key(_orientation_score(new_html, page_no, doc_type, inherited_header))
+            > _score_key(_orientation_score(old_html, page_no, doc_type, inherited_header)))
+
+
+def _first_own_header(pages: list[int], page_htmls: list[str]) -> list[str] | None:
+    """取这批页里第一个能自行解析出表头的表头列表（不做继承，避免自举）。"""
+    from apps.api.intelligence.table_parser import html_to_table_grids
+    for p in pages:
+        try:
+            grids = html_to_table_grids(page_htmls[p - 1], p)
+        except Exception:
+            continue
+        if not grids:
+            continue
+        best = max(grids, key=lambda g: len(g.col_map))
+        if best.header and len(best.header) >= 3:
+            return list(best.header)
+    return None
+
+
 def _detect_chain_orientation(
     chain: list[int], page_htmls: list[str], page_imgs: dict[int, bytes],
     provider: Any, doc_type: str,
 ) -> tuple[int, dict[int, tuple[str, bytes]]]:
     """连续表链方向检测：返回 (angle, probe_cache)。
 
-    angle: 0/90/270 — 整条链统一使用的方向角。
+    angle: 0/90/180/270 — 整条链统一使用的方向角（逐页兜底见调用方）。
     probe_cache: {page_no: (html, rotated_image)} — 探测阶段 sample 页在 winning
         angle 下的 OCR 结果，供调用方直接使用、无需重复 OCR。
 
-    取代旧 `_detect_doc_rotation` 的「>50% 抽样投票」：
-      1) 若链内多数页在 0° 已列覆盖达标（≥MIN_GOOD），直接返回 (0, {})，不探测。
-      2) 否则对 sample 页在 {90,270} 各 OCR 一次，按列覆盖度求和取 argmax；
-         唯一且严格高于 0° 才旋转；并列或不及 0° 则返回 (0, {})。
+    doc/19 §L1：
+      1) 逐页用 (列覆盖度, 算术一致性) 评分，由 `_orient_candidates` 决定候选角度。
+         **不再有「多数页正立就整链判定正立」的早退** —— 那会让少数错向页永不纠正。
+         只有当链内每一页都自证正立时才返回 (0, {})。
+      2) 候选集是各页候选的并集：轴不对 → {90,270}；翻转/列错位 → {180}。
+      3) 对 sample 页在每个候选角度各 OCR 一次，按 (覆盖度, 算术比例) 字典序求和取
+         argmax；唯一且严格优于 0° 才旋转，并列或不及 0° 则返回 (0, {})。
     """
     if not chain:
         return 0, {}
-    q0 = {p: _orientation_quality(page_htmls[p - 1], p, doc_type) for p in chain}
-    good0 = sum(1 for q in q0.values() if q >= _ORIENT_MIN_GOOD)
+    # 死锁破解：续页没有自己的表头 → 覆盖度恒为 0 → 各角度打分全同 → 判不出方向。
+    # 先从链内取一个能自解析的表头，让续页的方向评分也有信号（doc/19 §L1）。
+    chain_header = _first_own_header(chain, page_htmls) if _ORIENT_V2 else None
+    base = {p: _orientation_score(page_htmls[p - 1], p, doc_type, chain_header)
+            for p in chain}
+    candidates = tuple(sorted({
+        deg for p in chain for deg in _orient_candidates(base[p], doc_type)
+    }))
+    if not candidates:
+        return 0, {}   # 每一页都自证正立：不探测
+
+    # 链级守卫：多数页在 0° 已达标时，不对整条链做统一旋转——链角度是给"整条链都
+    # 转错了"准备的，不是给个别坏页准备的。个别坏页交给调用方的逐页兜底。
+    # 2026-08-09 实测：去掉这条守卫会让泰科龙（多数页本就正立）被整链旋转，行数
+    # 从 89 掉到 79。
+    good0 = sum(1 for p in chain
+                if _orientation_quality(page_htmls[p - 1], p, doc_type, chain_header)
+                >= _ORIENT_MIN_GOOD)
     if good0 >= max(1, len(chain) // 2):
-        return 0, {}   # 已正立：不探测
+        return 0, {}
 
     anchors = [p for p in chain
                if _orientation_signal(page_htmls[p - 1], doc_type)] or list(chain)
     step = max(1, len(anchors) // _ORIENT_SAMPLE_K)
     sample = anchors[::step][:_ORIENT_SAMPLE_K]
 
-    scores: dict[int, int] = {0: sum(q0[p] for p in sample)}
+    def _agg(per_page: dict[int, tuple[int, int, float]]) -> tuple[int, float]:
+        cov = sum(_score_key(per_page[p])[0] for p in sample if p in per_page)
+        ratios = [_score_key(per_page[p])[1] for p in sample if p in per_page]
+        return cov, (sum(ratios) / len(ratios) if ratios else 0.0)
+
+    scores: dict[int, tuple[int, float]] = {0: _agg(base)}
     # probe_by_deg[deg][page] = (html, rotated_image)
-    probe_by_deg: dict[int, dict[int, tuple[str, bytes]]] = {deg: {} for deg in _ORIENT_ROTATIONS}
-    for deg in _ORIENT_ROTATIONS:
-        s = 0
+    probe_by_deg: dict[int, dict[int, tuple[str, bytes]]] = {deg: {} for deg in candidates}
+    for deg in candidates:
+        per_page: dict[int, tuple[int, int, float]] = {}
         for p in sample:
             try:
                 rb = _rotate_png_bytes(page_imgs[p], deg)
                 results, _f = provider.ocr_pages_with_roles([rb])
                 if results:
                     html = results[0][1]
-                    s += _orientation_quality(html, p, doc_type)
+                    # 旋转后表头可能重新可读，故用该角度下自身表头优先、链表头兜底
+                    per_page[p] = _orientation_score(
+                        html, p, doc_type, chain_header)
                     probe_by_deg[deg][p] = (html, rb)
             except Exception as exc:
                 log.warning("chain orient probe failed page %d deg %d: %s", p, deg, exc)
-        scores[deg] = s
+        scores[deg] = _agg(per_page)
 
-    best_deg = max(_ORIENT_ROTATIONS, key=lambda d: scores[d])
-    winners = [d for d in _ORIENT_ROTATIONS if scores[d] == scores[best_deg]]
+    best_deg = max(candidates, key=lambda d: scores[d])
+    winners = [d for d in candidates if scores[d] == scores[best_deg]]
     chosen = best_deg if (scores[best_deg] > scores[0] and len(winners) == 1) else 0
-    log.info("chain %s-%s orient scores=%s sample=%s -> %d°",
-             chain[0], chain[-1], scores, sample, chosen)
+    log.info("chain %s-%s orient candidates=%s scores=%s sample=%s -> %d°",
+             chain[0], chain[-1], candidates, scores, sample, chosen)
     probe_cache = probe_by_deg.get(chosen, {}) if chosen else {}
     return chosen, probe_cache
 

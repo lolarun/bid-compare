@@ -1,0 +1,37 @@
+{
+ "source_pdf": "徐汇区华泾镇综合机电分包工程投标文件-远东.pdf",
+ "render_scale": 2.0,
+ "pages": {
+  "3": {
+   "270": {
+    "file": "p3_r270.html",
+    "chars": 2591,
+    "sha256": "36a6ca4de1c661e2"
+   },
+   "90": {
+    "file": "p3_r90.html",
+    "chars": 2608,
+    "sha256": "55ff3401103a2df9"
+   }
+  },
+  "5": {
+   "270": {
+    "file": "p5_r270.html",
+    "chars": 2756,
+    "sha256": "10cfd0b549a7e996"
+   },
+   "90": {
+    "file": "p5_r90.html",
+    "chars": 3013,
+    "sha256": "4a17db40629f77c0"
+   }
+  },
+  "12": {
+   "270": {
+    "file": "p12_r270.html",
+    "chars": 2008,
+    "sha256": "e256d8e2f4b0fec9"
+   }
+  }
+ }
+}
