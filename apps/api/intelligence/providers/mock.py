@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +27,38 @@ class MockProvider(LLMProvider):
         self,
         canned: dict[str, Any] | None = None,
         fixture_dir: str | Path | None = None,
+        vl_csv: str | None = None,
     ):
         self.canned = canned
         self.fixture_dir = Path(fixture_dir) if fixture_dir else None
+        self.vl_csv = vl_csv
+
+    # ─── VL-direct 能力 ──────────────────────────────────────────────────────
+    #
+    # 没有这个方法时，`ExtractionPipeline.extract_quote` 的 VL 分支条件
+    # `hasattr(provider, "vl_extract_csv")` 恒为 False —— **所有基于 mock 的集成
+    # 测试都静默落回 legacy**，哪怕 QUOTE_RECOGNIZER=vl_direct。也就是说在此之前
+    # VL 分支在测试里根本走不到，而且没有任何提示。
+
+    def vl_extract_csv(
+        self, images: list[bytes], prompt: str, *,
+        model: str | None = None, labels: list[str] | None = None, **_kw,
+    ) -> str:
+        """抽取与方向预检共用此方法，靠 `labels` 区分（与真实 provider 一致）。"""
+        if labels:
+            # 方向预检：从 PAGE_<n>_ROT_<deg> 标签里取出页号，一律答"不用转"。
+            pages = sorted({int(m.group(1)) for l in labels
+                            if (m := re.match(r"PAGE_(\d+)_ROT_", l))})
+            return "\n".join(f"{p},0" for p in pages)
+        if self.vl_csv is not None:
+            return self.vl_csv
+        if self.fixture_dir and (self.fixture_dir / "quote_vl.csv").exists():
+            return (self.fixture_dir / "quote_vl.csv").read_text(encoding="utf-8")
+        # 兜底：每页一行的最小合法 CSV。行数随页数变化，便于断言"页→行"的归属。
+        head = "row_type,名称,规格,单位,数量,单价,合价,copy_no,page"
+        body = [f"detail,模拟材料{i},SPEC-{i},米,{i + 1},10.00,{(i + 1) * 10:.2f},1,{i + 1}"
+                for i in range(len(images))]
+        return "\n".join([head, *body])
 
     def ocr_pages_with_roles(
         self, images: list[bytes],

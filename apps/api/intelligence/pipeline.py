@@ -118,6 +118,16 @@ class ExtractionPipeline:
         # 与 legacy 是不同的输入契约（legacy 需要 provider 的 OCR + JSON 能力），
         # 故用独立开关而非换模型名。provider 不具备多图调用能力时回落 legacy——
         # 静默按 legacy 跑并不危险（结果仍是合法 draft），但必须记日志说明为什么。
+        # 选了 vl_direct 但 provider 给不了多图调用 → 静默按 legacy 跑。结果仍是
+        # 合法 draft，所以不算危险；但**不说出来才危险**：实测 MockProvider 缺
+        # vl_extract_csv，所有集成测试都在这里落回 legacy，而以为自己在测 VL。
+        if _vl_direct_enabled() and not hasattr(self.provider, "vl_extract_csv"):
+            log.warning(
+                "QUOTE_RECOGNIZER=vl_direct 但 provider %s 没有 vl_extract_csv，"
+                "本次回落 legacy。测试里看到这条＝你以为在测 VL，实际不是。",
+                type(self.provider).__name__,
+            )
+
         if _vl_direct_enabled() and hasattr(self.provider, "vl_extract_csv"):
             from apps.api.intelligence.vl_direct import recognize_quote_vl
             s = get_settings()
