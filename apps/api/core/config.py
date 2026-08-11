@@ -82,13 +82,16 @@ PROFESSION_ABBR = {
 }
 
 CATEGORY_ABBR = {
-    "桥架": "BRG", "母线槽": "BUS", "配电箱": "PDB",
+    "桥架": "BRG", "母线槽": "BUS", "配电箱": "PDB", "电缆": "CBL",
     "阀门": "VLV", "不锈钢管": "SSP", "水箱": "WTK", "潜水泵": "SMP",
     "风口风阀": "FAV", "风机盘管": "FCU", "空调泵": "ACP",
 }
 
+# NOTE: key order matters — enhance._guess_category returns the first category
+# whose name appears in the material name, so 桥架 must stay ahead of 电缆
+# ("电缆桥架" is a tray, not a cable).
 PROFESSION_MAP = {
-    "桥架": "电气", "母线槽": "电气", "配电箱": "电气",
+    "桥架": "电气", "母线槽": "电气", "配电箱": "电气", "电缆": "电气",
     "阀门": "给排水", "不锈钢管": "给排水", "水箱": "给排水", "潜水泵": "给排水",
     "风口风阀": "暖通", "风机盘管": "暖通", "空调泵": "暖通",
 }
@@ -114,6 +117,7 @@ DEFAULT_THRESHOLDS = {
     "桥架":     {"yellow": 0.08, "red": 0.15},
     "母线槽":   {"yellow": 0.06, "red": 0.12},
     "配电箱":   {"yellow": 0.08, "red": 0.15},
+    "电缆":     {"yellow": 0.05, "red": 0.10},
     "阀门":     {"yellow": 0.06, "red": 0.12},
     "不锈钢管": {"yellow": 0.05, "red": 0.10},
     "水箱":     {"yellow": 0.08, "red": 0.15},
@@ -121,6 +125,23 @@ DEFAULT_THRESHOLDS = {
     "风口风阀": {"yellow": 0.07, "red": 0.13},
     "风机盘管": {"yellow": 0.07, "red": 0.13},
     "空调泵":   {"yellow": 0.06, "red": 0.12},
+}
+
+# Comparison policy is configuration, not a route-local category exception.
+COMPARISON_PROFILE_BY_CATEGORY = {
+    "配电箱": {
+        "key": "panel_horizontal",
+        "history_baseline": False,
+        "review_hint": "以同一轮次整箱横向报价为主；历史数据仅供查阅，不参与基准偏差。",
+    },
+    # Cable unit prices are quoted against a declared base copper price and
+    # adjusted by formula, so historical unit prices are not comparable across
+    # rounds. Horizontal comparison only, and the base price must be checked.
+    "电缆": {
+        "key": "cable_horizontal",
+        "history_baseline": False,
+        "review_hint": "电缆单价按基准铜价报价并随铜价调差；仅做本轮横向比价，比价前须确认各家基准铜价一致。",
+    },
 }
 
 # ─── Extended attribute schemas per category ────────────────────────────────

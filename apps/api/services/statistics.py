@@ -1,7 +1,7 @@
 """Dashboard summary, category stats, and baseline refresh service."""
 
 import numpy as np
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, Project
@@ -11,48 +11,44 @@ from apps.api.services.quote_filters import valid_quote_filters
 
 
 def get_dashboard_summary(db: Session) -> dict:
-    total_materials = db.query(func.count(Material.id)).scalar() or 0
-    total_suppliers = db.query(func.count(Supplier.id)).scalar() or 0
-    total_projects = db.query(func.count(Project.id)).scalar() or 0
-    total_quotes = db.query(func.count(Quote.id)).scalar() or 0
+    total_materials = db.scalar(select(func.count(Material.id))) or 0
+    total_suppliers = db.scalar(select(func.count(Supplier.id))) or 0
+    total_projects = db.scalar(select(func.count(Project.id))) or 0
+    total_quotes = db.scalar(select(func.count(Quote.id))) or 0
 
-    categories = db.query(Material.category).distinct().all()
+    categories = db.execute(select(Material.category).distinct()).all()
     cat_stats = []
 
     for (cat,) in categories:
         profession = PROFESSION_MAP.get(cat, "未分类")
-        mat_count = db.query(func.count(Material.id)).filter(Material.category == cat).scalar() or 0
-        quote_count = (
-            db.query(func.count(Quote.id))
+        mat_count = db.scalar(select(func.count(Material.id)).where(Material.category == cat)) or 0
+        quote_count = db.scalar(
+            select(func.count(Quote.id))
             .join(Material)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Material.category == cat, *valid_quote_filters())
-            .scalar() or 0
+            .where(Material.category == cat, *valid_quote_filters())
+        ) or 0
+
+        avg_price_row = db.scalar(
+            select(func.avg(Quote.unit_price))
+            .join(Material)
+            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
+            .where(Material.category == cat, Quote.unit_price > 0, *valid_quote_filters())
         )
 
-        avg_price_row = (
-            db.query(func.avg(Quote.unit_price))
+        supplier_count = db.scalar(
+            select(func.count(func.distinct(Quote.supplier_id)))
             .join(Material)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Material.category == cat, Quote.unit_price > 0, *valid_quote_filters())
-            .scalar()
-        )
+            .where(Material.category == cat, *valid_quote_filters())
+        ) or 0
 
-        supplier_count = (
-            db.query(func.count(func.distinct(Quote.supplier_id)))
+        project_count = db.scalar(
+            select(func.count(func.distinct(Quote.project_id)))
             .join(Material)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Material.category == cat, *valid_quote_filters())
-            .scalar() or 0
-        )
-
-        project_count = (
-            db.query(func.count(func.distinct(Quote.project_id)))
-            .join(Material)
-            .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Material.category == cat, *valid_quote_filters())
-            .scalar() or 0
-        )
+            .where(Material.category == cat, *valid_quote_filters())
+        ) or 0
 
         baseline = compute_baseline(db, cat)
         cv = baseline.get("cv") if baseline.get("count", 0) > 0 else None
@@ -81,39 +77,38 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
     """Get detailed price statistics per sub-category."""
     profession = PROFESSION_MAP.get(category, "未分类")
 
-    total_records = db.query(func.count(Material.id)).filter(
-        Material.category == category
-    ).scalar() or 0
+    total_records = db.scalar(
+        select(func.count(Material.id)).where(Material.category == category)
+    ) or 0
 
-    valid_prices = (
-        db.query(func.count(Quote.id))
+    valid_prices = db.scalar(
+        select(func.count(Quote.id))
         .join(Material)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Material.category == category, Quote.unit_price > 0, *valid_quote_filters())
-        .scalar() or 0
-    )
+        .where(Material.category == category, Quote.unit_price > 0, *valid_quote_filters())
+    ) or 0
 
-    sub_cats = db.query(Material.sub_category).filter(
-        Material.category == category
-    ).distinct().all()
+    sub_cats = db.execute(
+        select(Material.sub_category).where(Material.category == category).distinct()
+    ).all()
 
     sub_stats = []
     for (sub_cat,) in sub_cats:
         if not sub_cat:
             sub_cat = "未分类"
 
-        prices_q = (
-            db.query(Quote.unit_price)
+        prices_stmt = (
+            select(Quote.unit_price)
             .join(Material)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(
+            .where(
                 Material.category == category,
                 Material.sub_category == sub_cat,
                 Quote.unit_price > 0,
                 *valid_quote_filters(),
             )
         )
-        prices = [r[0] for r in prices_q.all()]
+        prices = list(db.scalars(prices_stmt).all())
         if not prices:
             continue
 
@@ -150,17 +145,17 @@ def get_category_detail_stats(db: Session, category: str) -> dict:
 
 def refresh_material_baselines(db: Session, category: str | None = None):
     """Recompute ref_price fields for materials based on their quotes."""
-    q = db.query(Material)
+    stmt = select(Material)
     if category:
-        q = q.filter(Material.category == category)
+        stmt = stmt.where(Material.category == category)
 
-    for mat in q.all():
-        prices_q = (
-            db.query(Quote.unit_price)
+    for mat in db.scalars(stmt).all():
+        prices_stmt = (
+            select(Quote.unit_price)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.material_id == mat.id, Quote.unit_price > 0, *valid_quote_filters())
+            .where(Quote.material_id == mat.id, Quote.unit_price > 0, *valid_quote_filters())
         )
-        prices = [r[0] for r in prices_q.all()]
+        prices = list(db.scalars(prices_stmt).all())
         if not prices:
             continue
 
@@ -186,17 +181,17 @@ def refresh_material_baselines(db: Session, category: str | None = None):
         mat.price_cv = float(np.std(filtered, ddof=1) / mean_val) if mean_val > 0 and len(filtered) > 1 else 0.0
         mat.deviation_threshold = round(max(mat.price_cv * 1.5, 0.05), 3)
 
-        brands_q = (
-            db.query(func.distinct(Quote.brand))
+        brands_stmt = (
+            select(func.distinct(Quote.brand))
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(
+            .where(
                 Quote.material_id == mat.id,
                 Quote.brand != "",
                 Quote.brand.isnot(None),
                 *valid_quote_filters(),
             )
         )
-        brands = [r[0] for r in brands_q.all() if r[0]]
+        brands = [brand for brand in db.scalars(brands_stmt).all() if brand]
         mat.recommended_brands = brands
         mat.supplier_count = len(brands)
 
@@ -209,21 +204,21 @@ def get_dashboard_heatmap(
     date_to: str | None = None,
 ) -> dict:
     """树状热力图：项目 → 品类 → 采购总金额。"""
-    q = (
-        db.query(
+    stmt = (
+        select(
             Project.name,
             Material.category,
             func.sum(Quote.unit_price * func.coalesce(Quote.quantity, 1)).label("total"),
         )
         .join(Quote, Quote.project_id == Project.id)
         .join(Material, Quote.material_id == Material.id)
-        .filter(Quote.unit_price > 0, Quote.bid_status != "未中标")
+        .where(Quote.unit_price > 0, Quote.bid_status != "未中标")
     )
     if date_from:
-        q = q.filter(Quote.quote_date >= date_from)
+        stmt = stmt.where(Quote.quote_date >= date_from)
     if date_to:
-        q = q.filter(Quote.quote_date <= date_to)
-    rows = q.group_by(Project.name, Material.category).all()
+        stmt = stmt.where(Quote.quote_date <= date_to)
+    rows = db.execute(stmt.group_by(Project.name, Material.category)).all()
 
     project_map: dict[str, dict] = {}
     for proj_name, cat, total in rows:
@@ -257,7 +252,7 @@ def get_dashboard_bubble(
     from apps.api.models import BrandTier
 
     tier_map: dict[tuple[str, str | None], str] = {}
-    for bt in db.query(BrandTier).all():
+    for bt in db.scalars(select(BrandTier)).all():
         tier_map[(bt.brand_name, bt.category)] = bt.tier
         if bt.category is None:
             tier_map[(bt.brand_name, None)] = bt.tier
@@ -268,21 +263,20 @@ def get_dashboard_bubble(
     if date_to:
         base_filter.append(Quote.quote_date <= date_to)
 
-    rows = (
-        db.query(
+    rows = db.execute(
+        select(
             Material.category,
             Supplier.name,
             func.sum(Quote.unit_price * func.coalesce(Quote.quantity, 1)).label("total"),
         )
         .join(Quote, Quote.material_id == Material.id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(*base_filter)
+        .where(*base_filter)
         .group_by(Material.category, Supplier.name)
-        .all()
-    )
+    ).all()
 
-    brand_rows = (
-        db.query(
+    brand_rows = db.execute(
+        select(
             Material.category,
             Supplier.name,
             Quote.brand,
@@ -290,10 +284,9 @@ def get_dashboard_bubble(
         )
         .join(Quote, Quote.material_id == Material.id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(*base_filter, Quote.brand.isnot(None), Quote.brand != "")
+        .where(*base_filter, Quote.brand.isnot(None), Quote.brand != "")
         .group_by(Material.category, Supplier.name, Quote.brand)
-        .all()
-    )
+    ).all()
     dominant_brand: dict[tuple[str, str], str] = {}
     brand_counts: dict[tuple[str, str], int] = {}
     for cat, sup_name, brand, cnt in brand_rows:

@@ -7,18 +7,20 @@ Key changes vs v1:
 """
 
 import numpy as np
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Project, Supplier, AnalysisConfig, DEFAULT_THRESHOLDS
 from apps.api.services.canonical import extract_valve_canonical, normalize_valve_family
 from apps.api.services.quote_filters import valid_quote_filters
+from apps.api.services.comparison_profiles import get_comparison_profile
 
 # 同规格基准最小样本数（< 此值视为"无可靠同规格基准"，deviation=null，不计异常）
 SPEC_BASELINE_MIN_SAMPLES = 5
 
 
 def get_config_value(db: Session, key: str, default=None):
-    cfg = db.query(AnalysisConfig).filter(AnalysisConfig.key == key).first()
+    cfg = db.scalar(select(AnalysisConfig).where(AnalysisConfig.key == key))
     return cfg.value if cfg else default
 
 
@@ -46,11 +48,11 @@ def compute_baseline(db: Session, category: str, sub_category: str | None = None
 
     brand_tier: if set, only include quotes with matching brand_tier (e.g. '合资').
     """
-    q = (
-        db.query(Quote.unit_price)
+    stmt = (
+        select(Quote.unit_price)
         .join(Material)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(
+        .where(
             Material.category == category,
             Quote.unit_price.isnot(None),
             Quote.unit_price > 0,
@@ -58,11 +60,11 @@ def compute_baseline(db: Session, category: str, sub_category: str | None = None
         )
     )
     if sub_category:
-        q = q.filter(Material.sub_category == sub_category)
+        stmt = stmt.where(Material.sub_category == sub_category)
     if brand_tier:
-        q = q.filter(Quote.brand_tier == brand_tier)
+        stmt = stmt.where(Quote.brand_tier == brand_tier)
 
-    prices = [row[0] for row in q.all()]
+    prices = list(db.scalars(stmt).all())
     if not prices:
         return {"count": 0}
 
@@ -110,11 +112,11 @@ def compute_reasonable_low(
 
     brand_tier: if set, only include quotes with matching brand_tier (e.g. '合资').
     """
-    q = (
-        db.query(Quote.unit_price, Quote.quote_date, Quote.project_id)
+    stmt = (
+        select(Quote.unit_price, Quote.quote_date, Quote.project_id)
         .join(Material)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(
+        .where(
             Material.category == category,
             Quote.unit_price.isnot(None),
             Quote.unit_price > 0,
@@ -122,11 +124,11 @@ def compute_reasonable_low(
         )
     )
     if sub_category:
-        q = q.filter(Material.sub_category == sub_category)
+        stmt = stmt.where(Material.sub_category == sub_category)
     if brand_tier:
-        q = q.filter(Quote.brand_tier == brand_tier)
+        stmt = stmt.where(Quote.brand_tier == brand_tier)
 
-    rows = q.all()
+    rows = db.execute(stmt).all()
     if not rows:
         return {
             "reasonable_low": None,
@@ -184,16 +186,15 @@ def build_spec_price_index(db: Session, category: str) -> dict[tuple, list[float
 
     每行矩阵按自身规格键 O(1) 查表，避免 N×全表重复扫描。
     """
-    rows = (
-        db.query(
+    rows = db.execute(
+        select(
             Quote.unit_price, Quote.unit_price_excl_tax, Quote.tax_rate,
             Material.standard_name, Material.spec, Material.unit,
         )
         .join(Material, Material.id == Quote.material_id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Material.category == category, *valid_quote_filters())
-        .all()
-    )
+        .where(Material.category == category, *valid_quote_filters())
+    ).all()
     index: dict[tuple, list[float]] = {}
     for up, upx, tr, name, spec, munit in rows:
         fam, dn, pn, u = _spec_key(name, spec, munit)
@@ -258,6 +259,25 @@ def compare_price(
     new_price: float | None = None,
 ) -> dict:
     """Compare a new price against the reasonable low baseline (v2)."""
+    profile = get_comparison_profile(category)
+    if not profile["history_baseline"]:
+        return {
+            "category": category,
+            "sub_category": sub_category or "",
+            "reasonable_low": None,
+            "reasonable_low_project": None,
+            "reasonable_low_date": None,
+            "historical_avg": None,
+            "historical_median": None,
+            "historical_min": None,
+            "baseline_high": None,
+            "new_price": new_price,
+            "deviation_pct": None,
+            "alert_level": "",
+            "sample_count": 0,
+            "comparison_profile": profile["key"],
+            "review_hint": profile["review_hint"],
+        }
     baseline = compute_baseline(db, category, sub_category)
     rl_info = compute_reasonable_low(db, category, sub_category)
 
@@ -276,6 +296,8 @@ def compare_price(
             "deviation_pct": None,
             "alert_level": "",
             "sample_count": 0,
+            "comparison_profile": profile["key"],
+            "review_hint": profile["review_hint"],
         }
 
     thresholds = get_category_thresholds(db, category)
@@ -301,4 +323,6 @@ def compare_price(
         "deviation_pct": deviation_pct,
         "alert_level": alert_level,
         "sample_count": baseline["count"],
+        "comparison_profile": profile["key"],
+        "review_hint": profile["review_hint"],
     }

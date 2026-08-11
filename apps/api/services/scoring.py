@@ -1,7 +1,7 @@
 """Supplier scoring and multi-supplier comparison service — v2."""
 
 import numpy as np
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, AnalysisConfig, DEFAULT_SCORING_WEIGHTS
@@ -9,7 +9,7 @@ from apps.api.services.quote_filters import valid_quote_filters
 
 
 def get_scoring_weights(db: Session) -> dict:
-    cfg = db.query(AnalysisConfig).filter(AnalysisConfig.key == "scoring_weights").first()
+    cfg = db.scalar(select(AnalysisConfig).where(AnalysisConfig.key == "scoring_weights"))
     return cfg.value if cfg else DEFAULT_SCORING_WEIGHTS
 
 
@@ -28,14 +28,14 @@ def score_supplier(
     weights = weights or get_scoring_weights(db)
 
     # ── 1. Price competitiveness (使用合理史低而非中位价) ─────────────────
-    q = (
-        db.query(Quote)
+    stmt = (
+        select(Quote)
         .join(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
+        .where(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
     )
     if category:
-        q = q.join(Material).filter(Material.category == category)
-    supplier_quotes = q.all()
+        stmt = stmt.join(Material).where(Material.category == category)
+    supplier_quotes = db.scalars(stmt).all()
 
     price_score = 60.0
     if supplier_quotes:
@@ -73,18 +73,16 @@ def score_supplier(
         history_score = 40.0
 
     # ── 3. Quote completeness ─────────────────────────────────────────────
-    total_quotes = (
-        db.query(func.count(Quote.id))
+    total_quotes = db.scalar(
+        select(func.count(Quote.id))
         .join(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Quote.supplier_id == supplier_id, *valid_quote_filters())
-        .scalar() or 0
-    )
-    valid_quotes = (
-        db.query(func.count(Quote.id))
+        .where(Quote.supplier_id == supplier_id, *valid_quote_filters())
+    ) or 0
+    valid_quotes = db.scalar(
+        select(func.count(Quote.id))
         .join(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
-        .scalar() or 0
-    )
+        .where(Quote.supplier_id == supplier_id, Quote.unit_price > 0, *valid_quote_filters())
+    ) or 0
     completeness_score = min(100.0, (valid_quotes / total_quotes) * 100) if total_quotes > 0 else 50.0
 
     # ── 4. Commercial terms ───────────────────────────────────────────────
@@ -126,30 +124,28 @@ def compare_multiple_suppliers(
         if not supplier:
             continue
 
-        q = (
-            db.query(Quote)
+        stmt = (
+            select(Quote)
             .join(Material)
             .join(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.supplier_id == sid, Material.category == category,
+            .where(Quote.supplier_id == sid, Material.category == category,
                     Quote.unit_price > 0, *valid_quote_filters())
         )
         if project_id:
-            q = q.filter(Quote.project_id == project_id)
-        quotes = q.all()
+            stmt = stmt.where(Quote.project_id == project_id)
+        quotes = db.scalars(stmt).all()
 
         avg_price = float(np.mean([qt.unit_price for qt in quotes])) if quotes else None
-        total_q = (
-            db.query(func.count(Quote.id))
+        total_q = db.scalar(
+            select(func.count(Quote.id))
             .join(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.supplier_id == sid, *valid_quote_filters())
-            .scalar() or 0
-        )
-        valid_q = (
-            db.query(func.count(Quote.id))
+            .where(Quote.supplier_id == sid, *valid_quote_filters())
+        ) or 0
+        valid_q = db.scalar(
+            select(func.count(Quote.id))
             .join(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.supplier_id == sid, Quote.unit_price > 0, *valid_quote_filters())
-            .scalar() or 0
-        )
+            .where(Quote.supplier_id == sid, Quote.unit_price > 0, *valid_quote_filters())
+        ) or 0
         completeness = valid_q / total_q if total_q > 0 else 0.0
 
         score = score_supplier(db, sid, category, weights=weights)
