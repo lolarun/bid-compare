@@ -28,7 +28,7 @@
 > split by frontend-coupling depth rather than a flat pass over all 22
 > `analysis.py`/`quotes.py` endpoints lacking `response_model`:
 > - **Tier 1** (batch, shallow verify — route builds the dict itself, frontend
->   already has a TS type or is unused/internal): 14 endpoints wired in one
+>   already has a TS type or is unused/internal): 15 endpoints wired in one
 >   commit (`refresh-baselines`, `bid-alignment/groups/{id}` DELETE,
 >   `anchor-review` GET/confirm/item-confirm/bulk-confirm/finalize,
 >   `tender-list/preview`/`reconcile`/`confirm`/`current-sessions`/
@@ -56,6 +56,19 @@
 >   exact wrong-named fields B3 exists to fix; adding `response_model` now
 >   would cement the wrong contract and force the frontend through two
 >   migrations instead of one.
+>
+> **E4 residue — identified, not scheduled**: `apps/api/routes/quotes.py` has
+> 4 more `response_model=dict` placeholders discovered after Tier 1/2 landed,
+> not on the original 22-endpoint `analysis.py` list and not covered by any
+> tier above: `GET /api/quotes` (list, flattens `material_name`/`spec`/`unit`/
+> `category`/`profession`/`supplier_name`/`project_name` onto `QuoteOut`),
+> `GET /api/quotes/batches`, `GET /api/quotes/stats`, `POST
+> /api/quotes/archive-prices` (already has a hand-shaped 7-field response,
+> just never got a schema). None were verified against frontend consumption —
+> deliberately deferred rather than fixed opportunistically. Disposition: fold
+> into the next Tier-1-style tail batch (same shallow-verify method: check
+> `apps/www/src` for `Record<string,any>`/`as any` reads before trusting the
+> existing TS type), not part of B3.
 >
 > **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
 > `vl_tender.py`; "direct" was a contrast name against legacy, which no longer
