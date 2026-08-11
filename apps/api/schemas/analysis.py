@@ -551,3 +551,219 @@ class BubbleItem(BaseModel):
 
 class DashboardBubbleData(BaseModel):
     items: list[BubbleItem]
+
+
+# ─── Anchor review (legacy group/item view, GET /anchor-review) ───────────────
+# 评审 E4 Tier 1：与 AnchorReviewMatrixResult 是两套不同的复核视图，命名对齐
+# 前端 client.ts 的 AnchorGroupItem/AnchorReviewGroup/AnchorResidueQuote/
+# AnchorReviewResult。bid_quote_line_id 未出现在前端 TS 类型里，但
+# test_bql_e2e.py 对它有断言(BQL 新路径身份字段)，必须保留、不可让
+# response_model 静默丢弃。
+
+class AnchorGroupItemOut(BaseModel):
+    item_id: int
+    action: str
+    quote_id: int | None = None
+    bid_quote_line_id: int | None = None
+    supplier_id: int | None = None
+    supplier_name: str
+    material_name: str
+    spec: str
+    unit_price: float | None
+    cosine: float | None = None
+    spec_note: str = ""
+
+
+class AnchorReviewGroupOut(BaseModel):
+    group_id: int
+    anchor_name: str
+    anchor_spec: str
+    confidence: float
+    items: list[AnchorGroupItemOut] = []
+    pending_count: int | None = None
+    align_count: int | None = None
+
+
+class AnchorResidueQuoteOut(BaseModel):
+    quote_id: int | None = None
+    bid_quote_line_id: int | None = None
+    supplier_id: int | None = None
+    supplier_name: str
+    material_name: str
+    spec: str
+    unit_price: float | None
+
+
+class AnchorReviewResult(BaseModel):
+    low_conf_groups: list[AnchorReviewGroupOut] = []
+    confirmed_groups: list[AnchorReviewGroupOut] = []
+    residue_quotes: list[AnchorResidueQuoteOut] = []
+    pending_items_total: int = 0
+
+
+# ─── Anchor review confirm / item-confirm / bulk-confirm / finalize ───────────
+
+class AnchorReviewConfirmResult(BaseModel):
+    ok: bool
+    group_id: int
+    status: str  # "confirmed" | "deleted"
+
+
+class AnchorReviewItemConfirmResult(BaseModel):
+    ok: bool
+    item_id: int
+    action: str  # "align" | "exclude"
+
+
+class AnchorReviewBulkConfirmResult(BaseModel):
+    ok: bool
+    confirmed: int
+
+
+class AnchorReviewFinalizeResult(BaseModel):
+    ok: bool
+    id: int
+    status: str
+    group_ids_count: int
+    pending_at_finalize: int
+
+
+# ─── Bid-alignment group delete / baseline refresh (trivial status dicts) ─────
+
+class BidAlignmentGroupDeleteResult(BaseModel):
+    status: str
+    deleted_group_id: int
+
+
+class RefreshBaselinesResult(BaseModel):
+    status: str
+    message: str
+
+
+# ─── Tender-list preview / reconcile / confirm / sessions ─────────────────────
+
+class TenderPreviewItemOut(BaseModel):
+    seq: str
+    name: str
+    spec: str
+    model: str
+    pressure: str
+    materials: dict[str, str] = {}
+    unit: str
+    qty: float | None
+    profession: str
+    category: str
+    category_confidence: float
+    category_reason: str
+    canonical: dict[str, str | None] = {}
+
+
+class TenderPreviewResultOut(BaseModel):
+    items: list[TenderPreviewItemOut]
+    detected_category: str
+    category_breakdown: dict[str, int]
+    has_multiple_categories: bool
+    unknown_count: int
+    total: int
+
+
+class SourceReconcileMismatchOut(BaseModel):
+    seq: str
+    field: str
+    xlsx_value: str
+    pdf_value: str
+
+
+class SourceReconcileResultOut(BaseModel):
+    xlsx_count: int
+    pdf_count: int
+    seq_missing_in_pdf: list[str]
+    only_in_excel_reference: list[str] | None = None
+    seq_missing_in_xlsx: list[str]
+    field_mismatches: list[SourceReconcileMismatchOut]
+    recommended_source: str
+
+
+class TenderListConfirmSessionOut(BaseModel):
+    category: str
+    id: int
+    version: int
+    anchors_total: int
+
+
+class TenderListConfirmResult(BaseModel):
+    ok: bool
+    id: int
+    version: int
+    primary_category: str
+    sessions: list[TenderListConfirmSessionOut]
+    multi_category: bool
+
+
+class TenderListCurrentSessionOut(BaseModel):
+    id: int
+    category: str
+    anchors_total: int
+
+
+class TenderListCurrentSessionsResult(BaseModel):
+    sessions: list[TenderListCurrentSessionOut]
+    primary_category: str
+
+
+class TenderListCurrentResult(BaseModel):
+    id: int
+    version: int
+    category: str
+    file_name: str
+    anchors_total: int
+    status: str
+    confirmed_by: str | None = None
+    confirmed_at: object | None = None
+    created_at: object | None = None
+    used_submission_ids: list[int] = []
+
+
+class TenderListDeactivateResult(BaseModel):
+    ok: bool
+    deactivated: int
+
+
+class TenderListVersionOut(BaseModel):
+    id: int
+    version: int
+    is_current: bool
+    status: str
+    anchors_total: int
+    file_name: str
+    created_at: object | None = None
+
+
+# ─── Compare-state (refresh-recoverable progress) ──────────────────────────────
+
+class CompareStateSubmissionOut(BaseModel):
+    submission_id: int
+    job_id: str | None = None
+    filename: str
+    supplier_raw_name: str
+    supplier_id: int | None = None
+    status: str
+    line_count: int
+    batch_id: str | None = None
+    job_status: str
+    progress_stage: str
+    progress_pct: float
+
+
+class CompareStateInflightJobOut(BaseModel):
+    job_id: str
+    filename: str
+    status: str
+    progress_stage: str
+    progress_pct: float
+    has_result: bool
+
+
+class CompareStateResult(BaseModel):
+    submissions: list[CompareStateSubmissionOut]
+    inflight_jobs: list[CompareStateInflightJobOut]

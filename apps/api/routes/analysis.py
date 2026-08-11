@@ -19,6 +19,14 @@ from apps.api.schemas import (
     AlignmentSuggestRequest, AlignmentSuggestResult,
     AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
     AnchorReviewMatrixResult,
+    AnchorReviewResult,
+    AnchorReviewConfirmResult, AnchorReviewItemConfirmResult,
+    AnchorReviewBulkConfirmResult, AnchorReviewFinalizeResult,
+    BidAlignmentGroupDeleteResult, RefreshBaselinesResult,
+    TenderPreviewResultOut, SourceReconcileResultOut,
+    TenderListConfirmResult, TenderListCurrentSessionsResult,
+    TenderListCurrentResult, TenderListDeactivateResult, TenderListVersionOut,
+    CompareStateResult,
 )
 from apps.api.services.history.comparison import compare_price
 from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
@@ -258,7 +266,7 @@ def dashboard_bubble(
     return get_dashboard_bubble(db, date_from, date_to)
 
 
-@router.post("/refresh-baselines")
+@router.post("/refresh-baselines", response_model=RefreshBaselinesResult)
 def refresh_baselines(category: str | None = None, db: Session = Depends(get_db)):
     refresh_material_baselines(db, category)
     return {"status": "ok", "message": f"Baselines refreshed for {category or 'all categories'}"}
@@ -478,7 +486,7 @@ def bid_alignment_groups(
     return result
 
 
-@router.delete("/bid-alignment/groups/{group_id}")
+@router.delete("/bid-alignment/groups/{group_id}", response_model=BidAlignmentGroupDeleteResult)
 def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     """删除一个对齐分组（撤销对齐）。"""
     from apps.api.models.bid_alignment import BidAlignmentGroup
@@ -544,7 +552,7 @@ def anchor_review_matrix(
     return result
 
 
-@router.get("/anchor-review")
+@router.get("/anchor-review", response_model=AnchorReviewResult)
 def anchor_review(
     project_id: int = Query(...),
     category: str = Query(...),
@@ -774,7 +782,7 @@ class _ItemConfirmBody(BaseModel):
     action: str  # "align" or "exclude"
 
 
-@router.post("/anchor-review/item-confirm")
+@router.post("/anchor-review/item-confirm", response_model=AnchorReviewItemConfirmResult)
 def anchor_review_item_confirm(
     body: _ItemConfirmBody,
     db: Session = Depends(get_db),
@@ -803,7 +811,7 @@ def anchor_review_item_confirm(
     return {"ok": True, "item_id": body.item_id, "action": body.action}
 
 
-@router.post("/tender-list/preview")
+@router.post("/tender-list/preview", response_model=TenderPreviewResultOut)
 async def tender_list_preview(
     file: UploadFile = File(...),
 ):
@@ -866,7 +874,7 @@ class _ReconcileBody(BaseModel):
     source_type: str = "excel_primary"  # "excel_primary" | "pdf_primary"
 
 
-@router.post("/tender-list/reconcile")
+@router.post("/tender-list/reconcile", response_model=SourceReconcileResultOut)
 def tender_list_reconcile(body: _ReconcileBody):
     """Excel 清单 vs PDF 投标清单对账。
 
@@ -882,7 +890,7 @@ class _AnchorConfirmBody(BaseModel):
     action: str  # "confirm" or "reject"
 
 
-@router.post("/anchor-review/confirm")
+@router.post("/anchor-review/confirm", response_model=AnchorReviewConfirmResult)
 def anchor_review_confirm(
     body: _AnchorConfirmBody,
     db: Session = Depends(get_db),
@@ -2036,7 +2044,7 @@ def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
     return resolved
 
 
-@router.post("/tender-list/confirm")
+@router.post("/tender-list/confirm", response_model=TenderListConfirmResult)
 def tender_list_confirm(
     body: _TenderListConfirmBody,
     db: Session = Depends(get_db),
@@ -2124,7 +2132,7 @@ def tender_list_confirm(
     }
 
 
-@router.get("/tender-list/current-sessions")
+@router.get("/tender-list/current-sessions", response_model=TenderListCurrentSessionsResult)
 def tender_list_current_sessions(
     project_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -2149,7 +2157,7 @@ def tender_list_current_sessions(
     }
 
 
-@router.get("/tender-list/current")
+@router.get("/tender-list/current", response_model=TenderListCurrentResult)
 def tender_list_current(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2172,7 +2180,7 @@ def tender_list_current(
     }
 
 
-@router.get("/compare-state")
+@router.get("/compare-state", response_model=CompareStateResult)
 def compare_state(
     project_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -2238,7 +2246,7 @@ def compare_state(
     return {"submissions": submissions_out, "inflight_jobs": inflight_out}
 
 
-@router.get("/tender-list/versions")
+@router.get("/tender-list/versions", response_model=list[TenderListVersionOut])
 def tender_list_versions(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2255,7 +2263,7 @@ def tender_list_versions(
     ]
 
 
-@router.delete("/tender-list/current")
+@router.delete("/tender-list/current", response_model=TenderListDeactivateResult)
 def tender_list_deactivate(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2268,7 +2276,7 @@ def tender_list_deactivate(
 
 # ── 对齐审核闸门 ──────────────────────────────────────────────────
 
-@router.post("/anchor-review/bulk-confirm")
+@router.post("/anchor-review/bulk-confirm", response_model=AnchorReviewBulkConfirmResult)
 def anchor_review_bulk_confirm(
     project_id: int = Query(...),
     category: str = Query(...),
@@ -2305,7 +2313,7 @@ class _FinalizeBody(BaseModel):
     finalized_by: str = ""
 
 
-@router.post("/anchor-review/finalize")
+@router.post("/anchor-review/finalize", response_model=AnchorReviewFinalizeResult)
 def anchor_review_finalize(
     body: _FinalizeBody,
     db: Session = Depends(get_db),
