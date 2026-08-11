@@ -1,6 +1,6 @@
 # HANDOFF — 识别链路现状与交接
 
-> 更新：2026-08-11（最佳实践评审批次2）· 分支 `codex/agent-rebuild`
+> 更新：2026-08-11（最佳实践评审批次1-6 全部完成）· 分支 `codex/agent-rebuild`
 >
 > **一句话**：VL-direct 是**报价与招标两侧唯一的识别路径**，走通了生产 HTTP
 > API 全链路（上传→任务→确认→对齐→矩阵→导出）；legacy 报价/招标分支（含
@@ -13,6 +13,18 @@
 >
 > **不要把本文任何数字当作系统能力承诺。** 准确率数字来自单次或少数几次运行；
 > 稳定性结论一律需要多次运行的分布，见 §0 的撤回表。
+>
+> **最佳实践评审 6 个批次已全部执行完毕**（commit 7d2adb0..17c8a68）：
+> C1/D1 导出弱门与有损重建、F1/F2/F4 legacy 物理删除、C2/D2-D5 重复实现合并、
+> G1 鉴权测试隔离、N2/N3/N7 命名与接口声明、services/ 按域包化。**E1-E4（错误
+> 契约统一）与 B3（身份键改名）明确推迟**，未做，不是遗漏——两者体量堪比整个
+> C/D 系列，需要专门一轮。详见各 commit message 与 `docs/design/22`。
+>
+> **方法论缺口（本轮末尾发现，记录不隐藏）**：`pyproject.toml` 的 `testpaths =
+> ["apps/api/tests", "tests"]` 有两处，本轮此前所有 `pytest apps/api/tests -q`
+> 命令因显式传路径覆盖了 config，**从未跑过根目录 `tests/`**（17 文件/151 用例）。
+> 批次6 末尾才发现并两处一起跑通。今后校验一律用 `pytest apps/api/tests tests -q`
+> 或不传路径依赖 config。
 
 ---
 
@@ -27,9 +39,10 @@
 | Excel 交叉校验 | 与识别器无关 | VL 的行同样对账 |
 
 legacy 已删除，不再是"仅剩两处用途"——那两处用途（provider 不具备多图调用时的
-逐页批量兜底、`services/tender_pdf.py` 的内部路径）经核实全部不可达，删除前逐一
-验证过（见 [22-best-practice-review-scope 批次2 commit]）。`.claude/rules/recognition.md`
-仍保留 TableGrid/bbox 相关的规范性表述，待最佳实践评审批次4 一并改写。
+逐页批量兜底、`services/tender/tender_pdf.py` 的内部路径，批次6 后已改到
+`services/tender/` 域包）经核实全部不可达，删除前逐一验证过。`.claude/rules/
+recognition.md` 仍保留 TableGrid/bbox 相关的规范性表述——批次4 只做了 N2/N3/N7，
+没有改写这份规则文件，仍待专门一轮（与 E1-E4/B3 一起排期）。
 
 **当前已知的两个不稳定源**（都不是代码缺陷，是模型行为）：
 1. 方向判定：同输入多次运行结论不同，未解决，靠"无过半共识则不转并标 REVIEW"兜底。
