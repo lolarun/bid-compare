@@ -18,6 +18,11 @@ paths:
   理由重新描述或引入"部分表格走确定性 TableGrid、复杂表头走 LLM fallback"的双路径
   架构——`provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
   （`pipeline.py` 的两处 `hasattr` 检查是防御性守卫，不是路径选择）。
+- 持久化标签值是 `"vl_direct"`，与模块名 `vl_quote.py` 不一致是**有意的**（评审 N1：
+  模块 2026-08-11 改名，存量 `job.result` 里的标签不迁移）。三个键同义、都指这条
+  识别路径：`fields.parser_mode` / `PageMetric.input_mode` / `meta.recognizer`。
+  新代码判断识别来源时认 `"vl_direct"` 这个值，不要"顺手统一"改成 `vl_quote`——
+  那是数据迁移，不是改名。
 - 识别必须覆盖文档实际页数；页数上限、方向未定页和丢行都要分别报告（`row_ledger`/
   `orientation_unresolved`，doc/19 §L3），禁止静默截断。
 - pdfium 不是线程安全的：所有渲染入口（含只读的 `get_page_count`）必须整体串行经过

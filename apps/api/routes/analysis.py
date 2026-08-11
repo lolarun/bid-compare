@@ -2467,13 +2467,13 @@ def bid_matrix_version_approve(
     db: Session = Depends(get_db),
 ):
     from apps.api.models.bid_matrix_version import BidMatrixVersion
-    from datetime import datetime as _dt
+    from apps.api.models._base import _now
     v = db.get(BidMatrixVersion, version_id)
     if not v:
         raise HTTPException(404, f"BidMatrixVersion {version_id} 不存在")
     v.status = "approved"
     v.review_note = body.note or None
     v.approved_by = body.approved_by or None
-    v.approved_at = _dt.utcnow()
+    v.approved_at = _now()
     db.commit()
     return {"ok": True, "id": v.id, "status": "approved"}

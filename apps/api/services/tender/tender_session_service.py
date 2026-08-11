@@ -22,7 +22,7 @@ Naming distinction (intentional, both kept):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -82,7 +82,7 @@ def save_session(
         TenderListSession.project_id == project_id,
         TenderListSession.category == category,
         TenderListSession.is_current.is_(True),
-    ).values(is_current=False, superseded_at=datetime.utcnow()))
+    ).values(is_current=False, superseded_at=datetime.now(timezone.utc)))
 
     last = db.scalar(
         select(TenderListSession).where(
@@ -106,7 +106,7 @@ def save_session(
         is_current=True,
         status="confirmed",
         confirmed_by=confirmed_by or None,
-        confirmed_at=datetime.utcnow(),
+        confirmed_at=datetime.now(timezone.utc),
     )
     db.add(session)
     return session
@@ -163,7 +163,7 @@ def deactivate_current(
     )
     if project_id is not None:
         stmt = stmt.where(TenderListSession.project_id == project_id)
-    updated = db.execute(stmt.values(is_current=False, superseded_at=datetime.utcnow())).rowcount
+    updated = db.execute(stmt.values(is_current=False, superseded_at=datetime.now(timezone.utc))).rowcount
     db.commit()
     return updated
 
