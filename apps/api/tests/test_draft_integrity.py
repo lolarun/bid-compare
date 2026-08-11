@@ -314,12 +314,12 @@ def test_gate_lets_legitimate_duplicates_through_with_a_flag():
 
 def test_gate_blocks_column_shift_even_for_a_single_row():
     """列错位没有合法形态——一行也不放行。"""
-    from fastapi import HTTPException
+    from apps.api.core.errors import ReviewRequiredError
     from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i) for i in range(10)]
     items[3]["validation_flags"] = [COLUMN_SHIFT_FLAG]
     db = _FakeDb()
-    with pytest.raises(HTTPException) as ei:
+    with pytest.raises(ReviewRequiredError) as ei:
         _gate_integrity(db, items)
     assert ei.value.status_code == 422
     assert ei.value.detail["error"] == "structural_integrity_requires_review"
@@ -327,11 +327,11 @@ def test_gate_blocks_column_shift_even_for_a_single_row():
 
 
 def test_gate_blocks_wholesale_duplication():
-    from fastapi import HTTPException
+    from apps.api.core.errors import ReviewRequiredError
     from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     base = [_item(f"DN{20 + i}", 1 + i, 10 + i, (1 + i) * (10 + i)) for i in range(20)]
     db = _FakeDb()
-    with pytest.raises(HTTPException) as ei:
+    with pytest.raises(ReviewRequiredError) as ei:
         _gate_integrity(db, base + [dict(x) for x in base])
     assert ei.value.detail["duplicates"]["verdict"] == BLOCKED
     assert db.rolled_back is True

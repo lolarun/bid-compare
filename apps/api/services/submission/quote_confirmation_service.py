@@ -12,12 +12,12 @@ import logging
 import re
 from typing import Any
 
-from fastapi import HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import PROFESSION_MAP
 from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
+from apps.api.core.errors import NotFoundError, ReviewRequiredError, ValidationError
 from apps.api.models import (
     BrandTier,
     ExtractionJob,
@@ -210,9 +210,8 @@ def _gate_integrity(db: Session, items: list[dict]) -> dict:
 
     if block_rows:
         db.rollback()
-        raise HTTPException(
-            422,
-            detail={
+        raise ReviewRequiredError(
+            {
                 "error": "structural_integrity_requires_review",
                 "message": (
                     f"{len(block_rows)} 行未通过结构完整性检查"
@@ -247,34 +246,33 @@ def confirm_batch(db: Session, body) -> dict:
     """
     job = db.get(ExtractionJob, body.job_id)
     if not job:
-        raise HTTPException(404, f"Job {body.job_id} not found")
+        raise NotFoundError(f"Job {body.job_id} not found")
     if job.type != "quote":
-        raise HTTPException(400, f"Job type is {job.type}; must be 'quote'")
+        raise ValidationError(f"Job type is {job.type}; must be 'quote'")
     if job.status != "done":
-        raise HTTPException(400, f"Job status is {job.status}; must be 'done'")
+        raise ValidationError(f"Job status is {job.status}; must be 'done'")
 
     # ── Supplier 验证（弱关联：supplier_id 可选，有则校验状态）──────────────────
     supplier: Supplier | None = None
     if body.supplier_id is not None:
         supplier = db.get(Supplier, body.supplier_id)
         if not supplier:
-            raise HTTPException(404, f"Supplier {body.supplier_id} not found")
+            raise NotFoundError(f"Supplier {body.supplier_id} not found")
         if supplier.merge_status != "active":
-            raise HTTPException(
-                400,
+            raise ValidationError(
                 f"Supplier {supplier.name!r} merge_status={supplier.merge_status}，"
                 "只允许选择 active 供应商",
             )
     else:
         if not body.supplier_name.strip():
-            raise HTTPException(422, "陌生供应商必须提供 supplier_name")
+            raise ReviewRequiredError("陌生供应商必须提供 supplier_name")
 
     # ── Project（允许按名查找或创建，project 不是污染来源）─────────────────────
     project: Project | None = None
     if body.project_id:
         project = db.get(Project, body.project_id)
         if not project:
-            raise HTTPException(404, f"Project {body.project_id} not found")
+            raise NotFoundError(f"Project {body.project_id} not found")
     elif body.project_name.strip():
         pname = body.project_name.strip()
         project = db.scalar(select(Project).where(Project.name == pname))
@@ -286,8 +284,7 @@ def confirm_batch(db: Session, body) -> dict:
         ctx_pid = job.context["project_id"]
         project = db.get(Project, ctx_pid)
         if not project:
-            raise HTTPException(
-                400,
+            raise ValidationError(
                 f"Project {ctx_pid} from job context no longer exists; "
                 "specify project_name or project_id to proceed.",
             )
@@ -299,7 +296,7 @@ def confirm_batch(db: Session, body) -> dict:
         or ""
     )
     if default_category and default_category not in PROFESSION_MAP:
-        raise HTTPException(400, f"Unknown category: {default_category}")
+        raise ValidationError(f"Unknown category: {default_category}")
 
     # ── Item list ──────────────────────────────────────────────────────────────
     raw_items: Any = (
@@ -310,15 +307,14 @@ def confirm_batch(db: Session, body) -> dict:
     if raw_items is None:
         raw_items = []
     if not isinstance(raw_items, list):
-        raise HTTPException(422, f"Expected items list, got {type(raw_items).__name__}")
+        raise ReviewRequiredError(f"Expected items list, got {type(raw_items).__name__}")
 
     # 早期校验：有 items 但 category 为空 → 立即拒绝，不创建空壳 submission
     _has_real_items = any(
         str(r.get("material") or "").strip() for r in raw_items if isinstance(r, dict)
     )
     if _has_real_items and not default_category:
-        raise HTTPException(
-            422,
+        raise ReviewRequiredError(
             "category 不能为空：无法确定报价品类，入库中止。"
             "请在前端选择品类（如「阀门」）后重新点击「校对入库」。",
         )
@@ -363,9 +359,8 @@ def confirm_batch(db: Session, body) -> dict:
             ) or 0.0
             checksum = _build_checksum(job, float(prior_sum), prior_line_count)
             if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
-                raise HTTPException(
-                    422,
-                    detail={
+                raise ReviewRequiredError(
+                    {
                         "error": "declared_total_mismatch",
                         "message": (
                             f"该 job 已入库 {prior_line_count} 行，但明细合价之和 "
@@ -653,9 +648,8 @@ def confirm_batch(db: Session, body) -> dict:
     # 不用占比阈值：亨通实测单行列错位即可造成约 2000 万误差，5% 的行数门槛护不住。
     if missing_total_rows:
         db.rollback()
-        raise HTTPException(
-            422,
-            detail={
+        raise ReviewRequiredError(
+            {
                 "error": "missing_total_requires_review",
                 "message": (
                     f"{len(missing_total_rows)} 行原文无合价。系统不会代为计算，"
@@ -670,8 +664,7 @@ def confirm_batch(db: Session, body) -> dict:
     if items and line_count == 0:
         db.rollback()
         reason_summary = "; ".join({e["reason"] for e in errors[:3]}) if errors else "品类无效或所有行被过滤"
-        raise HTTPException(
-            422,
+        raise ReviewRequiredError(
             f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
         )
 
@@ -685,9 +678,8 @@ def confirm_batch(db: Session, body) -> dict:
     checksum = _build_checksum(job, line_total_sum, line_count)
     if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
         db.rollback()
-        raise HTTPException(
-            422,
-            detail={
+        raise ReviewRequiredError(
+            {
                 "error": "declared_total_mismatch",
                 "message": (
                     f"明细合价之和 {checksum['line_sum']:,.2f} 与文件声明总价 "

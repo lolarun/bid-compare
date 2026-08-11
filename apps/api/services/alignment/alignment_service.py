@@ -10,10 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from fastapi import HTTPException
 from sqlalchemy import func as _func, select
 from sqlalchemy.orm import Session
 
+from apps.api.core.errors import ConflictError, ValidationError
 from apps.api.models.alignment_finalization import AlignmentFinalization
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.services.audit import write_domain_event, EVENT_ALIGNMENT_FINALIZE
@@ -37,14 +37,14 @@ def finalize_alignment(
 ) -> FinalizationResult:
     """Create an AlignmentFinalization locking the current confirmed group snapshot.
 
-    Raises HTTPException 400 if force=True without reason.
-    Raises HTTPException 409 if there are pending items or valve_type_conflict
+    Raises ValidationError (→400) if force=True without reason.
+    Raises ConflictError (→409) if there are pending items or valve_type_conflict
     align items and force=False.
 
     Commits the new AlignmentFinalization before returning.
     """
     if force and not reason:
-        raise HTTPException(400, "force=True 时必须提供 reason 字段")
+        raise ValidationError("force=True 时必须提供 reason 字段")
 
     # Gate 1: item-level pending check
     pending_count = db.scalar(
@@ -57,8 +57,7 @@ def finalize_alignment(
         )
     ) or 0
     if pending_count > 0 and not force:
-        raise HTTPException(
-            409,
+        raise ConflictError(
             f"仍有 {pending_count} 条 item 处于 pending 状态未处理。"
             "请先逐条确认，或使用 force=true 强制完成（需提供原因）。",
         )
@@ -76,8 +75,7 @@ def finalize_alignment(
         )
     ) or 0
     if fp_align_count > 0 and not force:
-        raise HTTPException(
-            409,
+        raise ConflictError(
             f"存在 {fp_align_count} 条 align item 含阀型冲突标记，拒绝 finalize。"
             "请重新运行 LLM 填表或使用 force=true 强制完成（需提供原因）。",
         )

@@ -12,7 +12,7 @@ Regression coverage for two defects found during the review:
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
+from apps.api.core.errors import ValidationError
 
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.services.matrix import bid_export_service
@@ -47,7 +47,7 @@ def test_export_rejects_unconfirmed_session(db_session, monkeypatch):
         lambda *a, **kw: called.__setitem__("build_anchor_matrix", True) or {},
     )
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ValidationError) as exc:
         bid_export_service.get_bid_matrix_for_export(db_session, 1, "阀门", [])
 
     assert exc.value.status_code == 400

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from apps.api.core.config import get_settings
 from apps.api.core.database import init_db, SessionLocal
+from apps.api.core.errors import register_exception_handlers
 from apps.api.core.runtime import (
     get_pool_stats,
     set_runtime_pipeline,
@@ -156,6 +157,7 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan,
 )
+register_exception_handlers(app)  # DomainError → HTTP (评审 E2, core/errors.py)
 
 settings = get_settings()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", settings.CORS_ORIGINS).split(",")

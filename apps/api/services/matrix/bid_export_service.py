@@ -5,10 +5,10 @@ serialization (Excel formatting), not for business logic.
 """
 from __future__ import annotations
 
-from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from apps.api.core.errors import ConflictError, ValidationError
 from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 from apps.api.services.tender.tender_session_service import (
     get_current_confirmed_session,
@@ -36,12 +36,9 @@ def get_bid_matrix_for_export(
 
     session = get_current_confirmed_session(db, project_id, category)
     if not session or not session.anchors_json:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"项目 {project_id} / 品类 {category} 尚无已确认采购清单（TenderListSession）。"
-                "请先完成采购清单上传和确认步骤后再导出。"
-            ),
+        raise ValidationError(
+            f"项目 {project_id} / 品类 {category} 尚无已确认采购清单（TenderListSession）。"
+            "请先完成采购清单上传和确认步骤后再导出。"
         )
 
     # 硬闸门：used_submission_ids 必须已写入（与 /bid-matrix 保持一致）
@@ -54,8 +51,7 @@ def get_bid_matrix_for_export(
             )
         )
         if any_active:
-            raise HTTPException(
-                409,
+            raise ConflictError(
                 "报价确认异常：项目存在 BidSubmission 但当前会话 used_submission_ids 为空。"
                 "请重新执行「校对入库」→「对齐核查」后再导出矩阵。",
             )
