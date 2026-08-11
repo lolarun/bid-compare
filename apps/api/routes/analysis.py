@@ -18,6 +18,7 @@ from apps.api.schemas import (
     DashboardHeatmapData, DashboardBubbleData,
     AlignmentSuggestRequest, AlignmentSuggestResult,
     AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
+    AnchorReviewMatrixResult,
 )
 from apps.api.services.history.comparison import compare_price
 from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
@@ -489,7 +490,7 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     return {"status": "ok", "deleted_group_id": group_id}
 
 
-@router.get("/anchor-review/matrix")
+@router.get("/anchor-review/matrix", response_model=AnchorReviewMatrixResult)
 def anchor_review_matrix(
     project_id: int = Query(...),
     category: str = Query(...),

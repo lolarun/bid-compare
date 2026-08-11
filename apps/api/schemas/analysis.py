@@ -132,6 +132,10 @@ class ReviewCell(BaseModel):
     flags: list[str] | None = None
     is_lowest: bool = False
     candidates: list[ReviewCellCandidate] = []
+    # 评审 E4：cell_status=missing 时 bid_matrix.py 会补一句人话解释（"该供应商
+    # 未报价此品项" / "清单此项无比价组..."），前端 AnchorReviewMatrix.vue:342
+    # 读它做兜底文案；schema 之前没声明，核实时发现补上。
+    missing_reason: str | None = None
     model_config = {"extra": "ignore"}
 
 
@@ -139,6 +143,13 @@ class ReviewRow(BaseModel):
     anchor_seq: str
     anchor_name: str
     anchor_spec: str
+    # 评审 E4：build_anchor_review_matrix 的行字典实际还有这三个字段，前端
+    # AnchorReviewMatrix.vue 也在读（client.ts 的 TS 类型已经声明了它们），
+    # 但这份 Pydantic schema 之前漏了——核实时发现，先补全再接 response_model，
+    # 否则会把锚点的压力等级/材质/品牌要求悄悄丢给前端。
+    anchor_pressure: str = ""
+    anchor_materials: str = ""
+    anchor_brand: str = ""
     unit: str
     quantity: float | None
     row_status: str  # ok|partial|pending|missing
@@ -149,8 +160,16 @@ class ReviewRow(BaseModel):
 
 
 class ReviewSupplier(BaseModel):
-    supplier_id: int
+    # 评审 E4：submission_id 是新 BID 路径的权威列身份（§7），前端拿它做列 key
+    # 和跨行的 cell 查找（AnchorReviewMatrix.vue 多处 sup.submission_id）；
+    # supplier_raw_name/brand 前端也在读（展示名优先取它、品牌标签）。三个都是
+    # bid_matrix.py 返回值里的真实字段，schema 之前漏了——先补全再接
+    # response_model，否则前端复核矩阵的列匹配会直接失效。
+    submission_id: int | None = None  # legacy supplier-path 下为 None
+    supplier_id: int | None = None    # nullable soft-ref（submission 未关联正式供应商时）
     supplier_name: str
+    supplier_raw_name: str = ""
+    brand: str = ""
     checksum_status: str | None = None
     declared_total: float | None = None
     checksum_delta_pct: float | None = None
@@ -164,6 +183,11 @@ class AnchorReviewMatrixResult(BaseModel):
     quoted_ge_2_count: int
     quoted_full_count: int
     suppliers: list[ReviewSupplier]
+    # 招标品牌要求（{brand_en, brand_cn} 列表）。评审 E4：此前本 schema 已写好但
+    # 零引用，核实时发现漏了这个字段——build_anchor_review_matrix 的返回值里有
+    # brand_requirement，前端 AnchorReviewMatrix.vue:230-232 也在读，若直接接
+    # response_model 会把它悄悄丢掉。补上后再接。
+    brand_requirement: list[dict] = []
     matrix_distribution: "MatrixDistribution | None" = None
     rows: list[ReviewRow]
     model_config = {"extra": "ignore"}

@@ -35,6 +35,8 @@ from apps.api.schemas.analysis import (
     AlignmentFieldFix,
     AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
     AlignmentApplyGroup, AlignmentApplyGroupItem, AlignmentApplyFieldFix,
+    ReviewCellCandidate, ReviewCell, ReviewRow, ReviewSupplier,
+    AnchorReviewMatrixResult,
 )
 
 __all__ = [
