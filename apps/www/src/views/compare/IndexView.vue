@@ -696,10 +696,10 @@ async function fetchInsight() {
   insightResult.value = null
   try {
     // 携带评标上下文（policy/排名/风险），AI 仅据此解释；行数截断控制体积
-    const trimmed = {
+    const trimmed: BidMatrixResult = {
       ...matrixResult.value,
       rows: matrixResult.value.rows.slice(0, 50),
-    } as unknown as BidMatrixResult
+    }
     const { data } = await analysisApi.bidInsight(trimmed)
     insightResult.value = data
   } catch (e: any) {
