@@ -56,6 +56,7 @@ from apps.api.intelligence.extraction_draft import (
 from apps.api.services.draft_integrity import (
     AMOUNT_NOT_QUOTED,
     check_column_alignment,
+    check_sequence_continuity,
     classify_amount_cell,
     detect_truncated_numbers,
 )
@@ -362,6 +363,22 @@ def build_draft(text: str, *, file_path: str, page_count: int,
     # unit_price_ex_tax / total_inc_tax，total_price 一个都没匹配上，
     # 89 行合价全空，金额短 824,915 元（88.5%），而结构门判 ok、逐行算术无异常。
     # 「读到了行却读不到钱」符合 CLAUDE.md §4 BLOCKED 的「无有效报价」。
+    # 行数守恒：台账在 VL 路径上是同义反复（expected 与 extracted 同源），
+    # 序号是文档自印的、不由抽取质量决定，是目前唯一的独立判据。
+    # **覆盖率不足时如实说"没有判据"，不得当成"没有问题"**（docs/design/21 §2.1）。
+    seq = check_sequence_continuity(
+        [{"seq": r.fields.get("seq")} for r in rows if r.row_type == "quote_line"])
+    diag["sequence"] = seq.to_dict()
+    if seq.verdict == "blocked":
+        quality.blocking_reasons = list(quality.blocking_reasons or []) + [seq.reason]
+        quality.status = "BLOCKED"
+    elif seq.verdict in ("review", "not_applicable"):
+        quality.blocking_reasons = list(quality.blocking_reasons or []) + [
+            seq.reason if seq.verdict == "review"
+            else f"row_conservation_unverifiable: {seq.reason}"]
+        if quality.status == "PASS":
+            quality.status = "REVIEW"
+
     lost = diag.get("unmapped_numeric_columns") or []
     if rows and not diag.get("has_price_column", True):
         quality.blocking_reasons = list(quality.blocking_reasons or []) + [

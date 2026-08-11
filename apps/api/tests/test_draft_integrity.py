@@ -395,3 +395,64 @@ def test_extra_and_missing_escalate_independently_worst_wins():
 
 def test_clean_table_is_ok():
     assert check_column_alignment(["a", "b", "c"], _rows(90, 0)).verdict == "ok"
+
+
+# ─── 序号连续性：行数守恒的独立判据（docs/design/21 §2.1）────────────────────
+#
+# VL 路径的行数台账是同义反复——expected 与 extracted 同源，结构上报不出丢行。
+# 序号是文档自己印在纸上的，不由抽取质量决定，是目前唯一的独立判据。
+
+from apps.api.services.draft_integrity import check_sequence_continuity  # noqa: E402
+
+
+def _seq_items(seqs):
+    return [{"seq": str(s)} for s in seqs]
+
+
+def test_complete_sequence_is_ok():
+    assert check_sequence_continuity(_seq_items(range(1, 137))).verdict == "ok"
+
+
+def test_single_gap_localises_the_missing_row():
+    """比"少了一行"更有用的是"少了第 51 行"——能据此定向重读那一页。"""
+    r = check_sequence_continuity(_seq_items([i for i in range(1, 137) if i != 51]))
+    assert r.verdict == "review" and r.missing == [51]
+
+
+def test_widespread_gaps_block():
+    r = check_sequence_continuity(
+        _seq_items([i for i in range(1, 137) if i not in range(50, 70)]))
+    assert r.verdict == "blocked" and len(r.missing) == 20
+
+
+def test_no_seq_column_is_not_applicable_never_ok():
+    """**「没有判据」不等于「没有问题」。** 四份实测文档一行序号都没有；
+    若这里返回 ok，行数守恒就又变回同义反复了。"""
+    r = check_sequence_continuity([{"seq": ""} for _ in range(136)])
+    assert r.verdict == "not_applicable"
+    assert r.verdict != "ok"
+    assert "缺独立判据" in r.reason
+
+
+def test_partial_coverage_refuses_to_extrapolate():
+    """零星几个序号推不出整份的完整性——宁可说没有判据。"""
+    items = _seq_items(range(1, 51)) + [{"seq": ""} for _ in range(86)]
+    assert check_sequence_continuity(items).verdict == "not_applicable"
+
+
+def test_does_not_assume_numbering_starts_at_one():
+    """分部报价常按段重编号。只在**观测到的区间内**找缺口，不猜应有多少行。"""
+    r = check_sequence_continuity(_seq_items(range(45, 137)))
+    assert r.verdict == "ok" and r.observed_min == 45
+
+
+def test_duplicate_seq_is_review_not_a_gap():
+    """重复与缺口是两回事：缺口是丢行，重复可能是分部重编号（合法）。"""
+    r = check_sequence_continuity(_seq_items([1, 2, 2, 3, 4, 5, 6, 7, 8, 9]))
+    assert r.verdict == "review" and r.duplicated == [2] and r.missing == []
+
+
+def test_seq_text_variants_are_tolerated():
+    r = check_sequence_continuity([{"seq": "1"}, {"seq": "2."}, {"seq": "No.3"},
+                                   {"seq": "4"}, {"seq": "5"}])
+    assert r.verdict == "ok"

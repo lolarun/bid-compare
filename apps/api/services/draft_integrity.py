@@ -34,6 +34,8 @@ from apps.api.core.domain_config import (
     INTEGRITY_TRUNCATION_MIN_SUSPECTS,
     MATCH_ARITHMETIC_MAX_ERROR_RATE,
     MATCH_ARITHMETIC_VAT_TOLERANCE,
+    SEQ_COVERAGE_MIN,
+    SEQ_GAP_BLOCKED_RATIO,
 )
 
 # 结论三态与 CLAUDE.md §4 的质量分级一致
@@ -643,3 +645,96 @@ def annotate_items(items: list[dict], report: IntegrityReport) -> list[dict]:
             existing = list(items[idx].get("validation_flags") or [])
             items[idx]["validation_flags"] = existing + [f for f in flags if f not in existing]
     return items
+
+
+# ─── ⑤ 序号连续性：行数守恒的独立判据 ────────────────────────────────────────
+#
+# 为什么需要它：VL 路径的行数台账拿"模型给了几行"当分母，也拿它当分子，
+# 结构上不可能报出丢行（docs/design/21 §2.1）。序号是文档**自己印在纸上**的，
+# 不由抽取质量决定——1..136 里缺了 51，就是确定丢了第 51 行，而且**能定位**。
+#
+# 三条边界，每条都是为了不把噪声当缺陷：
+#  · 覆盖率不足 → 不判定。零星几个序号推不出整份的完整性，宁可说"没有判据"。
+#  · 不假定从 1 开始、不假定单调步长为 1 —— 分部报价常按段重编号。只在**已观测到
+#    的最小值到最大值之间**找缺口，不猜文档应该有多少行。
+#  · 重复序号单独报。它和缺口是两回事：缺口是丢行，重复是同一行被抽了两次或分部
+#    编号重启，后者合法。
+
+@dataclass
+class SequenceReport:
+    total_rows: int = 0
+    rows_with_seq: int = 0
+    coverage: float = 0.0
+    observed_min: int | None = None
+    observed_max: int | None = None
+    missing: list[int] = field(default_factory=list)
+    duplicated: list[int] = field(default_factory=list)
+    verdict: str = OK
+    reason: str = ""
+
+    @property
+    def applicable(self) -> bool:
+        return self.verdict != "not_applicable"
+
+    def to_dict(self) -> dict:
+        return {
+            "total_rows": self.total_rows, "rows_with_seq": self.rows_with_seq,
+            "coverage": round(self.coverage, 4),
+            "range": [self.observed_min, self.observed_max],
+            "missing": self.missing[:50], "missing_count": len(self.missing),
+            "duplicated": self.duplicated[:20],
+            "verdict": self.verdict, "reason": self.reason,
+        }
+
+
+_SEQ_DIGITS = re.compile(r"\d+")
+
+
+def _seq_int(raw) -> int | None:
+    """序号取整数。'12'、'12.'、'No.12' 都算；'1-2' 这类分段编号取第一段。"""
+    if raw is None:
+        return None
+    m = _SEQ_DIGITS.search(str(raw))
+    return int(m.group()) if m else None
+
+
+def check_sequence_continuity(
+    items: list[dict], *, seq_key: str = "seq",
+    coverage_min: float = SEQ_COVERAGE_MIN,
+    blocked_ratio: float = SEQ_GAP_BLOCKED_RATIO,
+) -> SequenceReport:
+    """按文档自印的序号找缺口 —— 行数守恒的独立证据。
+
+    只在覆盖率达标时判定；否则返回 not_applicable，**由调用方如实说"没有判据"**，
+    不得当成"没有问题"。
+    """
+    rep = SequenceReport(total_rows=len(items))
+    seqs = [s for it in items if (s := _seq_int(it.get(seq_key))) is not None]
+    rep.rows_with_seq = len(seqs)
+    rep.coverage = len(seqs) / max(len(items), 1)
+
+    if not seqs or rep.coverage < coverage_min:
+        rep.verdict = "not_applicable"
+        rep.reason = (f"序号覆盖率 {rep.coverage:.0%} < {coverage_min:.0%}，"
+                      f"无序号轴可用；行数守恒缺独立判据")
+        return rep
+
+    rep.observed_min, rep.observed_max = min(seqs), max(seqs)
+    seen = {}
+    for s in seqs:
+        seen[s] = seen.get(s, 0) + 1
+    rep.duplicated = sorted(k for k, n in seen.items() if n > 1)
+    # 只在观测到的区间内找缺口——不猜这份文档"应该"有多少行
+    rep.missing = [n for n in range(rep.observed_min, rep.observed_max + 1)
+                   if n not in seen]
+
+    span = rep.observed_max - rep.observed_min + 1
+    if rep.missing:
+        ratio = len(rep.missing) / max(span, 1)
+        rep.verdict = BLOCKED if ratio > blocked_ratio else REVIEW
+        rep.reason = (f"序号缺口 {len(rep.missing)}/{span}（{ratio:.1%}）"
+                      f"：{rep.missing[:10]}{'…' if len(rep.missing) > 10 else ''}")
+    elif rep.duplicated:
+        rep.verdict = REVIEW
+        rep.reason = f"序号重复 {rep.duplicated[:10]}；可能是重复抽取或分部重编号"
+    return rep
