@@ -294,20 +294,42 @@ def extract_bidlist(
         default_category: 强制品类（本类招标文件单品类，默认阀门）。
         xlsx_path: 可选 Excel 清单路径；传入时自动运行 source reconciliation。
     """
-    if not (hasattr(provider, "ocr_pages_with_roles") and hasattr(provider, "_llm_call_json")):
-        raise RuntimeError(
-            "tender_pdf.extract_bidlist 需要 DashScopeOCRProvider（OCR 能力）；"
-            "当前 provider 不支持。请配置 DASHSCOPE_API_KEY。"
-        )
+    # VL-direct 优先。招标侧与报价侧共用同一套解析与结构门，差异只在列表与字段
+    # （apps/api/intelligence/vl_tender.py）。legacy 保留给不具备多图调用的 provider——
+    # 它同时还承担 Excel 对账（xlsx_path）与品牌页，那两项 VL 侧尚未实现。
+    use_vl = hasattr(provider, "vl_extract_csv") and xlsx_path is None
+    if use_vl:
+        from apps.api.core.config import get_settings
+        from apps.api.intelligence.vl_tender import recognize_tender_vl
 
-    draft = recognize_tables(
-        file_path=file_path,
-        provider=provider,
-        adapter=TENDER_ADAPTER,
-        progress_cb=progress_cb,
-        xlsx_path=xlsx_path,
-        target_pages=bidlist_pages or None,
-    )
+        s = get_settings()
+        draft = recognize_tender_vl(
+            file_path,
+            vl_call=lambda imgs, prompt: provider.vl_extract_csv(
+                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+            orient_call=lambda parts, prompt: provider.vl_extract_csv(
+                [b for _t, b in parts], prompt,
+                model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+            progress_cb=progress_cb,
+            target_pages=bidlist_pages or None,
+        )
+    else:
+        if not (hasattr(provider, "ocr_pages_with_roles")
+                and hasattr(provider, "_llm_call_json")):
+            raise RuntimeError(
+                "tender_pdf.extract_bidlist 需要具备 vl_extract_csv 的 provider，"
+                "或 DashScopeOCRProvider（OCR 能力）。请配置 DASHSCOPE_API_KEY。"
+            )
+        log.info("招标清单走 legacy：provider=%s xlsx_path=%s",
+                 type(provider).__name__, bool(xlsx_path))
+        draft = recognize_tables(
+            file_path=file_path,
+            provider=provider,
+            adapter=TENDER_ADAPTER,
+            progress_cb=progress_cb,
+            xlsx_path=xlsx_path,
+            target_pages=bidlist_pages or None,
+        )
 
     # ── 品牌表（从 meta 取，extract_meta 已填充）──────────────────────────
     meta = draft.meta or {}

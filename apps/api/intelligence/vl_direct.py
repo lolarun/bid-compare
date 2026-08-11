@@ -1,7 +1,10 @@
 """vl_direct.py — 报价清单识别器：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
 
-与 legacy（OCR → HTML → TableGrid → LLM）并存，由 `QUOTE_RECOGNIZER` 选择。
-两者是**不同的输入契约**，不是换模型名能切换的。
+**报价识别的唯一路径**（2026-08-10 起）。legacy 的报价分支（OCR → HTML →
+TableGrid → LLM）已归档，`QUOTE_RECOGNIZER` 开关随之移除——留着它就等于留着
+"这次结果是哪条路出来的"这个疑问，而实测 provider 缺一个方法就会静默换路。
+`recognize_tables` 仍在，但只服务招标清单（services/tender_pdf.py），
+那一侧尚无 VL 实现，见 docs/design/21 Phase 2。
 
 ## 为什么整份一次调用
 
@@ -141,14 +144,19 @@ _PRICE_SLOTS = {"unit_price", "total_price",
                 "unit_price_excl_tax", "total_price_excl_tax"}
 
 
-def map_columns(headers: Sequence[str]) -> dict[str, str]:
+def map_columns(headers: Sequence[str], *,
+                slots: dict[str, list[tuple[str, ...]]] | None = None) -> dict[str, str]:
     """表头 → 槽位。含税/不含税同时存在时必须选对那一列，否则把税前税后混为一谈。"""
     lower = [(h or "").lower() for h in headers]
     out: dict[str, str] = {}
-    for slot, tiers in _SLOTS.items():
+    # **一列只能认领一次。** 「规格型号」同时含「规格」和「型号」，无互斥时会同时
+    # 落进 spec 和 model 两个槽位，下游看到两个字段值相同却不知道它们是同一列。
+    # 七份真实报价表头实测：加互斥后映射零变化——它修的是歧义，不改变已有行为。
+    taken: set[str] = set()
+    for slot, tiers in (slots or _SLOTS).items():
         for tier in tiers:
             for h, lo in zip(headers, lower):
-                if not h:
+                if not h or h in taken:
                     continue
                 if slot in _PRICE_SLOTS and any(x in lo for x in _TAX_AMOUNT_MARKERS):
                     continue
@@ -156,6 +164,7 @@ def map_columns(headers: Sequence[str]) -> dict[str, str]:
                     continue
                 if all(k in lo for k in tier):
                     out[slot] = h
+                    taken.add(h)
                     break
             if slot in out:
                 break
@@ -166,6 +175,36 @@ def map_columns(headers: Sequence[str]) -> dict[str, str]:
 # 返回模型原始文本；失败请抛异常，不要吞掉——静默失败会变成"这份文档只有这些行"。
 VLCall = Callable[[list[bytes], str], str]
 OrientCall = Callable[[list[tuple[str, bytes]], str], str]
+
+# (取槽位值, 该行原始单元格, 表头→槽位映射) → 字段字典。
+# 报价与招标的差异全部收敛在这个函数里，解析与结构门两边共用。
+FieldBuilder = Callable[[Callable[[str], str], dict, dict], dict]
+
+
+def build_quote_fields(cell, _raw_cells: dict, _cmap: dict) -> dict:
+    """报价行字段。"""
+    fields = {
+        "seq": cell("seq").strip(),
+        "name": cell("name").strip(),
+        "spec": cell("spec").strip(),
+        "unit": cell("unit").strip(),
+        "brand": cell("brand").strip(),
+        "remark": cell("remark").strip(),
+        "qty": _num(cell("qty")),
+        "unit_price": _num(cell("unit_price")),
+        "total_price": _num(cell("total_price")),
+        "unit_price_excl_tax": _num(cell("unit_price_excl_tax")),
+        "total_price_excl_tax": _num(cell("total_price_excl_tax")),
+        "tax_rate": _num(cell("tax_rate")),
+        "tax_amount": _num(cell("tax_amount")),
+    }
+    # 「原文明确不报价」必须在原始文本还在的时候判定：_num 把「/」和空白
+    # 一律变成 None，两种语义就此不可分辨（前者合法，后者是缺陷）。
+    fields["not_quoted"] = any(
+        classify_amount_cell(cell(s)) == AMOUNT_NOT_QUOTED
+        for s in ("total_price", "total_price_excl_tax")
+    )
+    return fields
 
 
 @dataclass
@@ -199,18 +238,25 @@ def _num(x):
         return None
 
 
-def parse_csv(text: str, page_count: int) -> tuple[list[_ParsedRow], list[str], dict]:
+def parse_csv(text: str, page_count: int, *,
+              slots: dict[str, list[tuple[str, ...]]] | None = None,
+              field_builder: "FieldBuilder | None" = None,
+              ) -> tuple[list[_ParsedRow], list[str], dict]:
     """CSV 文本 → 结构化行 + 表头 + 诊断。
 
     走 `csv.reader` 而不是 `DictReader`：后者把多出的格塞进 restkey、缺的补 None，
     **列错位的证据就此消失**，而那是入库门唯一的判据来源。
+
+    `slots` / `field_builder` 让招标清单复用同一套解析与结构门：两种文档的**行为
+    差异只在"有哪些列、每列叫什么"**，列错位、截断、序号连续性、页码归属这些判据
+    完全一样。复制一份解析器出来只会让两边慢慢漂移。
     """
     rows = [r for r in csv.reader(io.StringIO(text)) if any((c or "").strip() for c in r)]
     if len(rows) < 2:
         return [], [], {"reason": "empty_or_header_only", "line_count": len(rows)}
     header = [h.strip() for h in rows[0]]
     body = rows[1:]
-    cmap = map_columns(header)
+    cmap = map_columns(header, slots=slots)
     align = check_column_alignment(header, body)
     trunc = detect_truncated_numbers(header, body)
     trunc_rows = trunc.suspect_row_indices
@@ -229,28 +275,9 @@ def parse_csv(text: str, page_count: int) -> tuple[list[_ParsedRow], list[str], 
         page = int(page_raw) if page_raw.isdigit() and 1 <= int(page_raw) <= page_count else None
         raw_cells = {h: (row[j] if j < len(row) else "") for j, h in enumerate(header) if h}
         used = set(cmap.values())
-        fields = {
-            "seq": cell(row, "seq").strip(),
-            "name": cell(row, "name").strip(),
-            "spec": cell(row, "spec").strip(),
-            "unit": cell(row, "unit").strip(),
-            "brand": cell(row, "brand").strip(),
-            "remark": cell(row, "remark").strip(),
-            "qty": _num(cell(row, "qty")),
-            "unit_price": _num(cell(row, "unit_price")),
-            "total_price": _num(cell(row, "total_price")),
-            "unit_price_excl_tax": _num(cell(row, "unit_price_excl_tax")),
-            "total_price_excl_tax": _num(cell(row, "total_price_excl_tax")),
-            "tax_rate": _num(cell(row, "tax_rate")),
-            "tax_amount": _num(cell(row, "tax_amount")),
-            "parser_mode": "vl_direct",
-        }
-        # 「原文明确不报价」必须在原始文本还在的时候判定：_num 把「/」和空白
-        # 一律变成 None，两种语义就此不可分辨（前者合法，后者是缺陷）。
-        fields["not_quoted"] = any(
-            classify_amount_cell(cell(row, s)) == AMOUNT_NOT_QUOTED
-            for s in ("total_price", "total_price_excl_tax")
-        )
+        builder = field_builder or build_quote_fields
+        fields = builder(lambda slot: cell(row, slot), raw_cells, cmap)
+        fields["parser_mode"] = "vl_direct"
         flags: list[str] = []
         if i in shifted:
             flags.append("column_shift")
@@ -308,9 +335,18 @@ def build_draft(text: str, *, file_path: str, page_count: int,
                 processed_pages: list[int], supplier_name: str = "",
                 rotations: dict[int, int] | None = None,
                 unresolved_pages: Sequence[int] = (),
-                declared_total: float | None = None) -> ExtractionDraft:
-    """模型返回的 CSV → ExtractionDraft（含逐行来源、质量与行数台账）。"""
-    parsed, header, diag = parse_csv(text, page_count)
+                declared_total: float | None = None,
+                doc_type: str = "quote",
+                slots: dict[str, list[tuple[str, ...]]] | None = None,
+                field_builder: FieldBuilder | None = None) -> ExtractionDraft:
+    """模型返回的 CSV → ExtractionDraft（含逐行来源、质量与行数台账）。
+
+    `doc_type` 只影响**价格相关的门**：招标采购清单本来就没有价格列（那是留给
+    投标人填的空表），对它做"读到行却读不到钱"的判定会把每一份都误判成 BLOCKED。
+    结构、截断、序号、页码归属这些判据两种文档完全一样，不区分。
+    """
+    parsed, header, diag = parse_csv(text, page_count,
+                                     slots=slots, field_builder=field_builder)
     _assign_pages(parsed, page_count)
 
     rows: list[DraftRow] = []
@@ -380,17 +416,18 @@ def build_draft(text: str, *, file_path: str, page_count: int,
             quality.status = "REVIEW"
 
     lost = diag.get("unmapped_numeric_columns") or []
-    if rows and not diag.get("has_price_column", True):
+    if doc_type == "quote" and rows and not diag.get("has_price_column", True):
         quality.blocking_reasons = list(quality.blocking_reasons or []) + [
             f"no_price_column_mapped; header={header[:12]}; "
             f"unmapped_numeric_columns={lost[:6]}"]
         quality.status = "BLOCKED"
 
     draft = ExtractionDraft(
-        doc_type="quote", source_file=file_path,
+        doc_type=doc_type, source_file=file_path,
         page_count=page_count, processed_page_count=len(processed_pages),
         target_pages=list(processed_pages), rows=rows,
         meta={"supplier_name": supplier_name, "recognizer": "vl_direct",
+              "doc_type": doc_type,
               "csv_header": header, "diagnostics": diag,
               "rotations": dict(rotations or {}),
               "orientation_unresolved": list(unresolved_pages)},

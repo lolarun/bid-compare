@@ -27,14 +27,12 @@ class Settings(BaseSettings):
     DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
     DASHSCOPE_LLM_MODEL: str = "qwen3.6-flash"
 
-    # ── 报价识别器选择 ──────────────────────────────────────────────────────
-    # legacy    OCR → HTML → TableGrid → LLM（现行默认）
-    # vl_direct 整份页面图像 → 视觉模型 → CSV → ExtractionDraft
+    # ── 报价识别 ────────────────────────────────────────────────────────────
+    # 报价走 VL-direct（整份页面图像 → 视觉模型 → CSV）。legacy 的报价分支已归档，
+    # 故**没有 QUOTE_RECOGNIZER 开关**——留着它就等于留着"这次是哪条路"的疑问。
+    # 招标清单仍走 legacy（services/tender_pdf.py），见 docs/design/21 Phase 2。
     #
-    # 两者是**不同的输入契约**，不是换个模型名就能切换：legacy 依赖 provider 的
-    # ocr_pages_with_roles + _llm_call_json，vl_direct 直接送页面图像。故用独立开关，
-    # 且**不复用 DASHSCOPE_LLM_MODEL**——那是通用文本模型，改它会影响其它调用方。
-    QUOTE_RECOGNIZER: str = "legacy"
+    # **不复用 DASHSCOPE_LLM_MODEL**：那是通用文本模型，改它会影响其它调用方。
     DASHSCOPE_QUOTE_VL_MODEL: str = "qwen3.7-plus"
     # 方向预检模型。判定的是"这页要不要转"，与抽取分开配置。
     DASHSCOPE_QUOTE_ORIENT_MODEL: str = "qwen3.7-plus"

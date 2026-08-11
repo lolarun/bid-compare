@@ -2,11 +2,10 @@
 
 ## 为什么必须走 API
 
-`ExtractionPipeline.extract_quote` 的 VL 分支条件是
-`hasattr(provider, "vl_extract_csv")`；脚本直调 `recognize_quote_vl` 会绕过这个判断，
-**分支选错了脚本也看不出来**。实测 `MockProvider` 此前没有该方法，所有基于 mock 的
-集成测试都静默落回 legacy——而没有任何提示。只有从 `/api/intake/upload` 进去，
-才能验证"生产真的会走 VL"。
+脚本直调 `recognize_quote_vl` 会绕过路由、任务、入库、确认这些真正会出问题的地方。
+`extract_quote` 现在按 `hasattr(provider, "vl_extract_csv")` 选路：有则 VL，
+没有则退到逐页批量兜底——**兜底同样产出合法 draft，断言照样能过**。所以只有从
+`/api/intake/upload` 进去、并显式验证 VL 方法被调用，才能确认走的是 VL。
 
 ## 确定性从哪来
 
@@ -59,7 +58,7 @@ def api(temp_db, tmp_path, monkeypatch):
     provider 必须在进入 TestClient **之前**换掉：pipeline 是在 lifespan 里由
     `_build_pipeline()` 建的，进去之后再替换已经晚了。
     """
-    monkeypatch.setenv("QUOTE_RECOGNIZER", "vl_direct")
+    # 不再需要设 QUOTE_RECOGNIZER —— 报价只有 VL 一条路（legacy 报价分支已归档）。
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
     import apps.api.core.config as config_mod
     config_mod._settings = None                       # 让新 env 生效

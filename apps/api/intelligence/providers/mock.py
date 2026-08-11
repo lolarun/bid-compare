@@ -54,11 +54,52 @@ class MockProvider(LLMProvider):
             return self.vl_csv
         if self.fixture_dir and (self.fixture_dir / "quote_vl.csv").exists():
             return (self.fixture_dir / "quote_vl.csv").read_text(encoding="utf-8")
-        # 兜底：每页一行的最小合法 CSV。行数随页数变化，便于断言"页→行"的归属。
+
+        # 默认从 `self.extract()` 派生 —— **同一个数据源，两种表达**。
+        #
+        # 这样做的理由：报价 legacy 分支归档后，所有既有测试的 canned 数据都是喂给
+        # `extract` 的。若 VL 路径另起一套合成数据，那些测试会拿到与自己声明的完全
+        # 无关的行（实测：整套集成测试的断言全部落在"模拟材料0"上）。走 extract
+        # 就自动尊重子类的覆盖（如按次轮换的 _CycleProvider），测试保留自己的数据、
+        # 只是换了条路——这正是迁移该有的样子。
+        try:
+            from apps.api.intelligence.schemas import QUOTE_SCHEMA
+            resp = self.extract(images, QUOTE_SCHEMA, prompt)
+            items = (resp.data or {}).get("items") or []
+        except Exception:                                        # noqa: BLE001
+            items = []
+        if items:
+            return self._items_to_csv(items)
+
+        # 连 canned 都没有：每页一行的最小合法 CSV，便于断言"页→行"的归属。
         head = "row_type,名称,规格,单位,数量,单价,合价,copy_no,page"
         body = [f"detail,模拟材料{i},SPEC-{i},米,{i + 1},10.00,{(i + 1) * 10:.2f},1,{i + 1}"
                 for i in range(len(images))]
         return "\n".join([head, *body])
+
+    @staticmethod
+    def _items_to_csv(items: list[dict]) -> str:
+        """canned item dict → 报价 CSV。**空值留空，绝不补算**（与真实提示词第 2 条一致）。"""
+        head = "row_type,名称,规格,品牌,单位,数量,单价,合价,copy_no,page"
+
+        def cell(v) -> str:
+            if v is None:
+                return ""
+            s = str(v)
+            # CSV 字段内的逗号会撑破列数，进而触发列错位门 —— 换成顿号而不是加引号，
+            # 因为这里只是测试数据，不值得为它引入引号转义的解析分支。
+            return s.replace(",", "、")
+
+        rows = [
+            ",".join([
+                "detail", cell(it.get("material")), cell(it.get("spec")),
+                cell(it.get("brand")), cell(it.get("unit")), cell(it.get("qty")),
+                cell(it.get("unit_price")), cell(it.get("total_price")),
+                "1", str(i + 1),
+            ])
+            for i, it in enumerate(items)
+        ]
+        return "\n".join([head, *rows])
 
     def ocr_pages_with_roles(
         self, images: list[bytes],

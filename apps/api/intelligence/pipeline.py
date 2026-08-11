@@ -59,14 +59,6 @@ PAGE_CONCURRENCY = max(1, int(os.getenv("PAGE_CONCURRENCY", "5")))
 ProgressCallback = Callable[[str, int], None]
 
 
-def _vl_direct_enabled() -> bool:
-    """报价识别器是否选了 vl_direct。读配置而非常量，便于灰度与回退。"""
-    try:
-        return (get_settings().QUOTE_RECOGNIZER or "legacy").strip().lower() == "vl_direct"
-    except Exception:                                   # noqa: BLE001
-        return False
-
-
 class ExtractionPipeline:
     """Coordinates document loading, batched LLM calls, and structured post-processing."""
 
@@ -114,21 +106,14 @@ class ExtractionPipeline:
         _notify(progress_cb, "渲染PDF", 10)
         t_start = time.time()
 
-        # VL-direct：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
-        # 与 legacy 是不同的输入契约（legacy 需要 provider 的 OCR + JSON 能力），
-        # 故用独立开关而非换模型名。provider 不具备多图调用能力时回落 legacy——
-        # 静默按 legacy 跑并不危险（结果仍是合法 draft），但必须记日志说明为什么。
-        # 选了 vl_direct 但 provider 给不了多图调用 → 静默按 legacy 跑。结果仍是
-        # 合法 draft，所以不算危险；但**不说出来才危险**：实测 MockProvider 缺
-        # vl_extract_csv，所有集成测试都在这里落回 legacy，而以为自己在测 VL。
-        if _vl_direct_enabled() and not hasattr(self.provider, "vl_extract_csv"):
-            log.warning(
-                "QUOTE_RECOGNIZER=vl_direct 但 provider %s 没有 vl_extract_csv，"
-                "本次回落 legacy。测试里看到这条＝你以为在测 VL，实际不是。",
-                type(self.provider).__name__,
-            )
-
-        if _vl_direct_enabled() and hasattr(self.provider, "vl_extract_csv"):
+        # 报价识别 = VL-direct。整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
+        #
+        # **legacy 的报价分支（OCR → HTML → TableGrid → LLM）已于 2026-08-10 归档**
+        # （docs/design/21）：`recognize_tables` 仍然存在，但报价侧不再调用它——
+        # 它现在只服务招标清单（services/tender_pdf.py），那一侧尚无 VL 实现。
+        # 不要为了"多一条保险"把它接回来：两条路并存意味着任何一次识别结果都要先问
+        # "这是哪条路出来的"，而实测 provider 缺一个方法就会静默换路且无人察觉。
+        if hasattr(self.provider, "vl_extract_csv"):
             from apps.api.intelligence.vl_direct import recognize_quote_vl
             s = get_settings()
             draft = recognize_quote_vl(
@@ -142,26 +127,17 @@ class ExtractionPipeline:
             )
             return self._draft_to_quote_response(draft, context or {}, t_start)
 
-        if (hasattr(self.provider, "ocr_pages_with_roles")
-                and hasattr(self.provider, "_llm_call_json")):
-            # Unified skeleton path: full-page OCR → role classify → detect →
-            # per-page LLM (thinking retry + adaptive tiling) → quality gate
-            from apps.api.intelligence.table_recognizer import recognize_tables
-            draft = recognize_tables(
-                file_path=file_path,
-                provider=self.provider,
-                adapter=_get_quote_adapter(),
-                progress_cb=progress_cb,
-            )
-            resp = self._draft_to_quote_response(draft, context or {}, t_start)
-        else:
-            # Legacy path for providers without OCR (mock, non-dashscope)
-            images = DocumentLoader.to_images(file_path)
-            resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
-            _notify(progress_cb, "整理结果", 95)
-            resp.data = self._postprocess_quote(resp.data, context or {})
-            self._log_extraction("quote", file_path, images, resp, t_start)
-
+        # provider 连多图调用都不具备（自定义 mock、非 dashscope 后端）→ 逐页批量。
+        # 这不是 legacy 识别链路，只是"没有 VL 能力时还能出点东西"的兜底。
+        log.warning(
+            "provider %s 没有 vl_extract_csv，报价走逐页批量兜底而非 VL-direct。",
+            type(self.provider).__name__,
+        )
+        images = DocumentLoader.to_images(file_path)
+        resp = self._run_batched(images, QUOTE_SCHEMA, QUOTE_PROMPT, "quote", progress_cb)
+        _notify(progress_cb, "整理结果", 95)
+        resp.data = self._postprocess_quote(resp.data, context or {})
+        self._log_extraction("quote", file_path, images, resp, t_start)
         return resp
 
     def _draft_to_quote_response(
