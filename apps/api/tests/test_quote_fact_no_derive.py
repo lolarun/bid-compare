@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from apps.api.intelligence.quote_fact import QuoteFact
-from apps.api.services.draft_integrity import check_row_arithmetic
+from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
 
 
 def test_missing_total_stays_none_with_candidate():

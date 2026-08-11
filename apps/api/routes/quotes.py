@@ -22,7 +22,7 @@ from apps.api.models import (
     BidQuoteLine,
 )
 from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult
-from apps.api.services.import_service import import_csv_data, _gen_code
+from apps.api.services.ingestion.import_service import import_csv_data, _gen_code
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
 
@@ -306,7 +306,7 @@ def create_quote(body: QuoteCreate, db: Session = Depends(get_db)):
     # 偏差率 & 色标（使用合理史低）
     ref = mat.ref_price_reasonable_low or mat.ref_price_median
     if quote.unit_price and ref and ref > 0:
-        from apps.api.services.comparison import get_category_thresholds, determine_alert
+        from apps.api.services.history.comparison import get_category_thresholds, determine_alert
         quote.deviation_pct = round((quote.unit_price - ref) / ref, 4)
         thresholds = get_category_thresholds(db, mat.category)
         quote.alert_level = determine_alert(quote.deviation_pct, thresholds)
@@ -385,7 +385,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     - 本函数不再写入 Quote / Material / Supplier 历史表。
     - 归档到 Quote 须显式调用 POST /api/quotes/archive-prices。
     """
-    from apps.api.services.quote_confirmation_service import confirm_batch
+    from apps.api.services.submission.quote_confirmation_service import confirm_batch
     return confirm_batch(db, body)
 
 

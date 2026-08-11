@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from apps.api.intelligence.extraction_draft import PageMetric, build_row_ledger
-from apps.api.services.standardize import normalize_model_code, standardize_name
+from apps.api.services.ingestion.standardize import normalize_model_code, standardize_name
 
 
 def _m(page, expected, extracted, reason="", role="quote_table_continuation", rot=0):

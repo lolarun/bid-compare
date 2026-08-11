@@ -31,7 +31,7 @@ from apps.api.schemas.intake import (
     JobListResponse, JobResponse,
     EnhanceRequest, EnhanceResponse,
 )
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
 )
@@ -153,7 +153,7 @@ def enhance_extraction(
     Optionally pass ``project_id`` to enable pre-alignment against existing
     project quotes from other suppliers.
     """
-    from apps.api.services.enhance import enhance_ocr_items
+    from apps.api.services.ingestion.enhance import enhance_ocr_items
 
     items: list[dict] = []
 

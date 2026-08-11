@@ -12,7 +12,7 @@ from sqlalchemy import select
 from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.tender_list_session import TenderListSession
-from apps.api.services.supplier_fill_llm import FillCell, SupplierFillResult
+from apps.api.services.supplier.supplier_fill_llm import FillCell, SupplierFillResult
 from apps.api.routes.analysis import _persist_llm_fill
 
 
@@ -151,7 +151,7 @@ def test_rerun_replaces_only_llm_fill_groups(fill_setup):
 
 def test_persisted_items_render_in_anchor_matrix(fill_setup):
     """build_anchor_matrix must consume llm-fill items unchanged."""
-    from apps.api.services.bid_matrix import build_anchor_matrix
+    from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 
     s = fill_setup
     db = s["db"]

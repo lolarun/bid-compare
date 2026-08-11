@@ -1,7 +1,7 @@
 """Regression tests for low-cost comparison policies."""
 
-from apps.api.services.comparison import compare_price
-from apps.api.services.comparison_profiles import get_comparison_profile
+from apps.api.services.history.comparison import compare_price
+from apps.api.services.history.comparison_profiles import get_comparison_profile
 
 
 class _NoDatabaseAccess:

@@ -321,7 +321,7 @@ def compute_quality(
     #   1. 单价与合价**按税基成对**取值，不再出现"不含税单价 vs 含税合价"这种比错尺子；
     #   2. 合价/(数量×单价) 落在简单倍数上的行判为报价口径（按根/按束报价），
     #      计入通过而非算术错误——倍率是报价方式的选择，不是错误。
-    from apps.api.services.draft_integrity import check_row_arithmetic
+    from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
 
     arith_pass = 0
     arith_total = 0

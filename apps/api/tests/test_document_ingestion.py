@@ -11,7 +11,7 @@ from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.models import ExtractionJob
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
     JobStatus,
@@ -37,7 +37,7 @@ def pipeline(fixture_dir):
 def service(db_session, pipeline, tmp_path, monkeypatch):
     # Redirect uploads to tmp_path so we don't pollute repo
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
     return DocumentIngestionService(db_session, pipeline)
 

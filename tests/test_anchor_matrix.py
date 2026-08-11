@@ -17,7 +17,7 @@ from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.schemas.analysis import BidMatrixResult
-from apps.api.services.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
+from apps.api.services.matrix.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
 
 
 # ─── Minimal TenderAnchor stub ────────────────────────────────────────────────

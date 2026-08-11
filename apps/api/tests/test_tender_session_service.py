@@ -7,7 +7,7 @@ version / deactivation.
 from __future__ import annotations
 
 from apps.api.models.tender_list_session import TenderListSession
-from apps.api.services import tender_session_service as svc
+from apps.api.services.tender import tender_session_service as svc
 
 
 def _mk(db, *, project_id, category, version, is_current, status="confirmed"):

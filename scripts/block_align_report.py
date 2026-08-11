@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from apps.api.services.block_alignment import (          # noqa: E402
+from apps.api.services.alignment.block_alignment import (          # noqa: E402
     DETERMINISTIC, Row, align_quote_to_anchors,
 )
 from scripts.cable_diff_report import (                  # noqa: E402

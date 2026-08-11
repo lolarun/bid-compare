@@ -1,7 +1,7 @@
 """Tests for material name standardization service."""
 
 import pytest
-from apps.api.services.standardize import standardize_name
+from apps.api.services.ingestion.standardize import standardize_name
 
 
 class TestDNNormalization:

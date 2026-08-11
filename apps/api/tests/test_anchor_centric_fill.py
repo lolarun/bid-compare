@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.anchor_match import attach_nearest_hints, QuoteCandidate
-from apps.api.services.supplier_fill_llm import (
+from apps.api.services.alignment.anchor_match import attach_nearest_hints, QuoteCandidate
+from apps.api.services.supplier.supplier_fill_llm import (
     AnchorView,
     SupplierQuoteRow,
     validate_anchor_fill,
@@ -481,8 +481,8 @@ class TestAttachNearestHintsDimensionGuard:
             embed_calls.append([f"anchor:{getattr(a, 'name', '')}" for a in anchors])
             return [[0.0, 1.0]] * len(anchors)
 
-        monkeypatch.setattr("apps.api.services.anchor_match._embed", _mock_embed)
-        monkeypatch.setattr("apps.api.services.anchor_match.embed_anchor_vecs", _mock_embed_anchor_vecs)
+        monkeypatch.setattr("apps.api.services.alignment.anchor_match._embed", _mock_embed)
+        monkeypatch.setattr("apps.api.services.alignment.anchor_match.embed_anchor_vecs", _mock_embed_anchor_vecs)
 
         rows = [_row(4001, material="闸阀 DN50"), _row(4002, material="截止阀 DN80")]
         anchors = [
@@ -514,8 +514,8 @@ class TestAttachNearestHintsDimensionGuard:
             embed_calls.append(["anchor_re_embed"])
             return [[0.0, 1.0]] * len(anchors)
 
-        monkeypatch.setattr("apps.api.services.anchor_match._embed", _mock_embed)
-        monkeypatch.setattr("apps.api.services.anchor_match.embed_anchor_vecs", _mock_embed_anchor_vecs)
+        monkeypatch.setattr("apps.api.services.alignment.anchor_match._embed", _mock_embed)
+        monkeypatch.setattr("apps.api.services.alignment.anchor_match.embed_anchor_vecs", _mock_embed_anchor_vecs)
 
         rows = [_row(4003, material="闸阀")]
         anchors = [_anchor(10, name="闸阀", canonical={})]

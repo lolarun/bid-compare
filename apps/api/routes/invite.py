@@ -29,7 +29,7 @@ from apps.api.schemas.invite import (
     SaveInvitationsResponse,
     SavedInvitation,
 )
-from apps.api.services.invitation_recommendation import (
+from apps.api.services.supplier.invitation_recommendation import (
     MAX_SUPPLIER_RECOMMENDATIONS,
     build_invitation_recommendation,
 )

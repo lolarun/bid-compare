@@ -92,7 +92,7 @@ class TestReplaceSupersedes:
 
     def test_new_groups_written_as_confirmed(self, db_session):
         """Groups written by the new LLM-fill run have status='confirmed'."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult, FillCell
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult, FillCell
 
         cell = FillCell(
             anchor_seq=5, quote_id=99, supplier_id=7, status="quoted", action="align",
@@ -101,7 +101,7 @@ class TestReplaceSupersedes:
         res = SupplierFillResult(supplier_id=7)
         res.cells = [cell]
 
-        from apps.api.services.tender_list import TenderAnchor
+        from apps.api.services.tender.tender_list import TenderAnchor
         anchor = TenderAnchor(seq=5, name="截止阀", spec="DN50 PN16", pressure="PN16")
 
         from apps.api.routes.analysis import _persist_llm_fill
@@ -122,7 +122,7 @@ class TestReplaceSupersedes:
 class TestSafetyGate:
     def test_error_result_detected(self):
         """SupplierFillResult.error is non-empty when LLM call failed."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
         r.error = "ConnectionError: timeout after 300s"
 
@@ -135,7 +135,7 @@ class TestSafetyGate:
 
     def test_no_error_passes_gate(self):
         """Clean result passes the safety gate check."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
 
         sids = [7]
@@ -145,7 +145,7 @@ class TestSafetyGate:
 
     def test_gate_does_not_block_when_force_partial(self):
         """force_partial=True means errors are tolerated — no failed list checked."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
         r.error = "LLM rate limit"
 

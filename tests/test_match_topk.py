@@ -8,7 +8,7 @@ Pins that Top-K candidate generation:
 """
 from dataclasses import dataclass, field
 
-import apps.api.services.anchor_match as am
+import apps.api.services.alignment.anchor_match as am
 
 
 @dataclass

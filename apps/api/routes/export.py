@@ -82,7 +82,7 @@ def _to_streaming(wb: Workbook, filename: str) -> StreamingResponse:
 @router.get("/dashboard")
 def export_dashboard(db: Session = Depends(get_db)):
     """导出仪表盘报表 — 包含采购概览 + 品类统计。"""
-    from apps.api.services.statistics import get_dashboard_summary
+    from apps.api.services.history.statistics import get_dashboard_summary
     summary = get_dashboard_summary(db)
 
     wb = Workbook()
@@ -253,7 +253,7 @@ def export_bid_matrix(
     """
     sids = parse_id_csv(supplier_ids, "supplier_ids")
 
-    from apps.api.services.bid_export_service import get_bid_matrix_for_export
+    from apps.api.services.matrix.bid_export_service import get_bid_matrix_for_export
     if project_id and category:
         result = get_bid_matrix_for_export(db, project_id, category, sids)
     else:

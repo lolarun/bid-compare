@@ -30,7 +30,7 @@ def client(temp_db, monkeypatch, fixture_dir, tmp_path, auth_override):
     # Force mock provider regardless of env
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
     # Patch the pipeline-builder so it picks our fixture-loading MockProvider
     from apps.api.intelligence.pipeline import ExtractionPipeline

@@ -44,7 +44,7 @@ def build_canonical(
     OCR error and provided a corrected name, use it for code-based extraction so
     the canonical score is not killed by the corrupted raw text.
     """
-    from apps.api.services.canonical import extract_valve_canonical
+    from apps.api.services.ingestion.canonical import extract_valve_canonical
 
     effective_material = normalized_material or material
     code_canon: dict = extract_valve_canonical(effective_material, spec, material=material_type)

@@ -311,9 +311,9 @@ class TestBqlE2E:
 
     def test_bid_matrix_cells_have_bql_id(self, client, db_session, seed):
         """bid_matrix cells built from BQL items must carry bid_quote_line_id, not source_quote_id."""
-        from apps.api.services.bid_matrix import build_anchor_review_matrix
+        from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
         from apps.api.models.tender_list_session import TenderListSession
-        from apps.api.services.tender_list import TenderAnchor
+        from apps.api.services.tender.tender_list import TenderAnchor
 
         proj = seed["proj"]
         sup = seed["sup"]
@@ -437,7 +437,7 @@ class TestResolveActiveSubmissions:
 
     def test_excludes_rejected_submission(self, unit_session):
         """resolve_active_submissions must not return rejected submissions."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="RAR-test", code="RAR-001")
         unit_session.add(proj)
@@ -465,7 +465,7 @@ class TestResolveActiveSubmissions:
 
     def test_requires_bql_rows_for_category(self, unit_session):
         """Supplier with BQL in wrong category must not appear."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="RC-test", code="RC-001")
         unit_session.add(proj)
@@ -495,7 +495,7 @@ class TestResolveActiveSubmissions:
 
     def test_latest_wins_among_multiple_submissions(self, unit_session):
         """Among multiple valid submissions per supplier, latest id wins."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="LW-test", code="LW-001")
         unit_session.add(proj)

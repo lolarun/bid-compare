@@ -430,7 +430,7 @@ def write_records(records: list[dict]) -> tuple[int, int]:
     """
     from apps.api.core.database import SessionLocal
     from apps.api.models import Material, Project, Quote
-    from apps.api.services.statistics import refresh_material_baselines
+    from apps.api.services.history.statistics import refresh_material_baselines
 
     db = SessionLocal()
     # (category, name, spec, unit) → material_id

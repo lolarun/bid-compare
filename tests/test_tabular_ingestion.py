@@ -90,7 +90,7 @@ VALVE_ROWS_DATA = [
 
 def test_basic_csv_no_total_row():
     """3 valve rows, no totals row → 3 items, canonical.dn set, bid_total None."""
-    from apps.api.services.tabular_ingestion import extract_quote_tabular
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
 
     path = _write_csv([VALVE_ROWS_HEADER] + VALVE_ROWS_DATA)
     try:
@@ -118,8 +118,8 @@ def test_basic_csv_no_total_row():
 
 def test_csv_with_tax_incl_total_row_checksum():
     """Totals row with 价税合计 → excluded from items, bid_total set, checksum works."""
-    from apps.api.services.tabular_ingestion import extract_quote_tabular
-    from apps.api.services.quote_readiness import assess_readiness
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
+    from apps.api.services.submission.quote_readiness import assess_readiness
 
     computed = 10 * 100.0 + 5 * 80.0 + 3 * 200.0  # 1000+400+600 = 2000
     total_row = ["价税合计", "", "", "", str(computed), "", ""]
@@ -164,7 +164,7 @@ def test_csv_with_tax_incl_total_row_checksum():
 
 def test_validation_warning_on_arithmetic_mismatch():
     """Explicit total_price column that disagrees with qty×unit_price → validation_warning."""
-    from apps.api.services.tabular_ingestion import extract_quote_tabular
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
 
     # Header includes a total_price column that we will fill inconsistently
     # import_service._COLUMN_PATTERNS doesn't have a direct "total_price" key,
@@ -196,7 +196,7 @@ def test_validation_warning_on_arithmetic_mismatch():
 
 def test_multi_supplier_column_raises():
     """CSV with supplier column containing >1 unique supplier → ValueError."""
-    from apps.api.services.tabular_ingestion import extract_quote_tabular
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
 
     header = ["名称", "规格型号", "单位", "数量", "含税单价", "供应商"]
     rows = [
@@ -213,7 +213,7 @@ def test_multi_supplier_column_raises():
 
 def test_no_name_column_raises():
     """CSV with no recognisable name column → ValueError (hard fail, not silent empty)."""
-    from apps.api.services.tabular_ingestion import extract_quote_tabular
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
 
     header = ["列A", "列B", "列C"]
     rows = [
@@ -230,7 +230,7 @@ def test_no_name_column_raises():
 
 def test_column_detection_separates_unit_price_from_total_price():
     """价税合计 column header must map to total_price, NOT unit_price."""
-    from apps.api.services.tabular_ingestion import _detect_tabular_columns
+    from apps.api.services.ingestion.tabular_ingestion import _detect_tabular_columns
 
     # Typical comparison-sheet columns
     cols = ["名称", "规格型号", "单位", "数量", "含税单价", "不含税单价", "价税合计"]
@@ -251,7 +251,7 @@ def test_column_detection_incl_excl_tax_both_orders():
     Regression for the substring bug: "不含税单价" contains "含税单价", so a naive
     pattern would let unit_price grab the excl-tax column when it appears first.
     """
-    from apps.api.services.tabular_ingestion import _detect_tabular_columns
+    from apps.api.services.ingestion.tabular_ingestion import _detect_tabular_columns
 
     # excl-tax column FIRST (the order that triggered the bug)
     m1 = _detect_tabular_columns(["名称", "规格型号", "数量", "不含税单价", "含税单价"])
@@ -266,7 +266,7 @@ def test_column_detection_incl_excl_tax_both_orders():
 
 def test_column_detection_lone_excl_tax_does_not_fill_unit_price():
     """A file with ONLY 不含税单价 must not populate unit_price (incl-tax)."""
-    from apps.api.services.tabular_ingestion import _detect_tabular_columns
+    from apps.api.services.ingestion.tabular_ingestion import _detect_tabular_columns
 
     m = _detect_tabular_columns(["名称", "规格型号", "数量", "不含税单价"])
     assert m.get("unit_price_excl_tax") == "不含税单价"
@@ -277,7 +277,7 @@ def test_column_detection_lone_excl_tax_does_not_fill_unit_price():
 
 def test_parse_number_handles_thousand_separators():
     """_parse_number must handle Chinese supplier number formatting."""
-    from apps.api.services.tabular_ingestion import _parse_number
+    from apps.api.services.ingestion.tabular_ingestion import _parse_number
 
     assert _parse_number("1,234.56") == pytest.approx(1234.56)
     assert _parse_number("¥1,234.56") == pytest.approx(1234.56)

@@ -114,7 +114,7 @@ class _CycleProvider(MockProvider):
 def compare_client(temp_db, monkeypatch, tmp_path, auth_override):
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
 
     cycle_provider = _CycleProvider([SUPPLIER_A_QUOTE, SUPPLIER_B_QUOTE])
@@ -682,7 +682,7 @@ class TestSubmissionResolver:
 
     def test_submission_ids_excludes_supplier_union(self, compare_client):
         """supplier_ids=[sid] 且 submission_ids=[sub_b] 时，不得返回 sub_a（同供应商）。"""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
 
         state = _setup_two_subs_same_supplier(compare_client)
@@ -706,7 +706,7 @@ class TestSubmissionResolver:
 
     def test_superseded_submission_excluded(self, compare_client):
         """superseded 状态的 submission 永不参与 resolve，无论 supplier_ids 是否匹配。"""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidSubmission
 
@@ -733,7 +733,7 @@ class TestSubmissionResolver:
 
     def test_explicit_sub_b_only_consumes_sub_b(self, compare_client):
         """同一 supplier 两份 submission，显式选择 sub_b 时结果集只含 sub_b。"""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
 
         state = _setup_two_subs_same_supplier(compare_client)
@@ -755,7 +755,7 @@ class TestSubmissionResolver:
 
     def test_no_submission_ids_legacy_path(self, compare_client):
         """不传 submission_ids 时，supplier_ids 仍能正常查到全部 active submissions。"""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
 
         state = _setup_two_subs_same_supplier(compare_client)

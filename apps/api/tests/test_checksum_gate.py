@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
-from apps.api.services.quote_confirmation_service import _build_checksum
+from apps.api.services.submission.quote_confirmation_service import _build_checksum
 
 
 class _Job:

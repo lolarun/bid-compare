@@ -16,13 +16,13 @@ from fastapi.testclient import TestClient
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
     _hash_context,
 )
-from apps.api.services.standardize import standardize_name, standard_key
-from apps.api.services.supplier_recommend import (
+from apps.api.services.ingestion.standardize import standardize_name, standard_key
+from apps.api.services.supplier.supplier_recommend import (
     infer_categories,
     _is_category_token_match,
 )
@@ -44,7 +44,7 @@ class TestContextAwareIdempotency:
         self, db_session, tmp_path, monkeypatch, fixture_dir
     ):
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         pipeline = ExtractionPipeline(MockProvider(fixture_dir=fixture_dir))
         svc = DocumentIngestionService(db_session, pipeline)
@@ -63,7 +63,7 @@ class TestContextAwareIdempotency:
         self, db_session, tmp_path, monkeypatch, fixture_dir
     ):
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         pipeline = ExtractionPipeline(MockProvider(fixture_dir=fixture_dir))
         svc = DocumentIngestionService(db_session, pipeline)
@@ -94,7 +94,7 @@ class TestBatchConfirmIdempotency:
     def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         canned = {
@@ -185,7 +185,7 @@ class TestBatchConfirmShapeGuard:
     def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         canned = {
@@ -344,7 +344,7 @@ class TestInviteSaveValidation:
     def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         monkeypatch.setattr(
@@ -386,7 +386,7 @@ class TestOrphanProjectGuard:
     def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         canned = {
             "supplier_name": "X",
@@ -474,7 +474,7 @@ class TestPeriodicStuckJobSweep:
 
         from apps.api.main import _periodic_stuck_job_sweep
         from apps.api.models import ExtractionJob
-        from apps.api.services.document_ingestion import JobStatus
+        from apps.api.services.ingestion.document_ingestion import JobStatus
 
         monkeypatch.setattr("apps.api.main.STUCK_JOB_SWEEP_S", 0.05)
         monkeypatch.setattr("apps.api.main.STUCK_JOB_MAX_AGE_MINUTES", 5)
@@ -770,7 +770,7 @@ class TestThreadPoolExtraction:
     def test_health_queue_endpoint(self, temp_db, monkeypatch, tmp_path):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         monkeypatch.setattr(
             "apps.api.main._build_pipeline",
@@ -791,14 +791,14 @@ class TestThreadPoolExtraction:
         monkeypatch.setenv("EXTRACTION_MODE", "inline")
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         from apps.api.core import runtime as rt
         from apps.api.intelligence.pipeline import ExtractionPipeline
         from apps.api.intelligence.providers.mock import MockProvider
         from apps.api.models import ExtractionJob
-        from apps.api.services.document_ingestion import (
+        from apps.api.services.ingestion.document_ingestion import (
             DocumentIngestionService, IngestionType,
         )
 

@@ -19,17 +19,17 @@ from apps.api.schemas import (
     AlignmentSuggestRequest, AlignmentSuggestResult,
     AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
 )
-from apps.api.services.comparison import compare_price
-from apps.api.services.scoring import score_supplier, compare_multiple_suppliers
-from apps.api.services.statistics import (
+from apps.api.services.history.comparison import compare_price
+from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
+from apps.api.services.history.statistics import (
     get_dashboard_summary,
     get_category_detail_stats,
     refresh_material_baselines,
     get_dashboard_heatmap,
     get_dashboard_bubble,
 )
-from apps.api.services.bid_insight import generate_bid_insight
-from apps.api.services.draft_integrity import check_row_arithmetic
+from apps.api.services.matrix.bid_insight import generate_bid_insight
+from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
 from apps.api.core.config import get_settings
 from apps.api.core.utils import parse_id_csv
 from apps.api.core.domain_config import (
@@ -40,8 +40,8 @@ from apps.api.core.domain_config import (
     MATCH_MAX_LINE_CONCENTRATION,
     MATCH_DECLARED_TOTAL_TOLERANCE,
 )
-from apps.api.services import tender_session_service
-from apps.api.services.tender_session_service import (
+from apps.api.services.tender import tender_session_service
+from apps.api.services.tender.tender_session_service import (
     get_current_confirmed_session,
     get_finalization_snapshot,
 )
@@ -121,8 +121,8 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
     # v2.5: prefer anchor-full-axis matrix when TenderListSession exists
     result = None
     if body.project_id and body.category:
-        from apps.api.services.tender_list import rebuild_anchors
-        from apps.api.services.bid_matrix import build_anchor_matrix
+        from apps.api.services.tender.tender_list import rebuild_anchors
+        from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 
         session = get_current_confirmed_session(db, body.project_id, body.category)
         if session and session.anchors_json:
@@ -284,7 +284,7 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
       1. Pass `rows` directly (from OCR results before DB import)
       2. Pass `project_id + supplier_ids + category` (query confirmed quotes from DB)
     """
-    from apps.api.services.bid_alignment import suggest_alignment
+    from apps.api.services.alignment.bid_alignment import suggest_alignment
     from apps.api.services.llm_provider import get_dashscope_client
     from apps.api.models import Quote, Material, Supplier
 
@@ -305,7 +305,7 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
         ROW_CAP = 75
         per_supplier = max(ROW_CAP // len(body.supplier_ids), 20)
 
-        from apps.api.services.quote_filters import valid_quote_filters as _vqf
+        from apps.api.services.history.quote_filters import valid_quote_filters as _vqf
         base_q = select(Quote, Material, Supplier).join(
             Material, Quote.material_id == Material.id
         ).join(
@@ -505,7 +505,7 @@ def anchor_review_matrix(
     supplier_ids: 遗留兼容参数。submission_ids 存在时被忽略；仅当 submission_ids 和
     session.used_submission_ids 均为空时才作为降级路径使用。新客户端请传 submission_ids。
     """
-    from apps.api.services.bid_matrix import build_anchor_review_matrix
+    from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
 
     sids: list[int] | None = None
     _use_submission = True  # new BID path by default
@@ -563,7 +563,7 @@ def anchor_review(
     from apps.api.models.quote import Quote as QuoteModel
     from apps.api.models.material import Material as MaterialModel
     from apps.api.models.supplier import Supplier as SupplierModel
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
     sub_ids: list[int] | None = parse_id_csv(submission_ids, "submission_ids") if submission_ids else None
     sids: list[int] | None = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
@@ -807,7 +807,7 @@ async def tender_list_preview(
     file: UploadFile = File(...),
 ):
     """解析采购清单 xlsx，返回品名/规格/数量预览，不跑嵌入，立即返回。"""
-    from apps.api.services.tender_list import parse_tender_xlsx
+    from apps.api.services.tender.tender_list import parse_tender_xlsx
 
     name = (file.filename or "").lower()
     if not name.endswith((".xlsx", ".xls")):
@@ -820,7 +820,7 @@ async def tender_list_preview(
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    from apps.api.services.category_classify import classify_category
+    from apps.api.services.ingestion.category_classify import classify_category
 
     items = []
     breakdown: dict[str, int] = {}
@@ -872,7 +872,7 @@ def tender_list_reconcile(body: _ReconcileBody):
     source_type="excel_primary"（默认）：Excel 为主，差异须人工确认。
     source_type="pdf_primary"：PDF 为主，Excel 仅参考，差异不阻断流程。
     """
-    from apps.api.services.source_reconcile import reconcile_anchors
+    from apps.api.services.tender.source_reconcile import reconcile_anchors
     return reconcile_anchors(body.xlsx_items, body.pdf_items, source_type=body.source_type)
 
 
@@ -935,7 +935,7 @@ async def tender_list_match(
     file 可选：提供时直接解析；省略时自动加载当前已确认的 TenderListSession。
     落组后，/bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
     """
-    from apps.api.services.anchor_match import import_and_match
+    from apps.api.services.alignment.anchor_match import import_and_match
 
     content: bytes | None = None
     if file is not None:
@@ -952,7 +952,7 @@ async def tender_list_match(
     # If no file provided, reconstruct anchors from current TenderListSession (issue 6)
     prebuilt_anchors = None
     if content is None:
-        from apps.api.services.tender_list import rebuild_anchors
+        from apps.api.services.tender.tender_list import rebuild_anchors
         session = (
             get_current_confirmed_session(db, project_id, category)
             if category
@@ -960,7 +960,7 @@ async def tender_list_match(
         )
         if session is None and category is None:
             # category 未指定时回退：找该项目最新的已确认 session
-            from apps.api.services.tender_session_service import get_any_current_confirmed_session
+            from apps.api.services.tender.tender_session_service import get_any_current_confirmed_session
             session = get_any_current_confirmed_session(db, project_id)
         if not session:
             raise HTTPException(
@@ -981,7 +981,7 @@ async def tender_list_match(
         # (closes the gap where match ran but no session was persisted → matrix 409).
         if not category:
             raise HTTPException(400, "上传招标清单时必须指定 category（品类）")
-        from apps.api.services.tender_list import (
+        from apps.api.services.tender.tender_list import (
             parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
         )
         _s = get_current_confirmed_session(db, project_id, category)
@@ -1006,7 +1006,7 @@ async def tender_list_match(
                 })
 
             file_name = (file.filename or "") if file is not None else ""
-            from apps.api.services import tender_session_service
+            from apps.api.services.tender import tender_session_service
             for cat, anchors_json in groups.items():
                 s = tender_session_service.save_session(
                     db, project_id, cat, file_name, anchors_json, confirmed_by=None,
@@ -1024,7 +1024,7 @@ async def tender_list_match(
     brand_ctx = None
     if _tls_id:
         from apps.api.models.tender_list_session import TenderListSession as _TLSb
-        from apps.api.services.brand_match import build_brand_context
+        from apps.api.services.supplier.brand_match import build_brand_context
         _tls_b = db.get(_TLSb, _tls_id)
         if _tls_b and (_tls_b.brand_requirement or _tls_b.supplier_brand_map):
             brand_ctx = build_brand_context(
@@ -1038,7 +1038,7 @@ async def tender_list_match(
     # 2. 综合数据质量门
     if sub_ids:
         from apps.api.models.bid_submission import BidQuoteLine as _BQLM
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         _cat_for_check = category or ""
 
         _valid_map = resolve_active_submissions(
@@ -1078,7 +1078,7 @@ async def tender_list_match(
             # 合价来源 / 价格覆盖率。此前这里完全不看 checksum——一份闭环失败的报价
             # 能直接通过 match 门进入矩阵。判据集中一处，各入口共享同一答案。
             if _sub_obj is not None:
-                from apps.api.services.submission_eligibility import evaluate_submission
+                from apps.api.services.submission.submission_eligibility import evaluate_submission
                 _verdict = evaluate_submission(db, _sub_obj)
                 if not _verdict.eligible:
                     _quality_failures.append({
@@ -1293,7 +1293,7 @@ async def tender_list_match(
     # Enrich per_supplier (now keyed by submission_id) with names and doc_meta
     from apps.api.models import ExtractionJob, Supplier as SupplierModel
     from apps.api.models.bid_submission import BidSubmission as _BSSub
-    from apps.api.services.quote_readiness import assess_readiness
+    from apps.api.services.submission.quote_readiness import assess_readiness
 
     # Load BidSubmission records for submission-keyed stats
     sub_ids_for_lookup = [sid for sid in per_supplier.keys() if isinstance(sid, int) and sid > 0]
@@ -1333,7 +1333,7 @@ async def tender_list_match(
 
     # v2.7+: persist used_submission_ids on TenderListSession
     if _tls_id:
-        from apps.api.services.tender_session_service import record_submission_scope
+        from apps.api.services.tender.tender_session_service import record_submission_scope
         # submission_ids 显式传入时精确写入，保证 Gate 一致性；
         # 否则从 per_supplier keys 推导（旧兼容路径）
         resolved_sub_ids = sorted(sub_ids) if sub_ids else sorted(
@@ -1370,9 +1370,9 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
     不从 Quote 读（因为 archive 可能尚未执行）。无 BidSubmission 则退回 Quote 路径。
     """
     from apps.api.models import Quote, Material
-    from apps.api.services.supplier_fill_llm import SupplierQuoteRow
-    from apps.api.services.canonical import extract_valve_canonical
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions
+    from apps.api.services.supplier.supplier_fill_llm import SupplierQuoteRow
+    from apps.api.services.ingestion.canonical import extract_valve_canonical
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
     # ── BQL 路径（优先）──────────────────────────────────────────────────────
     active_subs = resolve_active_submissions(db, project_id, category, [supplier_id])
@@ -1406,7 +1406,7 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
 
     # ── Quote 路径（旧数据 / 已归档）──────────────────────────────────────────
     from apps.api.models.supplier import Supplier as _Sup
-    from apps.api.services.quote_filters import valid_quote_filters as _vqf2
+    from apps.api.services.history.quote_filters import valid_quote_filters as _vqf2
     q = (
         select(Quote, Material)
         .join(Material, Quote.material_id == Material.id)
@@ -1623,9 +1623,9 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     import os
     from apps.api.models import Supplier, Quote, Material
     from apps.api.models.alignment_finalization import AlignmentFinalization
-    from apps.api.services.tender_list import rebuild_anchors
-    from apps.api.services.anchor_match import embed_anchor_vecs, _embed_client
-    from apps.api.services.supplier_fill_llm import (
+    from apps.api.services.tender.tender_list import rebuild_anchors
+    from apps.api.services.alignment.anchor_match import embed_anchor_vecs, _embed_client
+    from apps.api.services.supplier.supplier_fill_llm import (
         AnchorView, fill_one_supplier, fill_one_supplier_anchor_centric, DEFAULT_FILL_MODEL,
     )
 
@@ -1633,7 +1633,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
         raise HTTPException(400, "v1 仅支持 mode='replace'")
 
     # 1. 解析 session + 重建锚点
-    from apps.api.services.tender_session_service import get_session_for_fill
+    from apps.api.services.tender.tender_session_service import get_session_for_fill
     session = get_session_for_fill(
         db, body.project_id, body.category, tls_id=body.tender_list_session_id
     )
@@ -1651,7 +1651,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     # 2. 解析供应商集合
     sids = list(body.supplier_ids)
     if not sids:
-        from apps.api.services.quote_filters import valid_quote_filters as _vqf3
+        from apps.api.services.history.quote_filters import valid_quote_filters as _vqf3
         q = (
             select(Quote.supplier_id)
             .join(Material, Quote.material_id == Material.id)
@@ -1669,7 +1669,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     valid_sids = set(db.scalars(select(Supplier.id)).all())
 
     # 3. 主线程读：每家 supplier rows(纯数据)；顺带记录哪些走 BQL 路径
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions as _ras_fill
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions as _ras_fill
     _fill_active_subs = _ras_fill(db, body.project_id, body.category, sids)
     # _fill_active_subs is keyed by submission_id; derive supplier-based lookups for LLM fill path
     _bql_actual_supplier_ids: set[int] = {
@@ -1753,7 +1753,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
                         ),
                     )
                 except Exception as _exc:
-                    from apps.api.services.supplier_fill_llm import SupplierFillResult
+                    from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
                     _res = SupplierFillResult(supplier_id=sid, error=str(_exc))
                 return sid, _res
 
@@ -1813,8 +1813,8 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     db.commit()
 
     # 8. matrix_distribution：基于落库后矩阵，与 /bid-matrix 同源
-    from apps.api.services.bid_matrix import build_anchor_matrix as _bam_fn
-    from apps.api.services.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
+    from apps.api.services.matrix.bid_matrix import build_anchor_matrix as _bam_fn
+    from apps.api.services.matrix.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
     _bam_result = _bam_fn(
         db, tender_anchors, session.id, sids, body.project_id, body.category,
         used_submission_ids=[], submission_ids=[],
@@ -2307,7 +2307,7 @@ def anchor_review_finalize(
 
     force=True 时必须提供 reason 字段。
     """
-    from apps.api.services.alignment_service import finalize_alignment
+    from apps.api.services.alignment.alignment_service import finalize_alignment
 
     result = finalize_alignment(
         db,

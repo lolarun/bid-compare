@@ -2,7 +2,7 @@
 import sys
 sys.path.insert(0, ".")
 
-from apps.api.services.standardize import standardize_name
+from apps.api.services.ingestion.standardize import standardize_name
 
 cases = [
     # Critical: 热浸镀锌 vs 热镀锌 must NOT be merged

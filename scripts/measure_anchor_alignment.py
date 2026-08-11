@@ -15,7 +15,7 @@ import numpy as np
 from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from apps.api.services.tender_list import parse_tender_xlsx
+from apps.api.services.tender.tender_list import parse_tender_xlsx
 
 TENDER = r"docs\test\金桥地铁上盖J9A-03地块（浦发上城科创智谷）研发及商业项目（阀门）招标清单.xlsx"
 DB = os.path.join("data", "mempas.db")

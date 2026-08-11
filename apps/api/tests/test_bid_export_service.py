@@ -15,7 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from apps.api.models.tender_list_session import TenderListSession
-from apps.api.services import bid_export_service
+from apps.api.services.matrix import bid_export_service
 
 
 def _mk_session(db, *, project_id, category, status, anchors_json=None):

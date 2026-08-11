@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.draft_integrity import BLOCKED, OK, REVIEW
-from apps.api.services.submission_eligibility import (
+from apps.api.services.ingestion.draft_integrity import BLOCKED, OK, REVIEW
+from apps.api.services.submission.submission_eligibility import (
     blocking_summary,
     evaluate_submission,
 )

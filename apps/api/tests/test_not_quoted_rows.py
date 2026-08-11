@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.draft_integrity import (
+from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_EMPTY,
     AMOUNT_NOT_QUOTED,
     AMOUNT_VALUE,
     classify_amount_cell,
 )
-from apps.api.services.quote_confirmation_service import _num_or_none
+from apps.api.services.submission.quote_confirmation_service import _num_or_none
 
 
 @pytest.mark.parametrize("raw", ["/", "／", "－", "—", "无", "不报", "不报价",

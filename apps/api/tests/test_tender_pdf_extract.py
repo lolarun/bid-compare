@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from apps.api.services.brand_match import build_brand_context, check_brand
-from apps.api.services.tender_list import TenderAnchor, anchor_to_json, rebuild_anchors
-from apps.api.services.source_reconcile import reconcile_anchors
+from apps.api.services.supplier.brand_match import build_brand_context, check_brand
+from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json, rebuild_anchors
+from apps.api.services.tender.source_reconcile import reconcile_anchors
 
 REPO = Path(__file__).parent.parent.parent.parent
 TENDER_PDF = REPO / "docs" / "test" / "金桥地体上盖招标文件.pdf"
@@ -226,7 +226,7 @@ def test_session_persists_pdf_source_and_brands(db_session):
 
 def test_review_matrix_exposes_brand_and_materials(db_session):
     proj_id, cat, sids, _ = _seed_pdf_session(db_session)
-    from apps.api.services.bid_matrix import build_anchor_review_matrix
+    from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
     m = build_anchor_review_matrix(db_session, proj_id, cat, supplier_ids=sids)
 
     # 90×3 风格闭包：行数 == anchors_total，格数 == anchors_total × supplier_count
@@ -265,7 +265,7 @@ def test_extract_bidlist_real_pdf():
     if not s.DASHSCOPE_API_KEY:
         pytest.skip("DASHSCOPE_API_KEY 未配置")
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
-    from apps.api.services.tender_pdf import extract_bidlist
+    from apps.api.services.tender.tender_pdf import extract_bidlist
 
     provider = DashScopeOCRProvider(
         api_key=s.DASHSCOPE_API_KEY, base_url=s.DASHSCOPE_BASE_URL,

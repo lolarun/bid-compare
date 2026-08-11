@@ -49,7 +49,7 @@ def search_suppliers(
 
     支持 Supplier.name / short_name 模糊匹配 + SupplierAlias 精确规范化匹配。
     """
-    from apps.api.services.supplier_resolve import search_suppliers_by_name
+    from apps.api.services.supplier.supplier_resolve import search_suppliers_by_name
     return search_suppliers_by_name(db, q, limit=limit, active_only=active_only)
 
 
@@ -65,7 +65,7 @@ def resolve_supplier_by_name(
       {matched: false, ambiguous: true, candidates: [...]}  歧义（多个候选）
       {matched: false, ambiguous: false}        未找到
     """
-    from apps.api.services.supplier_resolve import resolve_supplier
+    from apps.api.services.supplier.supplier_resolve import resolve_supplier
     result = resolve_supplier(db, name)
     if result.supplier:
         sup = result.supplier

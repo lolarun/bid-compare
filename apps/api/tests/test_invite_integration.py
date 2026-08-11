@@ -201,7 +201,7 @@ def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
     """TestClient with seeded DB (brand tiers + CSV history) + MockProvider + auth bypass."""
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
 
     from apps.api.intelligence.pipeline import ExtractionPipeline
@@ -651,17 +651,17 @@ class TestInferCategories:
     """Unit test of the category-inference helper (no DB, no server)."""
 
     def test_explicit_category(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "X", "category": "桥架"}])
         assert cats == ["桥架"]
 
     def test_name_keyword_match(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "桥架300×200 镀锌"}])
         assert cats == ["桥架"]
 
     def test_dedupe(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([
             {"name": "桥架A"},
             {"name": "桥架B"},
@@ -670,6 +670,6 @@ class TestInferCategories:
         assert cats == ["桥架", "阀门"]
 
     def test_unknown_ignored(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "随便起的名字"}])
         assert cats == []

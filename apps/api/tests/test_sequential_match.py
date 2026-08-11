@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from apps.api.services.anchor_match import _sequential_matches
-from apps.api.services.canonical import extract_valve_canonical
+from apps.api.services.alignment.anchor_match import _sequential_matches
+from apps.api.services.ingestion.canonical import extract_valve_canonical
 
 
 def _anchor(seq, name, dn, unit="个", qty=1.0):
@@ -240,7 +240,7 @@ def test_chance_agreement_is_row_count_independent():
     去重比例做不到——4 行全同是 0.25（看着"还行"），100 行全同是 0.01，
     同一种病给出相反读数。
     """
-    from apps.api.services.anchor_match import _chance_agreement
+    from apps.api.services.alignment.anchor_match import _chance_agreement
     assert _chance_agreement([1.0] * 4) == 1.0
     assert _chance_agreement([1.0] * 100) == 1.0
     assert _chance_agreement([]) == 1.0, "没有取值就是没有证据，按最差处理"

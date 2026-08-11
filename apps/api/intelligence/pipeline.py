@@ -138,7 +138,7 @@ class ExtractionPipeline:
 
         委托给 services.tender_pdf；复用本 pipeline 的 provider（OCR 能力）。
         """
-        from apps.api.services.tender_pdf import extract_bidlist
+        from apps.api.services.tender.tender_pdf import extract_bidlist
         return extract_bidlist(
             file_path, self.provider, progress_cb=progress_cb,
             bidlist_pages=bidlist_pages, brand_page=brand_page,
@@ -315,7 +315,7 @@ class ExtractionPipeline:
             # 「N/A」和空白一律变成 None，**两种语义就此不可分辨**——下游只能把合法的
             # 不报价行当成缺陷，422 逼用户编一个金额。故在还看得到原始文本的这一层
             # 判定一次，用布尔标记随行带走。
-            from apps.api.services.draft_integrity import (
+            from apps.api.services.ingestion.draft_integrity import (
                 AMOUNT_NOT_QUOTED, classify_amount_cell,
             )
             not_quoted = any(

@@ -21,7 +21,7 @@ from unittest.mock import patch
 #  1-8: canonical.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.canonical import canonical_match_score, extract_valve_canonical
+from apps.api.services.ingestion.canonical import canonical_match_score, extract_valve_canonical
 
 
 def test_canonical_basic():
@@ -110,7 +110,7 @@ def test_canonical_score_one_sided_valve_type():
 #  8b: valve_type family normalization (P0 deterministic-gate fix)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.canonical import normalize_valve_family, valve_type_compatible
+from apps.api.services.ingestion.canonical import normalize_valve_family, valve_type_compatible
 
 
 def test_valve_family_normalize():
@@ -176,8 +176,8 @@ def test_canonical_score_family_blocks_real_conflicts():
 #  anchor_match.match_anchors canonical hard-filter
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.anchor_match import match_anchors, SIM_THRESHOLD
-from apps.api.services.tender_list import TenderAnchor
+from apps.api.services.alignment.anchor_match import match_anchors, SIM_THRESHOLD
+from apps.api.services.tender.tender_list import TenderAnchor
 
 
 def _make_anchor(name: str, spec: str = "", canonical: dict | None = None) -> TenderAnchor:
@@ -208,7 +208,7 @@ def test_anchor_match_blocks_valve():
 
     # Both anchor and quote map to the same unit vector → cosine = 1.0 without mock
     same_vec = [[1.0, 0.0, 0.0, 0.0]]
-    with patch("apps.api.services.anchor_match._embed", return_value=same_vec):
+    with patch("apps.api.services.alignment.anchor_match._embed", return_value=same_vec):
         result = match_anchors(anchors, quotes, q_texts, q_dns,
                                quote_canonicals=q_canons)
     # Canonical hard block (截止阀 vs 球阀) → no match
@@ -224,7 +224,7 @@ def test_anchor_match_blocks_pn():
     q_canons = [{"valve_type": "截止阀", "dn": "DN25", "pn": "PN25"}]
 
     same_vec = [[1.0, 0.0, 0.0, 0.0]]
-    with patch("apps.api.services.anchor_match._embed", return_value=same_vec):
+    with patch("apps.api.services.alignment.anchor_match._embed", return_value=same_vec):
         result = match_anchors(anchors, quotes, q_texts, q_dns,
                                quote_canonicals=q_canons)
     assert result == []
@@ -238,7 +238,7 @@ def test_anchor_match_compat():
     q_dns = [25]
 
     same_vec = [[1.0, 0.0, 0.0, 0.0]]
-    with patch("apps.api.services.anchor_match._embed", return_value=same_vec):
+    with patch("apps.api.services.alignment.anchor_match._embed", return_value=same_vec):
         result = match_anchors(anchors, quotes, q_texts, q_dns,
                                quote_canonicals=None)  # No canonical filtering
     # Without canonical filter, cosine=1.0 > threshold → match is found
@@ -251,7 +251,7 @@ def test_anchor_match_compat():
 #  quote_readiness.assess_readiness
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.quote_readiness import assess_readiness
+from apps.api.services.submission.quote_readiness import assess_readiness
 
 
 def test_readiness_auto_ready():
@@ -322,7 +322,7 @@ def test_readiness_checksum_shares_the_ingest_gate_threshold():
     等于**下游默默推翻了上游要求的人工判断**。
     """
     from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
-    from apps.api.services.quote_readiness import _CHECKSUM_TOLERANCE, _compute_checksum
+    from apps.api.services.submission.quote_readiness import _CHECKSUM_TOLERANCE, _compute_checksum
 
     assert _CHECKSUM_TOLERANCE == CHECKSUM_BLOCK_DELTA_RATIO, "两道门必须共用同一个阈值"
 

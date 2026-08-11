@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-import apps.api.services.supplier_fill_llm as sfl
-from apps.api.services.supplier_fill_llm import (
+import apps.api.services.supplier.supplier_fill_llm as sfl
+from apps.api.services.supplier.supplier_fill_llm import (
     AnchorView, SupplierQuoteRow, fill_one_supplier, build_prompt, _pick_model,
 )
 

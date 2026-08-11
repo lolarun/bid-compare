@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.block_alignment import (
+from apps.api.services.alignment.block_alignment import (
     DETERMINISTIC,
     LLM_RESOLVED,
     ORDER_FALLBACK,

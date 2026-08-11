@@ -57,7 +57,7 @@ from apps.api.intelligence.extraction_draft import (
     build_row_ledger,
     compute_quality,
 )
-from apps.api.services.draft_integrity import (
+from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_NOT_QUOTED,
     check_column_alignment,
     check_sequence_continuity,

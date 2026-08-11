@@ -121,7 +121,7 @@ def create_taikelong_fixture():
 def create_tender_jingqiao_fixture():
     """金桥招标清单 xlsx → data/golden/tender_jingqiao.json"""
     try:
-        from apps.api.services.tender_list import parse_tender_xlsx
+        from apps.api.services.tender.tender_list import parse_tender_xlsx
     except ImportError:
         print("[skip] parse_tender_xlsx import failed — add repo to sys.path")
         return

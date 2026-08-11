@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-from apps.api.services.alignment_service import finalize_alignment
+from apps.api.services.alignment.alignment_service import finalize_alignment
 
 
 def _group(db, project_id, category, status="confirmed"):

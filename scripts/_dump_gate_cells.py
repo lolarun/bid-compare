@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
-from apps.api.services.canonical import extract_valve_canonical
+from apps.api.services.ingestion.canonical import extract_valve_canonical
 
 conn = sqlite3.connect("data/mempas.db")
 conn.row_factory = sqlite3.Row

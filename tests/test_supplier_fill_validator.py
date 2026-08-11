@@ -13,7 +13,7 @@ honest is pinned here independent of model behavior:
   + split (one quote → many anchors) rejected in v1
   + price always sourced from the Quote row, never the LLM
 """
-from apps.api.services.supplier_fill_llm import (
+from apps.api.services.supplier.supplier_fill_llm import (
     AnchorView, SupplierQuoteRow, validate,
 )
 

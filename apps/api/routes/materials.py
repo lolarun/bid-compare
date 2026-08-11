@@ -12,7 +12,7 @@ from apps.api.schemas import (
     StandardizeRequest, StandardizeResult,
     ExtendedAttrSchema,
 )
-from apps.api.services.standardize import standardize_name
+from apps.api.services.ingestion.standardize import standardize_name
 
 router = APIRouter(prefix="/api/materials", tags=["materials"])
 

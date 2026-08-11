@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.draft_integrity import (
+from apps.api.services.ingestion.draft_integrity import (
     ARITHMETIC_FLAG,
     BLOCKED,
     COLUMN_SHIFT_FLAG,
@@ -300,7 +300,7 @@ def test_gate_lets_legitimate_duplicates_through_with_a_flag():
     实测三份真实阀门文档各有 3~6 组这样的行，且逐行与 golden 完全一致；
     早期版本在这里 422，把 4 个已通过的集成测试打红。
     """
-    from apps.api.services.quote_confirmation_service import _gate_integrity
+    from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i, name="闸阀") for i in range(40)]
     items += [dict(items[0]), dict(items[1])]
     db = _FakeDb()
@@ -315,7 +315,7 @@ def test_gate_lets_legitimate_duplicates_through_with_a_flag():
 def test_gate_blocks_column_shift_even_for_a_single_row():
     """列错位没有合法形态——一行也不放行。"""
     from fastapi import HTTPException
-    from apps.api.services.quote_confirmation_service import _gate_integrity
+    from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i) for i in range(10)]
     items[3]["validation_flags"] = [COLUMN_SHIFT_FLAG]
     db = _FakeDb()
@@ -328,7 +328,7 @@ def test_gate_blocks_column_shift_even_for_a_single_row():
 
 def test_gate_blocks_wholesale_duplication():
     from fastapi import HTTPException
-    from apps.api.services.quote_confirmation_service import _gate_integrity
+    from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     base = [_item(f"DN{20 + i}", 1 + i, 10 + i, (1 + i) * (10 + i)) for i in range(20)]
     db = _FakeDb()
     with pytest.raises(HTTPException) as ei:
@@ -339,7 +339,7 @@ def test_gate_blocks_wholesale_duplication():
 
 def test_gate_honours_explicit_ack():
     """人工核对过原文即可放行——与派生金额门一致，系统不替用户做判断。"""
-    from apps.api.services.quote_confirmation_service import _gate_integrity
+    from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i) for i in range(10)]
     items[3]["validation_flags"] = [COLUMN_SHIFT_FLAG]
     items[3]["integrity_ack"] = True
@@ -402,7 +402,7 @@ def test_clean_table_is_ok():
 # VL 路径的行数台账是同义反复——expected 与 extracted 同源，结构上报不出丢行。
 # 序号是文档自己印在纸上的，不由抽取质量决定，是目前唯一的独立判据。
 
-from apps.api.services.draft_integrity import check_sequence_continuity  # noqa: E402
+from apps.api.services.ingestion.draft_integrity import check_sequence_continuity  # noqa: E402
 
 
 def _seq_items(seqs):

@@ -87,7 +87,7 @@ def submit_extraction(job_id: str) -> None:
     Imports are deferred to keep this module side-effect-free at boot.
     """
     from apps.api.core.database import SessionLocal
-    from apps.api.services.document_ingestion import DocumentIngestionService
+    from apps.api.services.ingestion.document_ingestion import DocumentIngestionService
 
     pipeline = get_runtime_pipeline()
     if pipeline is None:
