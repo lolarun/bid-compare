@@ -29,6 +29,8 @@ from apps.api.schemas import (
     CompareStateResult,
     LlmFillResult,
     TenderMatchResult,
+    BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
+    BidMatrixVersionApproveResult,
 )
 from apps.api.services.history.comparison import compare_price
 from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
@@ -104,7 +106,7 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
     return result
 
 
-@router.post("/bid-matrix")
+@router.post("/bid-matrix", response_model=BidMatrixResult)
 def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatrixResult:
     """横向对比矩阵 — F6.1 核心接口。
 
@@ -2360,7 +2362,7 @@ class _BidMatrixSaveBody(BaseModel):
     recommended_supplier: str = ""
 
 
-@router.post("/bid-matrix/save")
+@router.post("/bid-matrix/save", response_model=BidMatrixSaveResult)
 def bid_matrix_save(
     body: _BidMatrixSaveBody,
     db: Session = Depends(get_db),
@@ -2409,7 +2411,7 @@ def bid_matrix_save(
     return {"ok": True, "id": bmv.id, "version": bmv.version}
 
 
-@router.get("/bid-matrix/versions")
+@router.get("/bid-matrix/versions", response_model=list[BidMatrixVersionListItem])
 def bid_matrix_versions(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2432,7 +2434,7 @@ def bid_matrix_versions(
     ]
 
 
-@router.get("/bid-matrix/versions/{version_id}")
+@router.get("/bid-matrix/versions/{version_id}", response_model=BidMatrixVersionDetail)
 def bid_matrix_version_get(version_id: int, db: Session = Depends(get_db)):
     from apps.api.models.bid_matrix_version import BidMatrixVersion
     v = db.get(BidMatrixVersion, version_id)
@@ -2460,7 +2462,7 @@ class _ApproveBody(BaseModel):
     approved_by: str = ""
 
 
-@router.post("/bid-matrix/versions/{version_id}/approve")
+@router.post("/bid-matrix/versions/{version_id}/approve", response_model=BidMatrixVersionApproveResult)
 def bid_matrix_version_approve(
     version_id: int,
     body: _ApproveBody,

@@ -196,7 +196,13 @@ class AnchorReviewMatrixResult(BaseModel):
 # ─── Bid Matrix ───────────────────────────────────────────────────────────────
 
 class SupplierCell(BaseModel):
+    # B3（评审 identity-key rename）：supplier_id 这个键名历史上一直是"列身份"
+    # （submission 模式下实际是 BidSubmission.id，legacy 模式下才真是 Supplier.id）——
+    # 名不副实。submission_id 是新增的同义正名键，submission 模式下=supplier_id 的值，
+    # legacy 模式下为 None。supplier_id 兼容期内保持原值不变，不做静默语义翻转；
+    # 兼容期结束、前端全量迁移到 submission_id 后才可能改为真正的供应商 FK 或移除。
     supplier_id: int
+    submission_id: int | None = None
     price: float | None
     total: float | None
     deviation_pct: float | None
@@ -214,11 +220,15 @@ class SupplierCell(BaseModel):
     # 评标口径（招标数量×含税单价）+ 同规格偏差
     price_basis: str | None = None
     incl_unit: float | None = None          # 含税单价（评标用）
+    unit: str | None = None                 # 供应商报价单位（评标资格判定用）
+    supplier_qty: float | None = None       # 供应商报价数量（评标数量以招标 tender_qty 为准）
+    item_canonical: dict | None = None      # 对齐行的规格 canonical（阀型/DN/PN）
     tender_qty: float | None = None         # 招标数量（评标数量，非供应商报价数量）
     eval_amount: float | None = None        # 评标金额 = 招标数量×含税单价
     eval_status: str | None = None          # ok|quantity_source_conflict|basis_unconfirmed|alignment_pending|missing
     evaluable: bool | None = None
     baseline: dict | None = None            # 同规格基准 {median,count,basis,spec_key}
+    tax_basis_assumed: bool | None = None   # 单一价格列按招标含税要求假定纳入（非确认）
 
     model_config = {"extra": "ignore"}
 
@@ -260,7 +270,9 @@ class MatrixRow(BaseModel):
 
 
 class MatrixTotal(BaseModel):
+    # B3：见 SupplierCell 顶部注释，同一条 col_id/submission_id 正名规则。
     supplier_id: int
+    submission_id: int | None = None
     total: float
     avg_deviation: float | None = None   # null when quoted_count=0 or no baseline
     quoted_count: int
@@ -288,9 +300,11 @@ class BidMatrixRequest(BaseModel):
 
 
 class SupplierLabel(BaseModel):
-    id: int
+    id: int                            # column key: submission_id when available, else supplier_id
     letter: str
     name: str
+    supplier_id: int | None = None     # 真正的供应商 FK（submission 模式下可空——陌生供应商未绑定）
+    submission_id: int | None = None   # B3：与 id 对称，submission 模式下等于 id，legacy 模式为 None
 
 
 class MatrixDistribution(BaseModel):
@@ -884,3 +898,59 @@ class BatchConfirmResult(BaseModel):
     not_quoted_detail: list[dict] | None = None
     integrity: dict | None = None
     model_config = {"extra": "ignore"}
+
+
+# ─── bid-matrix version snapshots (B3 Tier 3) ──────────────────────────────
+# 评审 E4 Tier 3：此前不单排、并入 B3——SupplierCell.supplier_id/MatrixTotal.
+# supplier_id 是 B3 要改的错名字段，先接 response_model 会把错误契约固化成
+# 正式契约。B3 已完成identity-key 正名（见 SupplierCell/MatrixTotal/
+# SupplierLabel 顶部注释），现在补 response_model 是同一轮的后半步，不是
+# 提前动作。matrix_json 是持久化的 BidMatrixResult 快照，快照本身走
+# BidMatrixResult schema 保证；这里的版本包装端点只对壳字段（id/version/
+# status/…）建约束，matrix_json/readiness_json/excluded_rows_json/
+# supplier_ids_json 保持裸 dict/list——它们是存量快照的整体读写，不逐字段
+# 消费，不为此另建一份重复的强 schema。
+
+class BidMatrixSaveResult(BaseModel):
+    ok: bool
+    id: int
+    version: int
+
+
+class BidMatrixVersionListItem(BaseModel):
+    id: int
+    version: int
+    status: str
+    anchors_count: int
+    compared_rows: int
+    recommended_supplier: str | None = None
+    approved_by: str | None = None
+    approved_at: object | None = None
+    created_at: object | None = None
+
+
+class BidMatrixVersionDetail(BaseModel):
+    id: int
+    version: int
+    status: str
+    project_id: int | None = None
+    category: str
+    tender_list_session_id: int | None = None
+    alignment_finalization_id: int | None = None
+    matrix_json: dict = {}
+    readiness_json: list = []
+    anchors_count: int
+    compared_rows: int
+    excluded_rows_json: list = []
+    supplier_ids_json: list = []
+    recommended_supplier: str | None = None
+    review_note: str | None = None
+    approved_by: str | None = None
+    approved_at: object | None = None
+    created_at: object | None = None
+
+
+class BidMatrixVersionApproveResult(BaseModel):
+    ok: bool
+    id: int
+    status: str

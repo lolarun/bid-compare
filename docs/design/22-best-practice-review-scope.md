@@ -6,9 +6,13 @@
 > separate session and its findings arrived pasted into chat, not as a file. Six
 > remediation batches landed 2026-08-11 (commits `7d2adb0`..`17c8a68`): C1/D1,
 > F1/F2/F4 (legacy physical deletion), C2/D2-D5, G1, N2/N3/N7, and the `services/`
-> package reorg. **E1-E4 and B3 are deliberately deferred** to their own round
+> package reorg. **E1-E4 and B3 were deliberately deferred** to their own round
 > (too large to fold into the batch that also did C/D/F/G/N) — see each batch's
-> commit message for what was and wasn't done and why.
+> commit message for what was and wasn't done and why. All of E1-E4 and B3 are
+> now resolved (see the entries below); B3's compat-period tail step (drop
+> `supplier_id`, flip frontend joins to `submission_id`) is explicitly left
+> for a later round once the new key has had real usage time, not deferred by
+> oversight.
 >
 > **E1/E2/E3 — resolved 2026-08-11**: `apps/api/core/errors.py` introduced
 > (`DomainError`/`ValidationError`/`NotFoundError`/`ConflictError`/
@@ -69,6 +73,68 @@
 > into the next Tier-1-style tail batch (same shallow-verify method: check
 > `apps/www/src` for `Record<string,any>`/`as any` reads before trusting the
 > existing TS type), not part of B3.
+>
+> **B3 — resolved 2026-08-11.** Confirmed the exact bug on read: `build_anchor_matrix`
+> (`services/matrix/bid_matrix.py`) keys every column by `col_id` — `BidSubmission.id`
+> when `use_submission_mode` (the modern §7 path), `Supplier.id` in the legacy
+> fallback — but serializes it under the literal key `"supplier_id"` in `SupplierCell`,
+> `MatrixTotal`, and (via `bid_recommendation.py::_compute_recommendation`) every
+> `supplier_evaluation` entry, `price_preferred_candidate`, and
+> `common_comparable.supplier_ids`. `SupplierLabel` was already correct (generic
+> `id` for the column key, separate `supplier_id` for the real FK) — just not yet
+> in the Pydantic schema or TS type.
+>
+> Fix, staged for a compat period (new key added, old key's *value* left
+> unchanged — not a silent semantic flip):
+> - Added `submission_id: int | None` next to `supplier_id` on `SupplierCell`,
+>   `MatrixTotal`, `SupplierLabel`, and the `supplier_eval`/`common_comparable`
+>   dicts in `bid_recommendation.py`. Populated = `col_id` when
+>   `use_submission_mode`, else `None`. `supplier_id` keeps holding `col_id`
+>   unchanged (mislabeled but functionally identical to before) — every
+>   existing frontend join (`cell.supplier_id === label.id`) still works
+>   without modification during the compat window.
+> - Also closed 4 fields `SupplierCell` was silently going to drop once
+>   `response_model` landed (found by diffing the schema against
+>   `_build_cell_for_supplier`'s actual dict, same discipline as E4):
+>   `unit`, `supplier_qty`, `item_canonical`, `tax_basis_assumed`.
+> - Wired `response_model` on all 5 deferred Tier-3 endpoints: `POST
+>   /bid-matrix` → `BidMatrixResult` (already fully declared at the top level
+>   from earlier work; only the identity-key + cell-field gaps above were
+>   missing). `POST /bid-matrix/save`, `GET /bid-matrix/versions`, `GET
+>   /bid-matrix/versions/{id}`, `POST /bid-matrix/versions/{id}/approve` got
+>   new lightweight wrapper schemas — `matrix_json`/`readiness_json`/
+>   `excluded_rows_json`/`supplier_ids_json` stay untyped `dict`/`list`
+>   (persisted snapshot, read/written whole, not field-consumed — same
+>   reasoning as E4's audit-dict fields).
+> - Frontend (`apps/www/src/api/client.ts` + `views/compare/IndexView.vue`):
+>   completed `SupplierCell`/`MatrixTotal`/`SupplierLabel` TS types to match
+>   the backend exactly, added `SupplierEvaluation`/`CommonComparable`/
+>   `NonPriceFactor` and the missing `BidMatrixResult` recommendation fields
+>   (`recommendation_level`/`award_mode`/`committee_required`/`price_ranking`/
+>   `risks`/`evaluation_policy`/`price_preferred_candidate`/
+>   `supplier_evaluation`/`common_comparable`/`non_price_factors`/
+>   `comprehensive_recommendation_status`). Removed the `matrixResult.value as
+>   unknown as Record<string, any>` escape hatch in `matrixSummary` and the 6
+>   per-field `as any` casts on `matrixTotals.find(...)` — all now type-check
+>   against the completed interfaces with no casts.
+> - **Deliberately not done today** (needs real compat-period elapsed time,
+>   not a same-session step): flipping `supplier_id`'s value to the true
+>   supplier FK, migrating frontend joins off `supplier_id` onto
+>   `submission_id`, and removing `supplier_id` entirely. `common_comparable`/
+>   `price_ranking` etc. stay untyped `dict`/`list[dict]` in the Python schema
+>   (loose containers don't strip unknown keys, so the new `submission_id`
+>   key rides along safely without a schema change).
+> - **Out of scope, not touched**: `_build_material_row`/`_finalize_row` in
+>   `bid_matrix.py` are dead code (zero callers anywhere — confirmed by grep)
+>   left over from a pre-anchor-matrix code path; not part of the identity-key
+>   bug since nothing calls them. `bid_matrix_save`'s request-body
+>   `supplier_ids_json` (persisted snapshot input, not a response identity
+>   key) was not audited for the same naming issue — out of the pinned scope.
+>
+> `apps/api/tests + tests -q`: 754 passed, 4 failed (existing, unrelated,
+> byte-identical to baseline), 1 skipped, 7 deselected. `apps/www`
+> `type-check` (vue-tsc -b) and `test:unit` (vitest, 42 tests / 4 files): both
+> green.
 >
 > **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
 > `vl_tender.py`; "direct" was a contrast name against legacy, which no longer

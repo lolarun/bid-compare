@@ -50,6 +50,8 @@ from apps.api.schemas.analysis import (
     SupplierFillSummaryOut, LlmFillReadinessOut, LlmFillResult,
     TenderMatchResult,
     BatchConfirmErrorOut, BatchConfirmResult,
+    BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
+    BidMatrixVersionApproveResult,
 )
 
 __all__ = [

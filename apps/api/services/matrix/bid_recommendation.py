@@ -20,11 +20,19 @@ def _compute_recommendation(
     total_anchors: int,
     checksum_by_col: dict[int, str],
     policy,
+    use_submission_mode: bool = False,
 ) -> dict:
     """招标文件驱动的确定性推荐（不自动定标、不拆单、不造权重）。
 
     产出：评标总价排名(价格优选候选人) + 共同可比金额 + 未决行金额 + 非价格因素证据缺口 +
     三态 recommendation_level。LLM 仅据此解释，不得改选。
+
+    B3（评审 identity-key rename）：col_id 在 submission 列模式下实际是
+    BidSubmission.id，但每个字典历史上只写了 "supplier_id" 这一个键——名字与
+    实际身份不符。这里新增同义的 "submission_id" 键（=col_id，仅
+    use_submission_mode 时非空），"supplier_id" 键保持原值不变（兼容期内旧
+    前端代码不受影响）。兼容期结束、前端全部迁移到 submission_id 后，
+    "supplier_id" 才可以改为真正的供应商 FK 或删除。
     """
     label_by = {sl["id"]: sl for sl in supplier_labels}
     per = {cid: {"evaluated_total": 0.0, "confirmed_lines": 0, "qty_conflict_lines": 0,
@@ -67,6 +75,7 @@ def _compute_recommendation(
         eligible = full and cs != "fail"
         supplier_eval.append({
             "supplier_id": cid,
+            "submission_id": cid if use_submission_mode else None,
             "name": label_by.get(cid, {}).get("name"),
             "letter": label_by.get(cid, {}).get("letter"),
             "evaluated_total": round(p["evaluated_total"], 2),
@@ -157,6 +166,7 @@ def _compute_recommendation(
         "supplier_evaluation": supplier_eval,
         "common_comparable": {
             "supplier_ids": ranked_ids,
+            "submission_ids": ranked_ids if use_submission_mode else None,
             "line_count": common_lines,
             "subtotals": {str(k): round(v, 2) for k, v in common_sub.items()},
         },

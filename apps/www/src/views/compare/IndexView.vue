@@ -614,14 +614,18 @@ const matrixTotals = computed(() => matrixResult.value?.totals ?? [])
 const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 const matrixSummary = computed(() => {
   if (!matrixResult.value) return null
-  const m = matrixResult.value as unknown as Record<string, any>
-  const rows = matrixResult.value.rows
-  const suppliers = matrixResult.value.suppliers
+  // B3：matrixResult 现在完整声明了 recommendation_level/award_mode/
+  // committee_required/price_ranking/risks/price_preferred_candidate 等字段
+  // （此前靠 Record<string,any> 旁路读取，此处一并接掉这个逃生舱）。
+  const m = matrixResult.value
+  const rows = m.rows
+  const suppliers = m.suppliers
   // 招标文件驱动：三态门禁 + 价格优选候选人（确定性，非自动定标）
-  const level = (m.recommendation_level as string) || (m.recommendation_blocked ? 'blocked' : 'conditional')
-  const awardMode = (m.award_mode as string) || 'single_supplier'
+  const level = m.recommendation_level || (m.recommendation_blocked ? 'blocked' : 'conditional')
+  const awardMode = m.award_mode || 'single_supplier'
   const allowSplit = awardMode === 'split_award'
   const pc = m.price_preferred_candidate || null
+  // pc.supplier_id 兼容期内仍是准确的列身份（=col_id），与 s.id 的 join 不受影响。
   const pricePreferred = pc ? suppliers.find((s) => s.id === pc.supplier_id) : null
   // 拆单/最优组合总价：仅当招标文件允许分项授标才计算并展示
   const optimalTotal = allowSplit
@@ -640,10 +644,10 @@ const matrixSummary = computed(() => {
     award_mode: awardMode,
     allow_split: allowSplit,
     price_preferred_candidate: pricePreferred,
-    price_preferred_total: pc ? (pc.evaluated_total as number) : null,
+    price_preferred_total: pc ? pc.evaluated_total : null,
     committee_required: m.committee_required !== false,
-    ranking: (m.price_ranking as any[]) || [],
-    risks: (m.risks as string[]) || [],
+    ranking: m.price_ranking || [],
+    risks: m.risks || [],
     optimal_total: optimalTotal,
     anomaly_count: anomalyCount,
   }
@@ -2295,7 +2299,7 @@ async function runMatrix() {
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">评标总价(含税)</span>
                   <span class="eval-card__metric-value">
-                    ¥{{ ((matrixTotals.find(t => t.supplier_id === s.id) as any)?.evaluated_total ?? matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
+                    ¥{{ (matrixTotals.find(t => t.supplier_id === s.id)?.evaluated_total ?? matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
@@ -2331,15 +2335,15 @@ async function runMatrix() {
               </div>
               <div class="eval-card__tags">
                 <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines ?? 0) > 0" color="orange">
-                  税口径假定含税 {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines }} 行
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.tax_assumed_lines ?? 0) > 0" color="orange">
+                  税口径假定含税 {{ matrixTotals.find(t => t.supplier_id === s.id)?.tax_assumed_lines }} 行
                 </a-tag>
-                <a-tag v-else-if="(matrixTotals.find(t => t.supplier_id === s.id) as any)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines ?? 0) > 0" color="gold">
-                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines }} 行未决
+                <a-tag v-else-if="matrixTotals.find(t => t.supplier_id === s.id)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.undecided_lines ?? 0) > 0" color="gold">
+                  {{ matrixTotals.find(t => t.supplier_id === s.id)?.undecided_lines }} 行未决
                 </a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines ?? 0) > 0" color="purple">
-                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines }} 行数量冲突
+                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.qty_conflict_lines ?? 0) > 0" color="purple">
+                  {{ matrixTotals.find(t => t.supplier_id === s.id)?.qty_conflict_lines }} 行数量冲突
                 </a-tag>
                 <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
               </div>

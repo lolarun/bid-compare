@@ -240,7 +240,13 @@ export interface MultiCompareResult {
 export type CellStatus = 'quoted' | 'aggregated' | 'pending' | 'excluded' | 'missing'
 
 export interface SupplierCell {
+  // B3（评审 identity-key rename）：supplier_id 历史上一直是"列身份"（submission
+  // 模式下实际是 BidSubmission.id），名不副实。submission_id 是新增同义正名键，
+  // submission 模式下 = supplier_id 的值，legacy 模式为 null。supplier_id 兼容期
+  // 内保持原值不变——现有按 supplier_id 做的行内 join（cell.supplier_id===label.id）
+  // 依然正确，不需要在兼容期内改写。
   supplier_id: number
+  submission_id: number | null
   price: number | null
   total: number | null
   deviation_pct: number | null
@@ -251,9 +257,22 @@ export interface SupplierCell {
   item_id?: number | null          // pending cell: BidAlignmentItem.id for inline confirm
   confidence?: number | null       // pending cell: cosine similarity
   source_quote_id?: number | null
+  bid_quote_line_id?: number | null  // new path: BidQuoteLine.id
   pending_note?: string | null     // "另有 N 条待确认" when align+pending coexist
   flags?: string[] | null          // validator flags: ocr_corrected_verified, valve_type_conflict, etc.
   evidence?: string | null         // LLM fill reasoning/evidence
+  // 评标口径（招标数量×含税单价）+ 同规格偏差
+  price_basis?: string | null
+  incl_unit?: number | null        // 含税单价（评标用）
+  unit?: string | null             // 供应商报价单位
+  supplier_qty?: number | null     // 供应商报价数量（评标数量以 tender_qty 为准）
+  item_canonical?: Record<string, unknown> | null
+  tender_qty?: number | null       // 招标数量（评标数量，非供应商报价数量）
+  eval_amount?: number | null      // 评标金额 = 招标数量×含税单价
+  eval_status?: string | null      // ok|quantity_source_conflict|basis_unconfirmed|alignment_pending|missing
+  evaluable?: boolean | null
+  baseline?: { median: number; count: number; basis: string; spec_key: string } | null
+  tax_basis_assumed?: boolean | null  // 单一价格列按招标含税要求假定纳入（非确认）
 }
 
 export interface MatrixRow {
@@ -274,11 +293,33 @@ export interface BidMatrixMeta {
 }
 
 export interface MatrixTotal {
+  // B3：见 SupplierCell 顶部注释，同一条 col_id/submission_id 正名规则。
   supplier_id: number
+  submission_id: number | null
   total: number
   avg_deviation: number | null  // null when quoted_count=0（无报价时不计偏差）
   quoted_count?: number
   anomaly_count?: number
+  declared_total?: number | null
+  checksum_delta_pct?: number | null
+  checksum_status?: string | null   // "pass" / "fail" / "unknown"
+  // 评标口径（招标数量×含税单价）
+  evaluated_total?: number | null
+  confirmed_lines?: number | null
+  qty_conflict_lines?: number | null
+  undecided_lines?: number | null
+  undecided_amount?: number | null
+  tax_assumed_lines?: number | null  // 单一价格列按招标含税要求纳入（假定非确认）
+  basis_confirmed?: boolean | null
+  eligible_for_ranking?: boolean | null
+}
+
+export interface SupplierLabel {
+  id: number                         // column key: submission_id when available, else supplier_id
+  letter: string
+  name: string
+  supplier_id?: number | null        // 真正的供应商 FK（submission 模式下可空）
+  submission_id?: number | null      // B3：与 id 对称，submission 模式下等于 id
 }
 
 export interface BidInsight {
@@ -301,9 +342,41 @@ export interface MatrixDistribution {
   covered_full_count: number   // N家完整覆盖（含 pending）
 }
 
+export interface SupplierEvaluation {
+  supplier_id: number
+  submission_id: number | null   // B3：同上，与 supplier_id 同义正名
+  name: string | null
+  letter: string | null
+  evaluated_total: number
+  confirmed_lines: number
+  total_anchors: number
+  qty_conflict_lines: number
+  undecided_lines: number
+  undecided_amount: number
+  missing_lines: number
+  anomaly_count: number
+  tax_assumed_lines: number
+  basis_confirmed: boolean
+  checksum_status: string
+  full_coverage: boolean
+  eligible_for_ranking: boolean
+}
+
+export interface CommonComparable {
+  supplier_ids: number[]
+  submission_ids: number[] | null  // B3：同义正名，submission 模式下等于 supplier_ids
+  line_count: number
+  subtotals: Record<string, number>
+}
+
+export interface NonPriceFactor {
+  factor: string
+  evidence_status: string
+}
+
 export interface BidMatrixResult {
   project_id: number | null
-  suppliers: { id: number; letter: string; name: string }[]
+  suppliers: SupplierLabel[]
   rows: MatrixRow[]
   totals: MatrixTotal[]
   brand_tier_filter: string | null
@@ -311,9 +384,22 @@ export interface BidMatrixResult {
   anchor_matrix?: boolean
   not_finalized_warning?: string
   matrix_distribution?: MatrixDistribution
-  // Recommendation gate
+  // Recommendation gate（兼容旧前端：仅 blocked 置 true）
   recommendation_blocked?: boolean
   recommendation_blocked_reasons?: string[]
+  // 招标文件驱动的三态评标
+  recommendation_level?: 'firm' | 'conditional' | 'blocked' | null
+  recommendation_reasons?: string[]
+  risks?: string[]
+  evaluation_policy?: Record<string, unknown> | null
+  award_mode?: string | null
+  committee_required?: boolean | null
+  price_ranking?: SupplierEvaluation[]
+  price_preferred_candidate?: SupplierEvaluation | null
+  supplier_evaluation?: SupplierEvaluation[]
+  common_comparable?: CommonComparable | null
+  non_price_factors?: NonPriceFactor[]
+  comprehensive_recommendation_status?: string | null
 }
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────

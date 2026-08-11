@@ -542,6 +542,7 @@ def build_anchor_matrix(
                 "letter": letters[i] if i < len(letters) else str(i + 1),
                 "name": display_name,
                 "supplier_id": sub.supplier_id,  # actual FK (may be None)
+                "submission_id": sub.id,  # B3：与 cell/total 的同义键对称，等于 id
             })
         # col_ids is submission_ids; letter_map keyed by submission_id
         col_ids = [s.id for s in subs]
@@ -564,6 +565,8 @@ def build_anchor_matrix(
                     "id": sid,
                     "letter": letters[i] if i < len(letters) else str(i + 1),
                     "name": sup.name,
+                    "supplier_id": sid,        # legacy mode: id IS the real supplier FK
+                    "submission_id": None,     # B3：无 submission 概念，与提交列身份区分
                 })
         col_ids = [sl["id"] for sl in supplier_labels]
         letter_map = {sl["id"]: sl["letter"] for sl in supplier_labels}
@@ -636,11 +639,14 @@ def build_anchor_matrix(
                     "cell_status": CELL_MISSING, "item_id": None, "confidence": None,
                     "source_quote_id": None, "bid_quote_line_id": None, "pending_note": None,
                     "price_basis": None, "incl_unit": None, "unit": "",
-                    "supplier_qty": None, "item_canonical": None,
+                    "supplier_qty": None, "item_canonical": None, "tax_basis_assumed": False,
                 }
             else:
                 col_items = _items_for_col(group.items, col_id, actual_sid)
                 cell = _build_cell_for_supplier(db, col_items, col_id)
+            # B3：col_id 是列身份，submission 模式下实际是 submission_id，"supplier_id"
+            # 这个键名不准确（兼容期内保留原值不变）。新增同义的 submission_id 键。
+            cell["submission_id"] = col_id if use_submission_mode else None
 
             # 同规格偏差 + 评标资格（评标金额 = 招标数量 × 含税单价）
             _evaluate_cell(cell, anchor_qty, fam, dn, pn, a_unit, spec_index, thresholds)
@@ -718,6 +724,7 @@ def build_anchor_matrix(
         checksum_by_col[col_id] = checksum_status
         totals.append({
             "supplier_id": col_id,
+            "submission_id": col_id if use_submission_mode else None,  # B3：同义正名键
             "total": round(data["total"], 2),   # 含税评标总价（招标数量×含税单价，确认行）
             "avg_deviation": avg_dev,
             "quoted_count": data["quoted"],
@@ -728,7 +735,10 @@ def build_anchor_matrix(
         })
 
     total_anchors = len(anchors)
-    rec = _compute_recommendation(rows, col_ids, supplier_labels, total_anchors, checksum_by_col, policy)
+    rec = _compute_recommendation(
+        rows, col_ids, supplier_labels, total_anchors, checksum_by_col, policy,
+        use_submission_mode=use_submission_mode,
+    )
     eval_by = {s["supplier_id"]: s for s in rec["supplier_evaluation"]}
     for t in totals:
         se = eval_by.get(t["supplier_id"], {})
