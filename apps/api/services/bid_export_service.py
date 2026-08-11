@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.services.bid_matrix import build_anchor_matrix
 from apps.api.services.tender_session_service import (
-    get_current_session,
+    get_current_confirmed_session,
     get_finalization_snapshot,
 )
 
@@ -31,11 +31,10 @@ def get_bid_matrix_for_export(
     Returns the raw matrix dict from build_anchor_matrix — the caller
     (export route) is responsible for Excel serialization.
     """
-    from apps.api.services.tender_list import TenderAnchor
-    from apps.api.services.canonical import extract_valve_canonical
+    from apps.api.services.tender_list import rebuild_anchors
     from apps.api.models.bid_submission import BidSubmission as _BS
 
-    session = get_current_session(db, category, project_id=project_id)
+    session = get_current_confirmed_session(db, project_id, category)
     if not session or not session.anchors_json:
         raise HTTPException(
             status_code=400,
@@ -61,27 +60,7 @@ def get_bid_matrix_for_export(
                 "请重新执行「校对入库」→「对齐核查」后再导出矩阵。",
             )
 
-    anchors = []
-    for a in session.anchors_json:
-        ta = TenderAnchor(
-            seq=int(a.get("seq") or 0),
-            name=str(a.get("name") or ""),
-            spec=str(a.get("spec") or ""),
-            model=str(a.get("model") or ""),
-            pressure=str(a.get("pressure") or ""),
-            materials=dict(a.get("materials") or {}),
-            unit=str(a.get("unit") or ""),
-            qty=float(a.get("qty") or 0) or None,
-            profession=str(a.get("profession") or ""),
-        )
-        stored_canon = a.get("canonical")
-        if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
-            ta.canonical = stored_canon
-        else:
-            ta.canonical = extract_valve_canonical(
-                ta.name, ta.spec, ta.pressure, ta.material_text()
-            )
-        anchors.append(ta)
+    anchors = rebuild_anchors(session)
 
     fin = get_finalization_snapshot(db, project_id, category)
     allowed_group_ids = set(fin.group_ids_json) if fin and fin.group_ids_json else None

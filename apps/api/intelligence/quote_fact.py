@@ -152,7 +152,9 @@ class QuoteFact:
 
         现在权威 `total_price` 保持 None，派生值只进 `derived_total_candidate`，
         `total_source` 标 `missing`。入库门据此阻断并要求人工补写（doc/19 §L2）。
-        与 pipeline.py / rebuild_submission_lines.py 的三个派生入口保持同一口径。
+        与 pipeline.py 的派生入口保持同一口径（rebuild_submission_lines.py 已删除，
+        见最佳实践评审 D1 —— 它是确认写入路径的克隆且漏了 price_basis 桥接，
+        唯一调用方是已下线的一次性修复脚本 repair_project63.py）。
         """
         if self.total_price is not None:
             self.total_source = "ocr"

@@ -12,9 +12,12 @@ move + naming consolidation, not a semantic change.
 Naming distinction (intentional, both kept):
   - get_current_confirmed_session: is_current AND status='confirmed' — the gate
     every compare/match/matrix entry point must use.
-  - get_current_session: is_current only (any status) — used by the read-only
-    /tender-list/current detail endpoint, which historically surfaces the
-    current session regardless of confirmation. Do NOT use it as a compare gate.
+  - get_current_session_any_status: is_current only (any status) — used by the
+    read-only /tender-list/current detail endpoint, which historically surfaces
+    the current session regardless of confirmation. The "_any_status" suffix is
+    load-bearing: a bare get_current_session() read like a gate and was used as
+    one by mistake (bid_export_service, see docs/design/22 §C1) — the longer
+    name is deliberately harder to reach for without noticing.
 """
 
 from __future__ import annotations
@@ -120,7 +123,7 @@ def list_current_sessions(db: Session, project_id: int) -> list[TenderListSessio
     ).all()
 
 
-def get_current_session(
+def get_current_session_any_status(
     db: Session, category: str, project_id: int | None = None
 ):
     """Current (is_current, any status) session for a category, or None.

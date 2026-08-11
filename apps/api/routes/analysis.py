@@ -1016,7 +1016,7 @@ async def tender_list_match(
                     _tls_id = s.id
             db.commit()
             # 用本品类锚点匹配(避免拿全清单跨品类误配)
-            cur = tender_session_service.get_current_session(db, category, project_id=project_id)
+            cur = tender_session_service.get_current_session_any_status(db, category, project_id=project_id)
             if cur:
                 prebuilt_anchors = rebuild_anchors(cur)
 
@@ -2159,7 +2159,7 @@ def tender_list_current(
     category: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    session = tender_session_service.get_current_session(db, category, project_id)
+    session = tender_session_service.get_current_session_any_status(db, category, project_id)
     if not session:
         raise HTTPException(404, "No current TenderListSession found")
     return {
