@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from apps.api.intelligence.extraction_draft import DraftRow
+from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE, DraftRow
 from apps.api.services.tender_list import TenderAnchor, anchor_to_json
 from apps.api.services.canonical import extract_valve_canonical
 
@@ -150,6 +150,9 @@ def extract_bidlist(
     # excel_reconcile 只吃 DraftRow，与识别器无关，VL 的行同样能对账。而且
     # 有些招标文件的 PDF 里**根本没有采购清单**，清单以 Excel 附件形式给出——
     # 那时 Excel 是唯一来源而非交叉校验，更不该因为它的存在而降级 PDF 识别。
+    #
+    # vl_extract_csv 是 LLMProvider 的 @abstractmethod（评审 N3），这里是防御性
+    # 守卫，不是能力探测。
     if not hasattr(provider, "vl_extract_csv"):
         raise RuntimeError(
             "tender_pdf.extract_bidlist 需要具备 vl_extract_csv 的 provider。"
@@ -194,9 +197,12 @@ def extract_bidlist(
     detected_brand_page = brand_page if brand_page is not None else meta.get("brand_page")
 
     # ── DraftRow → TenderAnchor ───────────────────────────────────────────
+    # DETAIL_ROW_TYPE（评审 N2）：字面值历史上叫 "quote_line"，招标清单里没有
+    # 一行是报价，用具名常量而不是字符串字面量，标明这里判的是"是不是小计/
+    # 合计行"，与 quote 语义无关。
     anchors: list[TenderAnchor] = []
     for row in draft.rows:
-        if row.row_type != "quote_line":
+        if row.row_type != DETAIL_ROW_TYPE:
             continue
         anchor = _draft_row_to_anchor(row, default_category)
         if anchor is not None:

@@ -1,7 +1,19 @@
 """Intelligence engine abstract base — LLMProvider contract + response types.
 
-Providers MUST implement `extract(images, schema, prompt) -> ExtractionResponse`.
-The response carries both the parsed dict and the raw text for debugging.
+Providers MUST implement `extract(...)` and `vl_extract_csv(...)`. The response
+carries both the parsed dict and the raw text for debugging.
+
+评审 N3：这份 ABC 此前只声明了 extract()，而生产链真正依赖的契约是
+vl_extract_csv——pipeline.py/tender_pdf.py 用 hasattr(provider,
+"vl_extract_csv") 判断走不走 VL-direct，是"未声明方法的 hasattr 私有嗅探"，
+接口名字实不符（HANDOFF 记录的"provider 缺一个方法就静默换路"教训根源就在
+这——能力靠 hasattr 而不是靠声明，缺了就无声降级）。批次2已经把"静默降级"
+改成了"显式报错"，这里再补上声明本身：两个 shipped provider（DashScopeOCR
+Provider、MockProvider）此前就已经无条件实现了 vl_extract_csv，提升为
+@abstractmethod 不改变任何行为，只是让 ABC 承认现状——新写一个 LLMProvider
+子类若没实现它，会在类定义/实例化时就报错，而不是等到某次调用才发现。
+pipeline.py/tender_pdf.py 里的 hasattr 判断保留：ABC 保证了"合法子类必有此
+方法"，但判断本身现在读作"防御性守卫"而非"能力探测"，说明见各调用点注释。
 """
 
 from __future__ import annotations
@@ -67,5 +79,38 @@ class LLMProvider(ABC):
 
         Raises:
             ProviderError: If extraction fails irrecoverably.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def vl_extract_csv(
+        self,
+        images: list[bytes],
+        prompt: str,
+        *,
+        model: str | None = None,
+        labels: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Whole-document VL-direct extraction: page images → CSV text.
+
+        This is the actual production contract (VL-direct is the only
+        recognition path for both quote and tender documents — see
+        vl_direct.py / vl_tender.py / docs/design/21). `labels` distinguishes
+        the orientation-probe call (rotation candidates per page) from the
+        main extraction/meta calls — see DashScopeOCRProvider.vl_extract_csv
+        for the convention.
+
+        Args:
+            images: PNG/JPG bytes for every page (or probe crops) in one call.
+            prompt: Business-tuned instruction text (extraction/meta/orient).
+            model: Provider-specific model id override.
+            labels: Present only for orientation-probe calls.
+
+        Returns:
+            Raw CSV (or `key: value` lines for meta calls) text from the model.
+
+        Raises:
+            ProviderError: If the call fails irrecoverably.
         """
         raise NotImplementedError

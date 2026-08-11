@@ -35,11 +35,21 @@ class SourceRef:
 
 # ─── Single extracted row ─────────────────────────────────────────────────────
 
+# 评审 N2：build_draft/parse_csv 是报价与招标共用的解析器（vl_direct.py docstring
+# "两种文档的行为差异只在'有哪些列、每列叫什么'"），"这一行是明细而非小计/合计"
+# 这个判据同样与文档类型无关——但字面值一直叫 "quote_line"，招标清单里没有一行
+# 是"报价"，词表名字跟着共享代码泄了过去。改字面值要牵动 quote_confirmation_
+# service.py 的持久化路径与审计日志（audit.normalize_row_type 另有一份 quote
+# 专属词表，历史值不宜改），故不改值本身，只给"文档类型无关的明细行"这个概念
+# 一个不带 quote 语义的名字，供 tender 侧消费点引用。
+DETAIL_ROW_TYPE = "quote_line"
+
+
 @dataclass
 class DraftRow:
     """One row as the recognizer sees it — raw cells preserved, fields standardised."""
     row_index: int
-    row_type: str           # quote_line|subtotal|grand_total|section_header|remark|invalid
+    row_type: str           # quote_line(=DETAIL_ROW_TYPE)|subtotal|grand_total|section_header|remark|invalid
     raw_cells: dict         # original OCR header→value mapping (never modified)
     fields: dict            # standardised fields (§4 superset; missing keys = None/"")
     source_ref: SourceRef
@@ -293,7 +303,7 @@ def compute_quality(
     review_hints: list[str] = []
 
     # — Row type counts —
-    quote_lines = [r for r in rows if r.row_type == "quote_line"]
+    quote_lines = [r for r in rows if r.row_type == DETAIL_ROW_TYPE]
     subtotals   = [r for r in rows if r.row_type == "subtotal"]
     totals      = [r for r in rows if r.row_type == "grand_total"]
 

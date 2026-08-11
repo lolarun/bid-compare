@@ -17,28 +17,9 @@ Optional extra key (ignored by batch-confirm, used by Tier3 LLM review later):
 """
 from __future__ import annotations
 
-import re
-
 from apps.api.core.domain_config import MATCH_PRICE_ARITHMETIC_TOLERANCE as _PRICE_TOL
 from dataclasses import dataclass, field
 from typing import Any
-
-
-# ─── helpers (mirror pipeline._coerce_num, kept local to avoid circular import) ──
-
-def _coerce_num(v: Any) -> float | None:
-    if v is None or v == "":
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip().replace(",", "").replace("，", "")
-    s = re.sub(r"[^\d.\-]", "", s)
-    if not s or s in {".", "-"}:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
 
 
 # ─── shared logic (called from both pipeline.py and tabular_ingestion.py) ────

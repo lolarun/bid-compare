@@ -1,10 +1,9 @@
 """vl_direct.py — 报价清单识别器：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
 
-**报价识别的唯一路径**（2026-08-10 起）。legacy 的报价分支（OCR → HTML →
-TableGrid → LLM）已归档，`QUOTE_RECOGNIZER` 开关随之移除——留着它就等于留着
-"这次结果是哪条路出来的"这个疑问，而实测 provider 缺一个方法就会静默换路。
-`recognize_tables` 仍在，但只服务招标清单（services/tender_pdf.py），
-那一侧尚无 VL 实现，见 docs/design/21 Phase 2。
+**报价与招标识别的唯一路径**（2026-08-10 起）。legacy 的 OCR→HTML→TableGrid→LLM
+分支已于 2026-08-11 物理删除（最佳实践评审 F1：两个生产 provider 均实现
+vl_extract_csv，legacy 分支在生产从未可达），不再是"归档保留"的状态。招标侧
+共享同一套解析与结构门，见 vl_tender.py。
 
 ## 为什么整份一次调用
 
@@ -47,8 +46,10 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from apps.api.core.config import get_settings
+from apps.api.core.utils import parse_num
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.extraction_draft import (
+    DETAIL_ROW_TYPE,
     DraftRow,
     ExtractionDraft,
     PageMetric,
@@ -319,22 +320,20 @@ class _ParsedRow:
 
 def _norm_row_type(raw: str) -> str:
     """CSV 的 row_type → DraftRow 词表。**认不出来的一律当明细**，不能丢——
-    静默丢弃未知标签会把召回凭空做高。"""
+    静默丢弃未知标签会把召回凭空做高。报价、招标共用本函数（评审 N2：
+    DETAIL_ROW_TYPE 的字面值仍是 "quote_line"，见该常量定义处的说明）。"""
     v = (raw or "").strip().lower()
     if v in ("subtotal", "小计"):
         return "subtotal"
     if v in ("total", "grand_total", "合计", "总计", "总价"):
         return "grand_total"
-    return "quote_line"
+    return DETAIL_ROW_TYPE
 
 
 def _num(x):
-    if x is None or x == "":
-        return None
-    try:
-        return float(re.sub(r"[,，¥￥$\s　]", "", str(x)))
-    except (TypeError, ValueError):
-        return None
+    # 评审 N7：曾是独立实现，现委托给 core.utils.parse_num（非 lenient 模式，
+    # 行为不变——只剥离已知分隔符/货币符号，不猜测自由文本里的数字）。
+    return parse_num(x)
 
 
 def parse_csv(text: str, page_count: int, *,

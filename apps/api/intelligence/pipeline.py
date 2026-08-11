@@ -22,12 +22,13 @@ Post-processing:
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any, Callable
 
 from apps.api.core.config import get_settings
+from apps.api.core.utils import parse_num
 from apps.api.intelligence.base import LLMProvider, ExtractionResponse
+from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE
 from apps.api.intelligence.quote_fact import build_canonical, apply_arithmetic_validation
 from apps.api.intelligence.price_basis import derive_price_basis
 
@@ -61,6 +62,9 @@ class ExtractionPipeline:
         # 也都要封面四标量。故两个入口共用 `parse_tender_document`，只在输出映射上
         # 不同——本方法映射成 TENDER_SCHEMA，`extract_tender_bidlist` 映射成
         # TenderAnchor。给两条流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
+        # vl_extract_csv 现在是 LLMProvider 的 @abstractmethod（评审 N3），任何
+        # 合法子类必有此方法——这条 hasattr 因此是防御性守卫（防 self.provider
+        # 不是真正 LLMProvider 子类的意外情况），不再是"探测能力后决定走哪条路"。
         if not hasattr(self.provider, "vl_extract_csv"):
             raise RuntimeError(
                 f"ExtractionPipeline.extract_tender 需要具备 vl_extract_csv 的 "
@@ -103,7 +107,7 @@ class ExtractionPipeline:
                 # 未落槽位的列原样带出——换个品类（桥架的表面处理等）全靠它
                 "extended_attrs": dict(r.extra_fields or {}),
             }
-            for r in draft.rows if r.row_type == "quote_line"
+            for r in draft.rows if r.row_type == DETAIL_ROW_TYPE
         ]
         data = {**parsed.meta, "items": items}
         resp = ExtractionResponse(
@@ -150,6 +154,8 @@ class ExtractionPipeline:
         t_start = time.time()
 
         # 报价识别 = VL-direct。整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
+        # 同上（extract_tender）：vl_extract_csv 是 @abstractmethod，这里是
+        # 防御性守卫，不是能力探测（评审 N3）。
         if not hasattr(self.provider, "vl_extract_csv"):
             raise RuntimeError(
                 f"ExtractionPipeline.extract_quote 需要具备 vl_extract_csv 的 "
@@ -183,7 +189,7 @@ class ExtractionPipeline:
         # Convert DraftRow → postprocess-compatible item dicts
         items = []
         for row in draft.rows:
-            if row.row_type not in ("quote_line",):
+            if row.row_type != DETAIL_ROW_TYPE:
                 continue
             f = row.fields
             items.append({
@@ -408,18 +414,9 @@ class ExtractionPipeline:
 
 # ─── helpers ──────────────────────────────────────────────────────────────
 def _coerce_num(v: Any) -> float | None:
-    if v is None or v == "":
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip().replace(",", "").replace("，", "")
-    s = re.sub(r"[^\d.\-]", "", s)
-    if not s or s in {".", "-"}:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
+    # 评审 N7：曾是独立实现，现委托给 core.utils.parse_num 的 lenient 模式
+    # （行为不变——剥离一切非数字字符后再解析，从自由文本里挖数字）。
+    return parse_num(v, lenient=True)
 
 
 def _infer_category(name: str) -> str:

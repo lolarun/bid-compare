@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from apps.api.core.utils import parse_num
+
 
 PRICE_BASIS_INCL = "incl_tax"
 PRICE_BASIS_EXCL = "excl_tax"
@@ -33,14 +35,12 @@ AUTO_COMPARABLE_BASES = frozenset(
 
 
 def _num(v: Any) -> float | None:
-    if v is None or v == "":
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    try:
-        return float(str(v).replace(",", "").replace("，", "").strip())
-    except (TypeError, ValueError):
-        return None
+    # 评审 N7：曾是独立实现（只剥逗号，不剥货币符号/空白），现委托给
+    # core.utils.parse_num 的非 lenient 模式——batch-confirm 里这个函数吃的是
+    # 用户在复核 UI 里可编辑改过的原始值（quote_confirmation_service.py），
+    # 用户手打"¥100"这类输入此前会被静默判成无法解析（price_basis=unknown），
+    # 现在能正确剥离货币符号解析出来。
+    return parse_num(v)
 
 
 def derive_price_basis(fields: dict) -> dict:

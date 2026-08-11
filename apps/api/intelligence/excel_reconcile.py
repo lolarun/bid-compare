@@ -14,7 +14,7 @@ the tender_list / source_reconcile services.
 """
 from __future__ import annotations
 
-from apps.api.intelligence.extraction_draft import DraftRow
+from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE, DraftRow
 
 
 def reconcile_vs_excel(
@@ -39,7 +39,7 @@ def reconcile_vs_excel(
              "spec": r.fields.get("spec") or "",
              "unit": r.fields.get("unit") or "",
              "qty": r.fields.get("qty")}
-            for r in rows if r.row_type == "quote_line"
+            for r in rows if r.row_type == DETAIL_ROW_TYPE
         ]
         return reconcile_anchors(xlsx_items, pdf_items, source_type="pdf_primary")
     # 报价侧对账：简单行数 + 声明总价检查
@@ -60,7 +60,7 @@ def _reconcile_quote_vs_excel(
     except Exception as exc:
         return {"error": f"excel parse failed: {exc}"}
 
-    pdf_quote_lines = [r for r in rows if r.row_type == "quote_line"]
+    pdf_quote_lines = [r for r in rows if r.row_type == DETAIL_ROW_TYPE]
     return {
         "xlsx_row_count": xlsx_row_count,
         "pdf_row_count": len(pdf_quote_lines),
