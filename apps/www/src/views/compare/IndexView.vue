@@ -37,6 +37,7 @@ import BidMatrix from './components/BidMatrix.vue'
 import AnchorReviewMatrix from './components/AnchorReviewMatrix.vue'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
 import { asQuoteShape, asQualityMeta } from '@/utils/extraction'
+import { handleBatchConfirmError } from '@/utils/batchConfirmError'
 
 // Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
 const STEP_RESULTS = 4
@@ -756,6 +757,11 @@ function extractErrMsg(e: unknown, fallback: string): string {
   return fallback
 }
 
+// 评审 R2（第3块）：batch-confirm 的两个结构化错误（checksum_ack / missing_total
+// review_rows）此前只走 extractErrMsg 落进裸 toast，见 handleBatchConfirmError
+// 的实现注释（utils/batchConfirmError.ts）——两个调用点（confirmSupplier /
+// confirmBatchEntry）和 import/IndexView.vue 共用同一份文案，不各写一份。
+
 // Run tender list matching (called when entering Step 3)
 async function runTenderMatch(): Promise<boolean> {
   if (!taskConfig.projectId) return false
@@ -1043,7 +1049,7 @@ function onExtracted(supplierId: number, job: ExtractionJob) {
   }
 }
 
-async function confirmSupplier(supplierId: number) {
+async function confirmSupplier(supplierId: number, checksumAck = false) {
   const slot = supplierUploads[supplierId]
   if (!slot || !slot.job) {
     message.warning('请先上传该供应商的报价单')
@@ -1062,13 +1068,16 @@ async function confirmSupplier(supplierId: number) {
       category: effectiveCategory,
       overrides: slot.items as unknown as Array<Record<string, unknown>>,
       bid_status: taskConfig.bidStatus,
+      checksum_ack: checksumAck || undefined,
     })
     const result = data as BatchConfirmResult
     slot.confirmed = true
     slot.batch_id = result.batch_id
     message.success(`已入库 ${result.line_count} 条报价`)
   } catch (e) {
-    message.error(extractErrMsg(e, '入库失败'))
+    if (await handleBatchConfirmError(e, message)) {
+      await confirmSupplier(supplierId, true)
+    }
   }
 }
 
@@ -1313,7 +1322,7 @@ async function restoreBatchFiles(pid: number) {
   }
 }
 
-async function confirmBatchEntry(entry: BatchFileEntry) {
+async function confirmBatchEntry(entry: BatchFileEntry, checksumAck = false) {
   if (!entry.jobId) return
 
   // ── 品类校验 ──
@@ -1367,6 +1376,7 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
       category: effectiveCategory,
       overrides: entry.items as unknown as Array<Record<string, unknown>>,
       bid_status: taskConfig.bidStatus,
+      checksum_ack: checksumAck || undefined,
     })
     entry.confirmed = true
     entry.confirmedSupplierId = data.supplier_id ?? null
@@ -1388,8 +1398,8 @@ async function confirmBatchEntry(entry: BatchFileEntry) {
       } else {
         message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
       }
-    } else {
-      message.error(extractErrMsg(e, '入库失败'))
+    } else if (await handleBatchConfirmError(e, message)) {
+      await confirmBatchEntry(entry, true)  // 用户核对差异后确认强制入库
     }
   }
 }

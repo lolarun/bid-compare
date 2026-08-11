@@ -120,6 +120,9 @@ export const quoteApi = {
     category: string
     overrides?: Array<Record<string, unknown>>
     bid_status?: string
+    // 评审 R2（第3块）：declared_total_mismatch 结构化错误的放行开关——
+    // 此前前端根本没有这个参数，用户永远无法在核对过差异后强制入库。
+    checksum_ack?: boolean
   }) => api.post<BatchConfirmResult>('/quotes/batch-confirm', data),
 }
 

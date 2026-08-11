@@ -12,6 +12,7 @@ import {
 import { quoteApi, intakeApi, projectApi } from '@/api'
 import type { EnhanceSummary } from '@/api/client'
 import ExtractionEditor from '@/components/ExtractionEditor.vue'
+import { handleBatchConfirmError } from '@/utils/batchConfirmError'
 
 const activeTab = ref<'excel' | 'ocr'>('excel')
 
@@ -266,7 +267,7 @@ async function parseOcr() {
   }
 }
 
-async function onOcrConfirm(rows: unknown[]) {
+async function onOcrConfirm(rows: unknown[], checksumAck = false) {
   if (!ocrJobId.value) {
     message.error('缺少任务 ID，请重新上传文件')
     return
@@ -283,6 +284,7 @@ async function onOcrConfirm(rows: unknown[]) {
       project_id: ocrProjectId.value ?? undefined,
       category: '',  // per-item category comes from enhanced items
       overrides: rows as Array<Record<string, unknown>>,
+      checksum_ack: checksumAck || undefined,
     })
     if (data.line_count > 0) {
       message.success(`入库成功：新增 ${data.line_count} 条，跳过 ${data.skipped_count} 条`)
@@ -301,8 +303,11 @@ async function onOcrConfirm(rows: unknown[]) {
     enhanceSummary.value = null
     ocrSupplierName.value = ''
   } catch (e) {
-    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '入库失败'
-    message.error(detail)
+    // 评审 R2（第3块）：checksum_ack / missing_total review_rows 结构化错误，
+    // 与 compare/IndexView.vue 共用同一份 handleBatchConfirmError 文案。
+    if (await handleBatchConfirmError(e, message)) {
+      await onOcrConfirm(rows, true)
+    }
   }
 }
 
