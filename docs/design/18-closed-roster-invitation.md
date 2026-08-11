@@ -24,7 +24,7 @@ creation. The roster changes **who a column can be**, not how a page is read.
 | Tender extraction captures only project name/code/date/deadline | `pipeline.py:410-413`, `prompts.py:TENDER_PROMPT` |
 | Invited suppliers already exist as rows, written by the invite page | `models/bid_invitation.py` — `(tender_id, supplier_id, status)` |
 | Bid ingestion never reads them | `quote_confirmation_service.confirm_batch` takes client-supplied `supplier_name` |
-| Supplier identity is resolved open-set, 7 layers over all suppliers | `services/supplier_resolve.py` |
+| Supplier identity is resolved open-set, 7 layers over all suppliers | `services/supplier/supplier_resolve.py` |
 | Bid supplier name is recognized per document, with a cover-page LLM fallback | `pipeline.py:273-283` |
 
 So the data model is 80% there; the two chains are simply not connected, and the

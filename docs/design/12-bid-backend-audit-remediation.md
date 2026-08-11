@@ -133,7 +133,7 @@ Current sizes:
 | `routes/analysis.py` | 2599 | session, match, review, persistence, finalize, and state recovery are mixed in one route module |
 | `routes/quotes.py` | 903 | `batch_confirm` does validation, basis derivation, supplier handling, and persistence all at once |
 | `routes/export.py` | 606 | scope/session resolution is coupled with export-format orchestration |
-| `services/bid_matrix.py` | 1513 | legacy matrix, anchor matrix, review matrix, baseline, recommendation, and evaluation statistics coexist |
+| `services/matrix/bid_matrix.py` | 1513 | legacy matrix, anchor matrix, review matrix, baseline, recommendation, and evaluation statistics coexist |
 | `intelligence/table_recognizer.py` | 1668 | acceptable, but needs stable internal boundaries to avoid further growth |
 
 Claude's judgment about "large functions, blurred boundaries" holds. But the claim that "pages and export each compute an entirely separate matrix" is overstated: the anchor main path already jointly calls `build_anchor_matrix()`; the real duplication is in session/scope resolution, finalization, and format mapping.

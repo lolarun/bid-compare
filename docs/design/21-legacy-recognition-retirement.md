@@ -90,7 +90,7 @@ supplies it (`vl_direct.py:492-494`), so the gate never fires. Legacy fed it via
 Separately — and this affects **both** paths — `document_ingestion.py:236-238` reads
 `resp.metadata["doc_meta"]`, but nothing in `apps/api/intelligence` ever sets that key. Only
 the xlsx bypass (`tabular_ingestion.py:363-379`) sets `_doc_meta`. So the declared-total
-checksum consumed by `routes/analysis.py` and `services/quote_readiness.py` is already unfed
+checksum consumed by `routes/analysis.py` and `services/submission/quote_readiness.py` is already unfed
 for PDF quotes today. That is a pre-existing defect, not one introduced by VL-direct, and it
 should be fixed independently of this plan.
 
