@@ -141,15 +141,23 @@ _LIST_CSV = ("row_type,序号,项目名称,规格,计量单位,数量,page\n"
 
 
 class _FakeVL:
-    """按提示词区分三种调用：方向 / 清单 / 封面。"""
+    """按提示词区分四种调用：方向 / 清单 / 封面 / 要求。
+
+    **必须区分全部四种**——少认一种就会把它算成另一种，测试看到的调用次数就是假的。
+    """
 
     def __init__(self):
         self.calls: list[tuple[str, int]] = []
 
     def __call__(self, images, prompt, **_kw):
-        kind = "meta" if "key: value" in prompt else "list"
+        if "key: value" in prompt:
+            kind, out = "meta", _META_TEXT
+        elif "###" in prompt:
+            kind, out = "req", "### 材料类别\n水阀门"
+        else:
+            kind, out = "list", _LIST_CSV
         self.calls.append((kind, len(images)))
-        return _META_TEXT if kind == "meta" else _LIST_CSV
+        return out
 
     def orient(self, parts, _prompt):
         self.calls.append(("orient", len(parts)))
@@ -180,8 +188,10 @@ def test_cover_pages_are_rendered_even_when_list_pages_are_pinned(tender_pdf):
     vl = _FakeVL()
     parse_tender_document(tender_pdf, vl_call=vl, target_pages=[5])
     kinds = dict(vl.calls)
+    counts = {k: sum(1 for kk, _n in vl.calls if kk == k) for k, _ in vl.calls}
     assert kinds["list"] == 1, "清单只送指定的那一页"
     assert kinds["meta"] >= 1, "封面页必须另外渲染并送检"
+    assert counts == {"list": 1, "meta": 1, "req": 1}, f"每类恰好一次，实际 {counts}"
 
 
 def test_render_happens_once_for_both_extractions(tender_pdf):
@@ -219,3 +229,92 @@ def test_meta_parser_ignores_unknown_lines_and_never_guesses():
     m = parse_tender_meta("project_name: A\n随便一行没有冒号\nunknown_key: B\ndeadline：C")
     assert m["project_name"] == "A" and m["deadline"] == "C"
     assert m["project_code"] == "" and m["tender_date"] == ""
+
+
+# ─── 招标要求：可扩展 ────────────────────────────────────────────────────────
+#
+# 要求是**数据不是代码**：加「要求 N」= 加一条 TenderRequirement，不改解析逻辑、
+# 不加模型调用。下面这组测试守的就是这条性质。
+
+from apps.api.intelligence.vl_tender import (  # noqa: E402
+    DEFAULT_TENDER_REQUIREMENTS,
+    TenderRequirement,
+    build_requirements_prompt,
+    extract_tender_requirements,
+    parse_requirements,
+)
+
+_REQ_TEXT = """### 业主品牌要求
+brand_en,brand_cn
+ALFA,阿法
+VEGA,威盖
+
+### 投标单位参与品牌
+supplier_name,brand
+星辉（上海）机电设备科技有限公司,阿法
+
+### 材料类别
+水阀门"""
+
+
+def test_parses_table_and_text_requirements():
+    out = parse_requirements(_REQ_TEXT, DEFAULT_TENDER_REQUIREMENTS)
+    assert out["brand_requirement"] == [{"brand_en": "ALFA", "brand_cn": "阿法"},
+                                        {"brand_en": "VEGA", "brand_cn": "威盖"}]
+    assert out["supplier_brands"] == [
+        {"supplier_name": "星辉（上海）机电设备科技有限公司", "brand": "阿法"}]
+    assert out["material_class"] == "水阀门"
+
+
+def test_missing_requirement_is_empty_not_absent():
+    """**缺的项留空而不是缺键** —— 否则下游分不清"没这一项"和"这次没读到"。"""
+    out = parse_requirements("### 材料类别\n水阀门", DEFAULT_TENDER_REQUIREMENTS)
+    assert out["brand_requirement"] == [] and out["supplier_brands"] == []
+    assert set(out) == {r.key for r in DEFAULT_TENDER_REQUIREMENTS}
+
+
+def test_adding_a_requirement_needs_no_parser_change():
+    """加一项 = 加一条配置。这条测试就是那个契约本身。"""
+    extra = TenderRequirement(key="warranty", title="质保期",
+                              hint="质保年限", shape="text")
+    reqs = (*DEFAULT_TENDER_REQUIREMENTS, extra)
+    assert "质保期" in build_requirements_prompt(reqs)
+    out = parse_requirements(_REQ_TEXT + "\n\n### 质保期\n两年", reqs)
+    assert out["warranty"] == "两年"
+    assert out["material_class"] == "水阀门", "新增项不得干扰既有项"
+
+
+def test_all_requirements_come_from_one_model_call():
+    """逐项调用等于把同样的图片重复送 N 遍；且分开问容易让模型混淆
+    "业主要求的品牌"与"各家申报的品牌"。"""
+    calls = []
+
+    def vl(images, prompt, **_kw):
+        calls.append(len(images))
+        return _REQ_TEXT
+
+    extract_tender_requirements([b"a", b"b"], vl, DEFAULT_TENDER_REQUIREMENTS)
+    assert calls == [2], f"应只调用一次，实际 {len(calls)} 次"
+
+
+def test_unknown_sections_are_ignored_and_nothing_is_guessed():
+    out = parse_requirements("### 不认识的东西\n随便\n### 材料类别\n水阀门",
+                             DEFAULT_TENDER_REQUIREMENTS)
+    assert out["material_class"] == "水阀门"
+    assert out["brand_requirement"] == []
+
+
+def test_requirement_failure_leaves_every_key_empty():
+    """要求读不出应当留空且可见——清单才是主线，不该让整份识别失败。"""
+    def boom(_images, _prompt, **_kw):
+        raise RuntimeError("down")
+
+    out = extract_tender_requirements([b"x"], boom, DEFAULT_TENDER_REQUIREMENTS)
+    assert out == {"brand_requirement": [], "supplier_brands": [], "material_class": ""}
+
+
+def test_prompt_contains_no_real_supplier_or_project_names():
+    """生产 prompt 禁止出现真实供应商/项目/文件名（.claude/rules/recognition.md）。"""
+    text = build_requirements_prompt(DEFAULT_TENDER_REQUIREMENTS)
+    for forbidden in ("金桥", "凯硕", "泰科龙", "绵存", "宏胜", "亨通", "远东", "浦东"):
+        assert forbidden not in text

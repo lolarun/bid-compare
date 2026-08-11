@@ -295,9 +295,13 @@ def extract_bidlist(
         xlsx_path: 可选 Excel 清单路径；传入时自动运行 source reconciliation。
     """
     # VL-direct 优先。招标侧与报价侧共用同一套解析与结构门，差异只在列表与字段
-    # （apps/api/intelligence/vl_tender.py）。legacy 保留给不具备多图调用的 provider——
-    # 它同时还承担 Excel 对账（xlsx_path）与品牌页，那两项 VL 侧尚未实现。
-    use_vl = hasattr(provider, "vl_extract_csv") and xlsx_path is None
+    # （apps/api/intelligence/vl_tender.py）。legacy 只留给不具备多图调用的 provider。
+    #
+    # **Excel 不是降级理由。** 先前把 `xlsx_path` 作为落回 legacy 的条件是错的：
+    # `_reconcile_vs_excel` 只吃 DraftRow，与识别器无关，VL 的行同样能对账。而且
+    # 有些招标文件的 PDF 里**根本没有采购清单**，清单以 Excel 附件形式给出——
+    # 那时 Excel 是唯一来源而非交叉校验，更不该因为它的存在而降级 PDF 识别。
+    use_vl = hasattr(provider, "vl_extract_csv")
     if use_vl:
         from apps.api.core.config import get_settings
         from apps.api.intelligence.vl_tender import parse_tender_document
@@ -314,6 +318,16 @@ def extract_bidlist(
             target_pages=bidlist_pages or None,
         )
         draft = parsed.draft
+        # Excel 对账：与识别器无关（只吃 DraftRow），legacy 路径在 recognize_tables
+        # 内部做，VL 路径在这里做。失败只记录不抛——对账是校验，不是识别本身。
+        if xlsx_path:
+            from apps.api.intelligence.table_recognizer import _reconcile_vs_excel
+            try:
+                draft.reconcile = _reconcile_vs_excel(
+                    "tender", draft.rows, xlsx_path, TENDER_ADAPTER.name_key)
+            except Exception as exc:                             # noqa: BLE001
+                log.error("VL 路径 Excel 对账失败: %s", exc)
+                draft.reconcile = {"error": str(exc)}
     else:
         if not (hasattr(provider, "ocr_pages_with_roles")
                 and hasattr(provider, "_llm_call_json")):
@@ -332,11 +346,14 @@ def extract_bidlist(
             target_pages=bidlist_pages or None,
         )
 
-    # ── 品牌表（从 meta 取，extract_meta 已填充）──────────────────────────
+    # ── 招标要求（品牌等）────────────────────────────────────────────────
+    # legacy 由 extract_meta 填进 draft.meta；VL 由 parse_tender_document 填进
+    # draft.meta["tender_requirements"]。两条路的键名一致，此处统一取。
     meta = draft.meta or {}
-    brand_requirement = meta.get("brand_requirement") or []
-    supplier_brands = meta.get("supplier_brands") or []
-    material_class = meta.get("material_class") or ""
+    reqs = meta.get("tender_requirements") or {}
+    brand_requirement = reqs.get("brand_requirement") or meta.get("brand_requirement") or []
+    supplier_brands = reqs.get("supplier_brands") or meta.get("supplier_brands") or []
+    material_class = reqs.get("material_class") or meta.get("material_class") or ""
     detected_brand_page = brand_page if brand_page is not None else meta.get("brand_page")
 
     # ── DraftRow → TenderAnchor ───────────────────────────────────────────

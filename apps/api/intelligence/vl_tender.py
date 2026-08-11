@@ -28,14 +28,17 @@ TenderAnchor，邀标把标量存进招标记录。所以解析只有一份
 封面标量在比价链路里**目前没有消费方**，但仍然抽取并返回：供应商推荐将来会用到，
 而"现在没人读"不是不抽的理由——一份解析器对同一种文档应当产出同样的东西。
 
-## 品牌页还不在这里
+## 招标要求可扩展
 
-`brand_requirement` / `supplier_brands` 来自另一页、另一种版式，属于独立的抽取任务，
-VL 侧尚未实现。走 VL 时它们是空的——这是**已知能力缺口**，不是"仍走既有路径"。
-见 `services/tender_pdf.py` 与 docs/design/21。
+采购清单之外，招标文件还有若干项对投标人的要求（品牌要求、参与品牌，将来可能有
+工期、质保、付款方式）。它们由 `TenderRequirement` **声明为数据**：加一项 = 加一条
+配置，不改解析逻辑、不加模型调用。一次调用问全部，而不是每项一次——这些要求散落
+在同几页里，逐项调用等于把同样的图片重复送 N 遍，且分开问容易让模型混淆
+"业主要求的品牌"与"各家申报的品牌"。
 """
 from __future__ import annotations
 
+import csv
 import io
 import logging
 import re
@@ -145,6 +148,7 @@ class TenderParseResult:
     """
     draft: ExtractionDraft                  # 采购清单（锚点行）
     meta: dict                              # 封面四标量
+    requirements: dict                      # 招标要求（品牌等，可扩展）
     rotations: dict
     unresolved_pages: list
 
@@ -153,7 +157,9 @@ def parse_tender_document(file_path: str, *, vl_call: VLCall,
                           orient_call: OrientCall | None = None,
                           progress_cb=None, votes: int | None = None,
                           target_pages: list[int] | None = None,
-                          with_meta: bool = True) -> TenderParseResult:
+                          with_meta: bool = True,
+                          requirements: Sequence["TenderRequirement"] | None = None,
+                          ) -> TenderParseResult:
     """招标 PDF → 采购清单 + 封面标量。**渲染只做一次**，两项共用同一批图像。
 
     `target_pages` 是用户手动指定的清单页（1-based）。不指定就整份送——招标文件
@@ -201,6 +207,14 @@ def parse_tender_document(file_path: str, *, vl_call: VLCall,
     meta = (extract_tender_meta([images[p] for p in meta_pages if p in images], vl_call)
             if with_meta else {k: "" for k in _META_KEYS})
 
+    # 要求（品牌等）散在清单之外的页里。**送整份**：它们的位置不固定，而页面角色
+    # 分类尚未在 VL 侧实现——按固定页号去取就是拿样本当规律。
+    _notify("读取招标要求", 85)
+    reqs = tuple(requirements if requirements is not None
+                 else DEFAULT_TENDER_REQUIREMENTS)
+    req_out = (extract_tender_requirements(
+        [images[p] for p in sorted(images)], vl_call, reqs) if reqs else {})
+
     _notify("整理结果", 90)
     draft = build_tender_draft(
         text, file_path=file_path, page_count=page_count,
@@ -208,7 +222,8 @@ def parse_tender_document(file_path: str, *, vl_call: VLCall,
         rotations=rotations, unresolved_pages=unresolved,
     )
     draft.meta["tender_meta"] = meta
-    return TenderParseResult(draft=draft, meta=meta,
+    draft.meta["tender_requirements"] = req_out
+    return TenderParseResult(draft=draft, meta=meta, requirements=req_out,
                              rotations=rotations, unresolved_pages=unresolved)
 
 
@@ -264,3 +279,116 @@ def extract_tender_meta(images: list[bytes], vl_call: VLCall) -> dict[str, str]:
     except Exception:                                            # noqa: BLE001
         log.warning("招标封面元信息抽取失败，四个标量留空", exc_info=True)
         return {k: "" for k in _META_KEYS}
+
+
+# ─── 招标要求（可扩展）──────────────────────────────────────────────────────
+#
+# 招标文件除采购清单外还有若干项对投标人的要求：品牌要求、投标单位参与品牌，
+# 将来可能还有工期、质保、付款方式……**要求是数据不是代码**：加一项 = 加一条
+# `TenderRequirement`，不改解析逻辑，也不加新的模型调用。
+#
+# 一次调用问全部，而不是每项一次：
+#  · 这些要求散落在同几页里，逐项调用等于把同样的图片重复送 N 遍；
+#  · 它们之间有互斥关系（品牌表里既有"业主要求品牌"又有"各家参与品牌"，
+#    分开问模型容易把两者搞混），一次给全反而更准。
+#
+# 失败不拖垮清单：要求读不出应当留空且可见——清单才是主线。
+
+
+@dataclass(frozen=True)
+class TenderRequirement:
+    """一项要求的抽取声明。
+
+    `shape` 只影响解析：table → CSV 逐行；text → 原文整段。**不做语义校验**，
+    要求的内容是什么由下游决定，识别层只负责照实取回来。
+    """
+    key: str          # 产出字典里的键
+    title: str        # 出现在提示词与返回分节里的名字
+    hint: str         # 一句话说明去哪找、什么形态
+    shape: str = "table"      # table | text
+
+
+# 默认要求集。**不是穷举**，调用方可以传自己的一组。
+# 品牌两项拆开是因为它们语义不同：一个是业主的约束，一个是各投标单位的申报。
+DEFAULT_TENDER_REQUIREMENTS: tuple[TenderRequirement, ...] = (
+    TenderRequirement(
+        key="brand_requirement", title="业主品牌要求",
+        hint="业主允许或指定的品牌清单。品牌常是英文+中文组合，"
+             "输出两列 brand_en,brand_cn；只有一种时另一列留空。"),
+    TenderRequirement(
+        key="supplier_brands", title="投标单位参与品牌",
+        hint="每个投标单位一行，输出两列 supplier_name,brand。"
+             "supplier_name 是公司全称，brand 是该单位申报的品牌。"
+             "不要把品牌当成单位，也不要把单位当成品牌。"),
+    TenderRequirement(
+        key="material_class", title="材料类别",
+        hint="本次招标的材料大类，一个词即可。", shape="text"),
+)
+
+_SECTION = re.compile(r"^###\s*(.+?)\s*$")
+
+
+def build_requirements_prompt(reqs: Sequence[TenderRequirement]) -> str:
+    """按要求集生成提示词。加一项要求只会让这里多一行，不改结构。"""
+    lines = [f"- {r.title}：{r.hint}" for r in reqs]
+    shapes = "；".join(f"{r.title} 用{'CSV 表格' if r.shape == 'table' else '原文文字'}"
+                       for r in reqs)
+    return (
+        "这份招标文件里有若干项对投标人的要求。请逐项提取。\n\n"
+        "需要提取的是：\n" + "\n".join(lines) + "\n\n"
+        f"输出格式：每项以 ### 加名称单独起一节，节内容按 {shapes}。\n"
+        "文档里没有的那一项，仍然输出 ### 名称，节内留空。不要推测、不要合并。\n"
+        "只返回这些分节，不要其他说明。"
+    )
+
+
+def parse_requirements(text: str, reqs: Sequence[TenderRequirement]) -> dict:
+    """`### 名称` 分节 → 字典。认不出的分节忽略；**缺的项留空而不是缺键**，
+    否则下游分不清"没这一项"和"这次没读到"。"""
+    by_title = {r.title: r for r in reqs}
+    out: dict = {r.key: ([] if r.shape == "table" else "") for r in reqs}
+    current: TenderRequirement | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        if current is None:
+            return
+        body = "\n".join(buf).strip()
+        if current.shape == "text":
+            out[current.key] = body
+        else:
+            rows = [r for r in csv.reader(io.StringIO(body))
+                    if any((c or "").strip() for c in r)]
+            if len(rows) >= 2:
+                header = [h.strip() for h in rows[0]]
+                out[current.key] = [
+                    {h: (r[i].strip() if i < len(r) else "")
+                     for i, h in enumerate(header) if h}
+                    for r in rows[1:]
+                ]
+
+    for line in (text or "").splitlines():
+        m = _SECTION.match(line.strip())
+        if m:
+            flush()
+            current, buf = by_title.get(m.group(1).strip()), []
+            continue
+        if current is not None:
+            buf.append(line)
+    flush()
+    return out
+
+
+def extract_tender_requirements(
+    images: list[bytes], vl_call: VLCall,
+    reqs: Sequence[TenderRequirement] = DEFAULT_TENDER_REQUIREMENTS,
+) -> dict:
+    """一次调用取回全部要求。失败留空——清单才是主线。"""
+    empty = {r.key: ([] if r.shape == "table" else "") for r in reqs}
+    if not images:
+        return empty
+    try:
+        return parse_requirements(vl_call(images, build_requirements_prompt(reqs)), reqs)
+    except Exception:                                            # noqa: BLE001
+        log.warning("招标要求抽取失败，各项留空", exc_info=True)
+        return empty
