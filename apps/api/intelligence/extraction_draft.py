@@ -10,6 +10,7 @@ from typing import Any
 
 from apps.api.core.domain_config import (
     MATCH_ARITHMETIC_PASS_THRESHOLD as _ARITHMETIC_PASS_THRESHOLD,
+    EXTRACTION_ARITHMETIC_TOLERANCE,
 )
 
 
@@ -266,9 +267,10 @@ _REVIEW_PAGE_RATIO = 0.30           # if > 30% target pages are under-extracted 
 _ARITH_MISMATCH_BLOCKED_COUNT = 3        # ≥3 flagged rows → BLOCKED
 _ARITH_MISMATCH_BLOCKED_RATIO = 0.02     # >2% of quote lines → BLOCKED
 _ARITH_MISMATCH_BLOCKED_AMOUNT_RATIO = 0.10  # >10% of total amount → BLOCKED
-# 识别阶段的单行算术容差（保持本函数历史口径不变；入库门用更严的
-# INTEGRITY_ARITHMETIC_TOLERANCE，因为那时已经是确认过的同口径数值）
-_ARITHMETIC_ROW_TOLERANCE = 0.03
+# 识别阶段的单行算术容差：domain_config.EXTRACTION_ARITHMETIC_TOLERANCE（评审
+# D5：此前是本文件内的模块级常量，未集中管理；值本身有意比入库门更宽，见该
+# 常量定义处的注释，搬迁不改值）。
+_ARITHMETIC_ROW_TOLERANCE = EXTRACTION_ARITHMETIC_TOLERANCE
 
 
 def compute_quality(

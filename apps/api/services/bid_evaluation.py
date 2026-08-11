@@ -10,13 +10,16 @@
 """
 from __future__ import annotations
 
+from apps.api.core.domain_config import SEQ_QTY_TOLERANCE
 from apps.api.core.enums import (
     CELL_MISSING, CELL_EXCLUDED, CELL_PENDING,
 )
 from apps.api.services.canonical import extract_valve_canonical, normalize_valve_family
 from apps.api.services.comparison import spec_baseline_from_index, determine_alert
 
-_EVAL_QTY_TOL = 0.001
+# 与 anchor_match.py 共用同一个数量比较容差（评审 D4：此前三处各自定义
+# 0.001/0.001/1e-6，1e-6 那处会把另两处判齐的行判成冲突）。
+_EVAL_QTY_TOL = SEQ_QTY_TOLERANCE
 
 
 def _anchor_spec(anchor) -> tuple:

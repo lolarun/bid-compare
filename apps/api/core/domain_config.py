@@ -106,6 +106,14 @@ CHECKSUM_BLOCK_DELTA_RATIO: float = 0.005
 # 不按算术错误处理。倍率是报价方式的选择，只能观测和标记，禁止据此修正原值。
 INTEGRITY_MULTIPLIER_TOLERANCE: float = 0.01
 
+# 识别阶段（ExtractionDraft.compute_quality）的单行算术容差，比入库门更宽。
+# 与 INTEGRITY_ARITHMETIC_TOLERANCE(0.005) 有意不同、不是待收敛的分叉（评审
+# D5 已核实）：识别阶段的数值可能还没确认，用更严格的容差会把大量待人工核对的
+# 正常行提前判 BLOCKED；入库门用严容差是因为那时已经是用户确认过的同口径数值，
+# 偏差理应只剩舍入误差。此前是 extraction_draft.py 内的模块级常量，未集中管理，
+# 现搬到这里（搬迁不改值）。
+EXTRACTION_ARITHMETIC_TOLERANCE: float = 0.03
+
 # ── 块级对齐（block_alignment）─────────────────────────────────────────────
 # 报价清单的物理顺序不等于招标清单顺序：实测某份投标文件把普通电缆印在前（PDF 2-7 页）、
 # 矿物电缆印在后（8-10 页），而采购清单的序号是矿物 1-44、普通 45-136。直接按文档行序
@@ -168,7 +176,8 @@ SEQ_EVIDENCE_CONSISTENCY_MIN: float = 0.95
 # 接受依据——名称词表覆盖不到的品类，族判据默认 1.0，不能让它成为唯一通行证。
 SEQ_FAMILY_CONSISTENCY_MIN: float = 0.90
 
-# 数量比较容差。评审记录同一事实在三处有三个值（anchor_match 0.001 /
-# bid_evaluation 0.001 / block_alignment 1e-6），严格 1000 倍的那处会把另两处
-# 判齐的行判成冲突。此处先收敛 anchor_match 侧，其余两处待统一。
+# 数量比较容差。此前同一事实在三处有三个值（anchor_match 0.001 / bid_evaluation
+# 0.001 / block_alignment 1e-6），严格 1000 倍的那处会把另两处判齐的行判成冲突。
+# 三处已统一到这一个常量（评审 D4，2026-08-11）。名字仍带 SEQ_ 前缀是历史遗留
+# （最早只服务 anchor_match 的顺序直连判据），语义已是通用数量比较容差。
 SEQ_QTY_TOLERANCE: float = 0.001

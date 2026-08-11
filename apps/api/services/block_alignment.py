@@ -36,6 +36,7 @@ from apps.api.core.domain_config import (
     BLOCK_ASSIGN_AMBIGUITY_MARGIN,
     BLOCK_QTY_SIMILARITY_MIN,
     BLOCK_ROW_CONFLICT_MAX_RATE,
+    SEQ_QTY_TOLERANCE,
 )
 
 log = logging.getLogger(__name__)
@@ -235,7 +236,10 @@ def _row_conflicts(q: Row, a: Row) -> list[str]:
     """逐行冲突判定。只用双方都该有的事实：数量与单位。价格不参与——
     价格是各家自己的，不同不代表对错。"""
     bad = []
-    if q.qty is not None and a.qty is not None and abs(q.qty - a.qty) > 1e-6:
+    # 与 anchor_match.py/bid_evaluation.py 共用同一个数量比较容差（评审 D4：
+    # 此前这里硬编码 1e-6，比另两处的 0.001 严 1000 倍，会把另两处判齐的行
+    # 判成冲突）。
+    if q.qty is not None and a.qty is not None and abs(q.qty - a.qty) > SEQ_QTY_TOLERANCE:
         bad.append("qty")
     qu, au = (q.unit or "").strip(), (a.unit or "").strip()
     if qu and au and qu != au:
