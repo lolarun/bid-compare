@@ -61,18 +61,38 @@
 >   would cement the wrong contract and force the frontend through two
 >   migrations instead of one.
 >
-> **E4 residue — identified, not scheduled**: `apps/api/routes/quotes.py` has
-> 4 more `response_model=dict` placeholders discovered after Tier 1/2 landed,
-> not on the original 22-endpoint `analysis.py` list and not covered by any
-> tier above: `GET /api/quotes` (list, flattens `material_name`/`spec`/`unit`/
-> `category`/`profession`/`supplier_name`/`project_name` onto `QuoteOut`),
-> `GET /api/quotes/batches`, `GET /api/quotes/stats`, `POST
-> /api/quotes/archive-prices` (already has a hand-shaped 7-field response,
-> just never got a schema). None were verified against frontend consumption —
-> deliberately deferred rather than fixed opportunistically. Disposition: fold
-> into the next Tier-1-style tail batch (same shallow-verify method: check
-> `apps/www/src` for `Record<string,any>`/`as any` reads before trusting the
-> existing TS type), not part of B3.
+> **E4 residue — resolved 2026-08-11.** The 4 `quotes.py` `response_model=dict`
+> placeholders wired to real schemas (`apps/api/schemas/quote.py`:
+> `QuoteListResult`, `QuoteBatchListResult`, `QuoteStatsResult`,
+> `ArchivePricesResult`). Correction to this section's own premise: the frontend
+> API surface lives across two files, not one — `apps/www/src/api/client.ts`
+> holds the TS interfaces (`Quote`, `QuoteStats`, `PaginatedResponse<T>`),
+> `apps/www/src/api/index.ts` holds the actual call sites (`quoteApi.*`); the
+> shallow-verify method had to check both, not just `client.ts`.
+> - `GET /api/quotes`: `history/IndexView.vue` is a real consumer with its own
+>   local `QuoteRow` type — confirmed it declares (and the table's `dataIndex`
+>   columns actually read) exactly `material_name`/`spec`/`supplier_name`/
+>   `unit`. `category`/`profession`/`project_name` are flattened by the route
+>   but read by nothing in that component today — kept in the schema anyway
+>   per the Tier 2 evidence-chain precedent (computed-but-unread ≠ droppable).
+> - `GET /api/quotes/batches`: frontend's inline response type in `index.ts`
+>   already matched the route's dict shape field-for-field; `batches/IndexView.vue`
+>   confirmed as the real consumer via its own `BatchRow` interface.
+> - `GET /api/quotes/stats`: zero real frontend consumer — `quoteApi.stats` is
+>   only exercised by a URL/params-assertion unit test, not called from any
+>   `.vue`. Same shape as Tier 2's llm-fill finding; schema written from what
+>   the route computes, not from any frontend consumption.
+> - `POST /api/quotes/archive-prices`: zero frontend binding at all (no
+>   `quoteApi.archivePrices` in `index.ts`). The 3-state `status` literal
+>   (`archived`/`partially_archived`/`no_eligible`) and exact field-by-field
+>   behaviour were cross-checked against `test_bql_e2e.py`'s assertions, which
+>   is the only real consumer of this contract today.
+>
+> Verification: full backend suite (`apps/api/tests` + `tests`, both testpaths —
+> `pyproject.toml`'s `testpaths` config is silently overridden by explicit CLI
+> paths, see the earlier `services/` reorg lesson) → 754 passed, same 4
+> pre-existing failures, failure text byte-identical to baseline (not just the
+> count). Frontend `vue-tsc -b` clean.
 >
 > **B3 — resolved 2026-08-11.** Confirmed the exact bug on read: `build_anchor_matrix`
 > (`services/matrix/bid_matrix.py`) keys every column by `col_id` — `BidSubmission.id`

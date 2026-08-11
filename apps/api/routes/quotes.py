@@ -21,7 +21,10 @@ from apps.api.models import (
     BidSubmission,
     BidQuoteLine,
 )
-from apps.api.schemas import QuoteCreate, QuoteUpdate, QuoteOut, ImportResult, BatchConfirmResult
+from apps.api.schemas import (
+    QuoteCreate, QuoteUpdate, QuoteOut, ImportResult, BatchConfirmResult,
+    QuoteListResult, QuoteBatchListResult, QuoteStatsResult, ArchivePricesResult,
+)
 from apps.api.services.ingestion.import_service import import_csv_data, _gen_code
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
@@ -51,7 +54,7 @@ class BatchConfirmRequest(BaseModel):
     bid_status: str = ""
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=QuoteListResult)
 def list_quotes(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -120,7 +123,7 @@ def list_quotes(
 
 # ─── Batches ──────────────────────────────────────────────────────────────────
 
-@router.get("/batches", response_model=dict)
+@router.get("/batches", response_model=QuoteBatchListResult)
 def list_batches(
     db: Session = Depends(get_db),
 ):
@@ -234,7 +237,7 @@ def remove_job(job_id: str, db: Session = Depends(get_db)):
 
 # ─── Stats (must be before /{quote_id} to avoid route conflict) ────────────
 
-@router.get("/stats", response_model=dict)
+@router.get("/stats", response_model=QuoteStatsResult)
 def quote_stats(
     category: str | None = None,
     supplier_id: int | None = None,
@@ -397,7 +400,7 @@ class ArchivePricesRequest(BaseModel):
     project_id: int | None = None  # 覆盖 BidSubmission.project_id（可选）
 
 
-@router.post("/archive-prices", response_model=dict)
+@router.post("/archive-prices", response_model=ArchivePricesResult)
 def archive_prices(body: ArchivePricesRequest, db: Session = Depends(get_db)):
     """将 BidSubmission 中 material_id 非空的 BidQuoteLine 归档为 Quote。
 

@@ -14,6 +14,10 @@ from apps.api.schemas.project import (
 )
 from apps.api.schemas.quote import (
     QuoteBase, QuoteCreate, QuoteUpdate, QuoteOut,
+    QuoteListItemOut, QuoteListResult,
+    QuoteBatchItemOut, QuoteBatchListResult,
+    QuoteStatsResult,
+    ArchivePricesSkippedLineOut, ArchivePricesResult,
 )
 from apps.api.schemas.user import UserCreate, UserUpdate, UserOut
 from apps.api.schemas.analysis import (
@@ -62,6 +66,10 @@ __all__ = [
     "SupplierBase", "SupplierCreate", "SupplierUpdate", "SupplierOut",
     "ProjectBase", "ProjectCreate", "ProjectUpdate", "ProjectOut",
     "QuoteBase", "QuoteCreate", "QuoteUpdate", "QuoteOut",
+    "QuoteListItemOut", "QuoteListResult",
+    "QuoteBatchItemOut", "QuoteBatchListResult",
+    "QuoteStatsResult",
+    "ArchivePricesSkippedLineOut", "ArchivePricesResult",
     "PriceCompareRequest", "PriceCompareResult",
     "SupplierScoreRequest", "SupplierScoreResult",
     "CategoryStats", "DashboardSummary",
