@@ -253,6 +253,21 @@ export const brandTierApi = {
     api.delete(`/brand-tiers/${id}`),
 }
 
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+export const authApi = {
+  me: () =>
+    api.get<{
+      id: number
+      username: string
+      nickname: string
+      role: string
+      email: string
+      phone: string
+      status: string
+    }>('/auth/me'),
+}
+
 // ─── Users ───────────────────────────────────────────────────────────────────
 
 export const userApi = {

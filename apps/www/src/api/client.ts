@@ -470,10 +470,21 @@ export interface BrandRecommendation {
   tags: string[]
 }
 
+export interface SupplierRecommendation {
+  supplier_id: number
+  supplier_name: string
+  score: number
+  rank: number
+  reason: RecommendReason
+}
+
 export interface RecommendResponse {
   categories: string[]
   recommendations: BrandRecommendation[]
   total_candidates: number
+  supplier_recommendations: SupplierRecommendation[]
+  total_supplier_candidates: number
+  data_gaps: string[]
 }
 
 export interface BatchConfirmResult {
