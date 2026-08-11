@@ -62,6 +62,12 @@ class _BQLMatProxy:
 from apps.api.core.domain_config import MATCH_SEQUENTIAL_SIM_THRESHOLD as SIM_THRESHOLD
 # 低于此标记为低置信、建议复核(写入 reason,前端可高亮)
 from apps.api.core.domain_config import MATCH_LOW_CONFIDENCE_THRESHOLD as LOW_CONF
+from apps.api.core.domain_config import (
+    SEQ_EVIDENCE_CONSISTENCY_MIN,
+    SEQ_EVIDENCE_COVERAGE_MIN,
+    SEQ_FAMILY_CONSISTENCY_MIN,
+    SEQ_QTY_TOLERANCE,
+)
 EMBED_MODEL = "text-embedding-v4"
 _EMBED_BATCH = 10
 
@@ -464,11 +470,33 @@ def attach_nearest_hints(
     return result
 
 
-# 顺序直连门禁阈值（整表层：决定该供应商是否走顺序直连）
-_SEQ_DN_COVERAGE = 0.90      # 双方都识别出 DN 的位置占比下限（防稀疏DN蒙混整表通过）
-_SEQ_DN_CONSISTENCY = 0.95   # 已识别DN的同位置一致率（确认整体按位置对齐，非shuffle）
-_SEQ_FAM_CONSISTENCY = 0.90  # 同位置大类族一致率（整表防整体/局部交换）
-_SEQ_QTY_TOL = 0.001         # 数量比较容差
+# 顺序直连门禁阈值：见 core/domain_config（CLAUDE.md §4「阈值集中」）。
+# 此处保留别名只为可读性，取值与判定行为与集中定义完全一致。
+_SEQ_EVIDENCE_COVERAGE = SEQ_EVIDENCE_COVERAGE_MIN
+_SEQ_EVIDENCE_CONSISTENCY = SEQ_EVIDENCE_CONSISTENCY_MIN
+_SEQ_FAM_CONSISTENCY = SEQ_FAMILY_CONSISTENCY_MIN
+_SEQ_QTY_TOL = SEQ_QTY_TOLERANCE
+
+# 顺序直连的**判据维度**。原实现只认 DN 一种，导致无 DN 的品类（电缆、桥架、
+# 母线槽…）`dn_cov` 恒为 0、门禁必然拒绝，顺序直连**永远无法启用**——这不是
+# 保守，是按品类锁死：七份基准里的阀门有 DN，电缆没有，于是电缆全部落回语义匹配。
+#
+# 判据的作用是证明「这个逐位对应不是碰巧」，DN 只是其中一种载体。数量序列是
+# 另一种，且已有先例：block_alignment 正是用数量序列做块级对应（招标清单只给
+# 序号/名称/规格/单位/数量，没有价格，数量是那里唯一可用的判别量）。
+#
+# **判据必须有区分度才算数**：一列全是 "1" 的数量，即便逐位"一致"也证明不了
+# 任何东西——把行打乱重排，它照样 100% 一致。
+#
+# 用「随机一致率」度量，而不是去重比例：随机一致率 = 任取两个位置取值相同的
+# 概率 = Σ(每个取值的占比²)。它直接回答「这个判据靠碰运气能对上多少」，且
+# 与行数无关——去重比例做不到这点（4 行全同的去重比例是 0.25，看起来"还行"，
+# 100 行全同却是 0.01，同一种病给出相反的读数）。
+#
+# 阈值 0.5：随机就能对上一半以上的判据，它给出的 95% 一致率说明不了对齐关系。
+# DN 原实现完全没有这道检查，同样存在"整表 DN 全是 DN100 则一致率恒 100%"的
+# 漏洞，本次一并补上。
+_SEQ_EVIDENCE_MAX_CHANCE_AGREEMENT = 0.5
 
 # 归一化大类族：稳健于名称变体（止回阀内部橡胶瓣/缓闭式/弹簧式 + 倒流防止器 同族），
 # 但 蝶阀≠闸阀≠球阀 严格区分——用于逐行 + 整表防同DN串位。关键字按特异性排序，先到先得。
@@ -497,6 +525,45 @@ def _qty_eq(a, b) -> bool:
         return abs(float(a) - float(b)) <= _SEQ_QTY_TOL
     except (TypeError, ValueError):
         return False
+
+
+def _evidence_verdict(
+    both: int, match: int, values: list, n: int,
+) -> tuple[bool, float, float]:
+    """单个判据维度的整表结论 → (是否达标, 覆盖率, 一致率)。
+
+    三项都必须过：
+      覆盖率    双方都取到该判据的位置占比 —— 防「稀疏判据蒙混整表通过」；
+      一致率    已覆盖位置上的相符占比 —— 防串位；
+      区分度    随机一致率必须足够低 —— **防"全是同一个值"的伪一致**。
+
+    区分度是原实现没有的。整表 DN 全为 DN100、或数量全为 1 时，把行打乱重排
+    一致率仍是 100%——那样的"一致"证明不了逐位对应关系。没有它，本次为无 DN
+    品类新开的数量判据会变成一条几乎无条件放行的通道（实测：既有的两个防串位
+    回归测试立刻被它放行，因为那些夹具的数量全是 1.0）。
+    """
+    if n <= 0:
+        return False, 0.0, 0.0
+    cov = both / n
+    cons = match / both if both else 0.0
+    ok = (cov >= _SEQ_EVIDENCE_COVERAGE
+          and cons >= _SEQ_EVIDENCE_CONSISTENCY
+          and _chance_agreement(values) <= _SEQ_EVIDENCE_MAX_CHANCE_AGREEMENT)
+    return ok, cov, cons
+
+
+def _chance_agreement(values: list) -> float:
+    """随机一致率 = 任取两个位置取值相同的概率 = Σ(每个取值占比²)。
+
+    全同 → 1.0（判据无区分度）；全不同 → 1/n（区分度最强）。
+    空列表返回 1.0：**没有取值就是没有证据**，按最差处理，不能当成"无从判断
+    所以放行"。
+    """
+    if not values:
+        return 1.0
+    from collections import Counter
+    total = len(values)
+    return sum((c / total) ** 2 for c in Counter(values).values())
 
 
 def _doc_order(qis: list[int], doc_index: dict | None) -> tuple[list[int], bool]:
@@ -575,6 +642,9 @@ def _sequential_matches(
         # ── 逐位置评估 ──
         per_pos: list[tuple[int, int, bool]] = []   # (qi, ai, row_clean)
         dn_both = dn_match = fam_both = fam_match = 0
+        qty_both = qty_match = 0
+        qty_values: list[float] = []     # 用于判断数量判据是否有区分度
+        dn_values: list[str] = []
         for pos, qi in enumerate(qis):
             ai = order[pos]
             adn, qdn = a_dn[ai], quote_dns[qi]
@@ -582,6 +652,7 @@ def _sequential_matches(
             dn_hit = dn_present and str(adn) == str(qdn)
             if dn_present:
                 dn_both += 1; dn_match += dn_hit
+                dn_values.append(str(adn))
             # 归一化大类族（稳健于名称变体；逐行+整表都用它防同DN串位）
             afam, qfam = a_fam[ai], _coarse_family(getattr(materials[qi], "standard_name", "") or "")
             fam_present = bool(afam and qfam)
@@ -593,18 +664,41 @@ def _sequential_matches(
             unit_conflict = bool(a_unit and q_unit and a_unit != q_unit)
             a_qty = getattr(anchors[ai], "qty", None)
             q_qty = getattr(quotes[qi], "quantity", None)
-            qty_conflict = (a_qty is not None and q_qty is not None and not _qty_eq(a_qty, q_qty))
+            qty_present = a_qty is not None and q_qty is not None
+            qty_hit = qty_present and _qty_eq(a_qty, q_qty)
+            qty_conflict = qty_present and not qty_hit
+            if qty_present:
+                qty_both += 1; qty_match += qty_hit
+                try:
+                    qty_values.append(float(a_qty))
+                except (TypeError, ValueError):
+                    pass
             # 逐行冲突：DN不符 / 大类族不符(防同DN异类) / 单位不符 / 数量不符 → 该行 pending
             row_conflict = (dn_present and not dn_hit) or (fam_present and not fam_hit) \
                 or unit_conflict or qty_conflict
             per_pos.append((qi, ai, not row_conflict))
         # ── 整表门禁 ──
-        dn_cov = dn_both / n if n else 0.0
-        dn_cons = dn_match / dn_both if dn_both else 0.0
+        #
+        # 每个判据独立评估「覆盖率 / 一致率 / 区分度」三项，**任一判据全部达标即可
+        # 授权**顺序直连。不要求所有判据都达标：无 DN 的品类（电缆/桥架/母线槽）
+        # 本来就取不到 DN，要求它达标等于按品类锁死（原实现即如此）。
+        #
+        # 族一致率是**否决项而非授权项**：`_COARSE_FAMILY_KEYWORDS` 是阀门词表，
+        # 非阀门品类下 fam_both=0 → fam_cons 默认 1.0。若它能单独授权，等于
+        # 「词表覆盖不到的品类自动放行」——恰好把最没有证据的情况判成最可信。
+        dn_ok, dn_cov, dn_cons = _evidence_verdict(dn_both, dn_match, dn_values, n)
+        qty_ok, qty_cov, qty_cons = _evidence_verdict(qty_both, qty_match, qty_values, n)
         fam_cons = fam_match / fam_both if fam_both else 1.0
-        accept = (dn_cov >= _SEQ_DN_COVERAGE and dn_cons >= _SEQ_DN_CONSISTENCY
-                  and fam_cons >= _SEQ_FAM_CONSISTENCY)
+
+        authorized = dn_ok or qty_ok
+        accept = authorized and fam_cons >= _SEQ_FAM_CONSISTENCY
         if not accept:
+            log.info(
+                "sequential direct-connect 拒绝: submission=%s n=%d "
+                "DN(覆盖%.0f%% 一致%.0f%% 达标=%s) 数量(覆盖%.0f%% 一致%.0f%% 达标=%s) 族一致%.0f%%",
+                sid, n, dn_cov * 100, dn_cons * 100, dn_ok,
+                qty_cov * 100, qty_cons * 100, qty_ok, fam_cons * 100,
+            )
             embed_qi.extend(qis)
             continue
         conflicts = 0
@@ -613,8 +707,13 @@ def _sequential_matches(
             seq_qi.add(qi)
             if not clean:
                 seq_conflict_qi.add(qi); conflicts += 1
-        log.info("sequential direct-connect: submission=%s %d 行直连 (DN覆盖%.0f%% 一致%.0f%% 族%.0f%%, 冲突%d行→pending)",
-                 sid, n, dn_cov * 100, dn_cons * 100, fam_cons * 100, conflicts)
+        log.info(
+            "sequential direct-connect: submission=%s %d 行直连 "
+            "(授权判据=%s, DN覆盖%.0f%%一致%.0f%%, 数量覆盖%.0f%%一致%.0f%%, 族%.0f%%, 冲突%d行→pending)",
+            sid, n, "DN" if dn_ok else "数量",
+            dn_cov * 100, dn_cons * 100, qty_cov * 100, qty_cons * 100,
+            fam_cons * 100, conflicts,
+        )
     return seq_matches, seq_qi, seq_conflict_qi, embed_qi
 
 

@@ -179,3 +179,69 @@ def test_document_row_index_used_when_present():
     assert len(seq_qi) == 3 and conflict == set() and embed == []
     # dri=1(qi=1)→anchor0, dri=2(qi=2)→anchor1, dri=3(qi=0)→anchor2
     assert sorted((qi, ai) for qi, ai, _ in seq) == [(0, 2), (1, 0), (2, 1)]
+
+
+# ─── 判据泛化：无 DN 品类不得被锁死（评审 B1）────────────────────────────────
+#
+# 原实现整表门禁只认 DN 一种判据，`dn_cov` 对电缆/桥架/母线槽恒为 0 → 顺序直连
+# **永远无法启用**。这不是保守，是按品类锁死：七份基准里阀门有 DN、电缆没有。
+
+def _cable(anchor_qtys, quote_qtys, sub_id=1):
+    """无 DN 的品类（电缆）：靠数量序列做位置判据。"""
+    anchors = [SimpleNamespace(seq=i + 1, name=f"电缆规格{i}", spec=f"YJV-{i}",
+                               unit="米", qty=q)
+               for i, q in enumerate(anchor_qtys)]
+    quotes, materials, dns, canons = [], [], [], []
+    for i, q in enumerate(quote_qtys):
+        quotes.append(SimpleNamespace(supplier_id=sub_id, quantity=q,
+                                      canonical={}, document_row_index=None))
+        materials.append(SimpleNamespace(unit="米", standard_name=f"电缆规格{i}",
+                                         spec=f"YJV-{i}"))
+        dns.append("")          # 电缆无 DN
+        canons.append({})
+    return anchors, quotes, materials, dns, canons
+
+
+def test_non_dn_category_can_use_qty_evidence():
+    """电缆等无 DN 品类：数量序列有区分度且逐位一致 → 应当允许顺序直连。
+
+    修复前这里必然走 embedding —— dn_cov=0 让门禁无条件拒绝。
+    """
+    qtys = [120.5, 88.0, 310.75, 45.0, 999.25, 7.5]
+    a, q, m, d, c = _cable(qtys, qtys)
+    seq, seq_qi, conflict, embed = _sequential_matches(a, q, m, d, c)
+    assert len(seq_qi) == len(qtys) and embed == []
+    assert conflict == set()
+
+
+def test_non_dn_category_shuffled_qty_rejected():
+    """数量序列被打乱 → 一致率掉下阈值 → 仍应拒绝。放开判据不等于放松防串位。"""
+    qtys = [120.5, 88.0, 310.75, 45.0, 999.25, 7.5]
+    a, q, m, d, c = _cable(qtys, [88.0, 120.5, 45.0, 310.75, 7.5, 999.25])
+    seq, seq_qi, conflict, embed = _sequential_matches(a, q, m, d, c)
+    assert seq == [] and len(embed) == len(qtys)
+
+
+def test_uniform_qty_is_not_evidence():
+    """**数量全相同不构成判据** —— 打乱重排它照样 100% 一致。
+
+    这是为无 DN 品类开数量判据时最容易漏的一条：不做区分度检查，它就成了一条
+    几乎无条件放行的通道（实测：既有两个防串位回归测试立刻被放行，因为那些
+    夹具的数量全是 1.0）。
+    """
+    a, q, m, d, c = _cable([1.0] * 6, [1.0] * 6)
+    seq, seq_qi, conflict, embed = _sequential_matches(a, q, m, d, c)
+    assert seq == [] and len(embed) == 6
+
+
+def test_chance_agreement_is_row_count_independent():
+    """区分度必须与行数无关：'全同'在 4 行和 100 行都该判为无区分度。
+
+    去重比例做不到——4 行全同是 0.25（看着"还行"），100 行全同是 0.01，
+    同一种病给出相反读数。
+    """
+    from apps.api.services.anchor_match import _chance_agreement
+    assert _chance_agreement([1.0] * 4) == 1.0
+    assert _chance_agreement([1.0] * 100) == 1.0
+    assert _chance_agreement([]) == 1.0, "没有取值就是没有证据，按最差处理"
+    assert _chance_agreement([1.0, 2.0, 3.0, 4.0]) == 0.25

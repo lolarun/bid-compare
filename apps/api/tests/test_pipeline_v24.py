@@ -439,3 +439,24 @@ def test_readiness_pending_excluded():
     assert r.excluded_rows["pending"] == 1
     assert r.checksum_status == "unknown"
     assert any("待确认" in w for w in r.warnings)
+
+
+def test_readiness_checksum_shares_the_ingest_gate_threshold():
+    """下游准入门不得比上游入库门宽松（评审 B2）。
+
+    此前 readiness 独立写着 5%、入库门是 0.5%，相差 10 倍。后果不是"多放行
+    一点"：偏差 2% 的报价入库时会被拒、需人工 checksum_ack，而 ack 的语义是
+    "允许存储"；到了 readiness 却因 2% ≤ 5% 判 passed，又被自动放进比价矩阵，
+    等于**下游默默推翻了上游要求的人工判断**。
+    """
+    from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
+    from apps.api.services.quote_readiness import _CHECKSUM_TOLERANCE, _compute_checksum
+
+    assert _CHECKSUM_TOLERANCE == CHECKSUM_BLOCK_DELTA_RATIO, "两道门必须共用同一个阈值"
+
+    # 2% 偏差：入库门会拒（需 ack），准入门也必须拒
+    assert _compute_checksum(1_000_000.0, 980_000.0, "tax_included") == "failed"
+    # 阈值内仍然通过
+    assert _compute_checksum(1_000_000.0, 997_000.0, "tax_included") == "passed"
+    # 税基不可比时既不是 passed 也不是 failed —— 保留这个第三态
+    assert _compute_checksum(1_000_000.0, 940_000.0, "tax_excluded") == "basis_mismatch"

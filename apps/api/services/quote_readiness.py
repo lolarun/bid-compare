@@ -13,8 +13,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
 
-_CHECKSUM_TOLERANCE = 0.05  # 5% tolerance for bid_total vs computed_total
+# 声明总价 vs 行级合计的容差。**与入库阻断门共用同一个常量**。
+#
+# 此前这里独立写着 0.05（5%），而入库门是 0.005（0.5%）——同一个事实、两个阈值、
+# 相差 10 倍，且下游这道更松。后果不是"多放行一点"，而是**下游默默推翻上游要求
+# 的人工判断**：偏差 2% 的报价在入库时会被拒（需人工 checksum_ack 才能存），
+# 而人工 ack 的是"允许存储"；到了这里 2% ≤ 5% 判 passed，于是它又被自动放进
+# 比价矩阵，仿佛从来没有过偏差。
+#
+# 0.5% 这个值本身的形状仍有疑问（docs/design/20，草稿待批），但那是"两处一起改"
+# 的问题；在批准之前，两处至少必须是同一个数。
+_CHECKSUM_TOLERANCE = CHECKSUM_BLOCK_DELTA_RATIO
 
 
 @dataclass
@@ -32,6 +43,11 @@ class QuoteReadiness:
     doc_total: float | None = None
     computed_total: float | None = None
     bid_total_basis: str = "unknown"   # "tax_included" | "tax_excluded" | "unknown"
+    # ⚠ 词表与入库门（quote_confirmation_service 的 pass/fail/unknown）不一致：
+    # 这里是 passed/failed，且多一个 basis_mismatch。两者都是公开 API 字段
+    # （readiness_list[].checksum_status vs suppliers[].checksum_status），
+    # 统一词表属破坏性契约变更，与 B3 身份命名一并在专门一轮处理。
+    # **阈值已统一**（见上方 _CHECKSUM_TOLERANCE），词表尚未。
     checksum_status: str = "unknown"   # "passed" | "failed" | "unknown" | "basis_mismatch"
     # Conflict
     cross_type_conflicts: int = 0
