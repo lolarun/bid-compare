@@ -17,6 +17,7 @@ import type {
   ExtractionJob,
   TenderExtractionItem,
   BrandRecommendation,
+  SupplierRecommendation,
 } from '@/api/client'
 import { asTenderBidlistShape } from '@/utils/extraction'
 
@@ -28,6 +29,9 @@ const recommending = ref(false)
 const recommendations = ref<BrandRecommendation[]>([])
 const categories = ref<string[]>([])
 const selectedBrands = ref<string[]>([])
+const supplierRecommendations = ref<SupplierRecommendation[]>([])
+const selectedSupplierIds = ref<number[]>([])
+const dataGaps = ref<string[]>([])
 
 // 每张卡片高度（含 gap）约 135px；去掉顶导、页头、信息条、分页、底部操作栏等固定开销
 const CARD_H = 135
@@ -57,7 +61,10 @@ const savedTenderId = ref<number | null>(null)
 
 const hasItems = computed(() => tenderItems.value.length > 0)
 const canRecommend = computed(() => hasItems.value && !recommending.value)
-const canSave = computed(() => savedTenderId.value === null && recommendations.value.length > 0)
+const canSave = computed(() =>
+  savedTenderId.value === null
+  && (recommendations.value.length > 0 || supplierRecommendations.value.length > 0)
+)
 
 // ─── Step 1: ingestion ─────────────────────────────────────────────────────
 function onExtracted(job: ExtractionJob) {
@@ -72,6 +79,9 @@ function onExtracted(job: ExtractionJob) {
   }
   recommendations.value = []
   selectedBrands.value = []
+  supplierRecommendations.value = []
+  selectedSupplierIds.value = []
+  dataGaps.value = []
   savedTenderId.value = null
   const rawName = (job.result as Record<string, unknown> | null)?.project_name
   if (typeof rawName === 'string' && rawName && !projectName.value) projectName.value = rawName
@@ -92,7 +102,10 @@ async function generateRecommendations() {
     })
     recommendations.value = data.recommendations
     categories.value = data.categories
+    supplierRecommendations.value = data.supplier_recommendations
+    dataGaps.value = data.data_gaps
     selectedBrands.value = []
+    selectedSupplierIds.value = data.supplier_recommendations.slice(0, 3).map((item) => item.supplier_id)
     savedTenderId.value = null
     currentPage.value = 1
   } catch (e) {
@@ -122,6 +135,7 @@ async function saveInvitations() {
       brand_requirements: selectedBrands.value.length > 0
         ? selectedBrands.value
         : brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
+      supplier_ids: selectedSupplierIds.value,
     })
     savedTenderId.value = data.tender_id
     message.success(`已保存招标记录 #${data.tender_id}`)
@@ -138,6 +152,12 @@ function toggleBrand(name: string) {
   const i = selectedBrands.value.indexOf(name)
   if (i >= 0) selectedBrands.value.splice(i, 1)
   else selectedBrands.value.push(name)
+}
+
+function toggleSupplier(id: number) {
+  const i = selectedSupplierIds.value.indexOf(id)
+  if (i >= 0) selectedSupplierIds.value.splice(i, 1)
+  else selectedSupplierIds.value.push(id)
 }
 
 // ─── Display helpers ──────────────────────────────────────────────────────
@@ -191,7 +211,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
       <a-col :xs="24" :lg="8" class="invite-page__col">
         <div class="tender-card">
           <div class="tender-card__title">招标信息</div>
-          <div class="tender-card__subtitle">上传招标文件，自动识别清单后生成品牌建议</div>
+          <div class="tender-card__subtitle">上传招标文件，自动识别清单后生成邀标建议</div>
 
           <div class="tender-card__upload">
             <FileUploadCard
@@ -256,12 +276,12 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
             @click="generateRecommendations"
           >
             <template #icon><ThunderboltOutlined /></template>
-            生成品牌建议
+            生成邀标建议
           </a-button>
         </div>
       </a-col>
 
-      <!-- ════════ 右侧：推荐品牌 ════════ -->
+      <!-- ════════ 右侧：供应商与品牌建议 ════════ -->
       <a-col :xs="24" :lg="16" class="invite-page__col">
         <div class="reco-panel">
           <!-- 信息条 -->
@@ -269,13 +289,51 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
             <div class="reco-header__meta">
               <InfoCircleOutlined class="reco-header__icon" />
               <span v-if="recommendations.length">
-                已从审定品牌库推荐 <b>{{ recommendations.length }}</b> 个品牌 · 合资优先，同类按样本量排序
+                已推荐 <b>{{ supplierRecommendations.length }}</b> 家供应商、<b>{{ recommendations.length }}</b> 个审定品牌
               </span>
               <span v-else>
-                上传招标文件后，系统将从审定品牌库按品类推荐品牌及参考价格区间
+                上传招标文件后，系统将按历史报价证据推荐供应商，并给出品牌及价格参考
               </span>
             </div>
           </div>
+
+          <a-alert
+            v-for="gap in dataGaps"
+            :key="gap"
+            type="warning"
+            show-icon
+            :message="gap"
+            class="reco-gap"
+          />
+
+          <section v-if="supplierRecommendations.length" class="supplier-reco">
+            <div class="supplier-reco__title">
+              推荐邀请供应商
+              <span>已分析 {{ categories.join('、') || '相关' }} 品类；默认勾选前 3 家，可调整</span>
+            </div>
+            <div class="supplier-reco__list">
+              <article
+                v-for="supplier in supplierRecommendations"
+                :key="supplier.supplier_id"
+                class="supplier-reco__card"
+                :class="{ 'supplier-reco__card--selected': selectedSupplierIds.includes(supplier.supplier_id) }"
+                @click="toggleSupplier(supplier.supplier_id)"
+              >
+                <a-checkbox
+                  :checked="selectedSupplierIds.includes(supplier.supplier_id)"
+                  @click.stop
+                  @change="toggleSupplier(supplier.supplier_id)"
+                />
+                <div class="supplier-reco__main">
+                  <div class="supplier-reco__name">{{ supplier.rank }}. {{ supplier.supplier_name }}</div>
+                  <div class="supplier-reco__summary">{{ supplier.reason.summary }}</div>
+                  <a-tag v-for="tag in supplier.reason.tags" :key="tag" size="small">{{ tag }}</a-tag>
+                  <a-tag v-for="brand in supplier.reason.brands.slice(0, 3)" :key="brand" color="cyan" size="small">{{ brand }}</a-tag>
+                </div>
+                <div class="supplier-reco__score">{{ supplier.score.toFixed(1) }}</div>
+              </article>
+            </div>
+          </section>
 
           <!-- 品牌卡片列表 -->
           <div v-if="recommendations.length" class="reco-list">
@@ -359,7 +417,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
 
           <!-- 空态 -->
           <div v-else-if="!recommendations.length" class="reco-empty">
-            <a-empty :description="hasItems ? '点击左侧「生成品牌建议」查看推荐品牌' : '上传招标文件后，这里展示推荐品牌'" />
+            <a-empty :description="hasItems ? '点击左侧「生成邀标建议」查看供应商与品牌建议' : '上传招标文件后，这里展示邀标建议'" />
           </div>
 
           <a-alert
@@ -373,14 +431,14 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
         </div>
 
         <!-- 右侧按钮 -->
-        <div v-if="recommendations.length" class="action-bar action-bar--right">
+        <div v-if="recommendations.length || supplierRecommendations.length" class="action-bar action-bar--right">
           <span class="action-bar__count">
-            已选品牌：<b>{{ selectedBrands.length }}</b> / {{ recommendations.length }}
+            已选供应商：<b>{{ selectedSupplierIds.length }}</b> / {{ supplierRecommendations.length }} · 品牌：<b>{{ selectedBrands.length }}</b>
           </span>
           <a-space>
             <a-button :loading="saving" :disabled="!canSave" @click="saveInvitations">
               <template #icon><SaveOutlined /></template>
-              保存为草稿
+              保存邀标名单
             </a-button>
             <a-button disabled>
               <template #icon><FilePdfOutlined /></template>
@@ -522,11 +580,55 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
   padding: 48px 16px;
 }
 
+.reco-gap {
+  margin-bottom: 12px;
+}
+
+.supplier-reco {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid #d9e7ff;
+  border-radius: @border-radius-base;
+  background: #f7fbff;
+
+  &__title {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    color: @heading-color;
+    span { font-size: 12px; font-weight: 400; color: @text-color-secondary; }
+  }
+  &__list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  &__card {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px;
+    border: 1px solid #e6eef8;
+    border-radius: @border-radius-base;
+    background: #fff;
+    cursor: pointer;
+    &--selected { border-color: @primary-color; box-shadow: 0 0 0 1px fade(@primary-color, 20%); }
+  }
+  &__main { flex: 1; min-width: 0; }
+  &__name { font-weight: 600; color: @heading-color; }
+  &__summary { margin: 3px 0 6px; font-size: 12px; color: @text-color-secondary; }
+  &__score { color: @primary-color; font-weight: 600; }
+}
+
 // ════════ 品牌卡片 ════════
 .reco-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .supplier-reco__list { grid-template-columns: 1fr; }
+  .supplier-reco__title { flex-direction: column; gap: 2px; }
 }
 
 .reco-card {

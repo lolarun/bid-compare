@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from sqlalchemy import select
 from PIL import Image
 from fastapi.testclient import TestClient
 
@@ -107,7 +108,7 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80) -> int
             else ""
         )
         if brand and brand not in {"nan", "None"}:
-            supplier = db.query(Supplier).filter_by(name=brand).first()
+            supplier = db.scalar(select(Supplier).where(Supplier.name == brand))
             if not supplier:
                 supplier = Supplier(name=brand)
                 db.add(supplier)
@@ -526,6 +527,71 @@ class TestBrandRecommendJingqiao:
 
 
 # ─── TestBrandRecommendE2E ──────────────────────────────────────────────────
+class TestSupplierInvitationEvidence:
+    """The actionable invitation path must persist deterministic evidence."""
+
+    def test_supplier_recommendation_and_saved_evidence(self, brand_client):
+        from apps.api.core.database import SessionLocal
+        from apps.api.models import Material, Quote, Supplier, TenderDocument
+
+        db = SessionLocal()
+        try:
+            supplier = Supplier(name="Evidence Supplier", cooperation_score=80)
+            material = Material(
+                standard_name="Evidence Cable Tray",
+                profession="电气",
+                category="桥架",
+                unit="m",
+                ref_price_reasonable_low=100,
+            )
+            db.add_all([supplier, material])
+            db.flush()
+            db.add_all([
+                Quote(
+                    material_id=material.id, supplier_id=supplier.id,
+                    unit_price=95, brand="Evidence Brand",
+                ),
+                # Excluded history must not be used as brand evidence.
+                Quote(
+                    material_id=material.id, supplier_id=supplier.id,
+                    unit_price=90, brand="Excluded Brand",
+                    bid_status="excluded_from_ref",
+                ),
+            ])
+            db.commit()
+        finally:
+            db.close()
+
+        items = [{"name": "桥架 300x100", "category": "桥架"}]
+        rec = brand_client.post("/api/invite/recommend", json={
+            "tender_items": items, "top_n": 5,
+        })
+        assert rec.status_code == 200, rec.text
+        suppliers = rec.json()["supplier_recommendations"]
+        evidence = next(item for item in suppliers if item["supplier_name"] == "Evidence Supplier")
+        assert evidence["reason"]["history_count"] == 1
+        assert "Evidence Brand" in evidence["reason"]["brands"]
+        assert "Excluded Brand" not in evidence["reason"]["brands"]
+
+        saved = brand_client.post("/api/invite/save", json={
+            "project_name": "Evidence Pilot",
+            "items": items,
+            "supplier_ids": [evidence["supplier_id"]],
+        })
+        assert saved.status_code == 200, saved.text
+        invitation = saved.json()["invitations"][0]
+        assert invitation["rank"] == evidence["rank"]
+        assert invitation["score"] == evidence["score"]
+
+        db = SessionLocal()
+        try:
+            tender = db.get(TenderDocument, saved.json()["tender_id"])
+            assert tender.recommendation_snapshot["selected_supplier_ids"] == [evidence["supplier_id"]]
+            assert tender.invitations[0].reason["history_count"] == 1
+        finally:
+            db.close()
+
+
 @pytest.mark.e2e
 class TestBrandRecommendE2E:
     """Fresh E2E: upload the real 金桥 PDF, parse tender items, then brand-recommend.

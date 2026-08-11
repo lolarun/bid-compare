@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,22 +24,36 @@ from apps.api.schemas.invite import (
     BrandRecommendation,
     RecommendRequest,
     RecommendResponse,
+    SupplierRecommendation,
     SaveInvitationsRequest,
     SaveInvitationsResponse,
     SavedInvitation,
 )
-from apps.api.services.brand_recommend import recommend_brands
+from apps.api.services.invitation_recommendation import (
+    MAX_SUPPLIER_RECOMMENDATIONS,
+    build_invitation_recommendation,
+)
 
 router = APIRouter(prefix="/api/invite", tags=["invite"])
 
 
 @router.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest, db: Session = Depends(get_db)) -> RecommendResponse:
-    recs, categories = recommend_brands(db, req.tender_items, top_n=max(1, req.top_n))
+    result = build_invitation_recommendation(
+        db,
+        req.tender_items,
+        top_n=req.top_n,
+        project_id=req.project_id,
+        brand_requirements=req.brand_requirements,
+    )
+
     return RecommendResponse(
-        categories=categories,
-        recommendations=[BrandRecommendation(**r) for r in recs],
-        total_candidates=len(recs),
+        categories=result["categories"],
+        recommendations=[BrandRecommendation(**r) for r in result["brand_recommendations"]],
+        total_candidates=len(result["brand_recommendations"]),
+        supplier_recommendations=[SupplierRecommendation(**r) for r in result["supplier_recommendations"]],
+        total_supplier_candidates=result["total_supplier_candidates"],
+        data_gaps=result["data_gaps"],
     )
 
 
@@ -66,6 +81,19 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         db.add(tender)
         db.flush()
 
+    result = build_invitation_recommendation(
+        db,
+        req.items or tender.items or [],
+        top_n=MAX_SUPPLIER_RECOMMENDATIONS,
+        project_id=req.project_id or tender.project_id,
+        brand_requirements=req.brand_requirements,
+    )
+    tender.recommendation_snapshot = {
+        **result,
+        "selected_supplier_ids": req.supplier_ids,
+        "selected_brand_requirements": req.brand_requirements,
+    }
+
     # When no supplier_ids are given (brand-only recommendation flow), just
     # persist the TenderDocument and return with an empty invitations list.
     if not req.supplier_ids:
@@ -74,11 +102,9 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
 
     # Pre-validate supplier IDs so an all-invalid request fails cleanly
     # (rather than leaving an orphan tender + empty invitations behind).
-    valid_suppliers = (
-        db.query(Supplier)
-        .filter(Supplier.id.in_(req.supplier_ids))
-        .all()
-    )
+    valid_suppliers = db.scalars(
+        select(Supplier).where(Supplier.id.in_(req.supplier_ids))
+    ).all()
     valid_id_map = {s.id: s for s in valid_suppliers}
     if not valid_id_map:
         db.rollback()
@@ -90,7 +116,10 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
             ),
         )
 
-    rec_lookup: dict[int, dict] = {}
+    rec_lookup = {
+        item["supplier_id"]: item
+        for item in result["supplier_recommendations"]
+    }
     saved: list[SavedInvitation] = []
     skipped_ids: list[int] = []
     for sid in req.supplier_ids:
@@ -103,9 +132,9 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         # both pass the existence check, both add, second commit raises
         # IntegrityError → was 500. Now we catch + re-fetch and treat the
         # row as if we lost the race (re-using the winner's invitation).
-        existing = db.query(BidInvitation).filter_by(
-            tender_id=tender.id, supplier_id=sid
-        ).first()
+        existing = db.scalar(select(BidInvitation).where(
+            BidInvitation.tender_id == tender.id, BidInvitation.supplier_id == sid
+        ))
         if existing:
             inv = existing
         else:
@@ -129,9 +158,9 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
                     "invite/save: concurrent IntegrityError on tender=%s "
                     "supplier=%s; reusing peer's row", tender.id, sid
                 )
-                inv = db.query(BidInvitation).filter_by(
-                    tender_id=tender.id, supplier_id=sid
-                ).first()
+                inv = db.scalar(select(BidInvitation).where(
+                    BidInvitation.tender_id == tender.id, BidInvitation.supplier_id == sid
+                ))
                 if not inv:
                     # Lost the race AND the peer's row vanished — surface
                     # rather than silently skip so the user can retry.
@@ -159,12 +188,9 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
 
 @router.get("/tenders", response_model=list[dict])
 def list_tenders(limit: int = 50, db: Session = Depends(get_db)) -> list[dict]:
-    rows = (
-        db.query(TenderDocument)
-        .order_by(TenderDocument.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+    rows = db.scalars(
+        select(TenderDocument).order_by(TenderDocument.created_at.desc()).limit(limit)
+    ).all()
     return [
         {
             "id": t.id,
@@ -205,6 +231,7 @@ def get_tender(tender_id: int, db: Session = Depends(get_db)) -> dict:
         "tender_date": t.tender_date,
         "deadline": t.deadline,
         "items": t.items,
+        "recommendation_snapshot": t.recommendation_snapshot or {},
         "status": t.status,
         "invitations": invitations,
         "created_at": t.created_at.isoformat() if t.created_at else None,
