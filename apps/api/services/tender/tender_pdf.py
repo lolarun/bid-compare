@@ -79,7 +79,8 @@ def _build_quality_metrics(items_out: list[dict], page_metrics: list) -> dict:
             "seq_missing": [], "seq_duplicate": [],
             "material_columns_filled_rate": 0.0, "brand_filled_rate": 0.0,
             "source_ref_coverage": 0.0, "qty_parse_success_rate": 0.0,
-            "row_count_by_page": {}, "table_grid_pages": [], "html_fallback_pages": [],
+            "row_count_by_page": {},
+            "vl_direct_pages": [], "table_grid_pages": [], "html_fallback_pages": [],
         }
 
     seqs = [str(it.get("seq", "")).strip() for it in items_out if it.get("seq") is not None]
@@ -103,6 +104,12 @@ def _build_quality_metrics(items_out: list[dict], page_metrics: list) -> dict:
         page = str((it.get("source_ref") or {}).get("page", "?"))
         row_count_by_page[page] = row_count_by_page.get(page, 0) + 1
 
+    # 评审 R2（第4块）：input_mode 现在生产上恒为 "vl_direct"（vl_quote.py:482），
+    # table_grid/html_fallback 是已删除的 legacy 逐页链路的遗留值——tg_pages/
+    # fb_pages 在当前架构下永远是空列表，前端"识别路径"那行因此永远不显示，
+    # 不是 bug 触发不了，是这两个列表本身已经名不副实。补一个 vl_direct_pages，
+    # 前两个保留（旧快照回放/legacy 数据仍可能带 table_grid/html_fallback）。
+    vl_pages = [m.page for m in page_metrics if m.input_mode == "vl_direct"]
     tg_pages = [m.page for m in page_metrics if m.input_mode == "table_grid"]
     fb_pages = [
         {"page": m.page, "reason": m.fallback_reason}
@@ -118,6 +125,7 @@ def _build_quality_metrics(items_out: list[dict], page_metrics: list) -> dict:
         "source_ref_coverage": round(src_ref_ok / n, 3),
         "qty_parse_success_rate": round(qty_ok / n, 3),
         "row_count_by_page": row_count_by_page,
+        "vl_direct_pages": vl_pages,
         "table_grid_pages": tg_pages,
         "html_fallback_pages": fb_pages,
     }

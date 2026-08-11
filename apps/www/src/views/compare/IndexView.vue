@@ -281,6 +281,19 @@ function pct(n: number | undefined | null): string {
   return (n * 100).toFixed(0) + '%'
 }
 
+// 评审 R2（第4块）：'vl_direct' 是生产上恒定的唯一取值，'table_grid'/
+// 'html_fallback' 只可能出现在已删除 legacy 链路的旧快照回放里。之前的
+// 二元判断把 vl_direct 全部误判成"OCR增强解析"（橙色，暗示降级路径）——
+// 而它其实是当前唯一的正式路径，不该带警示色。
+const INPUT_MODE_LABELS: Record<string, { text: string; color: string }> = {
+  vl_direct: { text: 'VL 直抽', color: 'green' },
+  table_grid: { text: '标准解析', color: 'green' },
+  html_fallback: { text: 'OCR增强解析', color: 'orange' },
+}
+function inputModeLabel(mode: string): { text: string; color: string } {
+  return INPUT_MODE_LABELS[mode] || { text: mode || '未知', color: 'default' }
+}
+
 // Computed shorthand so template stays readable
 const pdfQm = computed((): PdfQualityMetrics | null => pdfSupplement.value?.quality_metrics ?? null)
 const pdfDiagnostics = computed((): PageDiagnostic[] => pdfSupplement.value?.page_diagnostics ?? [])
@@ -1700,8 +1713,8 @@ async function runMatrix() {
             <span>材质覆盖：<strong :style="{ color: pdfQm.material_columns_filled_rate < 0.4 ? '#cf1322' : '#389e0d' }">{{ pct(pdfQm.material_columns_filled_rate) }}</strong></span>
             <span>来源追踪：<strong :style="{ color: pdfQm.source_ref_coverage < 1.0 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.source_ref_coverage) }}</strong></span>
             <span>数量解析：<strong :style="{ color: pdfQm.qty_parse_success_rate < 0.8 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.qty_parse_success_rate) }}</strong></span>
-            <span v-if="pdfQm.table_grid_pages.length || pdfQm.html_fallback_pages.length" style="color:rgba(0,0,0,0.45)">
-              识别路径：<template v-if="pdfQm.table_grid_pages.length">{{ pdfQm.table_grid_pages.length }}页标准解析</template><template v-if="pdfQm.html_fallback_pages.length">{{ pdfQm.table_grid_pages.length ? ' · ' : '' }}{{ pdfQm.html_fallback_pages.length }}页OCR增强解析</template>
+            <span v-if="pdfQm.vl_direct_pages.length || pdfQm.table_grid_pages.length || pdfQm.html_fallback_pages.length" style="color:rgba(0,0,0,0.45)">
+              识别路径：<template v-if="pdfQm.vl_direct_pages.length">{{ pdfQm.vl_direct_pages.length }}页VL直抽</template><template v-if="pdfQm.table_grid_pages.length">{{ pdfQm.vl_direct_pages.length ? ' · ' : '' }}{{ pdfQm.table_grid_pages.length }}页标准解析</template><template v-if="pdfQm.html_fallback_pages.length">{{ (pdfQm.vl_direct_pages.length || pdfQm.table_grid_pages.length) ? ' · ' : '' }}{{ pdfQm.html_fallback_pages.length }}页OCR增强解析</template>
             </span>
           </div>
           <div v-if="pdfQm.seq_missing.length || pdfQm.seq_duplicate.length" style="margin-top:6px;font-size:12px;color:#d46b08">
@@ -1716,8 +1729,8 @@ async function runMatrix() {
           <div v-if="showQualityDetails && pdfDiagnostics.length" style="margin-top:8px">
             <div style="display:flex;flex-wrap:wrap;gap:4px">
               <a-tooltip v-for="d in pdfDiagnostics" :key="d.page"
-                :title="`第${d.page}页 · ${d.input_mode === 'table_grid' ? '标准解析' : 'OCR增强解析'}${d.fallback_reason ? '（原因：' + d.fallback_reason + '）' : ''} · 预计${d.expected_rows}行 · 提取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
-                <a-tag :color="d.input_mode === 'table_grid' ? 'green' : 'orange'"
+                :title="`第${d.page}页 · ${inputModeLabel(d.input_mode).text}${d.fallback_reason ? '（原因：' + d.fallback_reason + '）' : ''} · 预计${d.expected_rows}行 · 提取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
+                <a-tag :color="inputModeLabel(d.input_mode).color"
                   style="cursor:default;font-size:11px;padding:0 6px;line-height:20px">
                   第{{ d.page }}页<template v-if="d.fallback_reason"> ⚠</template>
                 </a-tag>

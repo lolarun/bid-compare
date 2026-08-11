@@ -411,9 +411,14 @@ export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
 export interface TenderBrandReq { brand_en: string; brand_cn: string }
 export interface TenderSupplierBrand { supplier_name: string; brand: string; supplier_id?: number | null }
 
+// 评审 R2（第4块）：input_mode 生产上恒为 'vl_direct'（vl_quote.py 里唯一的
+// 赋值点）——'table_grid'/'html_fallback' 是已删除 legacy 逐页链路的遗留值，
+// 只可能出现在旧快照回放里。此前联合类型没声明 'vl_direct'，二元判断把它
+// 全部误判成 'html_fallback' 分支，UI 上把当前唯一的正式识别路径标成橙色
+// 「OCR增强解析」——不是极端情况，是每一页的常态。
 export interface PageDiagnostic {
   page: number
-  input_mode: 'table_grid' | 'html_fallback'
+  input_mode: 'vl_direct' | 'table_grid' | 'html_fallback' | string
   fallback_reason: string
   expected_rows: number
   extracted_rows: number
@@ -428,6 +433,7 @@ export interface PdfQualityMetrics {
   source_ref_coverage: number
   qty_parse_success_rate: number
   row_count_by_page: Record<string, number>
+  vl_direct_pages: number[]
   table_grid_pages: number[]
   html_fallback_pages: Array<{ page: number; fallback_reason: string }>
 }
