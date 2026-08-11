@@ -4,7 +4,7 @@ Two public methods:
 - extract_tender(file_path) → ExtractionResponse (data matches TENDER_SCHEMA)
 - extract_quote(file_path, context) → ExtractionResponse (data matches QUOTE_SCHEMA)
 
-Both are VL-direct only (apps/api/intelligence/vl_direct.py / vl_tender.py):
+Both are VL-direct only (apps/api/intelligence/vl_quote.py / vl_tender.py):
 the whole document renders once, goes to the vision model as one call, and
 comes back as CSV → ExtractionDraft. The legacy per-page OCR→HTML→TableGrid
 chain (batched multi-page execution, page-role classification, result
@@ -165,7 +165,7 @@ class ExtractionPipeline:
                 f"从未可达）。"
             )
 
-        from apps.api.intelligence.vl_direct import recognize_quote_vl
+        from apps.api.intelligence.vl_quote import recognize_quote_vl
         s = get_settings()
         draft = recognize_quote_vl(
             file_path,

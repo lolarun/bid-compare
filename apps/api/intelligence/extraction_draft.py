@@ -35,7 +35,7 @@ class SourceRef:
 
 # ─── Single extracted row ─────────────────────────────────────────────────────
 
-# 评审 N2：build_draft/parse_csv 是报价与招标共用的解析器（vl_direct.py docstring
+# 评审 N2：build_draft/parse_csv 是报价与招标共用的解析器（vl_quote.py docstring
 # "两种文档的行为差异只在'有哪些列、每列叫什么'"），"这一行是明细而非小计/合计"
 # 这个判据同样与文档类型无关——但字面值一直叫 "quote_line"，招标清单里没有一行
 # 是"报价"，词表名字跟着共享代码泄了过去。改字面值要牵动 quote_confirmation_

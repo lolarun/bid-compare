@@ -48,7 +48,7 @@ from typing import Sequence
 from apps.api.core.config import get_settings
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.extraction_draft import ExtractionDraft
-from apps.api.intelligence.vl_direct import (
+from apps.api.intelligence.vl_quote import (
     ORIENT_PROBE_MAX_EDGE_PX,
     PROMPT_ORIENT,
     RENDER_BATCH,

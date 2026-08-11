@@ -1,6 +1,21 @@
 # Best-Practice Review — Scope and Checklist
 
-> **Status — scope definition, 2026-08-10. Review not yet run.**
+> **Status — review completed, remediation in progress, 2026-08-11.** The scope
+> below was drafted 2026-08-10 before the review ran; the review itself (findings
+> A1-A4/B1-B3/C1-C6/D1-D5/E1-E4/F1-F4/G1 + naming supplement N1-N10) happened in a
+> separate session and its findings arrived pasted into chat, not as a file. Six
+> remediation batches landed 2026-08-11 (commits `7d2adb0`..`17c8a68`): C1/D1,
+> F1/F2/F4 (legacy physical deletion), C2/D2-D5, G1, N2/N3/N7, and the `services/`
+> package reorg. **E1-E4 and B3 are deliberately deferred** to their own round
+> (too large to fold into the batch that also did C/D/F/G/N) — see each batch's
+> commit message for what was and wasn't done and why.
+>
+> **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
+> `vl_tender.py`; "direct" was a contrast name against legacy, which no longer
+> exists). Persisted labels (`parser_mode`/`input_mode`/`recognizer` = `"vl_direct"`)
+> are unchanged — no data migration, see the module's own docstring. The other
+> N-items' "record only" dispositions from §2.1 below are unchanged.
+>
 > Requested by the user after the VL-direct migration, to clean up and standardise
 > the code before further feature work.
 >
@@ -34,11 +49,11 @@ Known suspects, to audit item by item:
 |---|---|---|
 | `TENDER_SLOTS["pressure"]` | `intelligence/vl_tender.py` | 工作压力 is valve-specific. 桥架 needs 表面处理/板材厚度/荷载等级; 风机盘管 needs 制冷量/风量. None are slots. Mitigation verified: unmatched columns survive in `extra_fields` + `raw_cells`, so data is not lost — but they never reach `TenderAnchor`'s typed fields. The valve-centricity is inherited from `TenderAnchor` itself (it has `pressure`, `materials`, valve `canonical`), not introduced here. Decide whether `EXTENDED_ATTR_SCHEMAS` (`core/config.py`) should drive slots per category instead. |
 | `_MATERIAL_PREFIXES` | `intelligence/vl_tender.py` | Uses the **parent-column prefix** (材质) rather than enumerating child names (阀体/阀芯…), which is the generic form. Verify it survives a category whose parent column is named differently. |
-| `_SLOTS` tax patterns | `intelligence/vl_direct.py` | Grew reactively (`excl` → `ex_tax` → `pre_tax` → …). The list can never be complete; the real defence is `has_price_column`. Check that the fallback, not the list, is what production relies on. |
+| `_SLOTS` tax patterns | `intelligence/vl_quote.py (formerly vl_direct.py)` | Grew reactively (`excl` → `ex_tax` → `pre_tax` → …). The list can never be complete; the real defence is `has_price_column`. Check that the fallback, not the list, is what production relies on. |
 | `INTEGRITY_*`, `SEQ_*`, `BLOCK_*` thresholds | `core/domain_config.py` | All derived from the same seven documents. Each carries its derivation in a comment — verify the comment still matches the value, and that none silently became a magic number. |
 | `CHECKSUM_BLOCK_DELTA_RATIO` | `core/domain_config.py` | Known wrong *shape* (ratio, should be per-row). Design in `docs/design/20`; instrumentation already shipped, threshold not yet changed. |
-| `ORIENT_PROBE_MAX_EDGE_PX` | `intelligence/vl_direct.py` | Derived from one offline baseline (scale 0.30 → 253–357px, rounded up to 400). Changing it invalidates the accuracy baseline; verify that is stated where someone would look before editing. |
-| Prompt rules 1–4 | `vl_direct.py`, `vl_tender.py` | Must contain no real supplier/project/file names and no sample-specific column order (`.claude/rules/recognition.md`). Re-verify after the tender prompt was added. |
+| `ORIENT_PROBE_MAX_EDGE_PX` | `intelligence/vl_quote.py (formerly vl_direct.py)` | Derived from one offline baseline (scale 0.30 → 253–357px, rounded up to 400). Changing it invalidates the accuracy baseline; verify that is stated where someone would look before editing. |
+| Prompt rules 1–4 | `vl_quote.py (formerly vl_direct.py)`, `vl_tender.py` | Must contain no real supplier/project/file names and no sample-specific column order (`.claude/rules/recognition.md`). Re-verify after the tender prompt was added. |
 
 **Fixed during scoping, recorded here so the review does not re-find it:** slot
 assignment was not exclusive — 「规格型号」 matched both `spec` and `model`, filling two
@@ -80,7 +95,7 @@ only; thresholds centralised.
   `table_parser`, `page_classifier`, `adaptive_tiler`, `snapshot_provider`, `aggregator`
   remain, now serving the tender path (and `_run_batched` for both). After the VL tender
   recogniser lands, re-audit which of these still has a live caller.
-- `vl_direct.py` now carries both shared machinery and quote specifics; `vl_tender.py`
+- `vl_quote.py (formerly vl_direct.py)` now carries both shared machinery and quote specifics; `vl_tender.py`
   holds tender specifics. Decide whether the shared part deserves its own module.
 - `pipeline.py` retains quote-legacy helpers (`_get_quote_adapter`, `_quote_detect_pages`,
   `_quote_extract_meta`, `_quote_prompt_for_mode`, `_assign_source_ref_from_grids`) —

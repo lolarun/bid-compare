@@ -38,7 +38,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from apps.api.core.config import get_settings                     # noqa: E402
-from apps.api.intelligence import vl_direct as vd                 # noqa: E402
+from apps.api.intelligence import vl_quote as vd                 # noqa: E402
 from apps.api.services.ingestion.draft_integrity import find_duplicate_rows  # noqa: E402
 
 DOCS = {

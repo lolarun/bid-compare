@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.intelligence.vl_direct import map_columns
+from apps.api.intelligence.vl_quote import map_columns
 from apps.api.intelligence.vl_tender import (
     TENDER_SLOTS,
     build_tender_draft,

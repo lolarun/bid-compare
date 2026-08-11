@@ -96,7 +96,7 @@ class LLMProvider(ABC):
 
         This is the actual production contract (VL-direct is the only
         recognition path for both quote and tender documents — see
-        vl_direct.py / vl_tender.py / docs/design/21). `labels` distinguishes
+        vl_quote.py / vl_tender.py / docs/design/21). `labels` distinguishes
         the orientation-probe call (rotation candidates per page) from the
         main extraction/meta calls — see DashScopeOCRProvider.vl_extract_csv
         for the convention.

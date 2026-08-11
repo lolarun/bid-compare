@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.intelligence.vl_direct import (
+from apps.api.intelligence.vl_quote import (
     build_draft,
     detect_rotations,
     map_columns,
@@ -207,7 +207,7 @@ def test_orientation_probes_are_downscaled_not_full_res():
     离线验证基线用的就是缩略图（scale=0.30），这条必须保持。"""
     from PIL import Image
     import io as _io
-    from apps.api.intelligence.vl_direct import ORIENT_PROBE_MAX_EDGE_PX
+    from apps.api.intelligence.vl_quote import ORIENT_PROBE_MAX_EDGE_PX
 
     sizes = []
 
@@ -228,8 +228,8 @@ def test_full_resolution_is_still_used_for_extraction():
     """缩略图只能用于方向判断。抽取必须拿全分辨率，否则认不出字。"""
     from PIL import Image
     import io as _io
-    from apps.api.intelligence.vl_direct import recognize_quote_vl
-    import apps.api.intelligence.vl_direct as vd
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
+    import apps.api.intelligence.vl_quote as vd
 
     big = _big_img()
     seen = {}

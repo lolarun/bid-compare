@@ -1,9 +1,18 @@
-"""vl_direct.py — 报价清单识别器：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
+"""vl_quote.py — 报价清单识别器：整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
 
 **报价与招标识别的唯一路径**（2026-08-10 起）。legacy 的 OCR→HTML→TableGrid→LLM
 分支已于 2026-08-11 物理删除（最佳实践评审 F1：两个生产 provider 均实现
 vl_extract_csv，legacy 分支在生产从未可达），不再是"归档保留"的状态。招标侧
 共享同一套解析与结构门，见 vl_tender.py。
+
+**模块已改名**（评审 N1，2026-08-11）：原名 `vl_direct.py`——"direct" 是相对
+legacy（OCR→HTML→TableGrid 的间接路径）的对照命名，legacy 删除后对照物消失，
+名字不再携带信息，且与 `vl_tender.py` 不对称（一个按机制+历史对照命名，一个按
+机制+文档类型命名）。现改名 `vl_quote.py`，与 `vl_tender.py` 对称。**持久化标签
+值不变**：`parser_mode`/`input_mode`/`recognizer` 三个键里的字符串仍是
+`"vl_direct"`（下方三处），不随模块改名——存量 `job.result` 里都是这个值，
+改值需要数据迁移，ROI 不成立。三键本身是同一个事实的三份拷贝（同样是历史
+遗留，未在本次改名中处理）。
 
 ## 为什么整份一次调用
 

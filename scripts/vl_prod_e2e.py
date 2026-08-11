@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from apps.api.core.config import get_settings                    # noqa: E402
-from apps.api.intelligence.vl_direct import (                    # noqa: E402
+from apps.api.intelligence.vl_quote import (                    # noqa: E402
     PROMPT_ORIENT, PROMPT_QUOTE_CSV, recognize_quote_vl,
 )
 

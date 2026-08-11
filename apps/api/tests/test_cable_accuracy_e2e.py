@@ -77,7 +77,7 @@ def test_accuracy_sample(slug):
 
     from apps.api.core.config import get_settings
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
-    from apps.api.intelligence.vl_direct import recognize_quote_vl
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
 
     name, declared = CABLE_DOCS[slug]
     cfg = get_settings()

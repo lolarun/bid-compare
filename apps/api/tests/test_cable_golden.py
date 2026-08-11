@@ -66,7 +66,7 @@ def _replay(slug: str):
         )
     snap = json.loads(snap_path.read_text(encoding="utf-8"))
 
-    from apps.api.intelligence.vl_direct import PROMPT_QUOTE_CSV, build_draft
+    from apps.api.intelligence.vl_quote import PROMPT_QUOTE_CSV, build_draft
 
     # 提示词变了 → **失败而不是跳过**。旧快照是旧格式的输入，拿它验证新解析器，
     # 测试还绿着但验证的东西已经不存在了（.claude/rules/tests.md：replay 缓存

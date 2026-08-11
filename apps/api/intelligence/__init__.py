@@ -9,7 +9,7 @@ Architecture:
 
 prompts.py (TENDER_PROMPT/QUOTE_PROMPT/META_EXTRACTION_PROMPT/TENDER_BIDLIST_PROMPT/
 TENDER_BRANDTABLE_PROMPT) was deleted 2026-08-11 with the legacy per-page OCR→HTML
-chain it served — see vl_direct.py / vl_tender.py for the live VL-direct prompts.
+chain it served — see vl_quote.py / vl_tender.py for the live VL-direct prompts.
 """
 
 from apps.api.intelligence.base import (
