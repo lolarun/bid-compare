@@ -347,6 +347,57 @@ def _incl_unit_from(data: "_ItemData | None") -> float | None:
 # that import them directly from bid_matrix.
 
 
+# ─── shared cell-building logic (评审 D2) ─────────────────────────────────────
+#
+# _build_cell_for_supplier（比价矩阵）与 _build_review_cell（复核矩阵 UI）此前
+# 各自独立实现"选最优 align/pending 候选"与"价格/合价计算"，逐行同义却是两份
+# 拷贝——review 版因此漏掉了 price_basis/incl_unit 等字段，且改选择优先级要
+# 记得同步改两处。这三个函数把两处唯一真正共享（且容易分叉）的部分收拢到一处：
+# 谁是最优候选、价格怎么算。两个调用方各自的输出形状（字段名、is_lowest/
+# deviation_pct vs candidates）保持不变，不强行统一成同一个 dict 契约——那是
+# 两个不同消费者（比价矩阵 vs 复核 UI）的合理差异，不是应该消除的重复。
+
+def _pick_best_align_item(
+    db: Session, align_items: list[BidAlignmentItem],
+) -> BidAlignmentItem | None:
+    """已确认对齐候选中选最优：effective price（聚合总价/聚合数量，否则单价）最低者。"""
+    if not align_items:
+        return None
+
+    def _effective_price(i: BidAlignmentItem) -> float:
+        if i.agg_total is not None and i.agg_qty:
+            return i.agg_total / i.agg_qty
+        data = _get_item_data(db, i)
+        return (data.unit_price or float("inf")) if data else float("inf")
+
+    return min(align_items, key=_effective_price)
+
+
+def _pick_best_pending_item(
+    pending_items: list[BidAlignmentItem],
+) -> BidAlignmentItem | None:
+    """待确认候选中选最优：语义相似度 cos 最高者。"""
+    if not pending_items:
+        return None
+    return max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
+
+
+def _price_and_total(
+    db: Session, item: BidAlignmentItem,
+) -> tuple[float | None, float | None, "_ItemData | None"]:
+    """(单价, 合价, item 明细)。聚合行优先用聚合总价/数量，否则单价×数量。"""
+    data = _get_item_data(db, item)
+    if not data:
+        return None, None, None
+    if item.agg_total is not None and item.agg_qty:
+        price = round(item.agg_total / item.agg_qty, 4)
+        total = round(item.agg_total, 2)
+    else:
+        price = data.unit_price
+        total = round(price * (data.quantity or 1), 2) if price else None
+    return price, total, data
+
+
 def _build_cell_for_supplier(
     db: Session,
     items: list[BidAlignmentItem],
@@ -385,15 +436,10 @@ def _build_cell_for_supplier(
         "item_canonical": None,
     }
 
-    def _fill(cell: dict, item: BidAlignmentItem, data: "_ItemData | None") -> None:
+    def _fill(cell: dict, item: BidAlignmentItem) -> None:
+        price, total, data = _price_and_total(db, item)
         if not data:
             return
-        if item.agg_total is not None and item.agg_qty:
-            price = round(item.agg_total / item.agg_qty, 4)
-            total = round(item.agg_total, 2)
-        else:
-            price = data.unit_price
-            total = round(price * (data.quantity or 1), 2) if price else None
         cell["price"] = price
         cell["total"] = total
         cell["source_quote_id"] = data.source_quote_id
@@ -404,15 +450,9 @@ def _build_cell_for_supplier(
         cell["supplier_qty"] = data.quantity
         cell["item_canonical"] = data.canonical
 
-    if align_items:
-        def _effective_price(i: BidAlignmentItem) -> float:
-            if i.agg_total is not None and i.agg_qty:
-                return i.agg_total / i.agg_qty
-            data = _get_item_data(db, i)
-            return (data.unit_price or float("inf")) if data else float("inf")
-
-        best = min(align_items, key=_effective_price)
-        _fill(base, best, _get_item_data(db, best))
+    best = _pick_best_align_item(db, align_items)
+    if best is not None:
+        _fill(base, best)
         base["cell_status"] = CELL_AGGREGATED if (best.agg_total is not None) else CELL_QUOTED
         base["flags"] = _parse_flags_from_note(best.spec_note) or None
         base["evidence"] = best.name_note or None
@@ -420,9 +460,9 @@ def _build_cell_for_supplier(
             base["pending_note"] = f"另有 {len(pending_items)} 条待确认"
         return base
 
-    if pending_items:
-        best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
-        _fill(base, best, _get_item_data(db, best))
+    best = _pick_best_pending_item(pending_items)
+    if best is not None:
+        _fill(base, best)
         base["cell_status"] = CELL_PENDING
         base["item_id"] = best.id
         base["confidence"] = _parse_cosine_from_note(best.spec_note)
@@ -758,15 +798,9 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
 
     def _get_prices(item: BidAlignmentItem) -> tuple:
         """Return (unit_price, total, source_quote_id, bid_quote_line_id)."""
-        data = _get_item_data(db, item)
+        price, total, data = _price_and_total(db, item)
         if not data:
             return None, None, None, None
-        if item.agg_total is not None and item.agg_qty:
-            price = round(item.agg_total / item.agg_qty, 4)
-            total = round(item.agg_total, 2)
-        else:
-            price = data.unit_price
-            total = round(price * (data.quantity or 1), 2) if price else None
         return price, total, data.source_quote_id, data.bid_quote_line_id
 
     def _build_candidates(plist: list) -> list:
@@ -787,14 +821,8 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
             })
         return out
 
-    if align_items:
-        def _eff(i: BidAlignmentItem) -> float:
-            if i.agg_total is not None and i.agg_qty:
-                return i.agg_total / i.agg_qty
-            data = _get_item_data(db, i)
-            return (data.unit_price or float("inf")) if data else float("inf")
-
-        best = min(align_items, key=_eff)
+    best = _pick_best_align_item(db, align_items)
+    if best is not None:
         price, total, source_qid, bql_id = _get_prices(best)
         base.update({
             "cell_status": CELL_AGGREGATED if best.agg_total is not None else CELL_QUOTED,
@@ -809,8 +837,8 @@ def _build_review_cell(db: Session, items: list[BidAlignmentItem], sid: int) -> 
         })
         return base
 
-    if pending_items:
-        best = max(pending_items, key=lambda i: _parse_cosine_from_note(i.spec_note) or 0)
+    best = _pick_best_pending_item(pending_items)
+    if best is not None:
         price, total, source_qid, bql_id = _get_prices(best)
         base.update({
             "cell_status": CELL_PENDING,
