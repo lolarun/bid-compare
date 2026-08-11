@@ -1,0 +1,490 @@
+{
+  "doc": "taikelong",
+  "doc_type": "quote",
+  "source_pdf": "泰科龙投标文件.pdf",
+  "labeled_by": "claude_visual",
+  "note": "旋转扫描件。真实报价页=p5-14,全部旋转90°(侧向表格)。p4是投标报价总表(汇总)。p35-48产品样本含部件参数表、p40/42/46-52命中golden物料名均为FP陷阱,判负类。负类细分(certificate/technical_spec/component_parameter_table/other)不影响target召回/误入指标。",
+  "pages": [
+    {
+      "page": 1,
+      "role": "cover",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "封面"
+      ]
+    },
+    {
+      "page": 2,
+      "role": "bid_letter",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "投标函/承诺正文"
+      ]
+    },
+    {
+      "page": 3,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "施工/技术正文"
+      ]
+    },
+    {
+      "page": 4,
+      "role": "subtotal_or_summary",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "投标报价汇总表(单价/合价但无逐条明细)"
+      ]
+    },
+    {
+      "page": 5,
+      "role": "quote_table_header",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°报价清单表头+数据行"
+      ]
+    },
+    {
+      "page": 6,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 7,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页(OCR弱)"
+      ]
+    },
+    {
+      "page": 8,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 9,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 10,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页(OCR弱)"
+      ]
+    },
+    {
+      "page": 11,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 12,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 13,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°续页"
+      ]
+    },
+    {
+      "page": 14,
+      "role": "quote_table_continuation",
+      "orientation": 90,
+      "has_golden_lines": true,
+      "evidence": [
+        "旋转90°报价清单末页"
+      ]
+    },
+    {
+      "page": 15,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "施工/技术表单"
+      ]
+    },
+    {
+      "page": 16,
+      "role": "bid_letter",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "法定代表人身份/授权(含照片)"
+      ]
+    },
+    {
+      "page": 17,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "正文"
+      ]
+    },
+    {
+      "page": 18,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "正文"
+      ]
+    },
+    {
+      "page": 19,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "授权代理证书"
+      ]
+    },
+    {
+      "page": 20,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "证书"
+      ]
+    },
+    {
+      "page": 21,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "团体标准/荣誉证书"
+      ]
+    },
+    {
+      "page": 22,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "证书"
+      ]
+    },
+    {
+      "page": 23,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "证书(含二维码)"
+      ]
+    },
+    {
+      "page": 24,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "RDA认证证书"
+      ]
+    },
+    {
+      "page": 25,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "优质供应商证书"
+      ]
+    },
+    {
+      "page": 26,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "证书"
+      ]
+    },
+    {
+      "page": 27,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "优秀供应商证书"
+      ]
+    },
+    {
+      "page": 28,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "荣誉证书"
+      ]
+    },
+    {
+      "page": 29,
+      "role": "other",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "公司介绍/厂区照片"
+      ]
+    },
+    {
+      "page": 30,
+      "role": "other",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "公司介绍"
+      ]
+    },
+    {
+      "page": 31,
+      "role": "other",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "公司介绍"
+      ]
+    },
+    {
+      "page": 32,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品技术正文"
+      ]
+    },
+    {
+      "page": 33,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品技术正文"
+      ]
+    },
+    {
+      "page": 34,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品技术正文"
+      ]
+    },
+    {
+      "page": 35,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品样本+尺寸参数表"
+      ]
+    },
+    {
+      "page": 36,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品样本+尺寸参数表"
+      ]
+    },
+    {
+      "page": 37,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "蝶阀样本+尺寸表"
+      ]
+    },
+    {
+      "page": 38,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "阀门图+参数"
+      ]
+    },
+    {
+      "page": 39,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "闸阀样本+参数表"
+      ]
+    },
+    {
+      "page": 40,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "多阀门样本(命中golden物料名,FP陷阱,无报价列)"
+      ]
+    },
+    {
+      "page": 41,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "BERMAD产品说明"
+      ]
+    },
+    {
+      "page": 42,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品样本+尺寸表(命中golden名,FP)"
+      ]
+    },
+    {
+      "page": 43,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品样本+尺寸表"
+      ]
+    },
+    {
+      "page": 44,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品说明"
+      ]
+    },
+    {
+      "page": 45,
+      "role": "component_parameter_table",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "产品样本+尺寸表"
+      ]
+    },
+    {
+      "page": 46,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "规范/施工正文"
+      ]
+    },
+    {
+      "page": 47,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术正文(命中golden名最多,FP陷阱)"
+      ]
+    },
+    {
+      "page": 48,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术正文(命中golden名,FP)"
+      ]
+    },
+    {
+      "page": 49,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 50,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文(命中golden名,FP)"
+      ]
+    },
+    {
+      "page": 51,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "试压/安装正文"
+      ]
+    },
+    {
+      "page": 52,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文(命中golden名,FP)"
+      ]
+    },
+    {
+      "page": 53,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    }
+  ],
+  "version": 1,
+  "basis": "model-assisted visual labeling (qwen3-vl-flash montage + manual review)",
+  "verified_by": "manual-review-pending",
+  "verification_status": "pending"
+}
