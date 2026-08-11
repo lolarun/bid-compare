@@ -6,6 +6,7 @@ serialization (Excel formatting), not for business logic.
 from __future__ import annotations
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.services.bid_matrix import build_anchor_matrix
@@ -47,13 +48,11 @@ def get_bid_matrix_for_export(
     # 硬闸门：used_submission_ids 必须已写入（与 /bid-matrix 保持一致）
     used_sub_ids = list(session.used_submission_ids or [])
     if not used_sub_ids:
-        any_active = (
-            db.query(_BS.id)
-            .filter(
+        any_active = db.scalar(
+            select(_BS.id).where(
                 _BS.project_id == project_id,
                 _BS.status.notin_(("rejected", "superseded")),
             )
-            .first()
         )
         if any_active:
             raise HTTPException(

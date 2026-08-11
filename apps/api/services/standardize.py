@@ -90,7 +90,7 @@ def _normalize_dn(text: str) -> tuple[str, list[str]]:
             changes.append(f"{inch_str}寸 → DN{dn}")
 
     # "100mm" without DN prefix → DN100 (only for pipe-like contexts)
-    m = re.search(r'(?<![×xX*\d])(\d+)\s*mm(?!\s*[×xX*])', text)
+    m = re.search(r'(?<![×xX*\d])(\d+)\s*MM(?!\s*[×xX*])', text, re.I)
     if m and not re.search(r'DN\d', text):
         val = int(m.group(1))
         if val in (15, 20, 25, 32, 40, 50, 65, 80, 100, 125, 150, 200, 250, 300, 350, 400, 450, 500, 600):
@@ -115,8 +115,9 @@ def _normalize_dimensions(text: str) -> tuple[str, list[str]]:
 # ─── Name synonym normalization ──────────────────────────────────────────────
 
 _SYNONYMS = [
-    # Surface treatment — 热浸镀锌 and 热镀锌 are DIFFERENT materials (20-50% price gap)
-    (r'热浸锌', '热浸镀锌'),
+    # "热镀锌" is the common abbreviated expression for hot-dip galvanizing.
+    # Keep true electroplating distinct (冷镀锌 → 电镀锌) below.
+    (r'热浸锌|热镀锌', '热浸镀锌'),
     (r'冷镀锌', '电镀锌'),
     # Bridge types — normalize structural names
     (r'电缆桥架|线缆桥架', '桥架'),
@@ -153,6 +154,28 @@ def _normalize_synonyms(text: str) -> tuple[str, list[str]]:
 
 
 # ─── Whitespace normalization ────────────────────────────────────────────────
+
+def _normalize_model_code(text: str) -> tuple[str, list[str]]:
+    """合并被 OCR 拆开的型号串字母游程（doc/19 §L2）。
+
+    扫描件 OCR 会在字母游程中间插空格：RTTYZ→"RTTY Z"、YJY→"Y JY"、YFD→"Y FD"。
+    电缆这类品类的型号串是**唯一**的匹配信号（没有可区分的中文品名），不归一化则
+    大面积匹配失败。实测占亨通报价行的 78%。
+
+    只在「两侧都是 ASCII 字母数字，且至少一侧是字母」时合并：
+      "RTTY Z-3*240" → "RTTYZ-3*240"      字母|字母
+      "DN 50"        → "DN50"             字母|数字
+      "300 150"      → 不变                纯数字之间保留，避免把两个尺寸粘成一个
+      "闸阀 DN50"     → 不变                中文侧不受影响
+    """
+    changes: list[str] = []
+    before = text
+    text = re.sub(r'(?<=[A-Za-z])[ \t]+(?=[A-Za-z0-9])', '', text)
+    text = re.sub(r'(?<=[0-9])[ \t]+(?=[A-Za-z])', '', text)
+    if text != before:
+        changes.append("合并型号串中被拆开的字母游程")
+    return text, changes
+
 
 def _normalize_whitespace(text: str) -> tuple[str, list[str]]:
     """Normalize whitespace: full-width spaces, multiple spaces, trim."""
@@ -191,6 +214,11 @@ def standardize_name(text: str, category: str | None = None) -> dict:
     text, changes = _canonicalize(text)
     all_changes.extend(changes)
 
+    # 型号串游程合并须在尺寸/DN 归一之前：DN 的识别依赖 "DN50" 这种连写形式，
+    # 而 OCR 可能吐出 "DN 50"。
+    text, changes = _normalize_model_code(text)
+    all_changes.extend(changes)
+
     text, changes = _normalize_dimensions(text)
     all_changes.extend(changes)
 
@@ -205,6 +233,18 @@ def standardize_name(text: str, category: str | None = None) -> dict:
         "standardized": text,
         "changes": all_changes,
     }
+
+
+def normalize_model_code(text: str) -> str:
+    """仅做型号串游程合并的轻量归一（doc/19 §L2）。
+
+    给匹配/比较用：招标锚点与报价行必须两侧同样处理，否则 "RTTYZ-3*240" 与 OCR 吐出的
+    "RTTY Z-3*240" 永远对不上。故意不套完整 standardize_name 管线——那会连带改动
+    大小写、尺寸符号和同义词，影响既有 embedding 行为。
+    """
+    if not text:
+        return text
+    return _normalize_model_code(text)[0]
 
 
 def standard_key(text: str, category: str | None = None) -> str:

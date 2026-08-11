@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from apps.api.models.tender_list_session import TenderListSession
@@ -33,15 +34,13 @@ def get_current_confirmed_session(db: Session, project_id: int, category: str):
     checked is_current may silently operate on unconfirmed sessions — this
     helper enforces the full gate.
     """
-    return (
-        db.query(TenderListSession)
-        .filter(
+    return db.scalar(
+        select(TenderListSession).where(
             TenderListSession.project_id == project_id,
             TenderListSession.category == category,
             TenderListSession.is_current.is_(True),
             TenderListSession.status == "confirmed",
         )
-        .first()
     )
 
 
@@ -49,15 +48,13 @@ def get_finalization_snapshot(db: Session, project_id: int, category: str):
     """Return the most recent finalized AlignmentFinalization, or None."""
     from apps.api.models.alignment_finalization import AlignmentFinalization
 
-    return (
-        db.query(AlignmentFinalization)
-        .filter(
+    return db.scalar(
+        select(AlignmentFinalization).where(
             AlignmentFinalization.project_id == project_id,
             AlignmentFinalization.category == category,
             AlignmentFinalization.status == "finalized",
         )
         .order_by(AlignmentFinalization.created_at.desc())
-        .first()
     )
 
 
@@ -78,20 +75,18 @@ def save_session(
     and bumps the version number. Returns the new session WITHOUT committing —
     the caller owns the transaction boundary.
     """
-    db.query(TenderListSession).filter(
+    db.execute(update(TenderListSession).where(
         TenderListSession.project_id == project_id,
         TenderListSession.category == category,
         TenderListSession.is_current.is_(True),
-    ).update({"is_current": False, "superseded_at": datetime.utcnow()})
+    ).values(is_current=False, superseded_at=datetime.utcnow()))
 
-    last = (
-        db.query(TenderListSession)
-        .filter(
+    last = db.scalar(
+        select(TenderListSession).where(
             TenderListSession.project_id == project_id,
             TenderListSession.category == category,
         )
         .order_by(TenderListSession.version.desc())
-        .first()
     )
     new_version = (last.version + 1) if last else 1
 
@@ -116,15 +111,13 @@ def save_session(
 
 def list_current_sessions(db: Session, project_id: int) -> list[TenderListSession]:
     """All current (is_current) sessions for a project, ordered by id asc."""
-    return (
-        db.query(TenderListSession)
-        .filter(
+    return db.scalars(
+        select(TenderListSession).where(
             TenderListSession.project_id == project_id,
             TenderListSession.is_current.is_(True),
         )
         .order_by(TenderListSession.id.asc())
-        .all()
-    )
+    ).all()
 
 
 def get_current_session(
@@ -135,23 +128,23 @@ def get_current_session(
     Read-only detail lookup. NOT a compare/confirm gate — use
     get_current_confirmed_session for that.
     """
-    q = db.query(TenderListSession).filter(
+    stmt = select(TenderListSession).where(
         TenderListSession.category == category,
         TenderListSession.is_current.is_(True),
     )
     if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    return q.first()
+        stmt = stmt.where(TenderListSession.project_id == project_id)
+    return db.scalar(stmt)
 
 
 def list_versions(
     db: Session, category: str, project_id: int | None = None
 ) -> list[TenderListSession]:
     """All versions for a category (newest first), optionally project-scoped."""
-    q = db.query(TenderListSession).filter(TenderListSession.category == category)
+    stmt = select(TenderListSession).where(TenderListSession.category == category)
     if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    return q.order_by(TenderListSession.version.desc()).all()
+        stmt = stmt.where(TenderListSession.project_id == project_id)
+    return db.scalars(stmt.order_by(TenderListSession.version.desc())).all()
 
 
 def deactivate_current(
@@ -161,13 +154,13 @@ def deactivate_current(
 
     Returns the number of rows updated.
     """
-    q = db.query(TenderListSession).filter(
+    stmt = update(TenderListSession).where(
         TenderListSession.category == category,
         TenderListSession.is_current.is_(True),
     )
     if project_id is not None:
-        q = q.filter(TenderListSession.project_id == project_id)
-    updated = q.update({"is_current": False, "superseded_at": datetime.utcnow()})
+        stmt = stmt.where(TenderListSession.project_id == project_id)
+    updated = db.execute(stmt.values(is_current=False, superseded_at=datetime.utcnow())).rowcount
     db.commit()
     return updated
 
@@ -183,15 +176,13 @@ def get_any_current_confirmed_session(db: Session, project_id: int):
     Prefer get_current_confirmed_session (category-scoped) when the category
     is known.
     """
-    return (
-        db.query(TenderListSession)
-        .filter(
+    return db.scalar(
+        select(TenderListSession).where(
             TenderListSession.project_id == project_id,
             TenderListSession.is_current.is_(True),
             TenderListSession.status == "confirmed",
         )
         .order_by(TenderListSession.id.desc())
-        .first()
     )
 
 
@@ -209,14 +200,12 @@ def get_session_for_fill(
     """
     if tls_id is not None:
         return db.get(TenderListSession, tls_id)
-    return (
-        db.query(TenderListSession)
-        .filter(
+    return db.scalar(
+        select(TenderListSession).where(
             TenderListSession.project_id == project_id,
             TenderListSession.category == category,
             TenderListSession.is_current.is_(True),
         )
-        .first()
     )
 
 

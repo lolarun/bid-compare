@@ -3,6 +3,7 @@
 import re as _re
 import string
 from dataclasses import dataclass
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.enums import (
@@ -90,6 +91,11 @@ def _get_item_data(db: Session, item: BidAlignmentItem) -> "_ItemData | None":
             bid_quote_line_id=None,
             standard_name=mat.standard_name if mat else "",
             spec=(mat.spec or "") if mat else "",
+            # Historical Quote has one recorded price column.  Preserve the
+            # explicit "assumed" audit state while allowing the established
+            # historical comparison path to participate in evaluation.
+            price_basis="unspecified",
+            unit_price_incl_tax=qt.unit_price,
             unit=(mat.unit or "") if mat else "",
         )
 
@@ -103,17 +109,16 @@ __all__ = [
 
 def _get_supplier_checksum(db: Session, supplier_id: int, project_id: int | None) -> dict:
     """Return checksum dict from the most recent ExtractionJob for this supplier+project."""
-    q = db.query(Quote.batch_id).filter(Quote.supplier_id == supplier_id)
+    q = select(Quote.batch_id).where(Quote.supplier_id == supplier_id)
     if project_id:
-        q = q.filter(Quote.project_id == project_id)
-    batch_ids = [r[0] for r in q.distinct().all() if r[0]]
+        q = q.where(Quote.project_id == project_id)
+    batch_ids = [batch_id for batch_id in db.scalars(q.distinct()).all() if batch_id]
     if not batch_ids:
         return {}
     job = (
-        db.query(ExtractionJob)
-        .filter(ExtractionJob.id.in_(batch_ids))
+        db.scalars(select(ExtractionJob).where(ExtractionJob.id.in_(batch_ids))
         .order_by(ExtractionJob.created_at.desc())
-        .first()
+        ).first()
     )
     return ((job.result or {}).get("_checksum") or {}) if job else {}
 
@@ -139,15 +144,15 @@ def _detect_brand_tier_filter(
     if len(supplier_ids) != 1:
         return None
 
-    q = db.query(Quote.brand_tier).join(Material).filter(
+    q = select(Quote.brand_tier).join(Material).where(
         Quote.supplier_id == supplier_ids[0],
         Material.category == category,
         Quote.unit_price > 0,
     )
     if project_id:
-        q = q.filter(Quote.project_id == project_id)
+        q = q.where(Quote.project_id == project_id)
 
-    tiers = {r[0] for r in q.all() if r[0]}
+    tiers = {tier for tier in db.scalars(q).all() if tier}
     if not tiers:
         return None
     if tiers == {"合资"}:
@@ -168,17 +173,18 @@ def _compute_row_baselines(
 
     historical_avg_info = None
     if hist_avg and sample_count > 0:
-        dates_q = db.query(Quote.quote_date).join(Material).filter(
+        dates_q = select(Quote.quote_date).join(Material).where(
             Material.category == cat,
             Quote.quote_date != "",
             Quote.quote_date.isnot(None),
-        ).all()
-        dates = sorted([r[0] for r in dates_q if r[0]])
+        )
+        dates = sorted(date for date in db.scalars(dates_q).all() if date)
         period = f"{dates[0]}~{dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "")
-        projects_count = db.query(Quote.project_id).join(Material).filter(
-            Material.category == cat,
-            Quote.project_id.isnot(None),
-        ).distinct().count()
+        projects_count = db.scalar(select(func.count()).select_from(
+            select(Quote.project_id).join(Material).where(
+                Material.category == cat, Quote.project_id.isnot(None),
+            ).distinct().subquery()
+        )) or 0
         historical_avg_info = {
             "price": round(hist_avg, 2),
             "period": period,
@@ -243,14 +249,14 @@ def _build_material_row(
     prices_this_row = []
 
     for sid in supplier_ids:
-        quote = db.query(Quote).filter(
+        quote = select(Quote).where(
             Quote.material_id == mat.id,
             Quote.supplier_id == sid,
             Quote.unit_price > 0,
         )
         if project_id:
-            quote = quote.filter(Quote.project_id == project_id)
-        qt = quote.order_by(Quote.id.desc()).first()
+            quote = quote.where(Quote.project_id == project_id)
+        qt = db.scalars(quote.order_by(Quote.id.desc())).first()
 
         # Skip if this quote is already handled by an alignment group
         if qt and aligned_quote_ids and qt.id in aligned_quote_ids:
@@ -526,17 +532,17 @@ def build_anchor_matrix(
 
     # ── Load groups: when session is known, ONLY load that session's groups ──
     # Prevents cross-session contamination when re-running match after a bad round.
-    q = db.query(BidAlignmentGroup).filter(
+    q = select(BidAlignmentGroup).where(
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
         BidAlignmentGroup.status == "confirmed",
     )
     if tender_list_session_id is not None:
         # Strict: only groups that were created by this specific session
-        q = q.filter(BidAlignmentGroup.tender_list_session_id == tender_list_session_id)
+        q = q.where(BidAlignmentGroup.tender_list_session_id == tender_list_session_id)
     if allowed_group_ids is not None:
-        q = q.filter(BidAlignmentGroup.id.in_(allowed_group_ids))
-    all_groups: list[BidAlignmentGroup] = q.all()
+        q = q.where(BidAlignmentGroup.id.in_(allowed_group_ids))
+    all_groups: list[BidAlignmentGroup] = db.scalars(q).all()
 
     # Build lookup: anchor_seq → group (no fallback needed — session already filtered)
     seq_to_group: dict[str, BidAlignmentGroup] = {}
@@ -601,9 +607,13 @@ def build_anchor_matrix(
             if cell.get("baseline") and row_baseline is None:
                 row_baseline = cell["baseline"]
 
-            if cell.get("price") is not None and cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING):
+            # Pending is evidence for review only, never a confirmed quote in
+            # supplier totals or ranking coverage.
+            if cell.get("price") is not None and cell["cell_status"] in (CELL_QUOTED, CELL_AGGREGATED):
                 supplier_totals[col_id]["quoted"] += 1
-            if cell.get("evaluable"):
+            # A pending alignment can expose a price for human review, but
+            # must never affect totals, lowest-price markers, or ranking.
+            if cell.get("evaluable") and cell["cell_status"] != CELL_PENDING:
                 supplier_totals[col_id]["total"] += cell.get("eval_amount") or 0.0
                 if cell.get("incl_unit") is not None:
                     prices_this_row.append((col_id, cell["incl_unit"], cell.get("deviation_pct")))
@@ -904,16 +914,12 @@ def build_anchor_review_matrix(
             })
 
     # Load confirmed groups scoped to current session ONLY (prevents historical data leakage)
-    all_groups = (
-        db.query(BidAlignmentGroup)
-        .filter(
-            BidAlignmentGroup.project_id == project_id,
-            BidAlignmentGroup.category == category,
-            BidAlignmentGroup.status == "confirmed",
-            BidAlignmentGroup.tender_list_session_id == session.id,
-        )
-        .all()
-    )
+    all_groups = db.scalars(select(BidAlignmentGroup).where(
+        BidAlignmentGroup.project_id == project_id,
+        BidAlignmentGroup.category == category,
+        BidAlignmentGroup.status == "confirmed",
+        BidAlignmentGroup.tender_list_session_id == session.id,
+    )).all()
     seq_to_group: dict[str, BidAlignmentGroup] = {}
     for g in all_groups:
         if g.anchor_seq is None:

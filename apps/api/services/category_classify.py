@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from apps.api.services.canonical import extract_valve_canonical
 from apps.api.services.standardize import standardize_name
 
-# 10 个合法品类
+# 11 个合法品类
 ALL_CATEGORIES = [
-    "桥架", "母线槽", "配电箱", "阀门", "不锈钢管",
+    "桥架", "母线槽", "配电箱", "电缆", "阀门", "不锈钢管",
     "水箱", "潜水泵", "风口风阀", "风机盘管", "空调泵",
 ]
 
@@ -45,6 +45,16 @@ _CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
     ("桥架", ["电缆桥架", "梯式桥架", "托盘桥架", "槽式桥架", "桥架", "线槽"]),
     ("配电箱", ["配电箱", "配电柜", "开关柜", "开关箱", "控制箱", "照明箱",
               "动力箱", "计量箱", "电表箱", "双电源"]),
+    # —— 电缆：必须排在桥架之后("电缆桥架"是桥架不是电缆)。招标清单常只给
+    #    型号串(如 RTTYZ-3*240+2*120)，无中文品名，故需覆盖型号前缀。 ——
+    ("电缆", ["矿物绝缘电缆", "矿物电缆", "电力电缆", "控制电缆", "预分支电缆",
+            "电缆", "电线",
+            "BTTZ", "BTTVZ", "BTLY", "BBTRZ", "YTTW",
+            "RTTZ", "RTTYZ", "RTTVZ", "RTXMY",
+            "YJV", "YJY", "YJLV", "WDZA", "WDZ", "NG-A",
+            "NH-YJ", "ZR-YJ", "ZC-YJ", "RVV", "BVR",
+            # 通信/控制电缆
+            "HYA", "HYAT", "RVVP", "KVV", "ZR-KVV"]),
     # —— 给排水设备/管材：水箱在不锈钢管之前(不锈钢水箱) ——
     ("水箱", ["不锈钢水箱", "膨胀水箱", "消防水箱", "生活水箱", "储水箱", "水箱"]),
     ("不锈钢管", ["薄壁不锈钢管", "不锈钢水管", "不锈钢钢管", "不锈钢管", "卡压管", "沟槽管"]),

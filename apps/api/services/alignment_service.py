@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import HTTPException
-from sqlalchemy import func as _func
+from sqlalchemy import func as _func, select
 from sqlalchemy.orm import Session
 
 from apps.api.models.alignment_finalization import AlignmentFinalization
@@ -47,16 +47,15 @@ def finalize_alignment(
         raise HTTPException(400, "force=True 时必须提供 reason 字段")
 
     # Gate 1: item-level pending check
-    pending_count = (
-        db.query(_func.count(BidAlignmentItem.id))
+    pending_count = db.scalar(
+        select(_func.count(BidAlignmentItem.id))
         .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
-        .filter(
+        .where(
             BidAlignmentGroup.project_id == project_id,
             BidAlignmentGroup.category == category,
             BidAlignmentItem.action == "pending",
         )
-        .scalar() or 0
-    )
+    ) or 0
     if pending_count > 0 and not force:
         raise HTTPException(
             409,
@@ -65,18 +64,17 @@ def finalize_alignment(
         )
 
     # Gate 2: valve_type_conflict align items
-    fp_align_count = (
-        db.query(_func.count(BidAlignmentItem.id))
+    fp_align_count = db.scalar(
+        select(_func.count(BidAlignmentItem.id))
         .join(BidAlignmentGroup, BidAlignmentItem.group_id == BidAlignmentGroup.id)
-        .filter(
+        .where(
             BidAlignmentGroup.project_id == project_id,
             BidAlignmentGroup.category == category,
             BidAlignmentGroup.status == "confirmed",
             BidAlignmentItem.action == "align",
             BidAlignmentItem.spec_note.like("%valve_type_conflict%"),
         )
-        .scalar() or 0
-    )
+    ) or 0
     if fp_align_count > 0 and not force:
         raise HTTPException(
             409,
@@ -85,15 +83,13 @@ def finalize_alignment(
         )
 
     # Lock current confirmed group ID snapshot
-    confirmed_groups = (
-        db.query(BidAlignmentGroup)
-        .filter(
+    confirmed_groups = db.scalars(
+        select(BidAlignmentGroup).where(
             BidAlignmentGroup.project_id == project_id,
             BidAlignmentGroup.category == category,
             BidAlignmentGroup.status == "confirmed",
         )
-        .all()
-    )
+    ).all()
     group_ids = [g.id for g in confirmed_groups]
 
     fin = AlignmentFinalization(

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 DB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 DB_DIR.mkdir(exist_ok=True)
@@ -38,7 +38,9 @@ def _set_sqlite_pragma(dbapi_conn, _connection_record):
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    """SQLAlchemy 2.x declarative base for all ORM mappings."""
+
 
 
 def get_db():

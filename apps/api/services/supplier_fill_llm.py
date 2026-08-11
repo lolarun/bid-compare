@@ -467,7 +467,10 @@ def attach_wide_candidates(
     """
     from apps.api.services.anchor_match import match_anchors_wide, _dn_of
 
-    pending = [r for r in rows if not r.candidates]
+    # Tests and upstream callers may already supply a Top-K recall result.
+    # It is sufficient for the prompt/Tier-1 path and must not trigger a new
+    # embedding request (which would also defeat offline execution).
+    pending = [r for r in rows if not r.candidates and not r.topk]
     if not pending:
         return
 

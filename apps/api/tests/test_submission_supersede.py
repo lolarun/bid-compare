@@ -76,7 +76,7 @@ def test_supersede_single(client, db_session):
     db_session.refresh(sub)
     assert sub.status == "superseded"
     # 软删除：记录仍在库，未物理删除
-    assert db_session.query(BidSubmission).get(sub.id) is not None
+    assert db_session.get(BidSubmission, sub.id) is not None
 
 
 def test_supersede_single_idempotent_and_404(client, db_session):

@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import math
@@ -44,14 +45,12 @@ def recommend_brands(
     if not categories:
         return [], []
 
-    brand_records: list[BrandTier] = (
-        db.query(BrandTier)
-        .filter(
+    brand_records: list[BrandTier] = db.scalars(
+        select(BrandTier).where(
             BrandTier.is_approved == True,  # noqa: E712
             BrandTier.category.in_(categories),
         )
-        .all()
-    )
+    ).all()
     if not brand_records:
         return [], categories
 
@@ -102,19 +101,18 @@ def recommend_brands(
 
 def _fetch_prices(db: Session, category: str, brand_aliases: list[str]) -> list[float]:
     from apps.api.models import Supplier
-    rows = (
-        db.query(Quote.unit_price)
+    rows = db.scalars(
+        select(Quote.unit_price)
         .join(Material, Material.id == Quote.material_id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(
+        .where(
             Material.category == category,
             Quote.brand.in_(brand_aliases),
             Quote.unit_price > 0,
             *valid_quote_filters(),
         )
-        .all()
-    )
-    return sorted(r[0] for r in rows if r[0] and r[0] > 0)
+    ).all()
+    return sorted(price for price in rows if price and price > 0)
 
 
 def _percentile(sorted_vals: list[float], p: float) -> float:

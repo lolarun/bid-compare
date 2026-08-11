@@ -7,9 +7,11 @@ Tests the deterministic persistence layer (no real LLM / no network):
   - build_anchor_matrix consumes the written items unchanged
 """
 import pytest
+from sqlalchemy import select
 
 from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
+from apps.api.models.tender_list_session import TenderListSession
 from apps.api.services.supplier_fill_llm import FillCell, SupplierFillResult
 from apps.api.routes.analysis import _persist_llm_fill
 
@@ -34,6 +36,9 @@ def fill_setup(db_session):
     sup_a = Supplier(name="供A", short_name="A", categories=["阀门"])
     sup_b = Supplier(name="供B", short_name="B", categories=["阀门"])
     db_session.add_all([proj, sup_a, sup_b])
+    db_session.flush()
+    session = TenderListSession(project_id=proj.id, category="阀门")
+    db_session.add(session)
     db_session.flush()
 
     mats = []
@@ -61,7 +66,7 @@ def fill_setup(db_session):
     ]
     return {
         "db": db_session, "proj": proj, "sup_a": sup_a, "sup_b": sup_b,
-        "anchors": anchors, "seq_to_anchor": {int(a.seq): a for a in anchors},
+        "anchors": anchors, "seq_to_anchor": {int(a.seq): a for a in anchors}, "session_id": session.id,
         "qa1": qa1, "qa2": qa2, "qb1": qb1,
     }
 
@@ -83,20 +88,20 @@ def test_persist_writes_group_per_anchor_and_item_per_cell(fill_setup):
                  quote_id=s["qb1"].id, unit_price=110.0, qty=10.0, total_price=1100.0,
                  confidence=0.88),
     ])
-    _persist_llm_fill(db, s["proj"].id, "阀门", 99, [res_a, res_b], s["seq_to_anchor"], valid_sids)
+    _persist_llm_fill(db, s["proj"].id, "阀门", s["session_id"], [res_a, res_b], s["seq_to_anchor"], valid_sids)
     db.commit()
 
-    groups = db.query(BidAlignmentGroup).filter(
+    groups = db.scalars(select(BidAlignmentGroup).where(
         BidAlignmentGroup.project_id == s["proj"].id,
         BidAlignmentGroup.reason.like("[llm-fill]%"),
-    ).all()
+    )).all()
     assert len(groups) == 1  # only anchor 1 had cells
     g = groups[0]
     assert g.anchor_seq == "1"
     assert g.status == "confirmed"
-    assert g.tender_list_session_id == 99
+    assert g.tender_list_session_id == s["session_id"]
 
-    items = db.query(BidAlignmentItem).filter(BidAlignmentItem.group_id == g.id).all()
+    items = db.scalars(select(BidAlignmentItem).where(BidAlignmentItem.group_id == g.id)).all()
     assert len(items) == 2  # one per supplier
     agg_item = next(i for i in items if i.supplier_id == s["sup_a"].id)
     assert agg_item.action == "align"
@@ -125,17 +130,19 @@ def test_rerun_replaces_only_llm_fill_groups(fill_setup):
                  confidence=0.9),
     ])
     # First run
-    _persist_llm_fill(db, s["proj"].id, "阀门", 99, [res], s["seq_to_anchor"], valid_sids)
+    _persist_llm_fill(db, s["proj"].id, "阀门", s["session_id"], [res], s["seq_to_anchor"], valid_sids)
     db.commit()
-    first = db.query(BidAlignmentGroup).filter(
-        BidAlignmentGroup.reason.like("[llm-fill]%")).all()
+    first = db.scalars(select(BidAlignmentGroup).where(
+        BidAlignmentGroup.reason.like("[llm-fill]%"),
+        BidAlignmentGroup.status == "confirmed")).all()
     assert len(first) == 1
 
     # Second run (idempotent replace)
-    _persist_llm_fill(db, s["proj"].id, "阀门", 99, [res], s["seq_to_anchor"], valid_sids)
+    _persist_llm_fill(db, s["proj"].id, "阀门", s["session_id"], [res], s["seq_to_anchor"], valid_sids)
     db.commit()
-    second = db.query(BidAlignmentGroup).filter(
-        BidAlignmentGroup.reason.like("[llm-fill]%")).all()
+    second = db.scalars(select(BidAlignmentGroup).where(
+        BidAlignmentGroup.reason.like("[llm-fill]%"),
+        BidAlignmentGroup.status == "confirmed")).all()
     assert len(second) == 1, "re-run must replace, not duplicate"
 
     # The non-llm-fill group is untouched
@@ -160,11 +167,11 @@ def test_persisted_items_render_in_anchor_matrix(fill_setup):
                  quote_id=s["qb1"].id, unit_price=110.0, qty=10.0, total_price=1100.0,
                  confidence=0.88),
     ])
-    _persist_llm_fill(db, s["proj"].id, "阀门", 99, [res_a, res_b], s["seq_to_anchor"], valid_sids)
+    _persist_llm_fill(db, s["proj"].id, "阀门", s["session_id"], [res_a, res_b], s["seq_to_anchor"], valid_sids)
     db.commit()
 
     matrix = build_anchor_matrix(
-        db=db, anchors=s["anchors"], tender_list_session_id=99,
+            db=db, anchors=s["anchors"], tender_list_session_id=s["session_id"],
         supplier_ids=[s["sup_a"].id, s["sup_b"].id],
         project_id=s["proj"].id, category="阀门",
     )

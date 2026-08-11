@@ -1,5 +1,6 @@
 """Brand tier CRUD API endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -14,10 +15,10 @@ def list_brand_tiers(
     category: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(BrandTier)
+    stmt = select(BrandTier)
     if category:
-        q = q.filter((BrandTier.category == category) | BrandTier.category.is_(None))
-    return q.order_by(BrandTier.brand_name).all()
+        stmt = stmt.where((BrandTier.category == category) | BrandTier.category.is_(None))
+    return db.scalars(stmt.order_by(BrandTier.brand_name)).all()
 
 
 @router.get("/unknown", response_model=list[str])
@@ -28,15 +29,15 @@ def list_unknown_brands(
     """Return brand names that appear in quotes but have no tier mapping."""
     from apps.api.models import Material
 
-    q = db.query(Quote.brand).filter(
+    stmt = select(Quote.brand).where(
         Quote.brand != "",
         Quote.brand.isnot(None),
     )
     if category:
-        q = q.join(Material).filter(Material.category == category)
-    all_brands = {r[0] for r in q.distinct().all() if r[0]}
+        stmt = stmt.join(Material).where(Material.category == category)
+    all_brands = {brand for brand in db.scalars(stmt.distinct()).all() if brand}
 
-    tiered_brands = {r[0] for r in db.query(BrandTier.brand_name).all()}
+    tiered_brands = set(db.scalars(select(BrandTier.brand_name)).all())
     unknown = sorted(all_brands - tiered_brands)
     return unknown
 
@@ -52,10 +53,10 @@ def get_brand_tier(tier_id: int, db: Session = Depends(get_db)):
 @router.post("", response_model=BrandTierOut, status_code=201)
 def create_brand_tier(body: BrandTierCreate, db: Session = Depends(get_db)):
     # Upsert: if (brand_name, category) exists, update tier
-    existing = db.query(BrandTier).filter(
+    existing = db.scalar(select(BrandTier).where(
         BrandTier.brand_name == body.brand_name,
         BrandTier.category == body.category,
-    ).first()
+    ))
     if existing:
         existing.tier = body.tier
         db.commit()

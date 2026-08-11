@@ -23,6 +23,8 @@ class PriceCompareResult(BaseModel):
     deviation_pct: float | None
     alert_level: str
     sample_count: int
+    comparison_profile: str = "standard"
+    review_hint: str = ""
 
 
 class SupplierScoreRequest(BaseModel):

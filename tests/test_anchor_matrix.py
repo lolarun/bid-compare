@@ -9,6 +9,7 @@ Verifies:
   6. multi align item: lowest effective price is selected (not highest)
 """
 import pytest
+from sqlalchemy import select
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,8 +115,8 @@ def anchor_setup(db_session):
     db_session.commit()
 
     anchors = [
-        _Anchor(seq=1, name="闸阀", spec="DN50"),
-        _Anchor(seq=2, name="蝶阀", spec="DN100"),  # no group — both missing
+        _Anchor(seq=1, name="闸阀", spec="DN50", qty=10.0),
+        _Anchor(seq=2, name="蝶阀", spec="DN100", qty=1.0),  # no group — both missing
     ]
 
     return {
@@ -285,7 +286,7 @@ def test_multi_align_items_lowest_price_selected(anchor_setup):
 
     # Add second align item to the existing group for anchor_seq=1
     from apps.api.models.bid_alignment import BidAlignmentGroup as BAG
-    grp = db.query(BAG).filter(BAG.anchor_seq == "1").first()
+    grp = db.scalar(select(BAG).where(BAG.anchor_seq == "1"))
     item2 = BidAlignmentItem(
         group_id=grp.id, quote_id=qt_a2.id,
         supplier_id=s["sup_a"].id, action="align",

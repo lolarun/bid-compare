@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import get_settings
@@ -31,6 +32,7 @@ from apps.api.services.canonical import (
     canonical_match_score, extract_valve_canonical, valve_type_compatible,
 )
 from apps.api.services.tender_list import TenderAnchor, parse_tender_xlsx
+from apps.api.services.standardize import normalize_model_code
 
 
 @dataclass
@@ -121,7 +123,8 @@ def embed_anchor_vecs(anchors: list[TenderAnchor], client: OpenAI | None = None)
     if not anchors:
         return []
     client = client or _embed_client()
-    a_text = [f"{a.name} {a.spec} {a.pressure} {a.material_text()}".strip() for a in anchors]
+    a_text = [normalize_model_code(
+        f"{a.name} {a.spec} {a.pressure} {a.material_text()}".strip()) for a in anchors]
     return _embed(client, a_text)
 
 
@@ -392,7 +395,7 @@ def attach_nearest_hints(
         nm = str(getattr(r, "normalized_material", "") or "")
         mat = nm or str(getattr(r, "raw_material", "") or getattr(r, "material", "") or "")
         spec = str(getattr(r, "raw_spec", "") or getattr(r, "spec", "") or "")
-        quote_texts.append(f"{mat} {spec}".strip() or str(mat))
+        quote_texts.append(normalize_model_code(f"{mat} {spec}".strip() or str(mat)))
 
     # P0 guard: if caller passed anchor_vecs for a different (larger) anchor set, re-embed.
     # This happens when analysis.py pre-computes full-90-anchor vectors then passes them
@@ -695,15 +698,15 @@ def import_and_match(
 
     if bql_submission_ids:
         _bql_q = (
-            db.query(BidQuoteLine, BidSubmission)
+            select(BidQuoteLine, BidSubmission)
             .join(BidSubmission, BidQuoteLine.submission_id == BidSubmission.id)
-            .filter(BidQuoteLine.submission_id.in_(bql_submission_ids))
+            .where(BidQuoteLine.submission_id.in_(bql_submission_ids))
         )
         if category:
-            _bql_q = _bql_q.filter(BidQuoteLine.category == category)
+            _bql_q = _bql_q.where(BidQuoteLine.category == category)
         # 显式按 (submission, id) 排序 = 入库/文档顺序，供顺序直连按位置对齐（不依赖隐式顺序）。
         _bql_q = _bql_q.order_by(BidQuoteLine.submission_id.asc(), BidQuoteLine.id.asc())
-        for bql, sub in _bql_q.all():
+        for bql, sub in db.execute(_bql_q).all():
             _dri = None
             _meta = bql.extraction_meta or {}
             if isinstance(_meta, dict):
@@ -729,33 +732,34 @@ def import_and_match(
     # ── 旧路径：载入 Quote（仅限无 BidSubmission 的供应商） ───────────────────
     bql_sup_ids = bql_supplier_ids
     _qt_q = (
-        db.query(Quote, Material)
+        select(Quote, Material)
         .join(Material, Quote.material_id == Material.id)
-        .filter(Quote.project_id == project_id)
+        .where(Quote.project_id == project_id)
     )
     if category:
-        _qt_q = _qt_q.filter(Material.category == category)
+        _qt_q = _qt_q.where(Material.category == category)
     if supplier_ids:
         legacy_sids = [sid for sid in supplier_ids if sid not in bql_sup_ids]
         if not legacy_sids:
             # All requested suppliers have BidSubmissions — skip Quote query
             rows = []
         else:
-            _qt_q = _qt_q.filter(Quote.supplier_id.in_(legacy_sids))
-            rows = _qt_q.all()
+            _qt_q = _qt_q.where(Quote.supplier_id.in_(legacy_sids))
+            rows = db.execute(_qt_q).all()
     elif bql_sup_ids:
         # No supplier filter but some have BidSubmissions — exclude them from Quote
-        _qt_q = _qt_q.filter(~Quote.supplier_id.in_(bql_sup_ids))
-        rows = _qt_q.all()
+        _qt_q = _qt_q.where(~Quote.supplier_id.in_(bql_sup_ids))
+        rows = db.execute(_qt_q).all()
     else:
-        rows = _qt_q.all()
+        rows = db.execute(_qt_q).all()
 
     for qt, m in rows:
         quotes.append(qt)
         materials.append(m)
         is_bql_flags.append(False)
 
-    quote_texts = [f"{m.standard_name} {m.spec or ''}".strip() for m in materials]
+    quote_texts = [normalize_model_code(
+        f"{m.standard_name} {m.spec or ''}".strip()) for m in materials]
     quote_dns = [_dn_of(m.spec) or _dn_of(m.standard_name) for m in materials]
 
     # Compute/load canonical per item (cache hit from extended_attrs or bql.canonical)
@@ -796,13 +800,13 @@ def import_and_match(
     matches = seq_matches + embed_matches
 
     # 预载有效 supplier_id 集合，避免向已删除供应商插外键
-    valid_sids: set[int] = {row[0] for row in db.query(Supplier.id).all()}
+    valid_sids: set[int] = set(db.scalars(select(Supplier.id)).all())
 
     # 幂等:清掉本 (project,category) 既有对齐组(及级联 items)
-    old = db.query(BidAlignmentGroup).filter(
+    old = db.scalars(select(BidAlignmentGroup).where(
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
-    ).all()
+    )).all()
     for g in old:
         db.delete(g)
     db.flush()

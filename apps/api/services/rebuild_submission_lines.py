@@ -6,6 +6,7 @@
 import logging
 import re
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import PROFESSION_MAP
@@ -63,7 +64,9 @@ def rebuild_submission_lines(
         raw_items = (job.result or {}).get("items") or []
 
     # Delete existing BQL rows (rebuilding in-place)
-    existing = db.query(BidQuoteLine).filter_by(submission_id=submission_id).all()
+    existing = db.scalars(
+        select(BidQuoteLine).where(BidQuoteLine.submission_id == submission_id)
+    ).all()
     for row in existing:
         db.delete(row)
     db.flush()
@@ -105,22 +108,26 @@ def rebuild_submission_lines(
                 except (ValueError, TypeError):
                     pass
             if not mat:
-                mat = db.query(Material).filter_by(
-                    category=item_category, standard_name=standard_name, spec=spec
-                ).first()
+                mat = db.scalar(select(Material).where(
+                    Material.category == item_category,
+                    Material.standard_name == standard_name,
+                    Material.spec == spec,
+                ))
 
             brand = str(item.get("brand") or "").strip()
             brand_tier = ""
             if brand:
-                bt = db.query(BrandTier).filter_by(brand_name=brand).first()
+                bt = db.scalar(select(BrandTier).where(BrandTier.brand_name == brand))
                 if bt:
                     brand_tier = bt.tier
 
             price = float(p) if (p := item.get("unit_price")) is not None else None
             qty = float(q) if (q := item.get("qty")) is not None else None
             total = item.get("total_price")
+            # 与 confirm 同一规则：不派生权威合价，只留候选（doc/19 §L2）。
+            derived_candidate = None
             if total is None and price is not None and qty is not None:
-                total = round(price * qty, 4)
+                derived_candidate = round(price * qty, 4)
             if total is not None:
                 total = float(total)
 

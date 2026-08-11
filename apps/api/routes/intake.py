@@ -21,6 +21,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -161,7 +162,7 @@ def enhance_extraction(
     elif body.job_id:
         # Load from job
         from apps.api.models.extraction_job import ExtractionJob
-        job = db.query(ExtractionJob).filter(ExtractionJob.id == body.job_id).first()
+        job = db.scalar(select(ExtractionJob).where(ExtractionJob.id == body.job_id))
         if not job:
             raise HTTPException(404, f"Job {body.job_id} not found")
         if job.status != "done":

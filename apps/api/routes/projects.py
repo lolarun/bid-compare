@@ -1,6 +1,7 @@
 """Project CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -18,14 +19,14 @@ def list_projects(
     status: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Project)
+    stmt = select(Project)
     if keyword:
-        q = q.filter(Project.name.contains(keyword) | Project.code.contains(keyword))
+        stmt = stmt.where(Project.name.contains(keyword) | Project.code.contains(keyword))
     if status:
-        q = q.filter(Project.status == status)
+        stmt = stmt.where(Project.status == status)
 
-    total = q.count()
-    items = q.order_by(Project.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(Project.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {
         "total": total,
         "page": page,

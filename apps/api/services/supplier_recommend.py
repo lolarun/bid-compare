@@ -31,7 +31,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, func
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Quote, Supplier, PROFESSION_MAP
@@ -117,7 +117,15 @@ def infer_categories(tender_items: list[dict[str, Any]]) -> list[str]:
                 break
         if not matched:
             for kw, cat in CATEGORY_KEYWORD_MAP.items():
-                if kw in name and cat not in seen:
+                idx = name.find(kw)
+                # A device keyword embedded in a longer CJK compound is not
+                # evidence for the broad category: 止回阀门 is not the
+                # standalone 止回阀 device.  Keep OCR/punctuation suffixes.
+                if (
+                    idx >= 0
+                    and (idx + len(kw) == len(name) or not _is_cjk(name[idx + len(kw)]))
+                    and cat not in seen
+                ):
                     out.append(cat)
                     seen.add(cat)
                     break
@@ -200,8 +208,8 @@ def _aggregate_supplier_stats(
         else_=None,
     )
 
-    q = (
-        db.query(
+    stmt = (
+        select(
             Quote.supplier_id,
             func.count(Quote.id).label("history_count"),
             func.avg(fallback_dev).label("avg_deviation"),
@@ -216,8 +224,8 @@ def _aggregate_supplier_stats(
         )
     )
     if categories:
-        q = q.filter(Material.category.in_(categories))
-    rows = q.group_by(Quote.supplier_id).all()
+        stmt = stmt.where(Material.category.in_(categories))
+    rows = db.execute(stmt.group_by(Quote.supplier_id)).all()
 
     stats: dict[int, dict[str, Any]] = {}
     for r in rows:
@@ -235,20 +243,19 @@ def _aggregate_supplier_stats(
     if stats and len(stats) <= 60:
         for sid in list(stats.keys()):
             quote_dates = (
-                db.query(Quote.created_at)
+                select(Quote.created_at)
                 .join(Material, Material.id == Quote.material_id)
                 .join(Supplier, Supplier.id == Quote.supplier_id)
-                .filter(
+                .where(
                     Quote.supplier_id == sid,
                     Quote.unit_price > 0,
                     *valid_quote_filters(),
                 )
             )
             if categories:
-                quote_dates = quote_dates.filter(Material.category.in_(categories))
+                quote_dates = quote_dates.where(Material.category.in_(categories))
             decayed = 0.0
-            for row in quote_dates.all():
-                d = row[0]
+            for d in db.scalars(quote_dates).all():
                 if d is None:
                     decayed += 0.3  # unknown date → modest contribution
                     continue
@@ -272,6 +279,10 @@ def _compute_tags(
 ) -> list[str]:
     """Generate semantic tags for a supplier recommendation card."""
     tags: list[str] = []
+    if history_count == 0:
+        # Cold-start candidates are useful as a fallback, but must never be
+        # presented as if the system had historical quotation evidence.
+        tags.append("待补充证据")
     if avg_dev is not None and avg_dev <= -0.05:
         tags.append("价格优势")
     if history_count >= 6:
@@ -310,24 +321,18 @@ def recommend_suppliers(
     candidates: list[Supplier] = []
     cand_ids: list[int] = []
     if categories:
-        cand_ids = [
-            r[0]
-            for r in db.query(Supplier.id)
+        cand_ids = list(db.scalars(
+            select(Supplier.id)
             .join(Quote, Supplier.id == Quote.supplier_id)
             .join(Material, Material.id == Quote.material_id)
-            .filter(
+            .where(
                 Material.category.in_(categories),
                 Quote.unit_price > 0,
                 *valid_quote_filters(),
             )
             .distinct()
-            .all()
-        ]
-        candidates = (
-            db.query(Supplier).filter(Supplier.id.in_(cand_ids)).all()
-            if cand_ids
-            else []
-        )
+        ).all())
+        candidates = db.scalars(select(Supplier).where(Supplier.id.in_(cand_ids))).all() if cand_ids else []
 
     # ── 2. Bulk aggregate stats in ONE query (was N+1) ──
     cat_stats = _aggregate_supplier_stats(db, categories) if categories else {}
@@ -344,14 +349,13 @@ def recommend_suppliers(
     # ── 4. Cold-start: fill remaining slots from global pool ──
     if len(primary) < top_n:
         primary_ids = {s["supplier_id"] for s in primary}
-        all_others_q = (
-            db.query(Supplier)
-            .filter(Supplier.merge_status == "active", ~Supplier.id.in_(primary_ids))
+        all_others_stmt = (
+            select(Supplier).where(Supplier.merge_status == "active", ~Supplier.id.in_(primary_ids))
             if primary_ids
-            else db.query(Supplier).filter(Supplier.merge_status == "active")
+            else select(Supplier).where(Supplier.merge_status == "active")
         )
         # Cap at 50 to bound cold-start cost
-        all_others = all_others_q.limit(50).all()
+        all_others = db.scalars(all_others_stmt.limit(50)).all()
         # Score without category constraint → use empty cat_stats
         global_stats = _aggregate_supplier_stats(db, []) if all_others else {}
         extras = [_score_one(db, sup, [], global_stats.get(sup.id), brand_requirements) for sup in all_others]
@@ -372,19 +376,18 @@ def _per_category_breakdown(
     """Return {category: quote_count} for this supplier. Used in summary."""
     if not categories:
         return {}
-    rows = (
-        db.query(Material.category, func.count(Quote.id))
+    rows = db.execute(
+        select(Material.category, func.count(Quote.id))
         .join(Quote, Quote.material_id == Material.id)
         .join(Supplier, Supplier.id == Quote.supplier_id)
-        .filter(
+        .where(
             Quote.supplier_id == supplier_id,
             Material.category.in_(categories),
             Quote.unit_price > 0,
             *valid_quote_filters(),
         )
         .group_by(Material.category)
-        .all()
-    )
+    ).all()
     return {cat: int(cnt) for cat, cnt in rows}
 
 
@@ -392,18 +395,20 @@ def _get_supplier_brands(
     db: Session, supplier_id: int, categories: list[str],
 ) -> list[str]:
     """Return distinct brand names this supplier has quoted in the given categories."""
-    q = (
-        db.query(func.distinct(Quote.brand))
+    stmt = (
+        select(func.distinct(Quote.brand))
         .join(Material, Material.id == Quote.material_id)
-        .filter(
+        .outerjoin(Supplier, Supplier.id == Quote.supplier_id)
+        .where(
             Quote.supplier_id == supplier_id,
             Quote.brand.isnot(None),
             Quote.brand != "",
+            *valid_quote_filters(),
         )
     )
     if categories:
-        q = q.filter(Material.category.in_(categories))
-    return sorted(r[0] for r in q.all() if r[0])
+        stmt = stmt.where(Material.category.in_(categories))
+    return sorted(brand for brand in db.scalars(stmt).all() if brand)
 
 
 def _score_one(
@@ -471,11 +476,13 @@ def _score_one(
             # Sort by count descending, show top 3 to keep summary short
             top_cats = sorted(breakdown.items(), key=lambda x: -x[1])[:3]
             cats_str = " · ".join(f"{cat} {cnt}" for cat, cnt in top_cats)
-            summary_parts.append(f"成交 {history_count} 次（{cats_str}）")
+            # A historical quote is useful invitation evidence, but it is not
+            # proof of an award or completed transaction.
+            summary_parts.append(f"历史报价 {history_count} 条（{cats_str}）")
         else:
-            summary_parts.append(f"在 {len(categories)} 个品类成交 {history_count} 次")
+            summary_parts.append(f"在 {len(categories)} 个品类有 {history_count} 条历史报价")
     else:
-        summary_parts.append(f"历史成交 {history_count} 次")
+        summary_parts.append(f"历史报价 {history_count} 条")
     if avg_dev is not None:
         sign = "+" if avg_dev >= 0 else ""
         coverage = f" ({dev_count}/{history_count} 条有偏差数据)" if dev_count < history_count else ""

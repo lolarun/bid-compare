@@ -9,7 +9,7 @@ Return type: dict[submission_id → BidSubmission]  (keyed by BidSubmission.id)
 
 from __future__ import annotations
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
@@ -32,10 +32,10 @@ def resolve_active_submissions(
     Status filter: 始终排除 rejected AND superseded。
     BQL filter: 必须在 category 下存在至少一行 BidQuoteLine。
     """
-    q = (
-        db.query(BidSubmission)
+    stmt = (
+        select(BidSubmission)
         .join(BidQuoteLine, BidSubmission.id == BidQuoteLine.submission_id)
-        .filter(
+        .where(
             BidSubmission.project_id == project_id,
             BidSubmission.status.notin_(["rejected", "superseded"]),
             BidQuoteLine.category == category,
@@ -45,13 +45,13 @@ def resolve_active_submissions(
 
     if submission_ids:
         # submission_ids 是调用方明确指定的权威集合，不允许 supplier_ids 扩展
-        q = q.filter(BidSubmission.id.in_(submission_ids))
+        stmt = stmt.where(BidSubmission.id.in_(submission_ids))
     elif supplier_ids:
-        q = q.filter(BidSubmission.supplier_id.in_(supplier_ids))
+        stmt = stmt.where(BidSubmission.supplier_id.in_(supplier_ids))
     # 两者均为空：不附加额外过滤（返回全部 active）
 
     result: dict[int, BidSubmission] = {}
-    for sub in q.order_by(BidSubmission.id.asc()).all():
+    for sub in db.scalars(stmt.order_by(BidSubmission.id.asc())).all():
         if sub.id not in result:
             result[sub.id] = sub
     return result

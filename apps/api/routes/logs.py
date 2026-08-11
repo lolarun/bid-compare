@@ -1,9 +1,12 @@
 """Operation log API endpoints."""
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.enums import ROLE_ADMIN
+from apps.api.core.security import require_role
 from apps.api.models.operation_log import OperationLog
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -19,21 +22,22 @@ def list_logs(
     date_from: str | None = None,
     date_to: str | None = None,
     db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
 ):
-    q = db.query(OperationLog)
+    stmt = select(OperationLog)
     if user:
-        q = q.filter(OperationLog.user == user)
+        stmt = stmt.where(OperationLog.user == user)
     if module:
-        q = q.filter(OperationLog.module == module)
+        stmt = stmt.where(OperationLog.module == module)
     if action:
-        q = q.filter(OperationLog.action.contains(action))
+        stmt = stmt.where(OperationLog.action.contains(action))
     if date_from:
-        q = q.filter(OperationLog.created_at >= date_from)
+        stmt = stmt.where(OperationLog.created_at >= date_from)
     if date_to:
-        q = q.filter(OperationLog.created_at <= date_to)
+        stmt = stmt.where(OperationLog.created_at <= date_to)
 
-    total = q.count()
-    items = q.order_by(OperationLog.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(OperationLog.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
 
     return {
         "total": total,

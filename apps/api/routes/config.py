@@ -1,10 +1,13 @@
 """Configuration management API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
 from apps.api.core.config import DEFAULT_SCORING_WEIGHTS, DEFAULT_THRESHOLDS, EXTENDED_ATTR_SCHEMAS
+from apps.api.core.enums import ROLE_ADMIN
+from apps.api.core.security import require_role
 from apps.api.models import AnalysisConfig
 from apps.api.schemas import ConfigUpdate, ConfigOut
 
@@ -13,24 +16,29 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 @router.get("", response_model=list[ConfigOut])
 def list_configs(db: Session = Depends(get_db)):
-    configs = db.query(AnalysisConfig).all()
+    configs = db.scalars(select(AnalysisConfig)).all()
     if not configs:
         _init_defaults(db)
-        configs = db.query(AnalysisConfig).all()
+        configs = db.scalars(select(AnalysisConfig)).all()
     return configs
 
 
 @router.get("/{key}", response_model=ConfigOut)
 def get_config(key: str, db: Session = Depends(get_db)):
-    cfg = db.query(AnalysisConfig).filter(AnalysisConfig.key == key).first()
+    cfg = db.scalar(select(AnalysisConfig).where(AnalysisConfig.key == key))
     if not cfg:
         raise HTTPException(404, f"Config key '{key}' not found")
     return cfg
 
 
 @router.put("/{key}", response_model=ConfigOut)
-def update_config(key: str, body: ConfigUpdate, db: Session = Depends(get_db)):
-    cfg = db.query(AnalysisConfig).filter(AnalysisConfig.key == key).first()
+def update_config(
+    key: str,
+    body: ConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
+):
+    cfg = db.scalar(select(AnalysisConfig).where(AnalysisConfig.key == key))
     if not cfg:
         raise HTTPException(404, f"Config key '{key}' not found")
 
@@ -62,7 +70,7 @@ def _init_defaults(db: Session):
         ("extended_attr_schemas", EXTENDED_ATTR_SCHEMAS, "各品类扩展属性 Schema"),
     ]
     for key, value, desc in defaults:
-        existing = db.query(AnalysisConfig).filter(AnalysisConfig.key == key).first()
+        existing = db.scalar(select(AnalysisConfig).where(AnalysisConfig.key == key))
         if not existing:
             db.add(AnalysisConfig(key=key, value=value, description=desc))
     db.commit()

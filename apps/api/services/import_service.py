@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models import Material, Supplier, Quote, Project, BrandTier
@@ -36,9 +37,9 @@ def _gen_code(db: Session, profession: str, category: str) -> str:
     prof_abbr = PROFESSION_ABBR.get(profession, "OT")
     cat_abbr = CATEGORY_ABBR.get(category, "OTH")
     prefix = f"{prof_abbr}-{cat_abbr}-"
-    last = db.query(Material).filter(
+    last = db.scalar(select(Material).where(
         Material.material_code.like(f"{prefix}%")
-    ).order_by(Material.material_code.desc()).first()
+    ).order_by(Material.material_code.desc()))
     seq = int(last.material_code.split("-")[-1]) + 1 if last and last.material_code else 1
     return f"{prefix}{seq:05d}"
 
@@ -51,7 +52,7 @@ def _get_or_create_supplier(db: Session, name: str) -> Supplier | None:
     if not name or not name.strip():
         return None
     name = name.strip()
-    sup = db.query(Supplier).filter(Supplier.name == name).first()
+    sup = db.scalar(select(Supplier).where(Supplier.name == name))
     if not sup:
         sup = Supplier(name=name)
         db.add(sup)
@@ -63,7 +64,7 @@ def _get_or_create_project(db: Session, name: str) -> Project | None:
     if not name or not name.strip():
         return None
     name = name.strip()
-    proj = db.query(Project).filter(Project.name == name).first()
+    proj = db.scalar(select(Project).where(Project.name == name))
     if not proj:
         proj = Project(name=name)
         db.add(proj)
@@ -82,13 +83,13 @@ def _get_or_create_material(
     brand: str = "",
 ) -> Material:
     """Find existing material by (category, standard_name, spec) or create new."""
-    q = db.query(Material).filter(
+    stmt = select(Material).where(
         Material.category == category,
         Material.standard_name == standard_name,
     )
     if spec:
-        q = q.filter(Material.spec == spec)
-    mat = q.first()
+        stmt = stmt.where(Material.spec == spec)
+    mat = db.scalar(stmt)
     if mat:
         return mat
 
@@ -114,16 +115,16 @@ def _lookup_brand_tier(db: Session, brand: str, category: str) -> str:
     if not brand:
         return ""
     # Category-specific first, then generic
-    bt = db.query(BrandTier).filter(
+    bt = db.scalar(select(BrandTier).where(
         BrandTier.brand_name == brand,
         BrandTier.category == category,
-    ).first()
+    ))
     if bt:
         return bt.tier
-    bt = db.query(BrandTier).filter(
+    bt = db.scalar(select(BrandTier).where(
         BrandTier.brand_name == brand,
         BrandTier.category.is_(None),
-    ).first()
+    ))
     return bt.tier if bt else ""
 
 

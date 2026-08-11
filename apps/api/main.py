@@ -23,7 +23,8 @@ from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
 from apps.api.intelligence.base import ProviderError
 from apps.api.routes import all_routers
-from apps.api.routes.auth import router as auth_router, get_current_user
+from apps.api.routes.auth import router as auth_router
+from apps.api.core.security import get_current_user
 from apps.api.services.document_ingestion import DocumentIngestionService
 
 log = logging.getLogger("mempas")

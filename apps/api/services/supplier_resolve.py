@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models.supplier import Supplier
@@ -50,15 +51,15 @@ def resolve_supplier(
     if not norm:
         return ResolveResult(normalized=norm)
 
-    def _active_filter(q):
+    def _active_filter(stmt):
         if active_only:
-            return q.filter(Supplier.merge_status == "active")
-        return q
+            return stmt.where(Supplier.merge_status == "active")
+        return stmt
 
     # ── 层 1: Supplier.name 精确（不区分大小写）────────────────────────────────
-    exact_name = _active_filter(
-        db.query(Supplier).filter(Supplier.name.ilike(raw_name.strip()))
-    ).all()
+    exact_name = db.scalars(_active_filter(
+        select(Supplier).where(Supplier.name.ilike(raw_name.strip()))
+    )).all()
     if len(exact_name) == 1:
         return ResolveResult(supplier=exact_name[0], matched_layer="1:name_exact", normalized=norm)
     if len(exact_name) > 1:
@@ -70,9 +71,9 @@ def resolve_supplier(
 
     # ── 层 2: Supplier.short_name 精确────────────────────────────────────────
     short_name = raw_name.strip()
-    exact_short = _active_filter(
-        db.query(Supplier).filter(Supplier.short_name.ilike(short_name))
-    ).filter(Supplier.short_name != "").all()
+    exact_short = db.scalars(_active_filter(
+        select(Supplier).where(Supplier.short_name.ilike(short_name))
+    ).where(Supplier.short_name != "")).all()
     if len(exact_short) == 1:
         return ResolveResult(supplier=exact_short[0], matched_layer="2:short_name_exact", normalized=norm)
     if len(exact_short) > 1:
@@ -86,23 +87,21 @@ def resolve_supplier(
     for layer_idx, alias_type in enumerate(
         ("legal_name", "short_name", "filename", "historical"), start=3
     ):
-        aliases = (
-            db.query(SupplierAlias)
-            .filter(
+        aliases = db.scalars(
+            select(SupplierAlias).where(
                 SupplierAlias.normalized_alias == norm,
                 SupplierAlias.alias_type == alias_type,
                 SupplierAlias.active == 1,
             )
-            .all()
-        )
+        ).all()
         if not aliases:
             continue
 
         # 获取对应的 active supplier
         sup_ids = set(a.supplier_id for a in aliases)
-        sups = _active_filter(
-            db.query(Supplier).filter(Supplier.id.in_(sup_ids))
-        ).all()
+        sups = db.scalars(_active_filter(
+            select(Supplier).where(Supplier.id.in_(sup_ids))
+        )).all()
 
         if len(sups) == 1:
             return ResolveResult(
@@ -140,14 +139,14 @@ def search_suppliers_by_name(
     if not query:
         return []
 
-    base_q = db.query(Supplier)
+    base_stmt = select(Supplier)
     if active_only:
-        base_q = base_q.filter(Supplier.merge_status == "active")
+        base_stmt = base_stmt.where(Supplier.merge_status == "active")
 
     # Supplier 名称模糊搜索
-    name_results = base_q.filter(
+    name_results = db.scalars(base_stmt.where(
         Supplier.name.contains(query) | Supplier.short_name.contains(query)
-    ).limit(limit).all()
+    ).limit(limit)).all()
 
     seen_ids = {s.id for s in name_results}
     alias_results: list[Supplier] = []
@@ -155,17 +154,15 @@ def search_suppliers_by_name(
     # SupplierAlias 精确 normalized 匹配
     norm = normalize_alias(query)
     if norm:
-        alias_hits = (
-            db.query(SupplierAlias)
-            .filter(
+        alias_hits = db.scalars(
+            select(SupplierAlias).where(
                 SupplierAlias.normalized_alias == norm,
                 SupplierAlias.active == 1,
             )
-            .all()
-        )
+        ).all()
         alias_sup_ids = {a.supplier_id for a in alias_hits} - seen_ids
         if alias_sup_ids:
-            extra = base_q.filter(Supplier.id.in_(alias_sup_ids)).all()
+            extra = db.scalars(base_stmt.where(Supplier.id.in_(alias_sup_ids))).all()
             alias_results = extra
 
     combined = name_results + alias_results

@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.intelligence.base import ProviderError
@@ -124,15 +125,13 @@ class DocumentIngestionService:
         # Idempotency: same content + same type + same business context →
         # return the latest non-failed job (caller can retry by waiting for a
         # FAILED job to age out, which produces a fresh job below).
-        existing = (
-            self.db.query(ExtractionJob)
-            .filter(
+        existing = self.db.scalars(
+            select(ExtractionJob).where(
                 ExtractionJob.file_hash == file_hash,
                 ExtractionJob.type == type_str,
             )
             .order_by(ExtractionJob.created_at.desc())
-            .all()
-        )
+        ).all()
         for prior in existing:
             if prior.status == JobStatus.FAILED.value:
                 continue
@@ -279,12 +278,12 @@ class DocumentIngestionService:
         status: str | None = None,
         limit: int = 50,
     ) -> list[ExtractionJob]:
-        q = self.db.query(ExtractionJob)
+        stmt = select(ExtractionJob)
         if type:
-            q = q.filter(ExtractionJob.type == type)
+            stmt = stmt.where(ExtractionJob.type == type)
         if status:
-            q = q.filter(ExtractionJob.status == status)
-        return q.order_by(ExtractionJob.created_at.desc()).limit(limit).all()
+            stmt = stmt.where(ExtractionJob.status == status)
+        return self.db.scalars(stmt.order_by(ExtractionJob.created_at.desc()).limit(limit)).all()
 
     # ─── housekeeping ─────────────────────────────────────────────────────
     @staticmethod
@@ -306,14 +305,12 @@ class DocumentIngestionService:
         statuses = [JobStatus.RUNNING.value]
         if include_pending:
             statuses.append(JobStatus.PENDING.value)
-        stuck = (
-            db.query(ExtractionJob)
-            .filter(
+        stuck = db.scalars(
+            select(ExtractionJob).where(
                 ExtractionJob.status.in_(statuses),
                 ExtractionJob.updated_at < threshold,
             )
-            .all()
-        )
+        ).all()
         for j in stuck:
             j.status = JobStatus.FAILED.value
             j.error = (

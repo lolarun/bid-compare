@@ -9,13 +9,14 @@ All reference-price queries MUST call valid_quote_filters() to exclude:
     (Quote.bid_status IN ('polluted', 'excluded_from_ref'))
 
 Usage (caller must OUTER-join Supplier before applying):
-    q = db.query(Quote).outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-    q = q.filter(*valid_quote_filters())
+    q = select(Quote).outerjoin(Supplier, Quote.supplier_id == Supplier.id)
+    q = q.where(*valid_quote_filters())
 
     # Or use the convenience function:
     q = valid_quote_query(db)
 """
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models.quote import Quote
@@ -41,7 +42,7 @@ def valid_quote_filters() -> list:
 def valid_quote_query(db: Session):
     """Base query for valid historical quotes with Supplier already outer-joined."""
     return (
-        db.query(Quote)
+        select(Quote)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-        .filter(*valid_quote_filters())
+        .where(*valid_quote_filters())
     )

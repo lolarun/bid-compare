@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from apps.api.core.config import PROFESSION_MAP, ALL_CATEGORIES, get_settings
 from apps.api.services.llm_provider import get_dashscope_client
@@ -109,13 +110,12 @@ def _build_existing_context(
     parts: list[str] = []
 
     # Existing materials in DB (for name matching)
-    mats = (
-        db.query(Material.id, Material.standard_name, Material.spec, Material.category)
-        .filter(Material.standard_name != "")
+    mats = db.execute(
+        select(Material.id, Material.standard_name, Material.spec, Material.category)
+        .where(Material.standard_name != "")
         .order_by(Material.category, Material.standard_name)
         .limit(150)
-        .all()
-    )
+    ).all()
     if mats:
         by_cat: dict[str, list[str]] = {}
         for mid, name, spec, cat in mats:
@@ -140,8 +140,8 @@ def _build_existing_context(
 
     # Existing quotes in this project (for pre-alignment)
     if project_id:
-        quotes = (
-            db.query(
+        quotes = db.execute(
+            select(
                 Material.standard_name,
                 Material.spec,
                 Material.category,
@@ -150,12 +150,10 @@ def _build_existing_context(
             .select_from(Quote)
             .join(Material, Quote.material_id == Material.id)
             .join(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.project_id == project_id)
-            .filter(Quote.unit_price > 0)
+            .where(Quote.project_id == project_id, Quote.unit_price > 0)
             .order_by(Material.standard_name)
             .limit(60)
-            .all()
-        )
+        ).all()
         if quotes:
             lines = ["\n## 本项目已有供应商报价（用于对齐匹配）"]
             for mat_name, spec, cat, sup_name in quotes:
@@ -298,9 +296,9 @@ def enhance_ocr_items(
                     try:
                         matched_mid = int(matched_mid)
                         # Validate it exists
-                        exists = db.query(Material.id).filter(
+                        exists = db.scalar(select(Material.id).where(
                             Material.id == matched_mid
-                        ).first()
+                        ))
                         if exists:
                             item["matched_material_id"] = matched_mid
                         else:
