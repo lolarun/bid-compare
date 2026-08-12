@@ -555,6 +555,7 @@ interface BatchFileEntry {
   confirmedSupplierId: number | null    // null for unknown suppliers
   confirmedSubmissionId: number | null  // always set on confirm success
   confirmed: boolean
+  confirming: boolean   // R1 止血：校对入库请求进行中——双击守卫，防止重复提交
   error: string
   pollTimer: ReturnType<typeof setInterval> | null
 }
@@ -1090,17 +1091,23 @@ function onExtracted(supplierId: number, job: ExtractionJob) {
   }
 }
 
+// R1 止血：双击守卫（同 confirmBatchEntry）。legacy 单供应商 tab 模式当前
+// 没有任何 UI 会把 taskConfig.supplierIds 填非空，这个函数因此实际不可达，
+// 但保留防护，避免以后重新接入时又是一次裸调用。
+const confirmingSuppliers = ref<Record<number, boolean>>({})
 async function confirmSupplier(supplierId: number, checksumAck = false) {
   const slot = supplierUploads[supplierId]
   if (!slot || !slot.job) {
     message.warning('请先上传该供应商的报价单')
     return
   }
+  if (confirmingSuppliers.value[supplierId]) return
   const effectiveCategory = tenderCategory.value || taskConfig.category
   if (!effectiveCategory) {
     message.error('品类不能为空：请先完成招标清单识别后再入库')
     return
   }
+  confirmingSuppliers.value[supplierId] = true
   try {
     const { data } = await quoteApi.batchConfirm({
       job_id: slot.job.id,
@@ -1117,8 +1124,11 @@ async function confirmSupplier(supplierId: number, checksumAck = false) {
     message.success(`已入库 ${result.line_count} 条报价`)
   } catch (e) {
     if (await handleBatchConfirmError(e, message)) {
+      confirmingSuppliers.value[supplierId] = false  // 重试前先解锁，避免被自己的守卫挡住
       await confirmSupplier(supplierId, true)
     }
+  } finally {
+    confirmingSuppliers.value[supplierId] = false
   }
 }
 
@@ -1162,6 +1172,7 @@ function handleBatchFile(file: File) {
       confirmedSupplierId: null,
       confirmedSubmissionId: null,
       confirmed: false,
+      confirming: false,
       error: '',
       pollTimer: null,
     }
@@ -1332,7 +1343,7 @@ async function restoreBatchFiles(pid: number) {
       quality: null,
       confirmedSupplierId: s.supplier_id,
       confirmedSubmissionId: s.submission_id,
-      confirmed: true, error: '', pollTimer: null,
+      confirmed: true, confirming: false, error: '', pollTimer: null,
     })
   }
   for (const j of data.inflight_jobs) {
@@ -1347,7 +1358,7 @@ async function restoreBatchFiles(pid: number) {
       items: [],
       quality: null,
       confirmedSupplierId: null, confirmedSubmissionId: null,
-      confirmed: false, error: '', pollTimer: null,
+      confirmed: false, confirming: false, error: '', pollTimer: null,
     })
   }
   batchFiles.value = restored
@@ -1364,7 +1375,9 @@ async function restoreBatchFiles(pid: number) {
 }
 
 async function confirmBatchEntry(entry: BatchFileEntry, checksumAck = false) {
-  if (!entry.jobId) return
+  // R1 止血：双击守卫。之前按钮没有任何 loading/disabled 绑定，网络慢时连
+  // 点两下会打两次 batch-confirm（重复入库，靠后端幂等兜底而不是前端不发）。
+  if (!entry.jobId || entry.confirming) return
 
   // ── 品类校验 ──
   const categories = confirmedCategories.value
@@ -1406,6 +1419,7 @@ async function confirmBatchEntry(entry: BatchFileEntry, checksumAck = false) {
     if (!ok) return
   }
 
+  entry.confirming = true
   try {
     // supplier_id 由用户主动选择（matchedSupplierId）决定；编辑名称后若不再匹配则为 null（陌生供应商）
     const supplierId = entry.matchedSupplierId ?? undefined
@@ -1435,13 +1449,17 @@ async function confirmBatchEntry(entry: BatchFileEntry, checksumAck = false) {
       )
       if (confirmed) {
         entry.matchedSupplierId = topMatch.id
+        entry.confirming = false  // 重试前先解锁，否则 confirmBatchEntry 递归调用会被自己的守卫挡住
         await confirmBatchEntry(entry)  // 用确认的 supplier_id 重试
       } else {
         message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
       }
     } else if (await handleBatchConfirmError(e, message)) {
+      entry.confirming = false
       await confirmBatchEntry(entry, true)  // 用户核对差异后确认强制入库
     }
+  } finally {
+    entry.confirming = false
   }
 }
 
@@ -2135,7 +2153,7 @@ async function runMatrix() {
                 />
                 <a-tag v-if="f.matchedSupplierId" color="blue" style="margin-left:4px;font-size:11px">已关联</a-tag>
                 <a-tag v-else style="margin-left:4px;font-size:11px">陌生</a-tag>
-                <a-button type="primary" size="small" @click="confirmBatchEntry(f)">校对入库</a-button>
+                <a-button type="primary" size="small" :loading="f.confirming" @click="confirmBatchEntry(f)">校对入库</a-button>
               </div>
             </div>
           </div>
@@ -2569,7 +2587,7 @@ async function runMatrix() {
             <template #icon><LeftOutlined /></template>
             返回核查
           </a-button>
-          <a-button @click="runMatrix">
+          <a-button :loading="analyzing" @click="runMatrix">
             <template #icon><LineChartOutlined /></template>
             重新比价
           </a-button>
