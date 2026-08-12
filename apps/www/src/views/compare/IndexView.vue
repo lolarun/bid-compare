@@ -922,16 +922,30 @@ watch(tenderCategory, (cat) => {
   if (cat && confirmedCategories.value.length > 1) {
     categoryExplicitlySelected.value = true
   }
+  // R1 止血：alignmentFinalizationId/savedMatrixVersionId 是"对齐审核已完成"
+  // 门禁的钥匙，之前切品类完全不重置——A 品类 finalize 后切到 B 品类，
+  // saveMatrixVersion 会把 A 的 finalization_id 和 B 的 category 一起发给
+  // 后端，保存出一份身份对不上的比价版本。watch 只在值真变化时触发，
+  // 重置到 null 在首次赋值时也是无害的空操作，不需要额外判首次。
+  alignmentFinalizationId.value = null
+  savedMatrixVersionId.value = null
 })
 
 // 选择项目 / 刷新后恢复品类状态（404 = 新项目，静默处理）
-watch(() => taskConfig.projectId, async (pid) => {
+watch(() => taskConfig.projectId, async (pid, prevPid) => {
   confirmedCategories.value = []
   categorySessionMap.value = {}
   tenderCategory.value = ''
   taskConfig.category = ''
   tenderListSessionId.value = null
   categoryExplicitlySelected.value = false
+  // R1 止血：项目真的发生切换（而不是初次挂载从 undefined→pid）时，旧项目
+  // 会话内的报价卡片必须清空——否则 restoreBatchFiles 的"已有卡片则不覆盖"
+  // 早退逻辑会让旧项目的 batchFiles（含在途 pollTimer）原样留下，跟着新
+  // project_id 一起提交（跨项目报价串号）。
+  if (prevPid !== undefined) {
+    clearAllBatchFiles()
+  }
   if (!pid) return
   try {
     const { data } = await analysisApi.tenderListCurrentSessions({ project_id: pid })
@@ -1476,10 +1490,22 @@ function _extractSupplierHintFromFilename(filename: string): string {
   return (parts[0] || '').trim()
 }
 
-onBeforeUnmount(() => {
+// R1 止血：停掉所有在途轮询并清空报价文件卡片（批量模式 + legacy 单供应商
+// tab 两套状态都要清）。之前只在 onBeforeUnmount 用过一次——切项目时完全没
+// 调用，导致旧项目的 batchFiles（含仍在跑的 pollTimer）原样留在页面上，
+// 跟着新 project_id 一起提交，造成跨项目报价串号。
+function clearAllBatchFiles() {
   for (const f of batchFiles.value) {
     if (f.pollTimer) clearInterval(f.pollTimer)
   }
+  batchFiles.value = []
+  for (const key of Object.keys(supplierUploads)) {
+    delete supplierUploads[Number(key)]
+  }
+}
+
+onBeforeUnmount(() => {
+  clearAllBatchFiles()
   stopTenderPoll()
 })
 
@@ -1876,22 +1902,46 @@ async function runMatrix() {
               强制归入默认品类「{{ tenderCategory || taskConfig.category }}」（{{ tenderPreview.unknown_count }} 项未识别将写入审计标记）
             </a-checkbox>
           </div>
-          <!-- 字段差异摘要（reconcile 已完成时显示） -->
-          <div v-if="reconcileResult && reconcileResult.field_mismatches.length" style="margin-top:12px">
-            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">
-              字段差异（{{ reconcileResult.field_mismatches.length }} 处）—— 以PDF主清单值为准
+          <!-- 差异摘要 + 确认（reconcile 已完成时显示）
+               R1 止血：此前这里只展示 field_mismatches，序号缺失
+               (seq_missing_in_pdf/xlsx) 完全没有列表可看；且
+               recommended_source==='excel' 时下方提示"请勾选「已确认差异」
+               后继续"，但页面上根本不存在这个勾选控件——reconcileConfirmed
+               永远是 false，第 1 步在这种情况下永久卡死。现在两类差异都
+               列出来，并且真的给了确认控件。 -->
+          <div v-if="reconcileResult && reconcileResult.recommended_source === 'excel'" style="margin-top:12px">
+            <div v-if="reconcileResult.field_mismatches.length" style="margin-bottom:10px">
+              <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">
+                字段差异（{{ reconcileResult.field_mismatches.length }} 处）—— 以PDF主清单值为准
+              </div>
+              <a-table
+                :data-source="reconcileResult.field_mismatches"
+                :row-key="(_r: Record<string,unknown>, i: number) => i"
+                size="small" :pagination="{ pageSize: 5, size: 'small' }"
+                :columns="[
+                  { title: '序号', dataIndex: 'seq', width: 56 },
+                  { title: '字段', dataIndex: 'field', width: 60 },
+                  { title: 'Excel参考值', dataIndex: 'xlsx_value', ellipsis: true },
+                  { title: 'PDF主清单值', dataIndex: 'pdf_value', ellipsis: true },
+                ]"
+              />
             </div>
-            <a-table
-              :data-source="reconcileResult.field_mismatches"
-              :row-key="(_r: Record<string,unknown>, i: number) => i"
-              size="small" :pagination="{ pageSize: 5, size: 'small' }"
-              :columns="[
-                { title: '序号', dataIndex: 'seq', width: 56 },
-                { title: '字段', dataIndex: 'field', width: 60 },
-                { title: 'Excel参考值', dataIndex: 'xlsx_value', ellipsis: true },
-                { title: 'PDF主清单值', dataIndex: 'pdf_value', ellipsis: true },
-              ]"
-            />
+            <div
+              v-if="reconcileResult.seq_missing_in_pdf.length || reconcileResult.seq_missing_in_xlsx.length"
+              style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:10px"
+            >
+              <div v-if="reconcileResult.seq_missing_in_pdf.length">
+                Excel 有、PDF 主清单缺失的序号：{{ reconcileResult.seq_missing_in_pdf.join('、') }}
+              </div>
+              <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="margin-top:2px">
+                PDF 主清单有、Excel 缺失的序号：{{ reconcileResult.seq_missing_in_xlsx.join('、') }}
+              </div>
+            </div>
+            <div style="padding:8px 12px;background:#fff7e6;border:1px solid #ffa940;border-radius:4px">
+              <a-checkbox v-model:checked="reconcileConfirmed">
+                已核对以上差异，确认继续（后续按 Excel 清单为准）
+              </a-checkbox>
+            </div>
           </div>
         </div>
       </div>

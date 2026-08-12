@@ -127,7 +127,11 @@ const routes: RouteRecordRaw[] = [
         path: '/compare/:projectId/:step?',
         name: 'CompareDeep',
         component: () => import('@/views/compare/IndexView.vue'),
-        meta: { title: '招标比价分析', public: false, roles: ['管理员', '比价员'] as Role[] },
+        // R1 止血：注释一直说"不进侧边菜单"，但漏了 group 只是让 SiderMenu 把它
+        // 归进兜底的"其他"组显示出来，不是真正隐藏——菜单里"招标比价分析"重复
+        // 两次正是这个原因。SiderMenu 已有 meta.hideInMenu 这个专门机制，用错了
+        // 手段。
+        meta: { title: '招标比价分析', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
       },
       // Legacy path redirects — inside layout so auth guard runs before redirect
       { path: '/quotes', redirect: '/analysis' },
