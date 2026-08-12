@@ -156,6 +156,35 @@
 > `type-check` (vue-tsc -b) and `test:unit` (vitest, 42 tests / 4 files): both
 > green.
 >
+> **B3 compat-period tail — trigger condition (not yet met).** The commit
+> message for `2198491` said the tail step needs "real compat-period elapsed
+> time" without saying what ends it — that's vague enough to let `supplier_id`
+> linger on `SupplierCell`/`MatrixTotal`/`SupplierLabel`/`supplier_eval`/
+> `common_comparable` forever. Concrete trigger: **all three** —
+> 1. `grep -rn '\.supplier_id' apps/www/src/views/compare/IndexView.vue
+>    apps/www/src/api/client.ts` (matrix-cell/total/label/ranking context
+>    only) returns zero *identity/join* reads — i.e. every place that today
+>    matches `cell.supplier_id === label.id` or similar has been switched to
+>    `submission_id` (falling back to `supplier_id` only in the legacy
+>    non-submission mode, where `submission_id` is `null` by construction).
+>    Reads of `SupplierLabel.supplier_id` as the genuine FK (display, brand
+>    lookups) are fine to keep — only the *column-identity* usage must move.
+> 2. At least one full release cycle has passed since that migration with no
+>    regression traced back to the join change (the whole reason for a compat
+>    period instead of a same-commit flip).
+> 3. `_persist`/`_compute_recommendation` no longer need to keep both
+>    `supplier_id` (col_id) and `submission_id` in sync — confirmed by re-running
+>    the full backend + frontend suite after removing the compat writes.
+>
+> Only once all three hold: flip `SupplierCell.supplier_id`/
+> `MatrixTotal.supplier_id`/`supplier_eval[].supplier_id`/
+> `common_comparable.supplier_ids` to actually mean the real `Supplier.id` FK
+> (nullable) instead of the column identity, or drop the field outright if
+> nothing needs the real FK at that granularity; remove the now-redundant
+> `submission_id` from the TS types only if `id`/`supplier_id` alone stays
+> unambiguous. Until triggered, do not touch `supplier_id`'s runtime value —
+> that is precisely the "two migrations" outcome B3 was designed to avoid.
+>
 > **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
 > `vl_tender.py`; "direct" was a contrast name against legacy, which no longer
 > exists). Persisted labels (`parser_mode`/`input_mode`/`recognizer` = `"vl_direct"`)
