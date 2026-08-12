@@ -56,6 +56,7 @@ from apps.api.schemas.analysis import (
     BatchConfirmErrorOut, BatchConfirmResult,
     BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
     BidMatrixVersionApproveResult,
+    AnchorMissingAckRequest, AnchorMissingAckResult,
 )
 
 __all__ = [

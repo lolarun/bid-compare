@@ -31,6 +31,7 @@ from apps.api.schemas import (
     TenderMatchResult,
     BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
     BidMatrixVersionApproveResult,
+    AnchorMissingAckRequest, AnchorMissingAckResult,
 )
 from apps.api.services.history.comparison import compare_price
 from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
@@ -65,6 +66,7 @@ from apps.api.services.audit import (
     EVENT_ALIGNMENT_ITEM_CONFIRM,
     EVENT_ALIGNMENT_BULK_CONFIRM,
     EVENT_LLM_FILL_PERSIST,
+    EVENT_ANCHOR_MISSING_ACK,
 )
 
 _SUMMARY_NAME_PAT = _re.compile(
@@ -813,6 +815,38 @@ def anchor_review_item_confirm(
     )
     db.commit()
     return {"ok": True, "item_id": body.item_id, "action": body.action}
+
+
+@router.post("/anchor-review/missing-ack", response_model=AnchorMissingAckResult)
+def anchor_review_missing_ack(
+    body: AnchorMissingAckRequest,
+    db: Session = Depends(get_db),
+):
+    """复核者确认"这格确实无报价，符合预期"（docs/design/23）。
+
+    纯审计/UI 抑制标记：不创建报价、不改 cell_status、不进评标总价——
+    build_anchor_review_matrix 只在 cell_status 已经是 missing 时才查这张表，
+    查到与否不改变 cell_status 本身。acked=true/false 都是幂等操作。
+    """
+    from apps.api.services.alignment.anchor_missing_ack import set_missing_ack
+
+    set_missing_ack(
+        db, body.project_id, body.category, body.anchor_seq, body.submission_id,
+        body.acked, reason=body.reason,
+    )
+    write_domain_event(
+        db, user="system", event_type=EVENT_ANCHOR_MISSING_ACK,
+        identity={
+            "project_id": body.project_id, "category": body.category,
+            "anchor_seq": body.anchor_seq, "submission_id": body.submission_id,
+        },
+        after={"acked": body.acked},
+    )
+    db.commit()
+    return {
+        "ok": True, "anchor_seq": body.anchor_seq,
+        "submission_id": body.submission_id, "acked": body.acked,
+    }
 
 
 @router.post("/tender-list/preview", response_model=TenderPreviewResultOut)

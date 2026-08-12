@@ -181,6 +181,13 @@ export const analysisApi = {
   // 确认从未接入 UI，复核矩阵页面走的是 anchorReviewItemConfirm 逐项确认）。
   anchorReviewItemConfirm: (data: { item_id: number; action: 'align' | 'exclude' }) =>
     api.post('/analysis/anchor-review/item-confirm', data),
+  // design/23：复核者确认"这格确实无报价，符合预期"；acked:false 撤销确认。
+  anchorReviewMissingAck: (data: {
+    project_id: number; category: string; anchor_seq: string; submission_id: number; acked: boolean
+  }) =>
+    api.post<{ ok: boolean; anchor_seq: string; submission_id: number; acked: boolean }>(
+      '/analysis/anchor-review/missing-ack', data,
+    ),
   anchorReviewFinalize: (data: {
     project_id?: number; category: string; force?: boolean; reason?: string; finalized_by?: string
   }) =>

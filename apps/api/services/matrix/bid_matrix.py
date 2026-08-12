@@ -873,6 +873,15 @@ def build_anchor_review_matrix(
         if seq not in seq_to_group:
             seq_to_group[seq] = g
 
+    # design/23：复核者已确认"这格确实无报价"的 (anchor_seq, submission_id) 集合。
+    # 只在 submission 模式下查——legacy supplier_ids 模式不接这个功能（与本仓库
+    # 新功能只做 submission 优先的方向一致）。查到与否不改变 cell_status 本身，
+    # 纯 UI 抑制标记（design/23 §6 的安全论证）。
+    missing_acked: set[tuple[str, int]] = set()
+    if use_submission_path:
+        from apps.api.services.alignment.anchor_missing_ack import get_missing_ack_set
+        missing_acked = get_missing_ack_set(db, session.id)
+
     # Build rows — cells keyed by str(col_id) [submission_id or supplier_id depending on mode]
     rows = []
     pending_cells = 0
@@ -904,6 +913,7 @@ def build_anchor_review_matrix(
                     "is_lowest": False,
                     "candidates": [],
                     "missing_reason": "清单此项无比价组（所有供应商均未报价或未完成匹配）",
+                    "missing_acked": (seq_key, col_id) in missing_acked,
                 }
                 missing_cells += 1
             else:
@@ -916,6 +926,7 @@ def build_anchor_review_matrix(
                 if status == CELL_MISSING:
                     missing_cells += 1
                     cell["missing_reason"] = "该供应商未报价此品项"
+                    cell["missing_acked"] = (seq_key, col_id) in missing_acked
                 elif status == CELL_PENDING:
                     pending_cells += 1
                 if status in (CELL_QUOTED, CELL_AGGREGATED) and cell["unit_price"]:

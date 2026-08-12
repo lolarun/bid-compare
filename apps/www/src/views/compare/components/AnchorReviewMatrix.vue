@@ -22,18 +22,35 @@ const result = ref<AnchorReviewMatrixResult | null>(null)
 const loading = ref(false)
 const confirmLoading = ref<Record<number, boolean>>({})
 const expandedCells = ref<Record<string, boolean>>({})   // key: `${anchor_seq}_${supplier_id}`
-const confirmedMissing = ref<Record<string, boolean>>({})
+// design/23：R1 止血时这里只写组件内 ref、从不调后端（评审点名的假按钮）——
+// missing 单元格没有 BidAlignmentItem 可以挂状态，BidAlignmentItem 的 CHECK
+// 约束又不允许"两个 FK 都空"表达"确认无报价"，当时判定需要设计讨论。现在
+// design/23 落地：AnchorMissingAck 单开一张表持久化这个确认，不再是本地
+// 状态——cell.missing_acked 直接来自后端 anchor-review/matrix 的响应。
+const missingAckLoading = ref<Record<string, boolean>>({})
 
-// R1 止血：这个函数此前叫「确认缺报」，UI 看起来像一次真实确认，实际只写
-// 组件内 ref，从不调后端，刷新即丢——评审点名的假按钮。核实后发现这不是
-// 一个可以顺手补的 API 调用：missing 单元格没有任何 BidAlignmentItem（根本
-// 没人对它做过匹配），而 BidAlignmentItem 表的 CHECK 约束要求 quote_id 和
-// bid_quote_line_id 二选一非空（models/bid_alignment.py:49-54）——"确认为
-// 空报价"这个语义在当前表结构下无法落库，需要放宽约束或另开一张表，属于
-// 需要设计讨论的 schema 变更，不是 R1 止血范围。这里先把 UI 改诚实：明确
-// 告知这只是本次复核会话内的展示折叠，不再暗示已持久化。
-function confirmMissing(anchorSeq: string, submissionId: number) {
-  confirmedMissing.value[`${anchorSeq}_${submissionId}`] = true
+async function setMissingAck(anchorSeq: string, submissionId: number, acked: boolean) {
+  const key = `${anchorSeq}_${submissionId}`
+  if (missingAckLoading.value[key]) return
+  missingAckLoading.value[key] = true
+  try {
+    await analysisApi.anchorReviewMissingAck({
+      project_id: props.projectId,
+      category: props.category,
+      anchor_seq: anchorSeq,
+      submission_id: submissionId,
+      acked,
+    })
+    // 成功后直接改本地结果里的这一格，不用整张矩阵重新拉一遍。
+    const row = result.value?.rows.find((r) => r.anchor_seq === anchorSeq)
+    const cell = row?.cells[String(submissionId)]
+    if (cell) cell.missing_acked = acked
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    message.error(detail ?? (acked ? '确认失败，请重试' : '取消确认失败，请重试'))
+  } finally {
+    missingAckLoading.value[key] = false
+  }
 }
 
 async function load() {
@@ -349,15 +366,18 @@ const cellAccountingDetail = computed(() => {
                       style="margin-top:4px;font-size:10px;color:#999;line-height:1.5;border-top:1px solid #f0f0f0;padding-top:4px">
                       <div>{{ record.cells[String(sup.submission_id)]?.missing_reason || '该供应商未报价此品项' }}</div>
                       <div style="margin-top:4px;display:flex;gap:4px"
-                        v-if="!confirmedMissing[`${record.anchor_seq}_${sup.submission_id}`]">
-                        <a-tooltip title="仅本次复核会话内隐藏该提示，不写入后端，刷新页面后会重新出现。真正的「已排除」需要在矩阵结果里对该行做排除操作。">
-                          <a-button size="small" style="font-size:10px;height:18px;padding:0 6px"
-                            @click.stop="confirmMissing(record.anchor_seq, sup.submission_id)"
-                          >本次复核内标记</a-button>
-                        </a-tooltip>
+                        v-if="!record.cells[String(sup.submission_id)]?.missing_acked">
+                        <a-button size="small" style="font-size:10px;height:18px;padding:0 6px"
+                          :loading="missingAckLoading[`${record.anchor_seq}_${sup.submission_id}`]"
+                          @click.stop="setMissingAck(record.anchor_seq, sup.submission_id, true)"
+                        >确认缺报</a-button>
                       </div>
-                      <div v-else style="color:#8c8c8c;font-size:10px;margin-top:2px">
-                        本次复核内已标记（未持久化，刷新后需重新标记）
+                      <div v-else style="color:#52c41a;font-size:10px;margin-top:2px;display:flex;align-items:center;gap:6px">
+                        <span>✓ 已确认缺报</span>
+                        <a-button type="link" size="small" style="font-size:10px;padding:0;height:auto;color:#8c8c8c"
+                          :loading="missingAckLoading[`${record.anchor_seq}_${sup.submission_id}`]"
+                          @click.stop="setMissingAck(record.anchor_seq, sup.submission_id, false)"
+                        >取消确认</a-button>
                       </div>
                     </div>
                   </template>

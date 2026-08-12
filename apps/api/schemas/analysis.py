@@ -136,6 +136,10 @@ class ReviewCell(BaseModel):
     # 未报价此品项" / "清单此项无比价组..."），前端 AnchorReviewMatrix.vue:342
     # 读它做兜底文案；schema 之前没声明，核实时发现补上。
     missing_reason: str | None = None
+    # design/23：复核者已确认"这格确实无报价，符合预期"——纯 UI 抑制标记，
+    # 不改变 cell_status 本身，不参与评标总价。只在 cell_status=missing 时
+    # 有意义；查 AnchorMissingAck 表填充。
+    missing_acked: bool = False
     model_config = {"extra": "ignore"}
 
 
@@ -191,6 +195,24 @@ class AnchorReviewMatrixResult(BaseModel):
     matrix_distribution: "MatrixDistribution | None" = None
     rows: list[ReviewRow]
     model_config = {"extra": "ignore"}
+
+
+# ─── Anchor missing acknowledgment (docs/design/23) ────────────────────────────
+
+class AnchorMissingAckRequest(BaseModel):
+    project_id: int
+    category: str
+    anchor_seq: str
+    submission_id: int
+    acked: bool
+    reason: str = ""  # 预留：本轮前端不传
+
+
+class AnchorMissingAckResult(BaseModel):
+    ok: bool
+    anchor_seq: str
+    submission_id: int
+    acked: bool
 
 
 # ─── Bid Matrix ───────────────────────────────────────────────────────────────

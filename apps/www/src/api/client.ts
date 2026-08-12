@@ -964,6 +964,9 @@ export interface ReviewCell {
   is_lowest: boolean
   candidates: ReviewCellCandidate[]
   missing_reason?: string | null
+  // design/23：复核者已确认"这格确实无报价，符合预期"——纯 UI 抑制标记，
+  // 只在 cell_status='missing' 时有意义，不改变 cell_status 本身。
+  missing_acked?: boolean
 }
 
 export interface ReviewRow {
