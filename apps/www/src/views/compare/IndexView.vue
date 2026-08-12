@@ -363,6 +363,20 @@ function clearExcelItemAction(seq: string) {
   delete excelOnlyItemActions.value[seq]
 }
 
+// R1 止血：「加入主清单」此前只是给 excelOnlyItemActions 打了个本地展示标记，
+// 从未真的把这一项并入实际提交的 anchors_json——按钮点了、标签变绿了、但
+// confirmTenderListVersion() 一直只发 pdfSupplement.items，用户以为"已加入"
+// 的那一项其实从未进入采购清单版本。这里把标为 'add' 的 Excel 独有项真正
+// 并入待提交列表（去重按 seq，防止与 PDF 主清单已有的同序号项重复）。
+const effectivePdfItems = computed((): ExcelDiffItem[] => {
+  const base = (pdfSupplement.value?.items ?? []) as unknown as ExcelDiffItem[]
+  const baseSeqs = new Set(base.map(it => String(it.seq)))
+  const added = excelOnlyItems.value.filter(
+    it => excelOnlyItemActions.value[String(it.seq)] === 'add' && !baseSeqs.has(String(it.seq))
+  )
+  return added.length ? [...base, ...added] : base
+})
+
 // ─── Step 3: Alignment finalization gate ─────────────────────────────────
 const alignmentFinalizing = ref(false)
 const alignmentFinalizationId = ref<number | null>(null)
@@ -388,8 +402,8 @@ async function confirmTenderListVersion() {
       project_id: taskConfig.projectId,
       category: tenderCategory.value || taskConfig.category,
       file_name: isPdfPrimary ? (tenderPdfFile.value?.name ?? '') : (tenderFile.value?.name ?? ''),
-      anchors_total: isPdfPrimary ? pdfSupplement.value!.row_count : tenderPreview.value!.total,
-      anchors_json: isPdfPrimary ? pdfSupplement.value!.items : tenderPreview.value!.items,
+      anchors_total: isPdfPrimary ? effectivePdfItems.value.length : tenderPreview.value!.total,
+      anchors_json: isPdfPrimary ? effectivePdfItems.value : tenderPreview.value!.items,
       force: hasUnknown && forceUnknownCategory.value,
       source_type: isPdfPrimary ? 'pdf_primary' : 'excel',
       brand_requirement: tenderBrandRequirement.value,
