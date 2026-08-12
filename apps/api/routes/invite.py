@@ -80,6 +80,21 @@ def save(req: SaveInvitationsRequest, db: Session = Depends(get_db)) -> SaveInvi
         )
         db.add(tender)
         db.flush()
+    else:
+        # R4：re-save with tender_id 此前只重算/追加 invitations，封面标量和
+        # items 停留在首次保存的值——用户改完项目名/日期/清单再点保存，页面
+        # 显示"已保存"但这些字段其实没写进去。幂等更新应该覆盖到整份请求，
+        # 不只是 invitations 那一半。
+        if req.project_name:
+            tender.project_name = req.project_name
+        if req.project_code:
+            tender.project_code = req.project_code
+        if req.tender_date:
+            tender.tender_date = req.tender_date
+        if req.deadline:
+            tender.deadline = req.deadline
+        if req.items:
+            tender.items = req.items
 
     result = build_invitation_recommendation(
         db,

@@ -368,6 +368,50 @@ class TestPhase2InviteFlow:
         assert r2.status_code == 200, r2.text
         assert r2.json()["tender_id"] == tender_id
 
+    def test_resave_with_tender_id_persists_cover_fields(self, seeded_client):
+        """R4: re-saving via tender_id must actually update the existing row's
+        cover-page scalars and items — previously the reuse branch only fed
+        them into the (transient) recommendation call and never wrote them
+        back onto the TenderDocument, so a corrected date/code/item after
+        first save silently vanished."""
+        r1 = seeded_client.post("/api/invite/save", json={
+            "project_name": "封面回填测试",
+            "project_code": "OLD-CODE",
+            "tender_date": "2026-01-01",
+            "deadline": "2026-01-15",
+            "items": [{"name": "阀门 DN50", "category": "阀门"}],
+        })
+        assert r1.status_code == 200, r1.text
+        tender_id = r1.json()["tender_id"]
+
+        r2 = seeded_client.post("/api/invite/save", json={
+            "tender_id": tender_id,
+            "project_name": "封面回填测试-改名",
+            "project_code": "NEW-CODE",
+            "tender_date": "2026-02-01",
+            "deadline": "2026-02-15",
+            "items": [
+                {"name": "阀门 DN50", "category": "阀门"},
+                {"name": "阀门 DN80", "category": "阀门"},
+            ],
+        })
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["tender_id"] == tender_id
+
+        from apps.api.core.database import SessionLocal
+        from apps.api.models import TenderDocument
+        db = SessionLocal()
+        try:
+            tender = db.get(TenderDocument, tender_id)
+            assert tender is not None
+            assert tender.project_name == "封面回填测试-改名"
+            assert tender.project_code == "NEW-CODE"
+            assert tender.tender_date == "2026-02-01"
+            assert tender.deadline == "2026-02-15"
+            assert len(tender.items or []) == 2
+        finally:
+            db.close()
+
 
 # ─── TestBrandRecommendation ────────────────────────────────────────────────
 class TestBrandRecommendation:

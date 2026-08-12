@@ -46,6 +46,12 @@ const appRoutes: RouteRecordRaw[] = [
     meta: { title: '物料主数据', icon: 'AppstoreOutlined', group: '数据管理' },
   },
   {
+    path: '/brand-tiers',
+    name: 'BrandTiers',
+    component: () => import('@/views/system/BrandTiersView.vue'),
+    meta: { title: '品牌档位维护', icon: 'TagsOutlined', group: '数据管理', roles: ['管理员', '比价员'] as Role[] },
+  },
+  {
     path: '/analysis',
     name: 'DataAnalysis',
     component: () => import('@/views/history/IndexView.vue'),

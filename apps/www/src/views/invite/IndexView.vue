@@ -18,12 +18,28 @@ import type {
   TenderExtractionItem,
   BrandRecommendation,
   SupplierRecommendation,
+  TenderSupplierBrand,
 } from '@/api/client'
 import { asTenderBidlistShape } from '@/utils/extraction'
 
 const sourceJob = ref<ExtractionJob | null>(null)
 const tenderItems = ref<TenderExtractionItem[]>([])
 const projectName = ref('')
+// R4：封面四标量此前只用了 1/4——project_code/tender_date/deadline 后端
+// 已经识别并原样返回（tender_pdf.py 明确注释"比价链路不消费但仍然返回，
+// 供应商推荐将来会用到"），前端却既不展示也不落库，保存时 invite.py
+// 收到的是空串。跟 projectName 用同一套"自动识别值，用户没手改就跟着新
+// 文件更新"逻辑。
+const projectCode = ref('')
+const tenderDate = ref('')
+const deadline = ref('')
+const coverFieldsAutoFilled = ref(true)
+function onCoverFieldInput(field: 'projectCode' | 'tenderDate' | 'deadline', v: string) {
+  if (field === 'projectCode') projectCode.value = v
+  else if (field === 'tenderDate') tenderDate.value = v
+  else deadline.value = v
+  coverFieldsAutoFilled.value = false
+}
 
 const recommending = ref(false)
 const recommendations = ref<BrandRecommendation[]>([])
@@ -56,6 +72,8 @@ const pagedRecs = computed(() => {
 })
 
 const brandRequirements = ref<string[]>([])
+// R4：各投标单位参与品牌（PDF 第13页），与业主品牌要求分开展示，不混在一起。
+const supplierBrands = ref<TenderSupplierBrand[]>([])
 const saving = ref(false)
 const savedTenderId = ref<number | null>(null)
 // R1 止血：projectName 是否还是自动识别的原值（未被用户手改）。换文件后是
@@ -69,9 +87,13 @@ function onProjectNameInput(v: string) {
 
 const hasItems = computed(() => tenderItems.value.length > 0)
 const canRecommend = computed(() => hasItems.value && !recommending.value)
+// R4：此前 savedTenderId!==null 时按钮永久禁用——保存后用户还能调整品牌/
+// 供应商勾选（那两组勾选框本身没被禁用），但调整完毕无法再保存，等于白改。
+// inviteApi.save 早就支持 tender_id 幂等更新（后端 save() 里 tender_id 命中
+// 复用同一条 TenderDocument，不会重复建单），前端只是没用上。改成允许重复
+// 保存，按钮文案区分首次/更新。
 const canSave = computed(() =>
-  savedTenderId.value === null
-  && (recommendations.value.length > 0 || supplierRecommendations.value.length > 0)
+  recommendations.value.length > 0 || supplierRecommendations.value.length > 0
 )
 
 // ─── Step 1: ingestion ─────────────────────────────────────────────────────
@@ -94,10 +116,18 @@ function onExtracted(job: ExtractionJob) {
   // R1 止血：!projectName.value 这个守卫只在项目名为空时才填，第一份文件填
   // 过之后永远不会再更新——换文件后项目名不刷新。改成"用户没手改过就跟着
   // 新文件走"。
-  const rawName = (job.result as Record<string, unknown> | null)?.project_name
-  if (typeof rawName === 'string' && rawName && projectNameAutoFilled.value) {
-    projectName.value = rawName
+  if (shape.projectName && projectNameAutoFilled.value) {
+    projectName.value = shape.projectName
   }
+  // R4：封面剩下三个标量，同一套"没手改就跟新文件走"规则。
+  if (coverFieldsAutoFilled.value) {
+    projectCode.value = shape.projectCode
+    tenderDate.value = shape.tenderDate
+    deadline.value = shape.deadline
+  }
+  // R4：业主品牌要求（brandRequirements）vs 各投标单位参与品牌
+  // （supplierBrands）——两个概念不能混，参与品牌同样按当前文件整体替换。
+  supplierBrands.value = shape.supplierBrands
 }
 
 // ─── Step 2: recommendations ───────────────────────────────────────────────
@@ -142,22 +172,67 @@ async function saveInvitations() {
   saving.value = true
   try {
     const { data } = await inviteApi.save({
+      tender_id: savedTenderId.value ?? undefined,
       job_id: sourceJob.value?.id,
       project_name: projectName.value || '未命名招标',
+      project_code: projectCode.value || undefined,
+      tender_date: tenderDate.value || undefined,
+      deadline: deadline.value || undefined,
       items: tenderItems.value as unknown as Array<Record<string, unknown>>,
       brand_requirements: selectedBrands.value.length > 0
         ? selectedBrands.value
         : brandRequirements.value.length > 0 ? brandRequirements.value : undefined,
       supplier_ids: selectedSupplierIds.value,
     })
+    const isUpdate = savedTenderId.value === data.tender_id
     savedTenderId.value = data.tender_id
-    message.success(`已保存招标记录 #${data.tender_id}`)
+    message.success(isUpdate ? `已更新招标记录 #${data.tender_id}` : `已保存招标记录 #${data.tender_id}`)
   } catch (e) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? '保存失败'
     message.error(detail)
   } finally {
     saving.value = false
+  }
+}
+
+// ─── R4：历史邀标（后端 /invite/tenders·/invite/tenders/{id} 早已实现，
+// 前端按钮一直硬编码 disabled，从未接线）────────────────────────────────
+const historyVisible = ref(false)
+const historyLoading = ref(false)
+const historyList = ref<Array<Record<string, unknown>>>([])
+const historyDetailVisible = ref(false)
+const historyDetailLoading = ref(false)
+const historyDetail = ref<Record<string, unknown> | null>(null)
+
+async function openHistory() {
+  historyVisible.value = true
+  historyLoading.value = true
+  try {
+    const { data } = await inviteApi.listTenders()
+    historyList.value = data
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '历史邀标加载失败'
+    message.error(detail)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function openHistoryDetail(id: number) {
+  historyDetailVisible.value = true
+  historyDetailLoading.value = true
+  historyDetail.value = null
+  try {
+    const { data } = await inviteApi.getTender(id)
+    historyDetail.value = data
+  } catch (e) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      ?? '邀标详情加载失败'
+    message.error(detail)
+  } finally {
+    historyDetailLoading.value = false
   }
 }
 
@@ -213,7 +288,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
           基于采购品类 · 推荐审定品牌及历史价格参考
         </div>
       </div>
-      <a-button disabled>
+      <a-button @click="openHistory">
         <template #icon><HistoryOutlined /></template>
         历史邀标
       </a-button>
@@ -247,13 +322,60 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
               />
             </div>
 
-            <!-- 品牌要求 -->
+            <!-- R4：封面剩余三个标量，此前后端已识别但前端不展示不落库 -->
+            <div class="field">
+              <label class="field__label">项目编号</label>
+              <a-input
+                :value="projectCode"
+                placeholder="自动识别，可编辑"
+                allow-clear
+                @update:value="(v: string) => onCoverFieldInput('projectCode', v)"
+              />
+            </div>
+            <a-row :gutter="8">
+              <a-col :span="12">
+                <div class="field">
+                  <label class="field__label">招标日期</label>
+                  <a-input
+                    :value="tenderDate"
+                    placeholder="自动识别，可编辑"
+                    allow-clear
+                    @update:value="(v: string) => onCoverFieldInput('tenderDate', v)"
+                  />
+                </div>
+              </a-col>
+              <a-col :span="12">
+                <div class="field">
+                  <label class="field__label">截止日期</label>
+                  <a-input
+                    :value="deadline"
+                    placeholder="自动识别，可编辑"
+                    allow-clear
+                    @update:value="(v: string) => onCoverFieldInput('deadline', v)"
+                  />
+                </div>
+              </a-col>
+            </a-row>
+
+            <!-- 品牌要求（业主要求，招标文件正文提出的准入品牌） -->
             <div class="field">
               <label class="field__label">品牌要求</label>
               <div v-if="brandRequirements.length" class="brand-tags">
                 <a-tag v-for="b in brandRequirements" :key="b" color="purple">{{ b }}</a-tag>
               </div>
               <div v-else class="field__placeholder">未识别到品牌要求</div>
+            </div>
+
+            <!-- R4：各投标单位参与品牌——招标文件里"某某公司拟投XX品牌"的登记表，
+                 与上面业主的品牌要求是两回事，不能混在一起展示 -->
+            <div v-if="supplierBrands.length" class="field">
+              <label class="field__label">各投标单位参与品牌（{{ supplierBrands.length }}）</label>
+              <div class="supplier-brand-list">
+                <div v-for="(sb, idx) in supplierBrands" :key="idx" class="supplier-brand-row">
+                  <span class="supplier-brand-row__name">{{ sb.supplier_name || '未署名单位' }}</span>
+                  <a-tag color="blue">{{ sb.brand || '未注明品牌' }}</a-tag>
+                </div>
+              </div>
             </div>
 
             <!-- 采购清单 -->
@@ -452,7 +574,7 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
           <a-space>
             <a-button :loading="saving" :disabled="!canSave" @click="saveInvitations">
               <template #icon><SaveOutlined /></template>
-              保存邀标名单
+              {{ savedTenderId !== null ? '更新邀标名单' : '保存邀标名单' }}
             </a-button>
             <a-button disabled>
               <template #icon><FilePdfOutlined /></template>
@@ -466,6 +588,74 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
         </div>
       </a-col>
     </a-row>
+
+    <!-- R4-4：历史邀标列表 -->
+    <a-modal
+      v-model:open="historyVisible"
+      title="历史邀标"
+      :footer="null"
+      width="720px"
+    >
+      <a-table
+        :data-source="historyList"
+        :loading="historyLoading"
+        :pagination="false"
+        row-key="id"
+        size="small"
+      >
+        <a-table-column key="project_name" title="项目名称" data-index="project_name" />
+        <a-table-column key="project_code" title="项目编号" data-index="project_code" />
+        <a-table-column key="tender_date" title="招标日期" data-index="tender_date" />
+        <a-table-column key="status" title="状态" data-index="status">
+          <template #default="{ text }">
+            <a-tag :color="text === 'invited' ? 'green' : 'default'">
+              {{ text === 'invited' ? '已发起邀标' : '草稿' }}
+            </a-tag>
+          </template>
+        </a-table-column>
+        <a-table-column key="item_count" title="清单项" data-index="item_count" />
+        <a-table-column key="invitation_count" title="邀标供应商" data-index="invitation_count" />
+        <a-table-column key="action" title="">
+          <template #default="{ record }">
+            <a @click="openHistoryDetail((record as Record<string, unknown>).id as number)">查看</a>
+          </template>
+        </a-table-column>
+      </a-table>
+      <a-empty v-if="!historyLoading && historyList.length === 0" description="暂无历史邀标记录" />
+    </a-modal>
+
+    <!-- R4-4：历史邀标详情（只读） -->
+    <a-modal
+      v-model:open="historyDetailVisible"
+      :title="historyDetail ? `邀标详情 · ${historyDetail.project_name || '未命名招标'}` : '邀标详情'"
+      :footer="null"
+      width="640px"
+    >
+      <a-spin :spinning="historyDetailLoading">
+        <template v-if="historyDetail">
+          <p>
+            项目编号：{{ historyDetail.project_code || '—' }} ·
+            招标日期：{{ historyDetail.tender_date || '—' }} ·
+            截止日期：{{ historyDetail.deadline || '—' }}
+          </p>
+          <a-divider style="margin: 8px 0" />
+          <div class="field__label" style="margin-bottom: 6px">
+            已邀供应商（{{ (historyDetail.invitations as unknown[] | undefined)?.length || 0 }}）
+          </div>
+          <div v-if="(historyDetail.invitations as Array<Record<string, unknown>> | undefined)?.length" class="supplier-brand-list">
+            <div
+              v-for="inv in (historyDetail.invitations as Array<Record<string, unknown>>)"
+              :key="inv.id as number"
+              class="supplier-brand-row"
+            >
+              <span class="supplier-brand-row__name">{{ inv.supplier_name }}</span>
+              <a-tag :color="inv.status === 'pending' ? 'orange' : 'default'">{{ inv.status }}</a-tag>
+            </div>
+          </div>
+          <a-empty v-else description="未选定供应商" :image-style="{ height: '32px' }" />
+        </template>
+      </a-spin>
+    </a-modal>
   </div>
 </template>
 
@@ -531,6 +721,30 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.supplier-brand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.supplier-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: @border-radius-base;
+  background: #f7f8fa;
+
+  &__name {
+    font-size: 13px;
+    color: @text-color;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .item-row {

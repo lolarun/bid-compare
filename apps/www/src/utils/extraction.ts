@@ -11,6 +11,7 @@ import type {
   QuoteExtractionItem,
   TenderExtractionItem,
   TenderBrandReq,
+  TenderSupplierBrand,
   QualityMeta,
 } from '@/api/client'
 
@@ -156,7 +157,15 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
 
 export interface TenderBidlistShape {
   items: TenderExtractionItem[]
-  brandRequirements: string[]
+  brandRequirements: string[]   // 业主品牌要求（招标文件第13页，PDF 主清单要求）
+  // R4：supplierBrands 是"各投标单位参与品牌"——与 brandRequirements（业主
+  // 品牌要求）是后端提示词专门区分的两个概念（防混淆），此前前端只取用了
+  // brandRequirements，supplier_brands 从未从这个 shape 里暴露过。
+  supplierBrands: TenderSupplierBrand[]
+  projectName: string
+  projectCode: string
+  tenderDate: string
+  deadline: string
 }
 
 /**
@@ -172,7 +181,10 @@ export interface TenderBidlistShape {
 export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
   if (!isObj(result)) {
     console.warn('[extraction] tender_bidlist result is not an object', result)
-    return { items: [], brandRequirements: [] }
+    return {
+      items: [], brandRequirements: [], supplierBrands: [],
+      projectName: '', projectCode: '', tenderDate: '', deadline: '',
+    }
   }
 
   const rawItems = result.items
@@ -206,7 +218,24 @@ export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
     }
   }
 
-  return { items, brandRequirements }
+  const rawSupplierBrands = result.supplier_brands
+  const supplierBrands: TenderSupplierBrand[] = Array.isArray(rawSupplierBrands)
+    ? rawSupplierBrands.filter(isObj).map((sb) => ({
+        supplier_name: asStr(sb.supplier_name),
+        brand: asStr(sb.brand),
+        supplier_id: typeof sb.supplier_id === 'number' ? sb.supplier_id : null,
+      }))
+    : []
+
+  return {
+    items,
+    brandRequirements,
+    supplierBrands,
+    projectName: asStr(result.project_name),
+    projectCode: asStr(result.project_code),
+    tenderDate: asStr(result.tender_date),
+    deadline: asStr(result.deadline),
+  }
 }
 
 /** Convenience: dispatch on the job type. */
