@@ -197,9 +197,14 @@ async function runTenderExtract(file: File, ctx: Record<string, unknown>) {
 
 function startTenderPoll(jobId: string) {
   stopTenderPoll()
+  // R1 止血：之前 catch 块只有注释"transient poll error — keep trying"，
+  // 没有失败计数——后端挂了/鉴权过期会无限轮询下去，不像 startBatchPolling
+  // 那样有 failures>=5 的上限。这里补上同款上限。
+  let failures = 0
   tenderPollTimer = setInterval(async () => {
     try {
       const { data } = await intakeApi.getJob(jobId)
+      failures = 0
       tenderJobStage.value = data.progress_stage || ''
       tenderJobPct.value = data.progress_pct ?? 0
       if (data.status === 'done') { stopTenderPoll(); onTenderJobDone(data) }
@@ -209,7 +214,15 @@ function startTenderPoll(jobId: string) {
         tenderJobError.value = data.error || '识别失败'
         message.error(tenderJobError.value)
       }
-    } catch { /* transient poll error — keep trying */ }
+    } catch {
+      failures++
+      if (failures >= 5) {
+        stopTenderPoll()
+        tenderPreviewing.value = false
+        tenderJobError.value = '轮询超时，请刷新页面重试'
+        message.error(tenderJobError.value)
+      }
+    }
   }, 2000)
 }
 
