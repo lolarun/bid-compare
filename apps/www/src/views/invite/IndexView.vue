@@ -58,6 +58,14 @@ const pagedRecs = computed(() => {
 const brandRequirements = ref<string[]>([])
 const saving = ref(false)
 const savedTenderId = ref<number | null>(null)
+// R1 止血：projectName 是否还是自动识别的原值（未被用户手改）。换文件后是
+// 否用新文件的 project_name 覆盖，取决于这个标记——用户已经手改过就不再
+// 覆盖，避免"我刚编辑完，换个文件又被冲掉"。
+const projectNameAutoFilled = ref(true)
+function onProjectNameInput(v: string) {
+  projectName.value = v
+  projectNameAutoFilled.value = false
+}
 
 const hasItems = computed(() => tenderItems.value.length > 0)
 const canRecommend = computed(() => hasItems.value && !recommending.value)
@@ -71,20 +79,25 @@ function onExtracted(job: ExtractionJob) {
   sourceJob.value = job
   const shape = asTenderBidlistShape(job.result)
   tenderItems.value = shape.items
-  if (shape.brandRequirements.length > 0) {
-    const existing = new Set(brandRequirements.value)
-    for (const b of shape.brandRequirements) {
-      if (!existing.has(b)) brandRequirements.value.push(b)
-    }
-  }
+  // R1 止血：之前只 push、从不清空——换一份招标文件后，品牌要求变成新旧两
+  // 份文件的并集，上一份招标的品牌要求会污染本次推荐。品牌要求应该来自
+  // 当前这份文件，不是历史所有文件的累加，改成整体替换（同一文件内部去重）。
+  brandRequirements.value = shape.brandRequirements.length > 0
+    ? [...new Set(shape.brandRequirements)]
+    : []
   recommendations.value = []
   selectedBrands.value = []
   supplierRecommendations.value = []
   selectedSupplierIds.value = []
   dataGaps.value = []
   savedTenderId.value = null
+  // R1 止血：!projectName.value 这个守卫只在项目名为空时才填，第一份文件填
+  // 过之后永远不会再更新——换文件后项目名不刷新。改成"用户没手改过就跟着
+  // 新文件走"。
   const rawName = (job.result as Record<string, unknown> | null)?.project_name
-  if (typeof rawName === 'string' && rawName && !projectName.value) projectName.value = rawName
+  if (typeof rawName === 'string' && rawName && projectNameAutoFilled.value) {
+    projectName.value = rawName
+  }
 }
 
 // ─── Step 2: recommendations ───────────────────────────────────────────────
@@ -227,9 +240,10 @@ function tagColor(t: string): string { return TAG_COLORS[t] ?? 'default' }
             <div class="field">
               <label class="field__label">项目名称</label>
               <a-input
-                v-model:value="projectName"
+                :value="projectName"
                 placeholder="自动识别，可编辑"
                 allow-clear
+                @update:value="onProjectNameInput"
               />
             </div>
 
