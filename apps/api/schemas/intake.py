@@ -20,6 +20,12 @@ class JobResponse(BaseModel):
     confidence: float | None = None
     progress_stage: str = ""
     progress_pct: int = 0
+    # design/24 B2：阶段内进度。stage_total=None 且 stage_current 有值 = "只有
+    # 单调递增计数、没有总数"（如逐页识别的长生成阶段——已转录行数）；两个都有
+    # 值 = 真正的"第 N/共 M"（如渲染页面）；两个都是 None = 这个阶段没有细粒度
+    # 进度可报，前端退回只显示 progress_stage/progress_pct。
+    stage_current: int | None = None
+    stage_total: int | None = None
     provider: str = ""
     tokens_used: int = 0
     duration_ms: int = 0

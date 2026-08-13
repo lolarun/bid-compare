@@ -25,6 +25,16 @@ import { asQuoteShape, asQualityMeta } from '@/utils/extraction'
 import { handleBatchConfirmError } from '@/utils/batchConfirmError'
 import { extractErrMsg } from '@/utils/errors'
 
+// design/24 B2：阶段内进度的人话摘要——stage_total 为空 = 只有单调递增计数
+// （逐页识别这个长阶段没有总数可言，见 dashscope_ocr.py::_mm_stream），两个
+// 都有值才是真正的"第 N/共 M"（渲染页面）。用户反馈 #4 的症结正是"进度长期
+// 停在逐页识别 20% 不动"——这里让它至少能看见数字在跳。
+function formatStageDetail(current?: number | null, total?: number | null): string {
+  if (current == null) return ''
+  if (total == null) return `已转录 ${current} 行`
+  return `${current}/${total} 页`
+}
+
 export interface UploadTaskConfig {
   projectId: number | undefined
   category: string
@@ -37,6 +47,9 @@ export interface BatchFileEntry {
   filename: string
   status: 'uploading' | 'processing' | 'done' | 'failed'
   stage: string
+  // design/24 B2：阶段内进度的人话摘要（"已转录 320 行" / "3/8 页"），跟 stage
+  // 分开存——stage 是步骤条按子串匹配当前步骤用的稳定标识，不能被拼接文字污染。
+  stageDetail: string
   progressPct: number
   uploadPct: number
   jobId: string | null
@@ -243,6 +256,7 @@ export function useSupplierUpload(deps: {
       filename: file.name,
       status: 'uploading',
       stage: '准备上传',
+      stageDetail: '',
       progressPct: 1,
       uploadPct: 1,
       jobId: null,
@@ -304,18 +318,22 @@ export function useSupplierUpload(deps: {
     if (job.status === 'pending') {
       entry.status = 'processing'
       entry.stage = job.progress_stage || '排队中'
+      entry.stageDetail = formatStageDetail(job.stage_current, job.stage_total)
       entry.progressPct = job.progress_pct || 0
     } else if (job.status === 'running') {
       entry.status = 'processing'
       entry.stage = job.progress_stage || '识别中'
+      entry.stageDetail = formatStageDetail(job.stage_current, job.stage_total)
       entry.progressPct = job.progress_pct || 10
     } else if (job.status === 'done') {
       entry.status = 'done'
       entry.stage = '已识别'
+      entry.stageDetail = ''
       entry.progressPct = 100
     } else if (job.status === 'failed') {
       entry.status = 'failed'
       entry.stage = job.progress_stage || '失败'
+      entry.stageDetail = ''
     }
   }
 
@@ -415,7 +433,7 @@ export function useSupplierUpload(deps: {
       restored.push({
         id: `restored-sub-${s.submission_id}`,
         filename: s.filename || `已入库报价 #${s.submission_id}`,
-        status: 'done', stage: `已入库 ${s.line_count} 条`,
+        status: 'done', stage: `已入库 ${s.line_count} 条`, stageDetail: '',
         progressPct: 100, uploadPct: 100,
         jobId: s.job_id,
         detectedSupplierName: s.supplier_raw_name,
@@ -434,6 +452,7 @@ export function useSupplierUpload(deps: {
         filename: j.filename || '报价文件',
         status: j.status === 'failed' ? 'failed' : 'processing',
         stage: j.progress_stage || (j.status === 'done' ? '已识别' : '识别中'),
+        stageDetail: formatStageDetail(j.stage_current, j.stage_total),
         progressPct: j.progress_pct || 0, uploadPct: 100,
         jobId: j.job_id,
         detectedSupplierName: '', finalSupplierName: '', matchedSupplierId: null,

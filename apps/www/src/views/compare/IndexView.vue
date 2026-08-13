@@ -1543,7 +1543,7 @@ async function runMatrix() {
                 {{ f.stage }} · {{ f.progressPct }}%
               </a-tag>
               <a-tag v-else-if="f.status === 'processing'" color="blue">
-                {{ f.stage }} · {{ f.progressPct }}%
+                {{ f.stage }}<template v-if="f.stageDetail">（{{ f.stageDetail }}）</template> · {{ f.progressPct }}%
               </a-tag>
               <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
               <a-tag v-else-if="f.confirmed && !f.jobId" color="green">Excel 已导入</a-tag>
@@ -1572,7 +1572,7 @@ async function runMatrix() {
               v-if="f.status === 'uploading' || f.status === 'processing'"
               class="batch-card__progress-detail"
             >
-              当前：{{ f.stage }} · {{ f.progressPct }}%
+              当前：{{ f.stage }}<template v-if="f.stageDetail">（{{ f.stageDetail }}）</template> · {{ f.progressPct }}%
               <span v-if="f.jobId"> · 任务 {{ f.jobId.slice(0, 8) }}</span>
             </div>
             <div

@@ -489,7 +489,7 @@ class DashScopeOCRProvider(LLMProvider):
         return text
 
     def _mm_stream(self, *, api_key: str, model: str, content: list[dict],
-                   temperature: float):
+                   temperature: float, row_progress_cb=None):
         """Streaming variant — returns an object shaped like a non-stream response.
 
         为什么必须流式：报价清单的抽取是**长生成**（136 行 CSV ≈ 一两万 token），
@@ -498,9 +498,15 @@ class DashScopeOCRProvider(LLMProvider):
         5 次全部撞同一堵墙——重试一个必然超时的请求纯属浪费（每份白烧 25 分钟）。
         调大超时只是把墙往后挪，下一份更大的文档照样撞；流式让超时取决于
         **token 间隔**而不是生成总长，才是与文档大小无关的解法。
+
+        design/24 B2：`row_progress_cb(n)` 在已转录行数（按累计文本里的换行符数
+        近似）每增加 5 行时调用一次——不是每个 chunk 都调用：chunk 是 token 粒度
+        的碎片，逐 chunk 上报会让上游（DB commit）被打爆。这是唯一能报"进度"的
+        地方：这条长生成没有页数概念，行数是仅有的、单调递增的信号。
         """
         chunks: list[str] = []
         got_any = False
+        last_reported = 0
         for resp in dashscope.MultiModalConversation.call(
                 api_key=api_key, model=model,
                 messages=[{"role": "user", "content": content}],
@@ -509,6 +515,14 @@ class DashScopeOCRProvider(LLMProvider):
                 return resp                      # 交给调用方按 429/其它错误处理
             got_any = True
             chunks.append(self._mm_text(resp) or "")
+            if row_progress_cb is not None:
+                current = "".join(chunks).count("\n")
+                if current - last_reported >= 5:
+                    last_reported = current
+                    try:
+                        row_progress_cb(current)
+                    except Exception:   # noqa: BLE001 — 进度上报绝不能打断识别本身
+                        log.warning("row_progress_cb raised, ignoring", exc_info=True)
 
         if not got_any:
             # 空流当作可重试的失败，而不是"识别出零行"——后者会被下游当成
@@ -518,7 +532,7 @@ class DashScopeOCRProvider(LLMProvider):
 
     def _mm_call(self, content: list[dict], model: str,
                  temperature: float = _VISUAL_TEMPERATURE,
-                 stream: bool = False) -> str:
+                 stream: bool = False, row_progress_cb=None) -> str:
         """Multimodal call with key rotation + retry; returns raw text. Reuses
         the same retry/concurrency infra as _ocr_page.
 
@@ -532,7 +546,8 @@ class DashScopeOCRProvider(LLMProvider):
             try:
                 if stream:
                     resp = self._mm_stream(api_key=key, model=model,
-                                           content=content, temperature=temperature)
+                                           content=content, temperature=temperature,
+                                           row_progress_cb=row_progress_cb)
                 else:
                     resp = dashscope.MultiModalConversation.call(
                         api_key=key, model=model,
@@ -679,6 +694,7 @@ class DashScopeOCRProvider(LLMProvider):
         labels: list[str] | None = None,
         max_pixels: int = 8_000_000,
         temperature: float = 0.0,
+        row_progress_cb=None,
     ) -> str:
         """VL-direct：一次调用送 N 张页图，返回模型原始文本（CSV）。
 
@@ -690,6 +706,10 @@ class DashScopeOCRProvider(LLMProvider):
 
         复用 `_mm_call` 的多 key 轮换与限流；**不解析、不清洗**，原样返回给调用方，
         解析规则属于识别器而不是 provider。
+
+        `row_progress_cb`（design/24 B2，可选）：仅在 `stream=True` 的长生成路径
+        （报价清单抽取，见 `_mm_stream`）有意义——方向预检等短响应调用方不传，
+        不受影响。callers（如 pipeline.py 的 `_vl_call`）按需传入。
         """
         mdl = model or os.getenv("DASHSCOPE_QUOTE_VL_MODEL", _VISUAL_PLUS_MODEL)
         content: list[dict] = []
@@ -699,7 +719,8 @@ class DashScopeOCRProvider(LLMProvider):
             content.append(self._img_part(img, max_pixels=max_pixels))
         content.append({"text": prompt})
         # 流式：整份报价清单是长生成，非流式会撞 SDK 的 300s read timeout（见 _mm_stream）。
-        raw = self._mm_call(content, mdl, temperature=temperature, stream=True)
+        raw = self._mm_call(content, mdl, temperature=temperature, stream=True,
+                            row_progress_cb=row_progress_cb)
         return (raw or "").replace("```csv", "").replace("```", "").strip()
 
     def _extract_structured_experimental(

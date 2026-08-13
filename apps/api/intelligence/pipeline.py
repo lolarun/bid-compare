@@ -40,7 +40,10 @@ KNOWN_CATEGORIES = [
     "水箱", "潜水泵", "风口风阀", "风机盘管", "空调泵",
 ]
 
-ProgressCallback = Callable[[str, int], None]
+# design/24 B2：progress_cb 的调用方仍可只传 (stage, pct) 两个位置参数——
+# stage_current/stage_total 是 Callable 类型省略不了的关键字参数，靠各处调用点
+# 自己按需传，类型标注保持宽松（Any-arity）不强行细化。
+ProgressCallback = Callable[..., None]
 
 
 class ExtractionPipeline:
@@ -167,10 +170,21 @@ class ExtractionPipeline:
 
         from apps.api.intelligence.vl_quote import recognize_quote_vl
         s = get_settings()
+
+        # design/24 B2：识别报价清单是耗时大头（整份文档一次流式模型调用），
+        # 没有页数概念可报——唯一能报的是"已经收到了多少内容"。vl_extract_csv
+        # 接受可选 row_progress_cb（provider 不支持就默默不调用，见
+        # dashscope_ocr.py），这里转发成同一条 progress_cb 通道，stage_total
+        # 恒为 None（如实说"没有总数"，不是留空）。
+        def _vl_call(imgs, prompt):
+            def _on_rows(n: int) -> None:
+                _notify(progress_cb, "识别报价清单", 55, stage_current=n, stage_total=None)
+            return self.provider.vl_extract_csv(
+                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL, row_progress_cb=_on_rows)
+
         draft = recognize_quote_vl(
             file_path,
-            vl_call=lambda imgs, prompt: self.provider.vl_extract_csv(
-                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+            vl_call=_vl_call,
             orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
                 [b for _t, b in parts], prompt,
                 model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
@@ -427,6 +441,10 @@ def _infer_category(name: str) -> str:
     return ""
 
 
-def _notify(progress_cb: ProgressCallback | None, stage: str, pct: int) -> None:
+def _notify(
+    progress_cb: ProgressCallback | None, stage: str, pct: int, *,
+    stage_current: int | None = None, stage_total: int | None = None,
+) -> None:
     if progress_cb:
-        progress_cb(stage, max(0, min(100, pct)))
+        progress_cb(stage, max(0, min(100, pct)),
+                    stage_current=stage_current, stage_total=stage_total)

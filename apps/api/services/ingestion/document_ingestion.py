@@ -213,12 +213,21 @@ class DocumentIngestionService:
             job.progress_pct = 5
             db.commit()
 
-            def update_progress(stage: str, pct: int) -> None:
+            def update_progress(
+                stage: str, pct: int, *,
+                stage_current: int | None = None, stage_total: int | None = None,
+            ) -> None:
                 current = db.get(ExtractionJob, job_id)
                 if not current or current.status != JobStatus.RUNNING.value:
                     return
                 current.progress_stage = stage
                 current.progress_pct = max(current.progress_pct or 0, pct)
+                # design/24 B2：阶段内进度——总是按本次调用的值原样写（含 None），
+                # 不做"没传就保留上次的值"。理由：换阶段时如果沿用上一阶段的
+                # current/total，会有一小段时间显示"识别报价清单"配着上一阶段
+                # 剩下的"8/8"，误导用户以为这个新阶段也快完成了。
+                current.stage_current = stage_current
+                current.stage_total = stage_total
                 db.commit()
 
             try:

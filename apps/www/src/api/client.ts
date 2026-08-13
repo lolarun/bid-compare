@@ -480,6 +480,12 @@ export interface ExtractionJob {
   confidence: number | null
   progress_stage?: string
   progress_pct?: number
+  // design/24 B2：阶段内进度。stage_total=null 且 stage_current 有值 = 只有
+  // 单调递增计数（如逐页识别的"已转录 N 行"，没有总数）；两个都有值 = 真正的
+  // "第 N/共 M"；两个都是 null/undefined = 这个阶段没有细粒度进度可报，
+  // 退回只显示 progress_stage/progress_pct。
+  stage_current?: number | null
+  stage_total?: number | null
   provider: string
   tokens_used: number
   duration_ms: number
@@ -934,6 +940,9 @@ export interface CompareStateInflightJob {
   status: string
   progress_stage: string
   progress_pct: number
+  // design/24 B2：见 ExtractionJob 同名字段注释。
+  stage_current?: number | null
+  stage_total?: number | null
   has_result: boolean
 }
 export interface CompareStateResult {

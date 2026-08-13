@@ -74,7 +74,7 @@ def test_quote_extraction_requests_streaming(provider):
     """vl_extract_csv 是那个长生成的调用方——它必须开流式，否则回到超时老路。"""
     seen = {}
 
-    def spy(content, model, temperature=0.0, stream=False):
+    def spy(content, model, temperature=0.0, stream=False, row_progress_cb=None):
         seen["stream"] = stream
         return "row_type,name\ndetail,A"
 
@@ -87,3 +87,65 @@ def test_streamed_response_survives_mm_text(provider):
     """_mm_text 对真实响应取 .output；拼好的流式结果必须走另一条分支而不是崩。"""
     r = m._StreamedResponse("abc")
     assert m.DashScopeOCRProvider._mm_text(r) == "abc"
+
+
+# ── design/24 B2：row_progress_cb（已转录行数上报）──────────────────────────
+
+def test_row_progress_cb_reports_increasing_line_count(provider):
+    """chunk 里带换行符时，累计行数应该单调递增地报给 row_progress_cb。"""
+    # 6 个 chunk，累计换行符数 1,2,3,4,5,6 —— 阈值是"每满 5 行才报一次"，
+    # 所以只应该在跨过第 5 行时触发一次。
+    parts = [f"row{i}\n" for i in range(6)]
+    reported = []
+    with mock.patch.object(m.dashscope.MultiModalConversation, "call",
+                           return_value=iter([_chunk(t) for t in parts])):
+        provider._mm_call([], "mdl", stream=True, row_progress_cb=reported.append)
+    assert reported == [5]
+
+
+def test_row_progress_cb_not_called_below_threshold(provider):
+    """不到 5 行的整个流：一次都不报——不是"至少报一次进度"的语义。"""
+    parts = [f"row{i}\n" for i in range(3)]
+    reported = []
+    with mock.patch.object(m.dashscope.MultiModalConversation, "call",
+                           return_value=iter([_chunk(t) for t in parts])):
+        provider._mm_call([], "mdl", stream=True, row_progress_cb=reported.append)
+    assert reported == []
+
+
+def test_row_progress_cb_none_is_safe(provider):
+    """默认（不传 row_progress_cb）：识别路径完全不受影响，改动前的三个测试
+    （test_chunks_are_concatenated_in_order 等）已经覆盖这条路径，这里补一句
+    显式断言不会因为新参数存在就出问题。"""
+    parts = ["a\n", "b\n"]
+    with mock.patch.object(m.dashscope.MultiModalConversation, "call",
+                           return_value=iter([_chunk(t) for t in parts])):
+        assert provider._mm_call([], "mdl", stream=True) == "a\nb\n"
+
+
+def test_row_progress_cb_exception_does_not_break_stream(provider):
+    """进度回调自己炸了，不能把识别本身也炸了——识别结果必须完整拿到。"""
+    parts = [f"row{i}\n" for i in range(6)]
+
+    def bad_cb(n):
+        raise RuntimeError("boom")
+
+    with mock.patch.object(m.dashscope.MultiModalConversation, "call",
+                           return_value=iter([_chunk(t) for t in parts])):
+        result = provider._mm_call([], "mdl", stream=True, row_progress_cb=bad_cb)
+    assert result == "".join(parts)
+
+
+def test_vl_extract_csv_forwards_row_progress_cb(provider):
+    """vl_extract_csv 是 pipeline.py 实际调用的入口——确认它真的把回调转发到
+    _mm_call，不是接了参数却没接线。"""
+    seen = {}
+
+    def spy(content, model, temperature=0.0, stream=False, row_progress_cb=None):
+        seen["cb"] = row_progress_cb
+        return "row_type,name\ndetail,A"
+
+    provider._mm_call = spy
+    marker = object()
+    provider.vl_extract_csv([b"\x89PNG"], "prompt", model="mdl", row_progress_cb=marker)
+    assert seen["cb"] is marker

@@ -159,6 +159,117 @@ def test_recognizer_marked_on_draft():
     assert d.rows[0].fields["parser_mode"] == "vl_direct"
 
 
+# ─── design/24 B2：渲染阶段的页级进度 ────────────────────────────────────────
+
+def test_render_stage_reports_page_progress_per_batch():
+    """RENDER_BATCH=8，10 页应该分两批（8、10）上报，不是渲完才报一次。"""
+    from apps.api.intelligence.vl_quote import recognize_quote_vl, RENDER_BATCH
+    import apps.api.intelligence.vl_quote as vd
+
+    assert RENDER_BATCH == 8, "本测试的批次断言依赖这个常量，改了常量要改期望值"
+    n_pages = 10
+    calls: list[tuple[str, int, int | None, int | None]] = []
+
+    def notify(stage, pct, *, stage_current=None, stage_total=None):
+        calls.append((stage, pct, stage_current, stage_total))
+
+    def fake_render(_path, pages):
+        return {p: _big_img() for p in pages}
+
+    class _L:
+        @staticmethod
+        def get_page_count(_p):
+            return n_pages
+        render_pages = staticmethod(fake_render)
+
+    orig = vd.DocumentLoader
+    vd.DocumentLoader = _L
+    try:
+        recognize_quote_vl(
+            "x.pdf",
+            vl_call=lambda imgs, prompt: HEAD + "\ndetail,电缆,A-1,米,1,1,1,1,1",
+            orient_call=None,
+            progress_cb=notify,
+        )
+    finally:
+        vd.DocumentLoader = orig
+
+    render_calls = [c for c in calls if c[0] == "渲染页面"]
+    # 起始一次 (0, 10)，第一批完成一次 (8, 10)，第二批完成一次 (10, 10)
+    assert [(c[2], c[3]) for c in render_calls] == [(0, n_pages), (8, n_pages), (n_pages, n_pages)]
+
+
+def test_render_stage_single_batch_still_reports_start_and_end():
+    """页数不超过一个批次：至少有开始(0/N)和结束(N/N)两次上报，不是完全没有。"""
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
+    import apps.api.intelligence.vl_quote as vd
+
+    calls = []
+
+    def notify(stage, pct, *, stage_current=None, stage_total=None):
+        if stage == "渲染页面":
+            calls.append((stage_current, stage_total))
+
+    def fake_render(_path, pages):
+        return {p: _big_img() for p in pages}
+
+    class _L:
+        @staticmethod
+        def get_page_count(_p):
+            return 3
+        render_pages = staticmethod(fake_render)
+
+    orig = vd.DocumentLoader
+    vd.DocumentLoader = _L
+    try:
+        recognize_quote_vl(
+            "x.pdf",
+            vl_call=lambda imgs, prompt: HEAD + "\ndetail,电缆,A-1,米,1,1,1,1,1",
+            orient_call=None,
+            progress_cb=notify,
+        )
+    finally:
+        vd.DocumentLoader = orig
+
+    assert calls == [(0, 3), (3, 3)]
+
+
+def test_plain_two_arg_progress_cb_still_works():
+    """旧调用方若只接 (stage, pct) 两个位置参数——本模块内部改用关键字传递
+    stage_current/stage_total，不能让这种签名炸掉（Python 允许函数签名比调用
+    方需要的更宽松，只要调用方用的是关键字参数）。"""
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
+    import apps.api.intelligence.vl_quote as vd
+
+    seen = []
+
+    def legacy_notify(stage, pct, **_ignored):
+        seen.append((stage, pct))
+
+    def fake_render(_path, pages):
+        return {p: _big_img() for p in pages}
+
+    class _L:
+        @staticmethod
+        def get_page_count(_p):
+            return 1
+        render_pages = staticmethod(fake_render)
+
+    orig = vd.DocumentLoader
+    vd.DocumentLoader = _L
+    try:
+        recognize_quote_vl(
+            "x.pdf",
+            vl_call=lambda imgs, prompt: HEAD + "\ndetail,电缆,A-1,米,1,1,1,1,1",
+            orient_call=None,
+            progress_cb=legacy_notify,
+        )
+    finally:
+        vd.DocumentLoader = orig
+
+    assert ("识别报价清单", 55) in seen
+
+
 # ─── 方向预检 ────────────────────────────────────────────────────────────────
 
 def _img(_n):

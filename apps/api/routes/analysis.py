@@ -2293,6 +2293,10 @@ def compare_state(
             "status": j.status,
             "progress_stage": j.progress_stage or "",
             "progress_pct": j.progress_pct or 0,
+            # design/24 B2：刷新恢复时也带上阶段内进度，不然刷新一下细粒度
+            # 进度就丢了，退回粗轴的 progress_pct。
+            "stage_current": j.stage_current,
+            "stage_total": j.stage_total,
             "has_result": bool(j.result),
         })
 

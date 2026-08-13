@@ -809,6 +809,10 @@ class CompareStateInflightJobOut(BaseModel):
     status: str
     progress_stage: str
     progress_pct: float
+    # design/24 B2：见 JobResponse 同名字段注释——刷新恢复时也要带上，
+    # 否则细粒度进度只在同一次会话内有效，一刷新就退回粗轴。
+    stage_current: int | None = None
+    stage_total: int | None = None
     has_result: bool
 
 

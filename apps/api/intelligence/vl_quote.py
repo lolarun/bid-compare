@@ -625,15 +625,21 @@ def recognize_quote_vl(file_path: str, *, vl_call: VLCall,
     page_count = DocumentLoader.get_page_count(file_path)
     pages = list(range(1, page_count + 1))
 
-    def _notify(stage: str, pct: int) -> None:
+    def _notify(stage: str, pct: int, *,
+                stage_current: int | None = None, stage_total: int | None = None) -> None:
         if progress_cb:
-            progress_cb(stage, pct)
+            progress_cb(stage, pct, stage_current=stage_current, stage_total=stage_total)
 
     # 分批渲染并及时释放：一次性渲全份会把内存峰值顶穿（53 页的文档实测存在）。
-    _notify("渲染页面", 15)
+    # design/24 B2：渲染本来就按 RENDER_BATCH 分批，天然有页级进度可报——
+    # 每批渲完更新一次"已渲染 N/总页数"，不是长阶段（识别报价清单）那种
+    # 没有总数可言的情况。
+    _notify("渲染页面", 15, stage_current=0, stage_total=len(pages))
     images: dict[int, bytes] = {}
     for start in range(0, len(pages), RENDER_BATCH):
         images.update(DocumentLoader.render_pages(file_path, pages[start:start + RENDER_BATCH]))
+        _notify("渲染页面", 15,
+                stage_current=min(start + RENDER_BATCH, len(pages)), stage_total=len(pages))
 
     rotations: dict[int, int] = {}
     unresolved: list[int] = []
