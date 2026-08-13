@@ -1,0 +1,735 @@
+{
+  "schema_version": "1",
+  "generated_at": "2026-06-23",
+  "source_registry_sha256": "02f74b0682f5557078e9b91053870ff43da99c058e361206866548e36009ffa6",
+  "sources": [
+    {
+      "source_id": "bridge-tray",
+      "category": "桥架",
+      "profession": "电气",
+      "path": "docs/项目资料/材料汇总/0桥架报价单格式模板.xls",
+      "sha256": "155a8d1139fc7f4e0eaef9b305cf1e5248e21b74ed1e6d584e3889ba4cb0939d",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 14,
+      "total_rows": 4106,
+      "csv_dir": "csv/桥架",
+      "sheets": [
+        {
+          "sheet": "汇总",
+          "csv": "桥架报价单格式模板_汇总.csv",
+          "rows": 2047,
+          "cols": 16
+        },
+        {
+          "sheet": "港汇恒隆",
+          "csv": "桥架报价单格式模板_港汇恒隆.csv",
+          "rows": 65,
+          "cols": 16
+        },
+        {
+          "sheet": "华泾镇D5B",
+          "csv": "桥架报价单格式模板_华泾镇D5B.csv",
+          "rows": 208,
+          "cols": 16
+        },
+        {
+          "sheet": "无锡104地块",
+          "csv": "桥架报价单格式模板_无锡104地块.csv",
+          "rows": 55,
+          "cols": 16
+        },
+        {
+          "sheet": "温州市鹿城广场四期",
+          "csv": "桥架报价单格式模板_温州市鹿城广场四期.csv",
+          "rows": 37,
+          "cols": 16
+        },
+        {
+          "sheet": "张江复旦国际创新中心生活组团",
+          "csv": "桥架报价单格式模板_张江复旦国际创新中心生活组团.csv",
+          "rows": 32,
+          "cols": 16
+        },
+        {
+          "sheet": "人工智能岛二期",
+          "csv": "桥架报价单格式模板_人工智能岛二期.csv",
+          "rows": 16,
+          "cols": 16
+        },
+        {
+          "sheet": "华泾镇D5D-1",
+          "csv": "桥架报价单格式模板_华泾镇D5D-1.csv",
+          "rows": 68,
+          "cols": 16
+        },
+        {
+          "sheet": "集电港3C-10",
+          "csv": "桥架报价单格式模板_集电港3C-10.csv",
+          "rows": 1333,
+          "cols": 16
+        },
+        {
+          "sheet": "淮海社区069-1、071-1街",
+          "csv": "桥架报价单格式模板_淮海社区069-1、071-1街.csv",
+          "rows": 30,
+          "cols": 16
+        },
+        {
+          "sheet": "金鼎20-01",
+          "csv": "桥架报价单格式模板_金鼎20-01.csv",
+          "rows": 94,
+          "cols": 16
+        },
+        {
+          "sheet": "大理银桥",
+          "csv": "桥架报价单格式模板_大理银桥.csv",
+          "rows": 34,
+          "cols": 16
+        },
+        {
+          "sheet": "简州新城",
+          "csv": "桥架报价单格式模板_简州新城.csv",
+          "rows": 31,
+          "cols": 16
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "桥架报价单格式模板_交子公园.csv",
+          "rows": 56,
+          "cols": 16
+        }
+      ]
+    },
+    {
+      "source_id": "busbar",
+      "category": "母线槽",
+      "profession": "电气",
+      "path": "docs/项目资料/材料汇总/0母线报价单格式模板.xls",
+      "sha256": "938adc304efe7f1b0b7229b5ba041e7e5124edabd628e7aaeec13def5788264d",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 8,
+      "total_rows": 340,
+      "csv_dir": "csv/母线槽",
+      "sheets": [
+        {
+          "sheet": "Sheet1",
+          "csv": "母线报价单格式模板_Sheet1.csv",
+          "rows": 55,
+          "cols": 17
+        },
+        {
+          "sheet": "汇总",
+          "csv": "母线报价单格式模板_汇总.csv",
+          "rows": 140,
+          "cols": 17
+        },
+        {
+          "sheet": "米哈游",
+          "csv": "母线报价单格式模板_米哈游.csv",
+          "rows": 14,
+          "cols": 17
+        },
+        {
+          "sheet": "无锡XDG-2021-104号地块",
+          "csv": "母线报价单格式模板_无锡XDG-2021-104号地块.csv",
+          "rows": 41,
+          "cols": 17
+        },
+        {
+          "sheet": "中科院",
+          "csv": "母线报价单格式模板_中科院.csv",
+          "rows": 18,
+          "cols": 17
+        },
+        {
+          "sheet": "肿瘤医院",
+          "csv": "母线报价单格式模板_肿瘤医院.csv",
+          "rows": 32,
+          "cols": 17
+        },
+        {
+          "sheet": "494厂房",
+          "csv": "母线报价单格式模板_494厂房.csv",
+          "rows": 11,
+          "cols": 17
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "母线报价单格式模板_交子公园.csv",
+          "rows": 29,
+          "cols": 17
+        }
+      ]
+    },
+    {
+      "source_id": "electrical-panel-2026-05-20",
+      "category": "配电箱",
+      "profession": "电气",
+      "path": "docs/项目资料/用户反馈/2026-05-20/0配电箱.xlsx",
+      "sha256": "1150d127d98332cfacc725cbfc28a410d4d8f96f94379da1d942c63b3aa826fd",
+      "status": "active",
+      "authority": "customer_feedback",
+      "sheet_count": 9,
+      "total_rows": 56799,
+      "csv_dir": "csv/配电箱",
+      "sheets": [
+        {
+          "sheet": "移动5G",
+          "csv": "配电箱_移动5G.csv",
+          "rows": 4313,
+          "cols": 11
+        },
+        {
+          "sheet": "上海天灵",
+          "csv": "配电箱_上海天灵.csv",
+          "rows": 226,
+          "cols": 8
+        },
+        {
+          "sheet": "龙旗科技",
+          "csv": "配电箱_龙旗科技.csv",
+          "rows": 13264,
+          "cols": 9
+        },
+        {
+          "sheet": "无锡104",
+          "csv": "配电箱_无锡104.csv",
+          "rows": 21335,
+          "cols": 9
+        },
+        {
+          "sheet": "杭州菜鸟",
+          "csv": "配电箱_杭州菜鸟.csv",
+          "rows": 3783,
+          "cols": 9
+        },
+        {
+          "sheet": "张江复旦1号楼创新",
+          "csv": "配电箱_张江复旦1号楼创新.csv",
+          "rows": 2326,
+          "cols": 10
+        },
+        {
+          "sheet": "张江复旦2号楼生物",
+          "csv": "配电箱_张江复旦2号楼生物.csv",
+          "rows": 7514,
+          "cols": 10
+        },
+        {
+          "sheet": "张江复旦3号楼科研",
+          "csv": "配电箱_张江复旦3号楼科研.csv",
+          "rows": 856,
+          "cols": 10
+        },
+        {
+          "sheet": "百联西郊",
+          "csv": "配电箱_百联西郊.csv",
+          "rows": 3182,
+          "cols": 9
+        }
+      ]
+    },
+    {
+      "source_id": "valve",
+      "category": "阀门",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0阀门询价格式.xls",
+      "sha256": "d5bf676608ff5d7dd069367f8e0289f1e9b4c88552e62bab8c4ff9d99fed0418",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 16,
+      "total_rows": 1862,
+      "csv_dir": "csv/阀门",
+      "sheets": [
+        {
+          "sheet": "汇总",
+          "csv": "阀门询价格式_汇总.csv",
+          "rows": 917,
+          "cols": 20
+        },
+        {
+          "sheet": "邬桥粮仓",
+          "csv": "阀门询价格式_邬桥粮仓.csv",
+          "rows": 32,
+          "cols": 20
+        },
+        {
+          "sheet": "鹿城广场4期不锈钢阀门",
+          "csv": "阀门询价格式_鹿城广场4期不锈钢阀门.csv",
+          "rows": 64,
+          "cols": 20
+        },
+        {
+          "sheet": "鹿城广场4期铜阀门",
+          "csv": "阀门询价格式_鹿城广场4期铜阀门.csv",
+          "rows": 59,
+          "cols": 20
+        },
+        {
+          "sheet": "鹿城广场4期空调铜阀门",
+          "csv": "阀门询价格式_鹿城广场4期空调铜阀门.csv",
+          "rows": 50,
+          "cols": 20
+        },
+        {
+          "sheet": "鹿城广场4期空调铸铁阀门",
+          "csv": "阀门询价格式_鹿城广场4期空调铸铁阀门.csv",
+          "rows": 78,
+          "cols": 20
+        },
+        {
+          "sheet": "常州新龙国际商务区",
+          "csv": "阀门询价格式_常州新龙国际商务区.csv",
+          "rows": 46,
+          "cols": 20
+        },
+        {
+          "sheet": "无锡XDG-2021-104号地块电动阀",
+          "csv": "阀门询价格式_无锡XDG-2021-104号地块电动阀.csv",
+          "rows": 25,
+          "cols": 20
+        },
+        {
+          "sheet": "无锡XDG-2021-104号地块空调水",
+          "csv": "阀门询价格式_无锡XDG-2021-104号地块空调水.csv",
+          "rows": 57,
+          "cols": 20
+        },
+        {
+          "sheet": "张江复旦",
+          "csv": "阀门询价格式_张江复旦.csv",
+          "rows": 16,
+          "cols": 20
+        },
+        {
+          "sheet": "龙旗科技铜阀门",
+          "csv": "阀门询价格式_龙旗科技铜阀门.csv",
+          "rows": 148,
+          "cols": 20
+        },
+        {
+          "sheet": "龙旗科技阀门",
+          "csv": "阀门询价格式_龙旗科技阀门.csv",
+          "rows": 119,
+          "cols": 20
+        },
+        {
+          "sheet": "金鼎20-01",
+          "csv": "阀门询价格式_金鼎20-01.csv",
+          "rows": 41,
+          "cols": 20
+        },
+        {
+          "sheet": "东方希望中心二期",
+          "csv": "阀门询价格式_东方希望中心二期.csv",
+          "rows": 108,
+          "cols": 20
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "阀门询价格式_交子公园.csv",
+          "rows": 48,
+          "cols": 20
+        },
+        {
+          "sheet": "张江高科站",
+          "csv": "阀门询价格式_张江高科站.csv",
+          "rows": 54,
+          "cols": 20
+        }
+      ]
+    },
+    {
+      "source_id": "ss-pipe",
+      "category": "不锈钢管",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0不锈钢管清单.xlsx",
+      "sha256": "19b209d9d8acf018a8916f140872621fcb12f640474d95612d6fadc0aaa6052c",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 7,
+      "total_rows": 1187,
+      "csv_dir": "csv/不锈钢管",
+      "sheets": [
+        {
+          "sheet": "Sheet1",
+          "csv": "不锈钢管清单_Sheet1.csv",
+          "rows": 21,
+          "cols": 14
+        },
+        {
+          "sheet": "汇总",
+          "csv": "不锈钢管清单_汇总.csv",
+          "rows": 581,
+          "cols": 15
+        },
+        {
+          "sheet": "58-01",
+          "csv": "不锈钢管清单_58-01.csv",
+          "rows": 12,
+          "cols": 15
+        },
+        {
+          "sheet": "邬桥粮仓",
+          "csv": "不锈钢管清单_邬桥粮仓.csv",
+          "rows": 6,
+          "cols": 15
+        },
+        {
+          "sheet": "鹿城广场四期",
+          "csv": "不锈钢管清单_鹿城广场四期.csv",
+          "rows": 465,
+          "cols": 15
+        },
+        {
+          "sheet": "宿迁恒力酒店",
+          "csv": "不锈钢管清单_宿迁恒力酒店.csv",
+          "rows": 3,
+          "cols": 15
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "不锈钢管清单_交子公园.csv",
+          "rows": 99,
+          "cols": 15
+        }
+      ]
+    },
+    {
+      "source_id": "water-tank",
+      "category": "水箱",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0水箱报价清单.xlsx",
+      "sha256": "e527cb9c13ee7432a5148b02fe18321c0a631c53b217cf06f1d065befd72d814",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 7,
+      "total_rows": 69,
+      "csv_dir": "csv/水箱",
+      "sheets": [
+        {
+          "sheet": "不锈钢水箱投标清单",
+          "csv": "水箱报价清单_不锈钢水箱投标清单.csv",
+          "rows": 12,
+          "cols": 13
+        },
+        {
+          "sheet": "不锈钢水箱投标清单技术明细",
+          "csv": "水箱报价清单_不锈钢水箱投标清单技术明细.csv",
+          "rows": 24,
+          "cols": 8
+        },
+        {
+          "sheet": "汇总",
+          "csv": "水箱报价清单_汇总.csv",
+          "rows": 15,
+          "cols": 14
+        },
+        {
+          "sheet": "港汇恒隆",
+          "csv": "水箱报价清单_港汇恒隆.csv",
+          "rows": 6,
+          "cols": 14
+        },
+        {
+          "sheet": "无锡XDG-2021-104地块",
+          "csv": "水箱报价清单_无锡XDG-2021-104地块.csv",
+          "rows": 5,
+          "cols": 14
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "水箱报价清单_交子公园.csv",
+          "rows": 3,
+          "cols": 14
+        },
+        {
+          "sheet": "金桥17B-06",
+          "csv": "水箱报价清单_金桥17B-06.csv",
+          "rows": 4,
+          "cols": 14
+        }
+      ]
+    },
+    {
+      "source_id": "submersible-pump",
+      "category": "潜水泵",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0潜水泵询价格式.xlsx",
+      "sha256": "3b51228807ea5ce5b40bc4a5eca63d8e9ee7f0eb72a7139933c4fd44052c8a63",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 8,
+      "total_rows": 1270,
+      "csv_dir": "csv/潜水泵",
+      "sheets": [
+        {
+          "sheet": "Sheet1",
+          "csv": "潜水泵询价格式_Sheet1.csv",
+          "rows": 26,
+          "cols": 12
+        },
+        {
+          "sheet": "汇总",
+          "csv": "潜水泵询价格式_汇总.csv",
+          "rows": 618,
+          "cols": 13
+        },
+        {
+          "sheet": "龙旗科技",
+          "csv": "潜水泵询价格式_龙旗科技.csv",
+          "rows": 226,
+          "cols": 13
+        },
+        {
+          "sheet": "华泾镇D5D-1",
+          "csv": "潜水泵询价格式_华泾镇D5D-1.csv",
+          "rows": 69,
+          "cols": 13
+        },
+        {
+          "sheet": "金鼎16-01",
+          "csv": "潜水泵询价格式_金鼎16-01.csv",
+          "rows": 134,
+          "cols": 13
+        },
+        {
+          "sheet": "中科院",
+          "csv": "潜水泵询价格式_中科院.csv",
+          "rows": 97,
+          "cols": 13
+        },
+        {
+          "sheet": "凤栖谷",
+          "csv": "潜水泵询价格式_凤栖谷.csv",
+          "rows": 27,
+          "cols": 13
+        },
+        {
+          "sheet": "张江高科站",
+          "csv": "潜水泵询价格式_张江高科站.csv",
+          "rows": 73,
+          "cols": 13
+        }
+      ]
+    },
+    {
+      "source_id": "air-vent",
+      "category": "风口风阀",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0风口风阀报价单格式.xls",
+      "sha256": "eba3a92c9a09299e97dc7675df326b517cd1f46e76ae19bf1032c62cc66706d3",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 13,
+      "total_rows": 6244,
+      "csv_dir": "csv/风口风阀",
+      "sheets": [
+        {
+          "sheet": "计价公式",
+          "csv": "风口风阀报价单格式_计价公式.csv",
+          "rows": 32,
+          "cols": 4
+        },
+        {
+          "sheet": "汇总",
+          "csv": "风口风阀报价单格式_汇总.csv",
+          "rows": 3101,
+          "cols": 11
+        },
+        {
+          "sheet": "华泾嘉华",
+          "csv": "风口风阀报价单格式_华泾嘉华.csv",
+          "rows": 869,
+          "cols": 11
+        },
+        {
+          "sheet": "人工智能岛二期",
+          "csv": "风口风阀报价单格式_人工智能岛二期.csv",
+          "rows": 292,
+          "cols": 11
+        },
+        {
+          "sheet": "“一点”方厅水院",
+          "csv": "风口风阀报价单格式_“一点”方厅水院.csv",
+          "rows": 100,
+          "cols": 11
+        },
+        {
+          "sheet": "长征镇214、210街坊",
+          "csv": "风口风阀报价单格式_长征镇214、210街坊.csv",
+          "rows": 80,
+          "cols": 11
+        },
+        {
+          "sheet": "张江复旦国际创新中心生活组团项目",
+          "csv": "风口风阀报价单格式_张江复旦国际创新中心生活组团项目.csv",
+          "rows": 118,
+          "cols": 11
+        },
+        {
+          "sheet": "复旦大学张江复旦国际创新中心生物与医学科技融合创新大楼",
+          "csv": "风口风阀报价单格式_复旦大学张江复旦国际创新中心生物与医学科技融合创新大楼.csv",
+          "rows": 162,
+          "cols": 11
+        },
+        {
+          "sheet": "复旦大学张江复旦国际创新中心三号科研楼",
+          "csv": "风口风阀报价单格式_复旦大学张江复旦国际创新中心三号科研楼.csv",
+          "rows": 143,
+          "cols": 11
+        },
+        {
+          "sheet": "金鼎20-01",
+          "csv": "风口风阀报价单格式_金鼎20-01.csv",
+          "rows": 643,
+          "cols": 11
+        },
+        {
+          "sheet": "金桥17B-06",
+          "csv": "风口风阀报价单格式_金桥17B-06.csv",
+          "rows": 8,
+          "cols": 11
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "风口风阀报价单格式_交子公园.csv",
+          "rows": 613,
+          "cols": 11
+        },
+        {
+          "sheet": "简州新城",
+          "csv": "风口风阀报价单格式_简州新城.csv",
+          "rows": 83,
+          "cols": 11
+        }
+      ]
+    },
+    {
+      "source_id": "fan-coil",
+      "category": "风机盘管",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0风盘报价单格式.xls",
+      "sha256": "c5ade9892a1f02795a2199b30d8cf1b3124b0947d118accf776b7e32b57a609c",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 10,
+      "total_rows": 252,
+      "csv_dir": "csv/风机盘管",
+      "sheets": [
+        {
+          "sheet": "风机盘管价格明细",
+          "csv": "风盘报价单格式_风机盘管价格明细.csv",
+          "rows": 24,
+          "cols": 14
+        },
+        {
+          "sheet": "风机盘管参数表",
+          "csv": "风盘报价单格式_风机盘管参数表.csv",
+          "rows": 36,
+          "cols": 32
+        },
+        {
+          "sheet": "汇总",
+          "csv": "风盘报价单格式_汇总.csv",
+          "rows": 93,
+          "cols": 15
+        },
+        {
+          "sheet": "港汇恒隆",
+          "csv": "风盘报价单格式_港汇恒隆.csv",
+          "rows": 9,
+          "cols": 15
+        },
+        {
+          "sheet": "龙旗科技",
+          "csv": "风盘报价单格式_龙旗科技.csv",
+          "rows": 21,
+          "cols": 15
+        },
+        {
+          "sheet": "米哈游",
+          "csv": "风盘报价单格式_米哈游.csv",
+          "rows": 8,
+          "cols": 15
+        },
+        {
+          "sheet": "21-02",
+          "csv": "风盘报价单格式_21-02.csv",
+          "rows": 22,
+          "cols": 15
+        },
+        {
+          "sheet": "21-03",
+          "csv": "风盘报价单格式_21-03.csv",
+          "rows": 18,
+          "cols": 15
+        },
+        {
+          "sheet": "金鼎16-01",
+          "csv": "风盘报价单格式_金鼎16-01.csv",
+          "rows": 11,
+          "cols": 15
+        },
+        {
+          "sheet": " 交子公园",
+          "csv": "风盘报价单格式_交子公园.csv",
+          "rows": 10,
+          "cols": 15
+        }
+      ]
+    },
+    {
+      "source_id": "hvac-pump",
+      "category": "空调泵",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0空调泵询价格式 .xlsx",
+      "sha256": "ead78ba756d7fa27c923543b5c58e4bf9782db1eb67d38449871b5016865e0d8",
+      "status": "active",
+      "authority": "original",
+      "sheet_count": 6,
+      "total_rows": 112,
+      "csv_dir": "csv/空调泵",
+      "sheets": [
+        {
+          "sheet": "Sheet2",
+          "csv": "空调泵询价格式_Sheet2.csv",
+          "rows": 10,
+          "cols": 27
+        },
+        {
+          "sheet": "汇总",
+          "csv": "空调泵询价格式_汇总.csv",
+          "rows": 48,
+          "cols": 28
+        },
+        {
+          "sheet": "龙旗",
+          "csv": "空调泵询价格式_龙旗.csv",
+          "rows": 9,
+          "cols": 28
+        },
+        {
+          "sheet": "华泾嘉华",
+          "csv": "空调泵询价格式_华泾嘉华.csv",
+          "rows": 19,
+          "cols": 28
+        },
+        {
+          "sheet": "无锡XDG-2021-104号地块",
+          "csv": "空调泵询价格式_无锡XDG-2021-104号地块.csv",
+          "rows": 20,
+          "cols": 28
+        },
+        {
+          "sheet": "交子公园",
+          "csv": "空调泵询价格式_交子公园.csv",
+          "rows": 6,
+          "cols": 28
+        }
+      ]
+    }
+  ]
+}

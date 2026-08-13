@@ -108,9 +108,9 @@ class QualityReport:
 |---|---|---|
 | `apps/api/intelligence/extraction_draft.py` | **New**: ExtractionDraft/DraftRow/QualityReport dataclasses | new |
 | `apps/api/intelligence/table_recognizer.py` | **New**: shared skeleton `recognize_tables(file, provider, adapter, progress_cb) -> ExtractionDraft` | new |
-| `apps/api/services/tender_pdf.py` | shrink to **TenderAdapter** (detect_pages + prompt + meta); extraction logic moved out | greatly shrunk |
+| `apps/api/services/tender/tender_pdf.py` | shrink to **TenderAdapter** (detect_pages + prompt + meta); extraction logic moved out | greatly shrunk |
 | `apps/api/intelligence/pipeline.py` | `_run_with_roles` / `_extract_page_with_html` **deleted**; `extract_quote` re-dispatches to skeleton + QuoteAdapter | dedup removed |
-| `apps/api/services/tender_list.py` | `draft_row → TenderAnchor` (conversion after confirmation, **not inside recognition**) | small add |
+| `apps/api/services/tender/tender_list.py` | `draft_row → TenderAnchor` (conversion after confirmation, **not inside recognition**) | small add |
 | quote batch-confirm path | `draft_row → BidQuoteLine` (conversion after confirmation) | reuse existing |
 
 ### Adapter contract (minimal: 2 hooks + 1 prompt + 1 optional meta)

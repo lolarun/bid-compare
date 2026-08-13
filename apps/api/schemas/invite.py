@@ -34,12 +34,6 @@ class BrandRecommendation(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
-class RecommendResponse(BaseModel):
-    categories: list[str]
-    recommendations: list[BrandRecommendation]
-    total_candidates: int = 0
-
-
 # ── kept for /save + backward compat ──────────────────────────────────────────
 class RecommendReason(BaseModel):
     history_count: int = 0
@@ -58,6 +52,17 @@ class SupplierRecommendation(BaseModel):
     score: float
     rank: int
     reason: RecommendReason
+
+
+class RecommendResponse(BaseModel):
+    categories: list[str]
+    recommendations: list[BrandRecommendation]
+    total_candidates: int = 0
+    # Existing brand recommendations remain available to legacy consumers.
+    # Supplier candidates make the invitation workflow actionable.
+    supplier_recommendations: list[SupplierRecommendation] = Field(default_factory=list)
+    total_supplier_candidates: int = 0
+    data_gaps: list[str] = Field(default_factory=list)
 
 
 class SaveInvitationsRequest(BaseModel):

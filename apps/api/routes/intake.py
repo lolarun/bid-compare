@@ -21,6 +21,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -30,7 +31,7 @@ from apps.api.schemas.intake import (
     JobListResponse, JobResponse,
     EnhanceRequest, EnhanceResponse,
 )
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
 )
@@ -152,7 +153,7 @@ def enhance_extraction(
     Optionally pass ``project_id`` to enable pre-alignment against existing
     project quotes from other suppliers.
     """
-    from apps.api.services.enhance import enhance_ocr_items
+    from apps.api.services.ingestion.enhance import enhance_ocr_items
 
     items: list[dict] = []
 
@@ -161,7 +162,7 @@ def enhance_extraction(
     elif body.job_id:
         # Load from job
         from apps.api.models.extraction_job import ExtractionJob
-        job = db.query(ExtractionJob).filter(ExtractionJob.id == body.job_id).first()
+        job = db.scalar(select(ExtractionJob).where(ExtractionJob.id == body.job_id))
         if not job:
             raise HTTPException(404, f"Job {body.job_id} not found")
         if job.status != "done":

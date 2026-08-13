@@ -1,13 +1,13 @@
 # 08 — Tender PDF Recognition Generalization Design
 
-> **Status — audited 2026-06-23.** Design draft, largely NOT yet implemented. The category-aware page scoring, `_detect_category`, per-category prompt/schema maps, and the `category_override` / `field_map_override` parameters described below do not exist in the code; `_score_page` still hardcodes valve keywords and both anchor builders call `extract_valve_canonical` unconditionally. The one piece that *did* land separately (via design 07) is content-based category detection in `apps/api/services/category_classify.py`, which `extract_bidlist` now uses to populate `detected_category`.
+> **Status — audited 2026-06-23.** Design draft, largely NOT yet implemented. The category-aware page scoring, `_detect_category`, per-category prompt/schema maps, and the `category_override` / `field_map_override` parameters described below do not exist in the code; `_score_page` still hardcodes valve keywords and both anchor builders call `extract_valve_canonical` unconditionally. The one piece that *did* land separately (via design 07) is content-based category detection in `apps/api/services/ingestion/category_classify.py`, which `extract_bidlist` now uses to populate `detected_category`.
 > _Originally written as a pre-implementation design draft. English translation of the Chinese original; now the authoritative version._
 
 > Status: design draft, to be implemented after discussion
 
 ## Background and problem
 
-The current `apps/api/services/tender_pdf.py` has an obvious **valve / water-supply-and-drainage specialization** problem:
+The current `apps/api/services/tender/tender_pdf.py` has an obvious **valve / water-supply-and-drainage specialization** problem:
 
 | Symptom | Specific code |
 |---|---|
@@ -209,10 +209,10 @@ The frontend UI (Step 2, after PDF upload) adds a collapsible "Advanced settings
 
 | File | Change type | Description |
 |---|---|---|
-| `apps/api/services/tender_pdf.py` | refactor | Generalize `_score_page`; add `_detect_category`; add `category_override`/`field_map_override` params to `extract_bidlist`; branch `_row_to_anchor` by category |
+| `apps/api/services/tender/tender_pdf.py` | refactor | Generalize `_score_page`; add `_detect_category`; add `category_override`/`field_map_override` params to `extract_bidlist`; branch `_row_to_anchor` by category |
 | `apps/api/intelligence/prompts.py` | extend | Add 6 category prompts (can be split into files) |
 | `apps/api/intelligence/schemas.py` | extend | Add 6 category schemas |
-| `apps/api/services/canonical.py` | extend | Keep existing `extract_valve_canonical`; add category-dispatching `extract_canonical(category, ...)` |
+| `apps/api/services/ingestion/canonical.py` | extend | Keep existing `extract_valve_canonical`; add category-dispatching `extract_canonical(category, ...)` |
 | `apps/api/routes/analysis.py` | extend | `GET /analysis/tender-list/pdf-job/{id}` returns new diagnostic fields; consider adding `POST /analysis/tender-list/pdf-reextract` (with override params) |
 | `apps/www/src/api/client.ts` | extend | `PageDiagnostic` adds `page_score / category_guess / category_confidence / field_mapping_confidence` |
 | `apps/www/src/views/compare/IndexView.vue` | extend | Page diagnostics display adds page_score/category_guess; show field-mapping confirmation UI on low confidence |

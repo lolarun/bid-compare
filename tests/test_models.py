@@ -79,10 +79,13 @@ def test_profession_map():
     assert PROFESSION_MAP["桥架"] == "电气"
     assert PROFESSION_MAP["阀门"] == "给排水"
     assert PROFESSION_MAP["风口风阀"] == "暖通"
-    assert len(PROFESSION_MAP) == 10
+    # 合并前审计（Fable复核）：品类表合法增长到11个（新增"空调泵"），写死的
+    # len==10 断言没跟上。改成跟 CATEGORY_ABBR 的 key 集合互相校验——两张表
+    # 本该一一对应，这才是真正该守住的契约，不是某个当前偶然的总数。
+    assert set(PROFESSION_MAP) == set(CATEGORY_ABBR)
 
 
 def test_category_abbr():
     assert CATEGORY_ABBR["桥架"] == "BRG"
     assert CATEGORY_ABBR["阀门"] == "VLV"
-    assert len(CATEGORY_ABBR) == 10
+    assert set(CATEGORY_ABBR) == set(PROFESSION_MAP)

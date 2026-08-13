@@ -40,10 +40,39 @@ export const useUserStore = defineStore('user', () => {
       access_token: string
       username: string
       role: string
+      nickname: string
     }>('/auth/login', { username, password })
     setToken(data.access_token)
-    setUser({ username: data.username, nickname: data.role, role: data.role })
+    setUser({
+      username: data.username,
+      nickname: data.nickname || data.username,
+      role: data.role,
+    })
     return true
+  }
+
+  /** Refresh user info from the server (GET /api/auth/me). */
+  async function fetchMe() {
+    if (!token.value) return
+    try {
+      const { data } = await api.get<{
+        id: number
+        username: string
+        nickname: string
+        role: string
+        email: string
+        phone: string
+        status: string
+      }>('/auth/me')
+      setUser({
+        username: data.username,
+        nickname: data.nickname || data.username,
+        role: data.role,
+      })
+    } catch {
+      // Token may be expired — clear auth state
+      logout()
+    }
   }
 
   function logout() {
@@ -53,5 +82,14 @@ export const useUserStore = defineStore('user', () => {
 
   const isLoggedIn = () => !!token.value
 
-  return { token, userInfo, login, logout, isLoggedIn, setToken, setUser }
+  return {
+    token,
+    userInfo,
+    login,
+    logout,
+    isLoggedIn,
+    setToken,
+    setUser,
+    fetchMe,
+  }
 })

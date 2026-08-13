@@ -311,9 +311,9 @@ class TestBqlE2E:
 
     def test_bid_matrix_cells_have_bql_id(self, client, db_session, seed):
         """bid_matrix cells built from BQL items must carry bid_quote_line_id, not source_quote_id."""
-        from apps.api.services.bid_matrix import build_anchor_review_matrix
+        from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
         from apps.api.models.tender_list_session import TenderListSession
-        from apps.api.services.tender_list import TenderAnchor
+        from apps.api.services.tender.tender_list import TenderAnchor
 
         proj = seed["proj"]
         sup = seed["sup"]
@@ -437,7 +437,7 @@ class TestResolveActiveSubmissions:
 
     def test_excludes_rejected_submission(self, unit_session):
         """resolve_active_submissions must not return rejected submissions."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="RAR-test", code="RAR-001")
         unit_session.add(proj)
@@ -465,7 +465,7 @@ class TestResolveActiveSubmissions:
 
     def test_requires_bql_rows_for_category(self, unit_session):
         """Supplier with BQL in wrong category must not appear."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="RC-test", code="RC-001")
         unit_session.add(proj)
@@ -495,7 +495,7 @@ class TestResolveActiveSubmissions:
 
     def test_latest_wins_among_multiple_submissions(self, unit_session):
         """Among multiple valid submissions per supplier, latest id wins."""
-        from apps.api.services.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
         proj = Project(name="LW-test", code="LW-001")
         unit_session.add(proj)
@@ -642,3 +642,77 @@ class TestLoadSupplierFillRowsBQL:
         assert len(rows) == 0, (
             "Supplier with no BidSubmission and no Quote must return empty rows"
         )
+
+
+class TestDerivedTotalProvenance:
+    """原文缺合价 → 必须阻断自动确认，而不是替用户算一个（doc/19 §L2）。
+
+    2026-08-09 复核：本类此前断言"派生的 300.0 成功写入 total_price"，等于把缺陷
+    固化成了测试预期。静默派生既凭空造钱（亨通单行虚增约 2000 万），又让算术校验
+    |qty×price − total| 恒成立，把列错位行洗白。现反转为 fail-closed 断言。
+    """
+
+    def _job(self, db_session, sup, category, name="derived-total.pdf"):
+        job_id = str(uuid.uuid4())
+        db_session.add(ExtractionJob(
+            id=job_id, type="quote", status="done",
+            result={"items": [], "supplier_name": sup.name},
+            context={"category": category}, filename=name,
+        ))
+        db_session.commit()
+        return job_id
+
+    def test_missing_total_blocks_confirmation_and_writes_nothing(
+            self, client, db_session, seed):
+        proj, sup, category = seed["proj"], seed["sup"], seed["category"]
+        m = seed["mats"][0]
+        job_id = self._job(db_session, sup, category)
+
+        r = client.post("/api/quotes/batch-confirm", json={
+            "job_id": job_id, "supplier_id": sup.id, "supplier_name": sup.name,
+            "project_id": proj.id,
+            "overrides": [
+                {"material": m.standard_name, "standard_name": m.standard_name,
+                 "spec": m.spec, "unit": "套", "qty": 3,
+                 "unit_price": 100.0, "category": category},      # 无合价
+                {"material": m.standard_name, "standard_name": m.standard_name,
+                 "spec": m.spec, "unit": "套", "qty": 2,
+                 "unit_price": 50.0, "total_price": 100.0, "category": category},
+            ],
+        })
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "missing_total_requires_review"
+        assert detail["review_row_count"] == 1
+        assert detail["review_rows"][0]["derived_total_candidate"] == 300.0,             "候选值可以给前端提示，但不得成为权威金额"
+
+        db_session.rollback()
+        # 只看本次 job 的作用域，避免依赖同文件其他用例的执行顺序
+        sub = db_session.query(BidSubmission).filter_by(batch_id=f"BID-{job_id}").first()
+        assert sub is None or db_session.query(BidQuoteLine).filter_by(
+            submission_id=sub.id).count() == 0, "阻断后不得留下任何 BidQuoteLine"
+        job = db_session.get(ExtractionJob, job_id)
+        assert job.lifecycle != "confirmed", "阻断后 job 不得被标成 confirmed"
+
+    def test_manual_total_is_accepted_and_marked_manual(
+            self, client, db_session, seed):
+        """用户在预览中补写后可以入库，但必须标成 manual，不得冒充 ocr。"""
+        proj, sup, category = seed["proj"], seed["sup"], seed["category"]
+        m = seed["mats"][0]
+        job_id = self._job(db_session, sup, category, "manual-total.pdf")
+
+        r = client.post("/api/quotes/batch-confirm", json={
+            "job_id": job_id, "supplier_id": sup.id, "supplier_name": sup.name,
+            "project_id": proj.id,
+            "overrides": [
+                {"material": m.standard_name, "standard_name": m.standard_name,
+                 "spec": m.spec, "unit": "套", "qty": 3, "unit_price": 100.0,
+                 "total_price": 300.0, "total_is_manual": True, "category": category},
+            ],
+        })
+        assert r.status_code == 200, r.text
+        lines = db_session.query(BidQuoteLine).filter_by(
+            submission_id=r.json()["submission_id"]).all()
+        assert len(lines) == 1
+        assert (lines[0].extraction_meta or {}).get("total_source") == "manual"
+        assert lines[0].total_price == 300.0

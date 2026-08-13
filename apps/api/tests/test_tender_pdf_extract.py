@@ -1,29 +1,29 @@
 """招标文件 PDF 投标清单抽取 + 品牌硬信号 + Excel/PDF 对账 测试。
 
-快速单测（无 OCR）：
-- 页范围检测（_detect_pages）
+快速单测（无 API）：
 - 品牌匹配（brand_match）
 - 锚点序列化往返（含 materials/brand/source_ref）
-- _row_to_anchor
 - source_reconcile.reconcile_anchors
 - TenderListSession 持久化 source_type/brand 字段
 - build_anchor_review_matrix 暴露供应商品牌 + 锚点材质 + 品牌要求，且品牌不入供应商列
 
-真实 OCR（e2e，需 DASHSCOPE_API_KEY + 真实 PDF + Excel）：
+真实 VL（e2e，需 DASHSCOPE_API_KEY + 真实 PDF + Excel）：
 - extract_bidlist 定位第13页品牌表 + 14-18页清单，row_count/材质/品牌映射
 - Excel vs PDF 对账：seq 集合比对 + 已知首尾项字段一致
+
+HTML 页面评分（_score_page/_is_brand_page/_is_bidlist_page/_detect_pages）与
+_row_to_anchor 覆盖已随 legacy OCR→HTML 识别链一并删除（2026-08-11，最佳实践
+评审 F1）——页定位与逐行抽取现在都在 vl_tender.py 内部完成一次 VL 调用，不再有
+独立的 HTML 打分步骤可单测；行为由本文件的 e2e 用例整体验证。
 """
 
 from pathlib import Path
 
 import pytest
 
-from apps.api.services.brand_match import build_brand_context, check_brand
-from apps.api.services.tender_pdf import (
-    _detect_pages, _is_bidlist_page, _is_brand_page, _row_to_anchor, _score_page,
-)
-from apps.api.services.tender_list import TenderAnchor, anchor_to_json, rebuild_anchors
-from apps.api.services.source_reconcile import reconcile_anchors
+from apps.api.services.supplier.brand_match import build_brand_context, check_brand
+from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json, rebuild_anchors
+from apps.api.services.tender.source_reconcile import reconcile_anchors
 
 REPO = Path(__file__).parent.parent.parent.parent
 TENDER_PDF = REPO / "docs" / "test" / "金桥地体上盖招标文件.pdf"
@@ -39,78 +39,6 @@ SUPPLIER_BRANDS = [
     {"supplier_name": "上海绵存", "brand": "沃茨", "supplier_id": 2},
     {"supplier_name": "上海泰科龙", "brand": "伯尔梅特", "supplier_id": 3},
 ]
-
-
-# ── 页范围检测 ──────────────────────────────────────────────────────────────
-
-def test_detect_pages_finds_brand_and_bidlist():
-    pages = [
-        "<p>招标文件正文第一页</p>",                                   # 1 prose
-        "<table><tr><td>招标情况表</td><td>业主</td><td>投标单位</td><td>参与品牌</td></tr></table>",  # 2 brand
-        "<table><tr><td>序号</td><td>项目名称</td><td>工作压力</td><td>阀体</td></tr><tr><td>1</td><td>球阀</td><td>1.6Mpa</td></tr></table>",  # 3 bidlist header
-        "<table><tr><td>20</td><td>给排水</td><td>蝶阀</td><td>DN50</td></tr></table>",  # 4 continuation
-    ]
-    bidlist, brand = _detect_pages(pages)
-    assert brand == 2
-    assert bidlist == [3, 4]
-
-
-def test_brand_page_not_counted_as_bidlist():
-    html = "<table><tr><td>招标情况表</td><td>参与品牌</td><td>工作压力</td></tr></table>"
-    assert _is_brand_page(html) is True
-    # brand page excluded from bidlist even if it mentions 工作压力
-    bidlist, brand = _detect_pages([html])
-    assert brand == 1
-    assert bidlist == []
-
-
-def test_prose_page_is_not_bidlist():
-    assert _is_bidlist_page("<p>第一章 投标须知</p>") is False
-
-
-# ── 页面评分单元测试 ─────────────────────────────────────────────────────────
-
-def test_score_bidlist_header_page():
-    """清单首页：有表格 + 序号/名称 + 工作压力 + 材质子列。"""
-    html = "<table><tr><td>序号</td><td>项目名称</td><td>工作压力</td><td>阀体</td></tr></table>"
-    bs, br = _score_page(html)
-    assert bs >= 0.35
-    assert not (br >= 0.5 and br > bs)   # 不被误判为品牌表
-
-
-def test_score_bidlist_continuation_page():
-    """续表页：无表头关键词，但有给排水专业列 + DN 规格序列。"""
-    html = "<table><tr><td>20</td><td>给排水</td><td>蝶阀</td><td>DN50</td></tr></table>"
-    bs, br = _score_page(html)
-    assert bs >= 0.35, f"续表页 bidlist 分数偏低: {bs:.2f}"
-
-
-def test_score_brand_page_strong():
-    """品牌表核心关键词：招标情况表 + 参与品牌。"""
-    html = "<table><tr><td>招标情况表</td><td>参与品牌</td><td>投标单位</td><td>品牌</td></tr></table>"
-    bs, br = _score_page(html)
-    assert br >= 0.5
-    assert br > bs
-
-
-def test_score_brand_page_with_pressure_keyword_not_bidlist():
-    """品牌表若含工作压力关键词，品牌分数仍应主导，不被分到清单页。"""
-    html = "<table><tr><td>招标情况表</td><td>参与品牌</td><td>工作压力</td></tr></table>"
-    bs, br = _score_page(html)
-    assert br >= 0.5 and br > bs, f"br={br:.2f} bs={bs:.2f}，品牌分未主导"
-    # 对应 _is_bidlist_page 应返回 False
-    assert _is_bidlist_page(html) is False
-
-
-def test_score_pure_prose_both_low():
-    """纯正文页：双分数均低于阈值，不被分配任何角色。"""
-    bs, br = _score_page("<p>第一章 投标须知 请认真阅读以下须知</p>")
-    assert bs < 0.35 and br < 0.5
-
-
-def test_score_empty_html_returns_zero():
-    bs, br = _score_page("")
-    assert bs == 0.0 and br == 0.0
 
 
 # ── 品牌硬信号 ──────────────────────────────────────────────────────────────
@@ -161,25 +89,6 @@ def test_anchor_json_roundtrip_keeps_materials_brand_sourceref():
     assert back.brand == "开滋"
     assert back.source_ref == {"page": 15, "row": 24}
     assert back.material_text() == "球墨铸铁/EPDM"
-
-
-def test_row_to_anchor_builds_canonical_and_sourceref():
-    row = {
-        "seq": 1, "name": "Y型过滤器", "spec": "DN20", "pressure": "1.6Mpa",
-        "materials": {"阀体": "", "阀芯": "不锈钢", "阀板": "", "阀杆": "", "密封圈": ""},
-        "unit": "个", "qty": 1, "brand": "", "profession": "给排水", "remark": "给水系统",
-    }
-    a = _row_to_anchor(row, page_no=14)
-    assert a is not None
-    assert a.source_ref == {"page": 14, "row": 1}
-    # 空材质子列被剔除，仅保留有值的
-    assert a.materials == {"阀芯": "不锈钢"}
-    assert a.canonical.get("dn") == "DN20"
-
-
-def test_row_to_anchor_skips_empty():
-    assert _row_to_anchor({"seq": "", "name": ""}, 14) is None
-    assert _row_to_anchor({"seq": 1, "name": ""}, 14) is None
 
 
 # ── Excel vs PDF 对账（source_reconcile）────────────────────────────────────
@@ -317,7 +226,7 @@ def test_session_persists_pdf_source_and_brands(db_session):
 
 def test_review_matrix_exposes_brand_and_materials(db_session):
     proj_id, cat, sids, _ = _seed_pdf_session(db_session)
-    from apps.api.services.bid_matrix import build_anchor_review_matrix
+    from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
     m = build_anchor_review_matrix(db_session, proj_id, cat, supplier_ids=sids)
 
     # 90×3 风格闭包：行数 == anchors_total，格数 == anchors_total × supplier_count
@@ -356,7 +265,7 @@ def test_extract_bidlist_real_pdf():
     if not s.DASHSCOPE_API_KEY:
         pytest.skip("DASHSCOPE_API_KEY 未配置")
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
-    from apps.api.services.tender_pdf import extract_bidlist
+    from apps.api.services.tender.tender_pdf import extract_bidlist
 
     provider = DashScopeOCRProvider(
         api_key=s.DASHSCOPE_API_KEY, base_url=s.DASHSCOPE_BASE_URL,
@@ -455,7 +364,7 @@ def test_extract_bidlist_real_pdf():
     # page_diagnostics 结构完整
     assert len(result["page_diagnostics"]) == len(result["detected_pages"]["bidlist"])
     for d in result["page_diagnostics"]:
-        assert d["input_mode"] in ("table_grid", "html_fallback")
+        assert d["input_mode"] == "vl_direct"
         assert isinstance(d["expected_rows"], int)
         assert isinstance(d["extracted_rows"], int)
 

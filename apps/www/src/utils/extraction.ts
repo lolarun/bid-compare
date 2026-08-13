@@ -11,6 +11,8 @@ import type {
   QuoteExtractionItem,
   TenderExtractionItem,
   TenderBrandReq,
+  TenderSupplierBrand,
+  QualityMeta,
 } from '@/api/client'
 
 export interface TenderExtractionShape {
@@ -111,6 +113,9 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
         if (typeof rest.category === 'string')      hidden.category      = rest.category
         if (typeof rest.standard_name === 'string') hidden.standard_name = rest.standard_name
         if (typeof rest.standard_spec === 'string') hidden.standard_spec = rest.standard_spec
+        // design/24 B0：副本编号必须往返，否则后端拿到的 items 里 copy_no
+        // 全部丢失，重复副本判别只能靠"内容重复"去猜，等于没有这个字段。
+        if (typeof rest.copy_no === 'string') hidden.copy_no = rest.copy_no
         // 价格口径桥接字段：数值字段统一 asNumOrNull，basis 字符串，flags 数组
         const basis: Partial<QuoteExtractionItem> = {
           unit_price_incl_tax: asNumOrNull(unit_price_incl_tax),
@@ -155,7 +160,15 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
 
 export interface TenderBidlistShape {
   items: TenderExtractionItem[]
-  brandRequirements: string[]
+  brandRequirements: string[]   // 业主品牌要求（招标文件第13页，PDF 主清单要求）
+  // R4：supplierBrands 是"各投标单位参与品牌"——与 brandRequirements（业主
+  // 品牌要求）是后端提示词专门区分的两个概念（防混淆），此前前端只取用了
+  // brandRequirements，supplier_brands 从未从这个 shape 里暴露过。
+  supplierBrands: TenderSupplierBrand[]
+  projectName: string
+  projectCode: string
+  tenderDate: string
+  deadline: string
 }
 
 /**
@@ -171,7 +184,10 @@ export interface TenderBidlistShape {
 export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
   if (!isObj(result)) {
     console.warn('[extraction] tender_bidlist result is not an object', result)
-    return { items: [], brandRequirements: [] }
+    return {
+      items: [], brandRequirements: [], supplierBrands: [],
+      projectName: '', projectCode: '', tenderDate: '', deadline: '',
+    }
   }
 
   const rawItems = result.items
@@ -205,7 +221,24 @@ export function asTenderBidlistShape(result: unknown): TenderBidlistShape {
     }
   }
 
-  return { items, brandRequirements }
+  const rawSupplierBrands = result.supplier_brands
+  const supplierBrands: TenderSupplierBrand[] = Array.isArray(rawSupplierBrands)
+    ? rawSupplierBrands.filter(isObj).map((sb) => ({
+        supplier_name: asStr(sb.supplier_name),
+        brand: asStr(sb.brand),
+        supplier_id: typeof sb.supplier_id === 'number' ? sb.supplier_id : null,
+      }))
+    : []
+
+  return {
+    items,
+    brandRequirements,
+    supplierBrands,
+    projectName: asStr(result.project_name),
+    projectCode: asStr(result.project_code),
+    tenderDate: asStr(result.tender_date),
+    deadline: asStr(result.deadline),
+  }
 }
 
 /** Convenience: dispatch on the job type. */
@@ -213,4 +246,16 @@ export function asExtractionShape(
   job: ExtractionJob,
 ): TenderExtractionShape | QuoteExtractionShape {
   return job.type === 'tender' ? asTenderShape(job.result) : asQuoteShape(job.result)
+}
+
+/**
+ * Extract the `_quality` metadata block (评审 R2) from a job result.
+ * Returns null when absent — older jobs recognized before the backend fix
+ * (or jobs whose pipeline never set it) simply have no signal to show;
+ * callers must treat null as "unknown", not as "PASS".
+ */
+export function asQualityMeta(result: unknown): QualityMeta | null {
+  if (!isObj(result)) return null
+  const q = result._quality
+  return isObj(q) ? (q as unknown as QualityMeta) : null
 }

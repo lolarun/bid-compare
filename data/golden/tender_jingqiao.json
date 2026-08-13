@@ -1,0 +1,1094 @@
+{
+  "doc_type": "tender",
+  "source_file": "金桥招标PDF.pdf",
+  "row_count": 89,
+  "rows": [
+    {
+      "seq": "1",
+      "name": "Y型过滤器",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "2",
+      "name": "Y型过滤器",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 17.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "3",
+      "name": "Y型过滤器",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 2.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "4",
+      "name": "Y型过滤器",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "5",
+      "name": "Y型过滤器",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 17.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "6",
+      "name": "Y型过滤器",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "7",
+      "name": "Y型过滤器",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "8",
+      "name": "Y型过滤器",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "9",
+      "name": "减压型倒流防止器",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "10",
+      "name": "低阻力倒流防止器",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 2.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "11",
+      "name": "低阻力倒流防止器",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 7.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "12",
+      "name": "低阻力倒流防止器",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "13",
+      "name": "蝶阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "14",
+      "name": "蝶阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "15",
+      "name": "蝶阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 11.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "16",
+      "name": "蝶阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "17",
+      "name": "蝶阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "18",
+      "name": "蝶阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）",
+        "阀杆": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "19",
+      "name": "防污隔断阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 10.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "20",
+      "name": "防污隔断阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "21",
+      "name": "防污隔断阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "22",
+      "name": "防污隔断阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 9.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "23",
+      "name": "节能消声止回阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 24.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "24",
+      "name": "节能消声止回阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 5.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM"
+      }
+    },
+    {
+      "seq": "25",
+      "name": "节能消声止回阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 198.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM"
+      }
+    },
+    {
+      "seq": "26",
+      "name": "节能消声止回阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 26.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢（不低于S304）/铝青铜/铝青铜覆EPDM"
+      }
+    },
+    {
+      "seq": "27",
+      "name": "橡胶瓣止回阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "28",
+      "name": "橡胶瓣止回阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "29",
+      "name": "橡胶瓣止回阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "30",
+      "name": "橡胶瓣止回阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "31",
+      "name": "截止阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 9.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "32",
+      "name": "截止阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 124.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "33",
+      "name": "截止阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 76.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "34",
+      "name": "截止阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 23.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "35",
+      "name": "截止阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 399.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "36",
+      "name": "球阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "37",
+      "name": "球阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "38",
+      "name": "球阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 2.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "39",
+      "name": "球阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "40",
+      "name": "球阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "41",
+      "name": "球阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 6.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "42",
+      "name": "球阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 6.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "43",
+      "name": "球阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "44",
+      "name": "闸阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "45",
+      "name": "闸阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "46",
+      "name": "闸阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "47",
+      "name": "闸阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "48",
+      "name": "闸阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "不锈钢（不低于S304）",
+        "阀板": "不锈钢（不低于S304）"
+      }
+    },
+    {
+      "seq": "49",
+      "name": "闸阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢"
+      }
+    },
+    {
+      "seq": "50",
+      "name": "闸阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢"
+      }
+    },
+    {
+      "seq": "51",
+      "name": "闸阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢"
+      }
+    },
+    {
+      "seq": "52",
+      "name": "闸阀",
+      "spec": "DN150",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢"
+      }
+    },
+    {
+      "seq": "53",
+      "name": "闸阀",
+      "spec": "DN200",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "不锈钢"
+      }
+    },
+    {
+      "seq": "54",
+      "name": "闸阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "硬聚氯乙烯（UPVC）",
+        "阀板": "硬聚氯乙烯（UPVC）"
+      }
+    },
+    {
+      "seq": "55",
+      "name": "闸阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "硬聚氯乙烯（UPVC）",
+        "阀板": "硬聚氯乙烯（UPVC）"
+      }
+    },
+    {
+      "seq": "56",
+      "name": "闸阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "硬聚氯乙烯（UPVC）",
+        "阀板": "硬聚氯乙烯（UPVC）"
+      }
+    },
+    {
+      "seq": "57",
+      "name": "闸阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "硬聚氯乙烯（UPVC）",
+        "阀板": "硬聚氯乙烯（UPVC）"
+      }
+    },
+    {
+      "seq": "58",
+      "name": "闸阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "硬聚氯乙烯（UPVC）",
+        "阀板": "硬聚氯乙烯（UPVC）"
+      }
+    },
+    {
+      "seq": "59",
+      "name": "闸阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 35.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁+EPDM"
+      }
+    },
+    {
+      "seq": "60",
+      "name": "闸阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 242.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁+EPDM"
+      }
+    },
+    {
+      "seq": "61",
+      "name": "闸阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 69.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁+EPDM"
+      }
+    },
+    {
+      "seq": "62",
+      "name": "闸阀",
+      "spec": "DN150",
+      "unit": "个",
+      "qty": 11.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁+EPDM"
+      }
+    },
+    {
+      "seq": "63",
+      "name": "闸阀",
+      "spec": "DN200",
+      "unit": "个",
+      "qty": 11.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁+EPDM"
+      }
+    },
+    {
+      "seq": "64",
+      "name": "真空破坏器",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "65",
+      "name": "真空破坏器",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "66",
+      "name": "真空破坏器",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "67",
+      "name": "真空破坏器",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 17.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "68",
+      "name": "真空破坏器",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "69",
+      "name": "小阻力可调式减压阀组",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "70",
+      "name": "小阻力可调式减压阀组",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "71",
+      "name": "小阻力可调式减压阀组",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 62.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "72",
+      "name": "小阻力可调式减压阀组",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "73",
+      "name": "小阻力可调式减压阀组",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 79.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "74",
+      "name": "可调式减压阀组",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "75",
+      "name": "可调式减压阀组",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁"
+      }
+    },
+    {
+      "seq": "76",
+      "name": "可调式减压阀组",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁"
+      }
+    },
+    {
+      "seq": "77",
+      "name": "可调式减压阀组",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁"
+      }
+    },
+    {
+      "seq": "78",
+      "name": "可调式减压阀组",
+      "spec": "DN150",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "热熔式环氧树脂粉体涂装球墨铸铁",
+        "阀板": "球墨铸铁"
+      }
+    },
+    {
+      "seq": "79",
+      "name": "自动排气阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 6.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "80",
+      "name": "自动排气阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 61.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "81",
+      "name": "自动排气阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 2.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "82",
+      "name": "止回阀",
+      "spec": "DN20",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "83",
+      "name": "止回阀",
+      "spec": "DN25",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "84",
+      "name": "止回阀",
+      "spec": "DN32",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "85",
+      "name": "止回阀",
+      "spec": "DN40",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "86",
+      "name": "止回阀",
+      "spec": "DN50",
+      "unit": "个",
+      "qty": 1.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {
+        "阀体": "青铜",
+        "阀板": "青铜"
+      }
+    },
+    {
+      "seq": "87",
+      "name": "缓闭式止回阀",
+      "spec": "DN65",
+      "unit": "个",
+      "qty": 2.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "88",
+      "name": "缓闭式止回阀",
+      "spec": "DN80",
+      "unit": "个",
+      "qty": 3.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    },
+    {
+      "seq": "89",
+      "name": "缓闭式止回阀",
+      "spec": "DN100",
+      "unit": "个",
+      "qty": 4.0,
+      "brand": "",
+      "profession": "给排水",
+      "materials": {}
+    }
+  ],
+  "validation": {
+    "row_count": 89,
+    "seq_range": [
+      1,
+      89
+    ]
+  },
+  "source_sha256": "b0ff316bfc1a5c2b49a4cf31eb99f6dc4ff6a82829a7edc3a1a71db220154040",
+  "declared_total": null,
+  "field_sources": {
+    "seq": "raw",
+    "name": "raw",
+    "spec": "raw",
+    "unit": "raw",
+    "qty": "raw",
+    "brand": "raw",
+    "profession": "raw"
+  },
+  "audit_status": "golden_from_xlsx_unverified_vs_pdf",
+  "audit_notes": "Golden 来自人工制作的 XLSX，尚未做 PDF 页面视觉审计。100% baseline 证明 PDF 识别与 XLSX golden 匹配，非循环验证。"
+}

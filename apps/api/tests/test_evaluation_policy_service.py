@@ -7,7 +7,7 @@ Locks the safety guarantees of get_evaluation_policy():
 """
 from __future__ import annotations
 
-from apps.api.services.evaluation_policy import (
+from apps.api.services.matrix.evaluation_policy import (
     get_evaluation_policy,
     UNKNOWN_EVALUATION_POLICY,
     DEFAULT_EVALUATION_POLICY,

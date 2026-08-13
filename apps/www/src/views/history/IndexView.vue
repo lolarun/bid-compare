@@ -9,9 +9,10 @@ import type { Quote, Supplier } from '@/api/client'
 import { normalizeAlert, alertColors, formatDeviation } from '@/utils/alert'
 import { doExport } from '@/utils/download'
 import { useUserStore } from '@/stores/user'
+import { ROLE_ADMIN } from '@/types/role'
 
 const userStore = useUserStore()
-const isAdmin = computed(() => userStore.userInfo?.role === '管理员')
+const isAdmin = computed(() => userStore.userInfo?.role === ROLE_ADMIN)
 
 interface QuoteRow extends Quote {
   material_name?: string

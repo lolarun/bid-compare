@@ -240,7 +240,13 @@ export interface MultiCompareResult {
 export type CellStatus = 'quoted' | 'aggregated' | 'pending' | 'excluded' | 'missing'
 
 export interface SupplierCell {
-  supplier_id: number
+  // B3 兼容期收尾（design/22 §B3）：原 supplier_id 历史上一直是"列身份"
+  // （submission 模式下实际是 BidSubmission.id），名不副实，且这个粒度从没
+  // 消费方需要真正的供应商 FK（那个 FK 在 SupplierLabel.supplier_id 上）。
+  // 已改为通用列身份键 id（= submission_id when available, else supplier_id，
+  // 与 SupplierLabel.id 对称）。join 请用 submission_id ?? id。
+  id: number
+  submission_id: number | null
   price: number | null
   total: number | null
   deviation_pct: number | null
@@ -251,9 +257,22 @@ export interface SupplierCell {
   item_id?: number | null          // pending cell: BidAlignmentItem.id for inline confirm
   confidence?: number | null       // pending cell: cosine similarity
   source_quote_id?: number | null
+  bid_quote_line_id?: number | null  // new path: BidQuoteLine.id
   pending_note?: string | null     // "另有 N 条待确认" when align+pending coexist
   flags?: string[] | null          // validator flags: ocr_corrected_verified, valve_type_conflict, etc.
   evidence?: string | null         // LLM fill reasoning/evidence
+  // 评标口径（招标数量×含税单价）+ 同规格偏差
+  price_basis?: string | null
+  incl_unit?: number | null        // 含税单价（评标用）
+  unit?: string | null             // 供应商报价单位
+  supplier_qty?: number | null     // 供应商报价数量（评标数量以 tender_qty 为准）
+  item_canonical?: Record<string, unknown> | null
+  tender_qty?: number | null       // 招标数量（评标数量，非供应商报价数量）
+  eval_amount?: number | null      // 评标金额 = 招标数量×含税单价
+  eval_status?: string | null      // ok|quantity_source_conflict|basis_unconfirmed|alignment_pending|missing
+  evaluable?: boolean | null
+  baseline?: { median: number; count: number; basis: string; spec_key: string } | null
+  tax_basis_assumed?: boolean | null  // 单一价格列按招标含税要求假定纳入（非确认）
 }
 
 export interface MatrixRow {
@@ -274,11 +293,33 @@ export interface BidMatrixMeta {
 }
 
 export interface MatrixTotal {
-  supplier_id: number
+  // B3 兼容期收尾：见 SupplierCell 顶部注释，同一条 id/submission_id 规则。
+  id: number
+  submission_id: number | null
   total: number
   avg_deviation: number | null  // null when quoted_count=0（无报价时不计偏差）
   quoted_count?: number
   anomaly_count?: number
+  declared_total?: number | null
+  checksum_delta_pct?: number | null
+  checksum_status?: string | null   // "pass" / "fail" / "unknown"
+  // 评标口径（招标数量×含税单价）
+  evaluated_total?: number | null
+  confirmed_lines?: number | null
+  qty_conflict_lines?: number | null
+  undecided_lines?: number | null
+  undecided_amount?: number | null
+  tax_assumed_lines?: number | null  // 单一价格列按招标含税要求纳入（假定非确认）
+  basis_confirmed?: boolean | null
+  eligible_for_ranking?: boolean | null
+}
+
+export interface SupplierLabel {
+  id: number                         // column key: submission_id when available, else supplier_id
+  letter: string
+  name: string
+  supplier_id?: number | null        // 真正的供应商 FK（submission 模式下可空）
+  submission_id?: number | null      // B3：与 id 对称，submission 模式下等于 id
 }
 
 export interface BidInsight {
@@ -301,9 +342,41 @@ export interface MatrixDistribution {
   covered_full_count: number   // N家完整覆盖（含 pending）
 }
 
+export interface SupplierEvaluation {
+  id: number
+  submission_id: number | null   // B3 兼容期收尾：同上，与 id 对称
+  name: string | null
+  letter: string | null
+  evaluated_total: number
+  confirmed_lines: number
+  total_anchors: number
+  qty_conflict_lines: number
+  undecided_lines: number
+  undecided_amount: number
+  missing_lines: number
+  anomaly_count: number
+  tax_assumed_lines: number
+  basis_confirmed: boolean
+  checksum_status: string
+  full_coverage: boolean
+  eligible_for_ranking: boolean
+}
+
+export interface CommonComparable {
+  ids: number[]
+  submission_ids: number[] | null  // B3 兼容期收尾：同义正名，submission 模式下等于 ids
+  line_count: number
+  subtotals: Record<string, number>
+}
+
+export interface NonPriceFactor {
+  factor: string
+  evidence_status: string
+}
+
 export interface BidMatrixResult {
   project_id: number | null
-  suppliers: { id: number; letter: string; name: string }[]
+  suppliers: SupplierLabel[]
   rows: MatrixRow[]
   totals: MatrixTotal[]
   brand_tier_filter: string | null
@@ -311,9 +384,22 @@ export interface BidMatrixResult {
   anchor_matrix?: boolean
   not_finalized_warning?: string
   matrix_distribution?: MatrixDistribution
-  // Recommendation gate
+  // Recommendation gate（兼容旧前端：仅 blocked 置 true）
   recommendation_blocked?: boolean
   recommendation_blocked_reasons?: string[]
+  // 招标文件驱动的三态评标
+  recommendation_level?: 'firm' | 'conditional' | 'blocked' | null
+  recommendation_reasons?: string[]
+  risks?: string[]
+  evaluation_policy?: Record<string, unknown> | null
+  award_mode?: string | null
+  committee_required?: boolean | null
+  price_ranking?: SupplierEvaluation[]
+  price_preferred_candidate?: SupplierEvaluation | null
+  supplier_evaluation?: SupplierEvaluation[]
+  common_comparable?: CommonComparable | null
+  non_price_factors?: NonPriceFactor[]
+  comprehensive_recommendation_status?: string | null
 }
 
 // ─── Intake / Invite (Phase 2-3) ─────────────────────────────────────────────
@@ -325,9 +411,14 @@ export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
 export interface TenderBrandReq { brand_en: string; brand_cn: string }
 export interface TenderSupplierBrand { supplier_name: string; brand: string; supplier_id?: number | null }
 
+// 评审 R2（第4块）：input_mode 生产上恒为 'vl_direct'（vl_quote.py 里唯一的
+// 赋值点）——'table_grid'/'html_fallback' 是已删除 legacy 逐页链路的遗留值，
+// 只可能出现在旧快照回放里。此前联合类型没声明 'vl_direct'，二元判断把它
+// 全部误判成 'html_fallback' 分支，UI 上把当前唯一的正式识别路径标成橙色
+// 「OCR增强解析」——不是极端情况，是每一页的常态。
 export interface PageDiagnostic {
   page: number
-  input_mode: 'table_grid' | 'html_fallback'
+  input_mode: 'vl_direct' | 'table_grid' | 'html_fallback' | string
   fallback_reason: string
   expected_rows: number
   extracted_rows: number
@@ -342,6 +433,7 @@ export interface PdfQualityMetrics {
   source_ref_coverage: number
   qty_parse_success_rate: number
   row_count_by_page: Record<string, number>
+  vl_direct_pages: number[]
   table_grid_pages: number[]
   html_fallback_pages: Array<{ page: number; fallback_reason: string }>
 }
@@ -388,11 +480,52 @@ export interface ExtractionJob {
   confidence: number | null
   progress_stage?: string
   progress_pct?: number
+  // design/24 B2：阶段内进度。stage_total=null 且 stage_current 有值 = 只有
+  // 单调递增计数（如逐页识别的"已转录 N 行"，没有总数）；两个都有值 = 真正的
+  // "第 N/共 M"；两个都是 null/undefined = 这个阶段没有细粒度进度可报，
+  // 退回只显示 progress_stage/progress_pct。
+  stage_current?: number | null
+  stage_total?: number | null
   provider: string
   tokens_used: number
   duration_ms: number
   created_at: string | null
   updated_at: string | null
+}
+
+// 前端评审 R2（第1块）：quality_status/quality_blocking_reasons/row_ledger/
+// orientation_unresolved 此前在 document_ingestion.py 就被丢弃，从未到达
+// job.result。后端已修复（_merge_quality_metadata，写入 job.result._quality），
+// 这里补上对应的 TS 类型，供 R2 后续几块的质量分层横幅/行标记使用。
+export interface RowLedgerPageDrop {
+  page: number
+  role?: string
+  reason: string
+  expected: number
+  extracted?: number
+  lost?: number
+  rotation_applied?: boolean
+}
+
+export interface RowLedger {
+  target_pages: number
+  expected_rows: number
+  recognized_rows: number
+  dropped_rows: number
+  empty_pages: RowLedgerPageDrop[]
+  short_pages: RowLedgerPageDrop[]
+}
+
+export interface QualityMeta {
+  doc_type?: string
+  quality_status?: 'PASS' | 'REVIEW' | 'BLOCKED' | string
+  quality_blocking_reasons?: string[]
+  page_count?: number
+  target_pages?: number[]
+  row_ledger?: RowLedger | null
+  rotations?: Record<string, number> | null
+  orientation_unresolved?: number[] | null
+  recognizer?: string
 }
 
 export interface TenderExtractionItem {
@@ -446,6 +579,10 @@ export interface QuoteExtractionItem {
   category?: string
   standard_name?: string
   standard_spec?: string
+  // design/24 B0：识别到重复副本（正本/副本）时标注属于第几份，1/2/…。
+  // 必须往返到 batch-confirm——后端靠它挑一份入库，此前前端round-trip 从
+  // 未保留过，副本信息在编辑表格这一步就已经丢了。
+  copy_no?: string
 }
 
 export interface RecommendReason {
@@ -470,10 +607,41 @@ export interface BrandRecommendation {
   tags: string[]
 }
 
+export interface SupplierRecommendation {
+  supplier_id: number
+  supplier_name: string
+  score: number
+  rank: number
+  reason: RecommendReason
+}
+
 export interface RecommendResponse {
   categories: string[]
   recommendations: BrandRecommendation[]
   total_candidates: number
+  supplier_recommendations: SupplierRecommendation[]
+  total_supplier_candidates: number
+  data_gaps: string[]
+}
+
+export interface CopyDedupInfo {
+  total_copies: number
+  copy_nos: string[]
+  selected_copy_no: string
+  selected_rows: number
+  dropped_rows: number
+  dropped_by_copy: Record<string, number>
+  selection_basis: 'closest_to_declared_total' | 'largest_row_count'
+}
+
+// design/24 B3：dry_run=true 时四道数据质量门的统一疑点形状——error 是稳定的
+// 判别键（"structural_integrity_requires_review" 等），message 是人话摘要，
+// 其余字段随 error 类型而定（checksum/review_rows/duplicates/...），前端按
+// error 分支处理，不强行统一成一个大而全的接口。
+export interface BatchConfirmIssue {
+  error: string
+  message: string
+  [key: string]: unknown
 }
 
 export interface BatchConfirmResult {
@@ -487,6 +655,13 @@ export interface BatchConfirmResult {
   project_id: number | null
   batch_id: string
   idempotent?: boolean
+  // design/24 B0：非 null = 识别到多份合法副本，本次只选了一份入库。
+  copy_dedup?: CopyDedupInfo | null
+  // design/24 B3：dry_run=true 的响应形状——从不写库，issues 收集本次会命中
+  // 的全部疑点（不是只有第一个）。真实写入路径这三个字段恒为 undefined。
+  dry_run?: boolean
+  would_succeed?: boolean
+  issues?: BatchConfirmIssue[]
 }
 
 export interface SavedInvitation {
@@ -714,6 +889,12 @@ export interface TenderPreviewItem {
   source_ref?: Record<string, unknown>
 }
 
+export interface TenderSheetInfo {
+  name: string
+  looks_like_list: boolean
+  row_count: number
+}
+
 export interface TenderPreviewResult {
   items: TenderPreviewItem[]
   detected_category: string
@@ -721,6 +902,9 @@ export interface TenderPreviewResult {
   has_multiple_categories: boolean
   unknown_count: number
   total: number
+  // design/24 B1：多 Sheet 候选 + 本次实际用的那个，驱动 Sheet 切换器。
+  sheets: TenderSheetInfo[]
+  selected_sheet: string | null
 }
 
 export interface TenderListConfirmSession {
@@ -756,6 +940,9 @@ export interface CompareStateInflightJob {
   status: string
   progress_stage: string
   progress_pct: number
+  // design/24 B2：见 ExtractionJob 同名字段注释。
+  stage_current?: number | null
+  stage_total?: number | null
   has_result: boolean
 }
 export interface CompareStateResult {
@@ -826,6 +1013,9 @@ export interface ReviewCell {
   is_lowest: boolean
   candidates: ReviewCellCandidate[]
   missing_reason?: string | null
+  // design/23：复核者已确认"这格确实无报价，符合预期"——纯 UI 抑制标记，
+  // 只在 cell_status='missing' 时有意义，不改变 cell_status 本身。
+  missing_acked?: boolean
 }
 
 export interface ReviewRow {
@@ -840,7 +1030,7 @@ export interface ReviewRow {
   row_status: 'ok' | 'partial' | 'pending' | 'missing'
   quoted_count: number
   covered_count: number
-  cells: Record<string, ReviewCell>   // keyed by str(supplier_id)
+  cells: Record<string, ReviewCell>   // keyed by str(col_id)：submission 模式下为 submission_id
 }
 
 export interface ReviewSupplier {

@@ -24,6 +24,9 @@ class TenderDocument(Base):
     deadline = Column(String(32), default="")
 
     items = Column(JSON, default=list)  # 材料清单 list[dict]
+    # Deterministic recommendation/evidence snapshot used when this tender was
+    # saved.  It makes an invitation auditable without creating an ERP master.
+    recommendation_snapshot = Column(JSON, default=dict)
     status = Column(String(16), default="draft", index=True)  # draft/invited/closed
 
     created_at = Column(DateTime, default=_now)

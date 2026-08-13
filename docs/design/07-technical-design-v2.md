@@ -38,7 +38,7 @@
 
 ## 2. Project structure
 
-> Superseded in part: the actual `apps/api/` tree now also contains `intelligence/` (OCR / page-role classification / table extraction / LLM pipeline) and `migrations/` (Alembic), and the `services/`, `models/`, `schemas/`, and `routes/` packages hold many modules not listed below (e.g. `services/bid_alignment.py`, `services/tender_list.py`, `services/matrix_stats.py`; `models/bid_submission.py`, `models/extraction_job.py`, `models/tender_list_session.py`, `models/bid_matrix_version.py`; `routes/intake.py`, `routes/invite.py`, `routes/export.py`, `routes/users.py`, `routes/logs.py`). The skeleton below reflects the May-2026 design intent, not the current file list.
+> Superseded in part: the actual `apps/api/` tree now also contains `intelligence/` (OCR / page-role classification / table extraction / LLM pipeline) and `migrations/` (Alembic), and the `services/`, `models/`, `schemas/`, and `routes/` packages hold many modules not listed below (e.g. `services/alignment/bid_alignment.py`, `services/tender/tender_list.py`, `services/matrix/matrix_stats.py`; `models/bid_submission.py`, `models/extraction_job.py`, `models/tender_list_session.py`, `models/bid_matrix_version.py`; `routes/intake.py`, `routes/invite.py`, `routes/export.py`, `routes/users.py`, `routes/logs.py`). The skeleton below reflects the May-2026 design intent, not the current file list.
 
 ```
 bid-compare/
@@ -286,7 +286,7 @@ Index: `(material_id, supplier_id)`
 | GET | `/api/analysis/category-stats/{category}` | Category price distribution |
 | POST | `/api/analysis/refresh-baselines` | Refresh all material baselines (category optional) |
 | POST | `/api/analysis/bid-matrix` | Horizontal comparison matrix |
-| POST | `/api/analysis/bid-alignment/suggest` | AI quote-alignment / field-correction suggestions (to be implemented) *(corrected 2026-06-23: implemented — see `routes/analysis.py` and `services/bid_alignment.py`.)* |
+| POST | `/api/analysis/bid-alignment/suggest` | AI quote-alignment / field-correction suggestions (to be implemented) *(corrected 2026-06-23: implemented — see `routes/analysis.py` and `services/alignment/bid_alignment.py`.)* |
 | POST | `/api/analysis/bid-alignment/apply` | Apply the confirmed alignment plan and produce the final matrix (to be implemented) *(corrected 2026-06-23: implemented.)* |
 | **Brand tiers** | | |
 | GET | `/api/brand-tiers` | Tier list |
@@ -445,7 +445,7 @@ Steps:
 
 ### 5.4 AI quote-alignment review algorithm (in design)
 
-> Superseded in part: this "in design" section is now built. See `routes/analysis.py` (`bid-alignment/suggest`, `bid-alignment/apply`, `bid-alignment/groups`), `services/bid_alignment.py`, and the `BidAlignmentGroup`/`BidAlignmentItem` models. The persisted shape evolved during `09-P0数据模型与写链路重构.md` (e.g. `bid_alignment_items` carries both `quote_id` and `bid_quote_line_id` with a mutual-exclusion CHECK, plus `submission_id`).
+> Superseded in part: this "in design" section is now built. See `routes/analysis.py` (`bid-alignment/suggest`, `bid-alignment/apply`, `bid-alignment/groups`), `services/alignment/bid_alignment.py`, and the `BidAlignmentGroup`/`BidAlignmentItem` models. The persisted shape evolved during `09-P0数据模型与写链路重构.md` (e.g. `bid_alignment_items` carries both `quote_id` and `bid_quote_line_id` with a mutual-exclusion CHECK, plus `submission_id`).
 
 #### Background
 
@@ -702,16 +702,16 @@ uv run python -m scripts.import_data
 
 | Feature | Modules involved | Notes |
 |------|---------|------|
-| Reasonable historical-low basis (IQR-filtered minimum + source project/date) | `services/comparison.py` | Replaces the old mean-price basis |
-| Three-level deviation color flag (normal/yellow/red, thresholds configurable per category) | `services/comparison.py`, `routes/quotes.py` | Deprecates green/blue/corrected-Z |
-| Horizontal comparison-matrix API | `services/bid_matrix.py`, `routes/analysis.py` | `POST /api/analysis/bid-matrix` |
+| Reasonable historical-low basis (IQR-filtered minimum + source project/date) | `services/history/comparison.py` | Replaces the old mean-price basis |
+| Three-level deviation color flag (normal/yellow/red, thresholds configurable per category) | `services/history/comparison.py`, `routes/quotes.py` | Deprecates green/blue/corrected-Z |
+| Horizontal comparison-matrix API | `services/matrix/bid_matrix.py`, `routes/analysis.py` | `POST /api/analysis/bid-matrix` |
 | Brand-tier model + CRUD + import-popup trigger | `models/brand_tier.py`, `routes/brand_tiers.py` | Import returns `unknown_brands` |
-| Material dedup (category + standard_name + spec) | `services/import_service.py` | Prevents duplicate storage |
-| Supplier-column recognition (independent of the brand column) | `services/import_service.py` | Fixes the brand-mistaken-as-supplier issue |
-| Auto-refresh material baselines after import | `services/import_service.py` | Calls `refresh_material_baselines` |
-| Supplier-scoring short-key weights (price/history/completeness/brand/commercial) | `services/scoring.py`, `core/config.py` | Consistent with the frontend SettingsView *(corrected 2026-06-23: now long keys; brand dimension removed 2026-06-06.)* |
-| Scoring brand dimension switched to BrandTier hit rate | `services/scoring.py` | Replaces the old static brand score *(corrected 2026-06-23: brand dimension subsequently removed from scoring.)* |
-| Dashboard heatmap + bubble endpoints | `services/statistics.py`, `routes/analysis.py` | Frontend wired up |
+| Material dedup (category + standard_name + spec) | `services/ingestion/import_service.py` | Prevents duplicate storage |
+| Supplier-column recognition (independent of the brand column) | `services/ingestion/import_service.py` | Fixes the brand-mistaken-as-supplier issue |
+| Auto-refresh material baselines after import | `services/ingestion/import_service.py` | Calls `refresh_material_baselines` |
+| Supplier-scoring short-key weights (price/history/completeness/brand/commercial) | `services/history/scoring.py`, `core/config.py` | Consistent with the frontend SettingsView *(corrected 2026-06-23: now long keys; brand dimension removed 2026-06-06.)* |
+| Scoring brand dimension switched to BrandTier hit rate | `services/history/scoring.py` | Replaces the old static brand score *(corrected 2026-06-23: brand dimension subsequently removed from scoring.)* |
+| Dashboard heatmap + bubble endpoints | `services/history/statistics.py`, `routes/analysis.py` | Frontend wired up |
 | Config validation (weights sum ≈ 1, threshold yellow < red) | `routes/config.py` | PUT `/api/config/{key}` |
 | JWT login endpoint | `routes/auth.py` | Env vars `JWT_SECRET`, `ADMIN_USER`, `ADMIN_PASS` |
 | Extended-attribute schema initialization | `routes/config.py` | `_init_defaults` writes automatically |
@@ -722,7 +722,7 @@ uv run python -m scripts.import_data
 
 | Priority | Feature | Modules involved | Notes |
 |--------|------|---------|------|
-| P1 | Switchgear-cabinet BOM component-split import | `services/import_service.py` | Must parse in-cabinet component rows and generate independent material+quote records |
+| P1 | Switchgear-cabinet BOM component-split import | `services/ingestion/import_service.py` | Must parse in-cabinet component rows and generate independent material+quote records |
 | P1 | Route-level permission guard | `routes/` middleware | Login endpoint done; per-route token check not yet enabled *(corrected 2026-06-23: done — `main.py` wraps every router except auth in `Depends(get_current_user)`.)* |
 | P2 | User-management API | new `routes/users.py` | Frontend `/system/users` page done *(corrected 2026-06-23: `routes/users.py` exists and is registered.)* |
 | P2 | Operation-log API | new `routes/logs.py` | Frontend `/system/logs` page done *(corrected 2026-06-23: `routes/logs.py` exists and is registered; `OperationLog` model present.)* |
@@ -731,7 +731,7 @@ uv run python -m scripts.import_data
 | P2 | Comparison-report Excel export | `routes/analysis.py` | F6.4; `scripts/export_excel.py` can be referenced *(corrected 2026-06-23: a dedicated `routes/export.py` now exists and is registered.)* |
 | P2 | Data flow / TODO queue | new API + frontend | F1.4, list-status management |
 | P3 | Material-code integration | `models/material.py` | Pending the first-construction party's own coding scheme |
-| P3 | Bubble-chart brand-tier coloring | `services/statistics.py` | `BubbleItem.tier` field currently returns null |
+| P3 | Bubble-chart brand-tier coloring | `services/history/statistics.py` | `BubbleItem.tier` field currently returns null |
 
 ### 8.3 Database migration notes (v1 → v2.1)
 

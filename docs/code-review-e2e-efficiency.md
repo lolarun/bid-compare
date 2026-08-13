@@ -487,7 +487,7 @@ Phase 4 匹配:    90-180s (LLM结果也可缓存)
 | `7faa340` | 切片降级并发化 | `table_recognizer.py` | 4 tiles 串行 → 并发 |
 | `7faa340` | 链式方向批量 OCR | `table_recognizer.py` | 逐页 re-OCR → 单次批量调用 |
 | `7faa340` | 指数退避+抖动 | `dashscope_ocr.py` | 线性(3,6,9,12,15s) → 指数(2,4,8,16,32)+jitter |
-| `2ba84fc` | PyMuPDF 替换 pypdfium2 | `document_loader.py` | 渲染引擎切换，单线程快 20% |
+| `2ba84fc` | PyMuPDF 评估（未采用） | `document_loader.py` | 单线程快约 20%，但商业使用受 AGPL 约束，运行时保持 pypdfium2 |
 | `2ba84fc` | embedding v3→v4 | `anchor_match.py` | 模型升级 |
 | `f39f9ba` | 跳过 recall 页 tiling | `table_recognizer.py` | recall 页 best-effort，省 8 次 API 调用 |
 | `f39f9ba` | PDF 文本预筛分类 | `table_recognizer.py` | PyMuPDF get_text() 零成本排除非表格页 |
@@ -552,8 +552,7 @@ Phase 4 匹配:    90-180s (LLM结果也可缓存)
 | pypdfium2 | ❌ 不安全，跨线程会 crash | 用 ProcessPoolExecutor |
 | PyMuPDF | ❌ 不安全 | 用 multiprocessing |
 
-两者都不能用 ThreadPoolExecutor 并行渲染。PyMuPDF 单线程比 pypdfium2 快 20%，是更优选择。
-注意：PyMuPDF 是 AGPL-3.0 许可证，商业使用需购买 Artifex 授权。
+两者都不能用 ThreadPoolExecutor 并行渲染。PyMuPDF 单线程约快 20%，但因 AGPL-3.0 商业许可限制，本项目不采用；运行时与文本预筛统一使用 pypdfium2。
 
 ### 8.7 剩余可优化项
 

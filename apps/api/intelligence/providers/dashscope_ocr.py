@@ -43,6 +43,17 @@ _RETRY_BASE = 2          # exponential backoff base: 2, 4, 8, 16, 32 (with jitte
 _RETRY_MAX = 30          # cap at 30s
 
 
+class _StreamedResponse:
+    """把流式分片拼好后伪装成一次性响应，让 _mm_call 的重试逻辑不必分叉。"""
+
+    __slots__ = ("text",)
+    status_code = 200
+    message = ""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
 def _retry_wait(attempt: int) -> float:
     """Exponential backoff with full jitter: min(base * 2^attempt, max) + uniform(0, 1)."""
     return min(_RETRY_BASE * (2 ** attempt), _RETRY_MAX) + random.uniform(0, 1)
@@ -57,7 +68,7 @@ _TENDER_S2_PROMPT = """你是机电材料招投标助理。下面是OCR识别出
 要求：
 - 只提取材料/设备条目，不要表头、合计行、小计行
 - 材料名称按原文，不要简化
-- 品类从以下选项选择：桥架、母线槽、配电箱、阀门、不锈钢管、水箱、潜水泵、风口风阀、风机盘管、空调泵；无法判断留空
+- 品类从以下选项选择：桥架、母线槽、配电箱、电缆、阀门、不锈钢管、水箱、潜水泵、风口风阀、风机盘管、空调泵；无法判断留空
 - 数量若为'若干'等非数字，留null
 - 无法识别的字段返回空字符串或null
 
@@ -146,61 +157,8 @@ _META_S2_PROMPT = """你是机电材料招投标助理。下面是投标文件�
 - supplier_name：优先从"投标单位"/"报价单位"/"投标人"字段取；若为营业执照页，从"名称"/"称"字段取公司全名（即使列标题因OCR截断只剩"称"）；不要填经销商授权书中的品牌商名称。
 - 若该页没有相关信息，对应字段返回null或空字符串。"""
 
-# Stage 2 prompt for structured TableGrid JSON input (replaces raw HTML when available)
-_QUOTE_S2_TABLE_PROMPT = """你是机电材料报价单解析助理。以下是 OCR 识别后按页面表格整理的结构化数据（JSON 格式）。
-
-请从所有 row_type="quote_line" 的行中提取每一条报价明细。每条明细必须包含该行的 table_index 和 row_index（直接从输入复制，不要修改）。
-row_type 为 subtotal/grand_total/header/empty/note 的行忽略不提取。
-
-要求：
-- 【完整性】所有 row_type=quote_line 的行都要提取，一行不能遗漏
-- 【价格口径】表头含"含税"/"综合单价"时→unit_price_incl_tax；表头含"不含税"/"税前"时→unit_price_excl_tax；表头无税种区分时才→unit_price；表头已明确区分时unit_price留null
-- 【严禁推算】不得自行用×1.13或÷1.13推导含税/不含税价，文档没有的字段留null；只有一个价格字段时填unit_price_incl_tax（含税）或unit_price_excl_tax（不含税）按表头映射，不填unit_price
-- 对阀门类材料（截止阀/闸阀/止回阀/球阀/蝶阀/减压阀/疏水阀/过滤器等）额外填写 canonical 对象：valve_type/dn/pn/material/connection
-- material_type：若表格有独立材质列按原文填；否则从规格型号中提取；无则留空字符串
-- 总价若表格已标注使用原值，否则留 null（不要自己计算）
-- 税率用小数如 0.13 表示 13%
-- supplier_name：若当前页面有明确供应商/投标单位名称则填，否则留空字符串
-- 无法识别的字段返回空字符串或 null，不要猜测
-
-OCR 纠错（阀门类）：当你发现材料名称存在明显形近字 OCR 错误时（如"阀阀"→闸阀、"橡胶海"→橡胶瓣）：
-- normalized_material: 纠错后的正确名称（确信时填，否则留空字符串）
-- ocr_correction_reason: 纠错依据（词表命中+相邻行规格连续性），无纠错时留空字符串
-合法词表：闸阀/截止阀/止回阀/球阀/蝶阀/橡胶瓣止回阀/节能消声止回阀/缓闭式止回阀/低阻力倒流防止器/倒流防止器/小阻力可调式减压阀组/减压阀组/Y型过滤器
-material 字段仍按原文填写；normalized_material 仅在确认为OCR错别字时才填，不确定留空。
-
-【价格字段——按表头文字严格映射，不按列顺序推断】
-  unit_price_excl_tax（不含税单价）：表头含"不含税"/"税前"时填此字段
-  unit_price_incl_tax（含税单价）：表头含"含税"/"综合单价"时填此字段
-  unit_price（单价，仅表头无含税/不含税区分时才填）
-  total_price_excl_tax（不含税合计）：表头含"不含税合计"/"金额(不含税)"时填
-  total_price_incl_tax（含税合计）：表头含"价税合计"/"含税合计"/"合价(含税)"时填
-  total_price（合计，仅表头无含税/不含税区分时才填）
-  tax_amount（税额）：表头含"税额"/"增值税额"时填；无此列留null
-  model（型号）：表头独立"型号"列时填；规格型号合并在一列时归入spec
-
-返回 JSON 格式（table_index 和 row_index 必须包含）：
-{"supplier_name": "供应商名称或空字符串", "items": [{"table_index": 0, "row_index": 2, "seq": "序号或空字符串", "material": "材料名称", "spec": "规格型号", "model": "型号或空字符串", "brand": "品牌", "unit": "单位", "qty": 数量, "unit_price": null或单价（仅表头无税种标注时才填，否则留null）, "unit_price_excl_tax": null或不含税单价, "unit_price_incl_tax": null或含税单价, "total_price": null或合计（仅表头无税种标注时才填，否则留null）, "total_price_excl_tax": null或不含税合计, "total_price_incl_tax": null或含税合计, "tax_rate": 税率, "tax_amount": null或税额, "material_type": "材质", "remark": "备注", "canonical": {}, "normalized_material": "", "ocr_correction_reason": ""}]}
-
-没有报价明细时返回 {"items": []}"""
-
 # Max cover/summary pages to process for supplier name / bid total extraction
 MAX_META_PAGES = 5
-
-# ── Cover-page supplier-name fallback prompt ─────────────────────────────
-_SUPPLIER_NAME_PROMPT = """从以下HTML内容中，找出【投标人/投标单位（卖方报价方）的公司全称】。
-
-投标文件里常出现4类公司，只要"投标人"，其余三类一律排除：
-- 【投标人=要的】卖方/报价方。【必须】有明确标签："投标单位名称""投标人""（盖章）投标单位"或报价单落款盖章处。
-- 【招标人=排除】买方/甲方/采购方。出现在封面顶部、"致：XX公司"（投标书抬头）、"招标人""招标单位"处。
-- 【厂家/品牌商=排除】产品制造商。出现在"厂家""制造商""生产企业""品牌""授权"等处（如某品牌/某阀门等产品制造商对应的公司）。它只是货品来源，不是投标人。
-- 【代理商=排除】除非它同时是盖章的投标单位。
-
-规则：
-- 公司全称含"有限公司/集团/实业/设备/科技/贸易/工程"等机构后缀。
-- 【关键】只有当公司名旁有明确的"投标单位名称/投标人/（盖章）"标签时才返回；若本页是封面、投标书抬头、厂家资质/授权页（只有招标人或厂家名），一律返回空字符串。
-只返回投标人公司全称（字符串），不确定就返回 ""。不要JSON，不要任何解释。"""
-
 
 # ── 视觉页面分类（qwen3-vl-flash / plus）────────────────────────────────────
 _VISUAL_FLASH_MODEL = "qwen3-vl-flash"
@@ -385,44 +343,6 @@ class DashScopeOCRProvider(LLMProvider):
                 self._llm_clients[key] = OpenAI(api_key=key, base_url=self.base_url)
             return self._llm_clients[key]
 
-    # ─── page classification (single OCR pass, HTML cached) ──────────────
-
-    def ocr_pages_with_roles(
-        self, images: list[bytes],
-    ) -> tuple[list[tuple["PageClassification", str]], list[dict]]:
-        """Stage 1 for all pages: OCR → HTML → classify role.
-
-        Returns:
-            (page_roles, failed_pages)
-            - page_roles: list of (PageClassification, html) in page order
-            - failed_pages: list of {"page": 1-based, "error": str} for failed OCR calls
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from apps.api.intelligence.page_classifier import classify_page, PageClassification, PageRole
-
-        n = len(images)
-        out: list[tuple[PageClassification, str] | None] = [None] * n
-        failures: list[dict] = []
-        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), n)
-
-        def _ocr_one(idx: int, image: bytes):
-            html, _ = self._ocr_page(image)
-            return idx, (classify_page(html), html), None
-
-        with ThreadPoolExecutor(max_workers=workers) as exc:
-            futs = {exc.submit(_ocr_one, i, img): i for i, img in enumerate(images)}
-            for fut in as_completed(futs):
-                idx = futs[fut]
-                try:
-                    idx, result, _ = fut.result()
-                    out[idx] = result
-                except Exception as e:
-                    log.warning("OCR page %d failed: %s", idx + 1, e)
-                    out[idx] = (PageClassification(primary_role=PageRole.UNKNOWN), "")
-                    failures.append({"page": idx + 1, "error": str(e)})
-
-        return out, failures  # type: ignore[return-value]
-
     # ─── public API (called per-page by pipeline) ─────────────────────────
 
     def extract(
@@ -432,16 +352,20 @@ class DashScopeOCRProvider(LLMProvider):
         prompt: str,
         timeout: int = 90,
         page_html: str | None = None,
-        table_grids=None,  # list[TableGrid] | None — structured input from table_parser
+        table_grids=None,  # unused — kept for LLMProvider signature compatibility
     ) -> ExtractionResponse:
-        """Two-stage extraction for a single page image.
+        """Two-stage extraction for a single page image (abstract LLMProvider.extract).
 
-        If page_html is provided (pre-computed from ocr_pages_with_roles),
-        Stage 1 OCR is skipped and the cached HTML is used directly.
+        No production caller remains — VL-direct (vl_extract_csv) replaced the
+        per-page OCR→HTML→LLM chain this served (best-practice review F1/F2,
+        2026-08-11). Kept because `LLMProvider.extract` is `@abstractmethod`
+        (base.py) — removing this implementation would make the class
+        uninstantiable. The table_grids structured-input path
+        (table_parser.grids_to_llm_json) was deleted with the legacy chain
+        that was its only producer.
 
-        If table_grids is also provided (and doc_type is 'quote'), the Stage-2
-        LLM receives structured TableGrid JSON instead of raw HTML, which reduces
-        hallucination and enables row-level source_ref tracking.
+        If page_html is provided, Stage 1 OCR is skipped and the cached HTML
+        is used directly.
         """
         if not images:
             raise ProviderError("extract() requires at least one image")
@@ -466,17 +390,7 @@ class DashScopeOCRProvider(LLMProvider):
             )
 
         doc_type = self._guess_doc_type(prompt)
-
-        if table_grids and doc_type == "quote":
-            # Structured path: TableGrid JSON → LLM (lower token cost, row-level source_ref)
-            from apps.api.intelligence.table_parser import grids_to_llm_json
-            grid_json = grids_to_llm_json(table_grids)
-            data, raw_text, llm_tokens = self._llm_call_json(
-                _QUOTE_S2_TABLE_PROMPT, grid_json
-            )
-        else:
-            data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
-
+        data, raw_text, llm_tokens = self._llm_parse(html, doc_type)
         total_tokens += llm_tokens
 
         return ExtractionResponse(
@@ -545,72 +459,6 @@ class DashScopeOCRProvider(LLMProvider):
             "tax_rate": data.get("tax_rate"),
         }
 
-    def extract_supplier_name_from_cover(
-        self, cover_images: list[bytes], max_pages: int = 10,
-    ) -> str:
-        """Fallback: scan the front pages for the bidder (投标人) company name.
-
-        Runs all candidate pages in parallel, returns the result from the
-        earliest page that yields a confident bidder name.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from apps.api.intelligence.aggregator import _pick_supplier_name
-
-        pages = cover_images[:max_pages]
-        if not pages:
-            return ""
-
-        def _try_page(idx: int, page_bytes: bytes) -> tuple[int, str]:
-            try:
-                html, _ = self._ocr_page(page_bytes)
-                if not html.strip():
-                    return idx, ""
-                key = self._next_key()
-                client = self._get_client(key)
-                sem = self._per_key_sem[key]
-                sem.acquire()
-                try:
-                    resp = client.chat.completions.create(
-                        model=self.llm_model,
-                        messages=[
-                            {"role": "system", "content": _SUPPLIER_NAME_PROMPT},
-                            {"role": "user", "content": html},
-                        ],
-                        temperature=0.0,
-                        max_tokens=100,
-                        extra_body={"enable_thinking": False},
-                    )
-                finally:
-                    sem.release()
-                name = (resp.choices[0].message.content or "").strip()
-                if "</think>" in name:
-                    name = name.split("</think>")[-1].strip()
-                name = name.strip('"').strip("'").strip()
-                if name and name not in {"无", "找不到", "null", "None", ""}:
-                    return idx, _pick_supplier_name([name], set()) or ""
-            except Exception as e:
-                log.warning("Supplier name cover fallback error (page %d): %s", idx + 1, e)
-            return idx, ""
-
-        workers = min(_PER_KEY_CONCURRENCY * len(self._keys), len(pages))
-        found: dict[int, str] = {}
-        with ThreadPoolExecutor(max_workers=workers) as exc:
-            futs = {exc.submit(_try_page, i, img): i for i, img in enumerate(pages)}
-            for fut in as_completed(futs):
-                try:
-                    idx, name = fut.result()
-                    if name:
-                        found[idx] = name
-                except Exception:
-                    pass
-
-        # Return earliest-page confident result
-        for i in range(len(pages)):
-            if found.get(i):
-                log.info("Supplier name recovered from cover page %d: %r", i + 1, found[i])
-                return found[i]
-        return ""
-
     # ─── Stage 1: OCR ─────────────────────────────────────────────────────
 
     @staticmethod
@@ -627,6 +475,8 @@ class DashScopeOCRProvider(LLMProvider):
     @staticmethod
     def _mm_text(resp) -> str:
         """Extract concatenated text from a MultiModalConversation response."""
+        if isinstance(resp, _StreamedResponse):   # 分片已在 _mm_stream 里拼好
+            return resp.text
         text = ""
         if resp.output and resp.output.choices:
             choice = resp.output.choices[0]
@@ -638,35 +488,87 @@ class DashScopeOCRProvider(LLMProvider):
                         text += part["text"] or ""
         return text
 
+    def _mm_stream(self, *, api_key: str, model: str, content: list[dict],
+                   temperature: float, row_progress_cb=None):
+        """Streaming variant — returns an object shaped like a non-stream response.
+
+        为什么必须流式：报价清单的抽取是**长生成**（136 行 CSV ≈ 一两万 token），
+        一次性响应会撞上 SDK 的 300s read timeout，而 read timeout 是"多久没收到
+        字节"，不是"总共花了多久"。实测远东/上海浦东两份就是这么失败的，且重试
+        5 次全部撞同一堵墙——重试一个必然超时的请求纯属浪费（每份白烧 25 分钟）。
+        调大超时只是把墙往后挪，下一份更大的文档照样撞；流式让超时取决于
+        **token 间隔**而不是生成总长，才是与文档大小无关的解法。
+
+        design/24 B2：`row_progress_cb(n)` 在已转录行数（按累计文本里的换行符数
+        近似）每增加 5 行时调用一次——不是每个 chunk 都调用：chunk 是 token 粒度
+        的碎片，逐 chunk 上报会让上游（DB commit）被打爆。这是唯一能报"进度"的
+        地方：这条长生成没有页数概念，行数是仅有的、单调递增的信号。
+        """
+        chunks: list[str] = []
+        got_any = False
+        last_reported = 0
+        for resp in dashscope.MultiModalConversation.call(
+                api_key=api_key, model=model,
+                messages=[{"role": "user", "content": content}],
+                temperature=temperature, stream=True, incremental_output=True):
+            if getattr(resp, "status_code", 200) != 200:
+                return resp                      # 交给调用方按 429/其它错误处理
+            got_any = True
+            chunks.append(self._mm_text(resp) or "")
+            if row_progress_cb is not None:
+                current = "".join(chunks).count("\n")
+                if current - last_reported >= 5:
+                    last_reported = current
+                    try:
+                        row_progress_cb(current)
+                    except Exception:   # noqa: BLE001 — 进度上报绝不能打断识别本身
+                        log.warning("row_progress_cb raised, ignoring", exc_info=True)
+
+        if not got_any:
+            # 空流当作可重试的失败，而不是"识别出零行"——后者会被下游当成
+            # 合法的空报价单，把一次网络问题变成一条业务结论。
+            raise ProviderError("VL stream produced no chunks")
+        return _StreamedResponse("".join(chunks))
+
     def _mm_call(self, content: list[dict], model: str,
-                 temperature: float = _VISUAL_TEMPERATURE) -> str:
+                 temperature: float = _VISUAL_TEMPERATURE,
+                 stream: bool = False, row_progress_cb=None) -> str:
         """Multimodal call with key rotation + retry; returns raw text. Reuses
-        the same retry/concurrency infra as _ocr_page."""
+        the same retry/concurrency infra as _ocr_page.
+
+        `stream` 只对长生成有意义（见 _mm_stream）；短响应（页面角色分类等）
+        保持非流式，避免为几十个 token 引入分片重组的失败面。
+        """
         for attempt in range(_MAX_RETRIES):
             key = self._next_key()
             sem = self._per_key_sem[key]
             sem.acquire()
             try:
-                resp = dashscope.MultiModalConversation.call(
-                    api_key=key, model=model,
-                    messages=[{"role": "user", "content": content}],
-                    temperature=temperature,
-                )
+                if stream:
+                    resp = self._mm_stream(api_key=key, model=model,
+                                           content=content, temperature=temperature,
+                                           row_progress_cb=row_progress_cb)
+                else:
+                    resp = dashscope.MultiModalConversation.call(
+                        api_key=key, model=model,
+                        messages=[{"role": "user", "content": content}],
+                        temperature=temperature,
+                    )
             except Exception as e:
                 sem.release()
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL call failed after {_MAX_RETRIES} retries: {e}") from e
             sem.release()
             if resp.status_code == 429:
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL 429 after {_MAX_RETRIES} retries")
             if resp.status_code != 200:
                 if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    time.sleep(_retry_wait(attempt))
                     continue
                 raise ProviderError(f"VL error {resp.status_code}: {resp.message}")
             return self._mm_text(resp)
@@ -782,6 +684,74 @@ class DashScopeOCRProvider(LLMProvider):
             fallback = dict(flash_result)
             fallback["source"] = "plus_failed"
             return fallback
+
+    def vl_extract_csv(
+        self,
+        images: list[bytes],
+        prompt: str,
+        *,
+        model: str | None = None,
+        labels: list[str] | None = None,
+        max_pixels: int = 8_000_000,
+        temperature: float = 0.0,
+        row_progress_cb=None,
+    ) -> str:
+        """VL-direct：一次调用送 N 张页图，返回模型原始文本（CSV）。
+
+        整份送而非逐页：续页表头在前页、重复副本要跨页才看得见、序号连续性也只有
+        整份才能校验。
+
+        `labels` 用于在每张图前插一段文本标签（如 PAGE_3_ROT_90）。方向预检必须交错
+        标签——不交错模型会串页（视觉分类稳定性 v4 的教训）。
+
+        复用 `_mm_call` 的多 key 轮换与限流；**不解析、不清洗**，原样返回给调用方，
+        解析规则属于识别器而不是 provider。
+
+        `row_progress_cb`（design/24 B2，可选）：仅在 `stream=True` 的长生成路径
+        （报价清单抽取，见 `_mm_stream`）有意义——方向预检等短响应调用方不传，
+        不受影响。callers（如 pipeline.py 的 `_vl_call`）按需传入。
+        """
+        mdl = model or os.getenv("DASHSCOPE_QUOTE_VL_MODEL", _VISUAL_PLUS_MODEL)
+        content: list[dict] = []
+        for i, img in enumerate(images):
+            if labels and i < len(labels):
+                content.append({"text": labels[i]})
+            content.append(self._img_part(img, max_pixels=max_pixels))
+        content.append({"text": prompt})
+        # 流式：整份报价清单是长生成，非流式会撞 SDK 的 300s read timeout（见 _mm_stream）。
+        raw = self._mm_call(content, mdl, temperature=temperature, stream=True,
+                            row_progress_cb=row_progress_cb)
+        return (raw or "").replace("```csv", "").replace("```", "").strip()
+
+    def _extract_structured_experimental(
+        self,
+        page_image: bytes,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_pixels: int = 8_000_000,
+        temperature: float = 0.0,
+    ) -> tuple[dict, str, int]:
+        """Experimental VL-direct page extraction.
+
+        This bypasses Stage-1 OCR HTML and asks a visual-language model to
+        return the same JSON shape consumed by the quote/tender post-processors.
+        It is intentionally not used by the production recognizer yet; scripts
+        can call it to compare VL->JSON against OCR HTML->LLM.
+        """
+        mdl = model or os.getenv("DASHSCOPE_VL_STRUCTURED_MODEL", _VISUAL_PLUS_MODEL)
+        content = [
+            self._img_part(page_image, max_pixels=max_pixels),
+            {"text": prompt},
+        ]
+        raw = self._mm_call(content, mdl, temperature=temperature)
+        clean = self._clean_json_text(raw)
+        try:
+            return json.loads(clean), raw, 0
+        except Exception as exc:
+            raise ProviderError(
+                f"VL structured JSON parse failed: {exc}\nRaw: {raw[:300]}"
+            ) from exc
 
     def _ocr_page(self, page_bytes: bytes) -> tuple[str, int]:
         """Qwen-VL-OCR table_parsing on one page. Retries on 429 / connection errors."""

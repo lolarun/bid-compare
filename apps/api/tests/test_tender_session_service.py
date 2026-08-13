@@ -7,7 +7,7 @@ version / deactivation.
 from __future__ import annotations
 
 from apps.api.models.tender_list_session import TenderListSession
-from apps.api.services import tender_session_service as svc
+from apps.api.services.tender import tender_session_service as svc
 
 
 def _mk(db, *, project_id, category, version, is_current, status="confirmed"):
@@ -61,11 +61,11 @@ def test_get_current_confirmed_session_requires_both_gates(db_session):
     assert got is not None and got.id == confirmed.id
 
 
-def test_get_current_session_ignores_status(db_session):
-    """get_current_session returns the current row regardless of confirmation."""
+def test_get_current_session_any_status_ignores_status(db_session):
+    """get_current_session_any_status returns the current row regardless of confirmation."""
     preview = _mk(db_session, project_id=4, category="阀门", version=1,
                   is_current=True, status="preview")
-    got = svc.get_current_session(db_session, "阀门", project_id=4)
+    got = svc.get_current_session_any_status(db_session, "阀门", project_id=4)
     assert got is not None and got.id == preview.id
 
 

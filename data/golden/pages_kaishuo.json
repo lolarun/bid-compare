@@ -1,0 +1,184 @@
+{
+  "doc": "kaishuo",
+  "doc_type": "quote",
+  "source_pdf": "凯硕新正投标文件.pdf",
+  "labeled_by": "claude_visual",
+  "note": "真实报价页仅p4-7(含价格列+金额+DN)。p13-19虽命中golden物料名但无价格/金额,是技术规范FP陷阱,判负类。",
+  "pages": [
+    {
+      "page": 1,
+      "role": "cover",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "投标文件正本封面"
+      ]
+    },
+    {
+      "page": 2,
+      "role": "bid_letter",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "投标函信函正文"
+      ]
+    },
+    {
+      "page": 3,
+      "role": "subtotal_or_summary",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "投标报价总价表(单一总额,非逐条明细)"
+      ]
+    },
+    {
+      "page": 4,
+      "role": "quote_table_header",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "报价清单表头(含税合计/单价列名)+数据行,金额密集"
+      ]
+    },
+    {
+      "page": 5,
+      "role": "quote_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页,数据行+金额+DN"
+      ]
+    },
+    {
+      "page": 6,
+      "role": "quote_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页"
+      ]
+    },
+    {
+      "page": 7,
+      "role": "quote_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页末(税额列)"
+      ]
+    },
+    {
+      "page": 8,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术/施工说明正文"
+      ]
+    },
+    {
+      "page": 9,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "营业执照"
+      ]
+    },
+    {
+      "page": 10,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "营业执照"
+      ]
+    },
+    {
+      "page": 11,
+      "role": "certificate",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "KITZ品牌授权证书"
+      ]
+    },
+    {
+      "page": 12,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 13,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文+小参数表(命中物料名但无价格)"
+      ]
+    },
+    {
+      "page": 14,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文(命中物料名,无价格/金额)"
+      ]
+    },
+    {
+      "page": 15,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 16,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 17,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 18,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文(试压/安装,无报价)"
+      ]
+    },
+    {
+      "page": 19,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    }
+  ],
+  "version": 1,
+  "basis": "model-assisted visual labeling (qwen3-vl-flash montage + manual review)",
+  "verified_by": "manual-review-pending",
+  "verification_status": "pending"
+}

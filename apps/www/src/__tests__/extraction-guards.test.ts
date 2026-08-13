@@ -3,6 +3,7 @@ import {
   asQuoteShape,
   asTenderShape,
   asExtractionShape,
+  asTenderBidlistShape,
 } from '../utils/extraction'
 
 describe('extraction runtime guards', () => {
@@ -129,6 +130,61 @@ describe('extraction runtime guards', () => {
       // 不含税/含税字段缺失 → null，不得臆造
       expect(it.unit_price_incl_tax).toBeNull()
       expect(it.total_price_excl_tax).toBeNull()
+    })
+  })
+
+  describe('asTenderBidlistShape', () => {
+    it('produces empty shape for non-object', () => {
+      const r = asTenderBidlistShape(null)
+      expect(r.items).toEqual([])
+      expect(r.brandRequirements).toEqual([])
+      expect(r.supplierBrands).toEqual([])
+      expect(r.projectCode).toBe('')
+      expect(r.tenderDate).toBe('')
+      expect(r.deadline).toBe('')
+    })
+
+    // R4：封面四标量此前只暴露 project_name，project_code/tender_date/
+    // deadline 从 shape 里丢失——前端拿到的 result 明明有这些字段，函数却
+    // 没读它们。
+    it('surfaces project_code/tender_date/deadline alongside project_name', () => {
+      const r = asTenderBidlistShape({
+        project_name: '金桥地体上盖',
+        project_code: 'JQ-2026-01',
+        tender_date: '2026-05-20',
+        deadline: '2026-06-01',
+        items: [],
+      })
+      expect(r.projectName).toBe('金桥地体上盖')
+      expect(r.projectCode).toBe('JQ-2026-01')
+      expect(r.tenderDate).toBe('2026-05-20')
+      expect(r.deadline).toBe('2026-06-01')
+    })
+
+    // R4：supplier_brands（各投标单位参与品牌）此前完全没有从 shape 里暴露
+    // 过，与 brand_requirement（业主品牌要求）是两个不同的后端字段。
+    it('surfaces supplier_brands distinct from brand_requirement', () => {
+      const r = asTenderBidlistShape({
+        items: [],
+        brand_requirement: [{ brand_cn: '西门子', brand_en: 'Siemens' }],
+        supplier_brands: [
+          { supplier_name: 'A公司', brand: '西门子', supplier_id: 3 },
+          { supplier_name: 'B公司', brand: '施耐德', supplier_id: null },
+        ],
+      })
+      expect(r.brandRequirements).toEqual(['西门子'])
+      expect(r.supplierBrands).toEqual([
+        { supplier_name: 'A公司', brand: '西门子', supplier_id: 3 },
+        { supplier_name: 'B公司', brand: '施耐德', supplier_id: null },
+      ])
+    })
+
+    it('drops non-dict supplier_brands entries but does not throw', () => {
+      const r = asTenderBidlistShape({
+        items: [],
+        supplier_brands: [{ supplier_name: 'A', brand: 'X' }, 'garbage', null],
+      })
+      expect(r.supplierBrands.length).toBe(1)
     })
   })
 

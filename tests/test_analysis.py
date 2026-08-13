@@ -2,9 +2,9 @@
 
 import numpy as np
 from apps.api.models import Material, Quote
-from apps.api.services.comparison import compute_baseline, determine_alert, compare_price
-from apps.api.services.scoring import score_supplier
-from apps.api.services.statistics import refresh_material_baselines
+from apps.api.services.history.comparison import compute_baseline, determine_alert, compare_price
+from apps.api.services.history.scoring import score_supplier
+from apps.api.services.history.statistics import refresh_material_baselines
 
 
 # ─── determine_alert tests (v2: normal/yellow/red only) ──────────────────────

@@ -37,17 +37,23 @@ const query = reactive({
 })
 
 // ─── 模拟数据（后端无数据时使用）─────────────────────────────────────────
+// R1 止血：MOCK.id 之前是 1..10，和真实 Supplier 主键同一个取值区间。只要
+// 数据库里已经存在 id=1..10 的真实供应商（几乎必然，自增主键从 1 开始），
+// 用户在"当前筛选/翻页恰好 0 条结果"的场景下会看到 mock 数据、点进「画像」
+// 却打真实供应商的接口——查出来的评分数据挂在假名字下面，两边对不上。
+// 改成负数区间，永远不可能撞上真实自增主键；配合下面 openProfile 的守卫，
+// mock 行点「画像」根本不发真实请求。
 const MOCK: SupplierRow[] = [
-  { id: 1, name: '江苏华润管业', short_name: '华润', contact: '', phone: '', categories: ['桥架类'], win_count: 8, cooperation_score: 92, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.052, delivery_score: 0.95, ai_score: 92, last_cooperation: '2026-04-15', tags: [{ label: '价格优势', color: 'green' }, { label: '长期合作', color: 'blue' }] },
-  { id: 2, name: '天源华威桥架', short_name: '天源', contact: '', phone: '', categories: ['桥架类','防火桥架'], win_count: 6, cooperation_score: 88, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.018, delivery_score: 0.98, ai_score: 88, last_cooperation: '2026-04-08', tags: [{ label: '质量优秀', color: 'cyan' }] },
-  { id: 3, name: '上海管业贸易', short_name: '上海管业', contact: '', phone: '', categories: ['管材/桥架'], win_count: 3, cooperation_score: 86, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.075, delivery_score: 0.90, ai_score: 86, last_cooperation: '2026-03-22', tags: [{ label: '价格优势', color: 'green' }, { label: '新合作', color: 'purple' }] },
-  { id: 4, name: '广东联墅供应', short_name: '联墅', contact: '', phone: '', categories: ['管材类'], win_count: 4, cooperation_score: 81, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.036, delivery_score: 0.88, ai_score: 81, last_cooperation: '2026-03-10', tags: [{ label: '稳定供应', color: 'blue' }] },
-  { id: 5, name: '江苏华润电气', short_name: '华润电', contact: '', phone: '', categories: ['电气/防火桥架'], win_count: 5, cooperation_score: 78, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.024, delivery_score: 0.85, ai_score: 78, last_cooperation: '2026-02-28', tags: [{ label: '防火专项', color: 'orange' }] },
-  { id: 6, name: '浙江中铁建材', short_name: '中铁', contact: '', phone: '', categories: ['钢材类'], win_count: 7, cooperation_score: 72, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.061, delivery_score: 0.82, ai_score: 72, last_cooperation: '2026-02-15', tags: [{ label: '需关注', color: 'orange' }] },
-  { id: 7, name: '伟星新材华东', short_name: '伟星', contact: '', phone: '', categories: ['管材类'], win_count: 9, cooperation_score: 90, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.014, delivery_score: 0.96, ai_score: 90, last_cooperation: '2026-01-30', tags: [{ label: '长期合作', color: 'blue' }] },
-  { id: 8, name: '金龙铜管有限', short_name: '金龙', contact: '', phone: '', categories: ['暖通铜管'], win_count: 4, cooperation_score: 85, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.028, delivery_score: 0.91, ai_score: 85, last_cooperation: '2026-01-12', tags: [{ label: '稳定供应', color: 'cyan' }] },
-  { id: 9, name: '鞍钢华东仓储', short_name: '鞍钢', contact: '', phone: '', categories: ['钢材类'], win_count: 11, cooperation_score: 87, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.005, delivery_score: 0.93, ai_score: 87, last_cooperation: '2025-12-28', tags: [{ label: '长期合作', color: 'blue' }] },
-  { id: 10, name: '正泰电器华南', short_name: '正泰', contact: '', phone: '', categories: ['配电设备'], win_count: 2, cooperation_score: 65, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.035, delivery_score: 0.78, ai_score: 65, last_cooperation: '2025-12-10', tags: [{ label: '待评估', color: 'default' }] },
+  { id: -1, name: '江苏华润管业', short_name: '华润', contact: '', phone: '', categories: ['桥架类'], win_count: 8, cooperation_score: 92, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.052, delivery_score: 0.95, ai_score: 92, last_cooperation: '2026-04-15', tags: [{ label: '价格优势', color: 'green' }, { label: '长期合作', color: 'blue' }] },
+  { id: -2, name: '天源华威桥架', short_name: '天源', contact: '', phone: '', categories: ['桥架类','防火桥架'], win_count: 6, cooperation_score: 88, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.018, delivery_score: 0.98, ai_score: 88, last_cooperation: '2026-04-08', tags: [{ label: '质量优秀', color: 'cyan' }] },
+  { id: -3, name: '上海管业贸易', short_name: '上海管业', contact: '', phone: '', categories: ['管材/桥架'], win_count: 3, cooperation_score: 86, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.075, delivery_score: 0.90, ai_score: 86, last_cooperation: '2026-03-22', tags: [{ label: '价格优势', color: 'green' }, { label: '新合作', color: 'purple' }] },
+  { id: -4, name: '广东联墅供应', short_name: '联墅', contact: '', phone: '', categories: ['管材类'], win_count: 4, cooperation_score: 81, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.036, delivery_score: 0.88, ai_score: 81, last_cooperation: '2026-03-10', tags: [{ label: '稳定供应', color: 'blue' }] },
+  { id: -5, name: '江苏华润电气', short_name: '华润电', contact: '', phone: '', categories: ['电气/防火桥架'], win_count: 5, cooperation_score: 78, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.024, delivery_score: 0.85, ai_score: 78, last_cooperation: '2026-02-28', tags: [{ label: '防火专项', color: 'orange' }] },
+  { id: -6, name: '浙江中铁建材', short_name: '中铁', contact: '', phone: '', categories: ['钢材类'], win_count: 7, cooperation_score: 72, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.061, delivery_score: 0.82, ai_score: 72, last_cooperation: '2026-02-15', tags: [{ label: '需关注', color: 'orange' }] },
+  { id: -7, name: '伟星新材华东', short_name: '伟星', contact: '', phone: '', categories: ['管材类'], win_count: 9, cooperation_score: 90, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.014, delivery_score: 0.96, ai_score: 90, last_cooperation: '2026-01-30', tags: [{ label: '长期合作', color: 'blue' }] },
+  { id: -8, name: '金龙铜管有限', short_name: '金龙', contact: '', phone: '', categories: ['暖通铜管'], win_count: 4, cooperation_score: 85, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.028, delivery_score: 0.91, ai_score: 85, last_cooperation: '2026-01-12', tags: [{ label: '稳定供应', color: 'cyan' }] },
+  { id: -9, name: '鞍钢华东仓储', short_name: '鞍钢', contact: '', phone: '', categories: ['钢材类'], win_count: 11, cooperation_score: 87, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: -0.005, delivery_score: 0.93, ai_score: 87, last_cooperation: '2025-12-28', tags: [{ label: '长期合作', color: 'blue' }] },
+  { id: -10, name: '正泰电器华南', short_name: '正泰', contact: '', phone: '', categories: ['配电设备'], win_count: 2, cooperation_score: 65, supplier_type: '', remark: '', created_at: null, updated_at: null, history_deviation: 0.035, delivery_score: 0.78, ai_score: 65, last_cooperation: '2025-12-10', tags: [{ label: '待评估', color: 'default' }] },
 ]
 
 async function fetchData() {
@@ -106,25 +112,36 @@ const drawerSupplier = ref<SupplierRow | null>(null)
 const drawerScore = ref<SupplierScore | null>(null)
 const drawerLoading = ref(false)
 
+function mockScoreFor(record: SupplierRow): SupplierScore {
+  return {
+    supplier_id: record.id,
+    supplier_name: record.name,
+    price_score: Math.round(85 + (record.history_deviation ?? 0) * -200),
+    history_score: Math.min(100, 40 + record.win_count * 8),
+    completeness_score: Math.round((record.delivery_score ?? 0.9) * 100),
+    commercial_score: 75,
+    total_score: record.ai_score ?? 80,
+    weights: { price_competitiveness: 0.45, history_cooperation: 0.25, quote_completeness: 0.15, commercial_terms: 0.15 },
+  }
+}
+
 async function openProfile(record: SupplierRow) {
   drawerSupplier.value = record
   drawerVisible.value = true
+  // R1 止血：mock 行（id 为负数，见 MOCK 定义处注释）绝不能拿 record.id 去打
+  // 真实的 /analysis/supplier-score 接口——不是"这个 id 大概率没有对应真实
+  // 供应商"，而是即使撞上了也不该把真实评分数据显示在假供应商名下。
+  if (isMockData.value) {
+    drawerScore.value = mockScoreFor(record)
+    return
+  }
   drawerLoading.value = true
   try {
     const { data } = await analysisApi.supplierScore({ supplier_id: record.id })
     drawerScore.value = data
   } catch {
     // 后端无数据时拼装一份模拟评分
-    drawerScore.value = {
-      supplier_id: record.id,
-      supplier_name: record.name,
-      price_score: Math.round(85 + (record.history_deviation ?? 0) * -200),
-      history_score: Math.min(100, 40 + record.win_count * 8),
-      completeness_score: Math.round((record.delivery_score ?? 0.9) * 100),
-      commercial_score: 75,
-      total_score: record.ai_score ?? 80,
-      weights: { price_competitiveness: 0.45, history_cooperation: 0.25, quote_completeness: 0.15, commercial_terms: 0.15 },
-    }
+    drawerScore.value = mockScoreFor(record)
   } finally {
     drawerLoading.value = false
   }

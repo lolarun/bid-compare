@@ -10,15 +10,14 @@ import {
   WarningOutlined, BulbOutlined, RobotOutlined,
   FilePdfOutlined, FileExcelOutlined, InboxOutlined,
 } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi, quoteApi, intakeApi } from '@/api'
+import { projectApi, supplierApi, analysisApi, intakeApi } from '@/api'
 import type {
   Project,
   Supplier,
   BidMatrixResult,
+  MatrixTotal,
   BidInsight,
   ExtractionJob,
-  QuoteExtractionItem,
-  BatchConfirmResult,
   AnchorMatchSummary,
   AnchorReviewResult,
   TenderPreviewResult,
@@ -35,7 +34,11 @@ import StatCard from '@/components/StatCard.vue'
 import BidMatrix from './components/BidMatrix.vue'
 import AnchorReviewMatrix from './components/AnchorReviewMatrix.vue'
 import { normalizeAlert, formatDeviation } from '@/utils/alert'
-import { asQuoteShape } from '@/utils/extraction'
+import { extractErrMsg } from '@/utils/errors'
+// R5（低垂果实轮）：Step 2「供应商报价上传」整段（legacy 槽位 + 批量上传/轮询/
+// 校对入库/移除/跨项目清空/刷新恢复）迁到这个 composable，IndexView.vue 只留
+// 编排（导航、跟 Step1/Step4 的耦合点），不再直接持有那段状态和函数体。
+import { useSupplierUpload, BATCH_PROGRESS_STEPS } from '@/composables/useSupplierUpload'
 
 // Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
 const STEP_RESULTS = 4
@@ -115,27 +118,33 @@ function stopTenderPoll() {
 }
 
 // ── Excel 主清单预览 ───────────────────────────────────────────────────────
-async function previewTenderList(file: File) {
+// design/24 B1：sheet 有值 = 用户在切换器里改选了 Sheet，重新预览同一份文件——
+// 这时只是换一屏数据，不是换文件，不能把 PDF 补充/对账状态一起清空。
+async function previewTenderList(file: File, sheet?: string) {
   tenderPreviewing.value = true
-  tenderPreview.value = null
+  if (!sheet) tenderPreview.value = null
   tenderJobError.value = ''
   try {
     const form = new FormData()
     form.append('file', file)
+    if (sheet) form.append('sheet', sheet)
     const { data } = await analysisApi.tenderListPreview(form)
     tenderFile.value = file
     tenderPreview.value = data
     tenderCategory.value = data.detected_category
-    // Reset PDF supplement + reconcile when Excel changes
-    pdfSupplement.value = null
-    tenderBrandRequirement.value = []
-    tenderSupplierBrands.value = []
-    tenderDetectedPages.value = null
-    tenderPdfFile.value = null
-    reconcileResult.value = null
-    reconcileConfirmed.value = false
-    showExcelPanel.value = true   // 上传 Excel 后自动展开参考面板
-    message.success(`参考清单已预览：${data.total} 条采购项`)
+    if (!sheet) {
+      // Reset PDF supplement + reconcile when Excel changes (genuinely new file only)
+      pdfSupplement.value = null
+      tenderBrandRequirement.value = []
+      tenderSupplierBrands.value = []
+      tenderDetectedPages.value = null
+      tenderPdfFile.value = null
+      reconcileResult.value = null
+      reconcileConfirmed.value = false
+      showExcelPanel.value = true   // 上传 Excel 后自动展开参考面板
+    }
+    const sheetNote = data.sheets.length > 1 ? `（Sheet「${data.selected_sheet}」）` : ''
+    message.success(`参考清单已预览${sheetNote}：${data.total} 条采购项`)
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? (e as Error).message
@@ -195,9 +204,14 @@ async function runTenderExtract(file: File, ctx: Record<string, unknown>) {
 
 function startTenderPoll(jobId: string) {
   stopTenderPoll()
+  // R1 止血：之前 catch 块只有注释"transient poll error — keep trying"，
+  // 没有失败计数——后端挂了/鉴权过期会无限轮询下去，不像 startBatchPolling
+  // 那样有 failures>=5 的上限。这里补上同款上限。
+  let failures = 0
   tenderPollTimer = setInterval(async () => {
     try {
       const { data } = await intakeApi.getJob(jobId)
+      failures = 0
       tenderJobStage.value = data.progress_stage || ''
       tenderJobPct.value = data.progress_pct ?? 0
       if (data.status === 'done') { stopTenderPoll(); onTenderJobDone(data) }
@@ -207,7 +221,15 @@ function startTenderPoll(jobId: string) {
         tenderJobError.value = data.error || '识别失败'
         message.error(tenderJobError.value)
       }
-    } catch { /* transient poll error — keep trying */ }
+    } catch {
+      failures++
+      if (failures >= 5) {
+        stopTenderPoll()
+        tenderPreviewing.value = false
+        tenderJobError.value = '轮询超时，请刷新页面重试'
+        message.error(tenderJobError.value)
+      }
+    }
   }, 2000)
 }
 
@@ -279,6 +301,19 @@ function pct(n: number | undefined | null): string {
   return (n * 100).toFixed(0) + '%'
 }
 
+// 评审 R2（第4块）：'vl_direct' 是生产上恒定的唯一取值，'table_grid'/
+// 'html_fallback' 只可能出现在已删除 legacy 链路的旧快照回放里。之前的
+// 二元判断把 vl_direct 全部误判成"OCR增强解析"（橙色，暗示降级路径）——
+// 而它其实是当前唯一的正式路径，不该带警示色。
+const INPUT_MODE_LABELS: Record<string, { text: string; color: string }> = {
+  vl_direct: { text: 'VL 直抽', color: 'green' },
+  table_grid: { text: '标准解析', color: 'green' },
+  html_fallback: { text: 'OCR增强解析', color: 'orange' },
+}
+function inputModeLabel(mode: string): { text: string; color: string } {
+  return INPUT_MODE_LABELS[mode] || { text: mode || '未知', color: 'default' }
+}
+
 // Computed shorthand so template stays readable
 const pdfQm = computed((): PdfQualityMetrics | null => pdfSupplement.value?.quality_metrics ?? null)
 const pdfDiagnostics = computed((): PageDiagnostic[] => pdfSupplement.value?.page_diagnostics ?? [])
@@ -348,6 +383,20 @@ function clearExcelItemAction(seq: string) {
   delete excelOnlyItemActions.value[seq]
 }
 
+// R1 止血：「加入主清单」此前只是给 excelOnlyItemActions 打了个本地展示标记，
+// 从未真的把这一项并入实际提交的 anchors_json——按钮点了、标签变绿了、但
+// confirmTenderListVersion() 一直只发 pdfSupplement.items，用户以为"已加入"
+// 的那一项其实从未进入采购清单版本。这里把标为 'add' 的 Excel 独有项真正
+// 并入待提交列表（去重按 seq，防止与 PDF 主清单已有的同序号项重复）。
+const effectivePdfItems = computed((): ExcelDiffItem[] => {
+  const base = (pdfSupplement.value?.items ?? []) as unknown as ExcelDiffItem[]
+  const baseSeqs = new Set(base.map(it => String(it.seq)))
+  const added = excelOnlyItems.value.filter(
+    it => excelOnlyItemActions.value[String(it.seq)] === 'add' && !baseSeqs.has(String(it.seq))
+  )
+  return added.length ? [...base, ...added] : base
+})
+
 // ─── Step 3: Alignment finalization gate ─────────────────────────────────
 const alignmentFinalizing = ref(false)
 const alignmentFinalizationId = ref<number | null>(null)
@@ -373,8 +422,8 @@ async function confirmTenderListVersion() {
       project_id: taskConfig.projectId,
       category: tenderCategory.value || taskConfig.category,
       file_name: isPdfPrimary ? (tenderPdfFile.value?.name ?? '') : (tenderFile.value?.name ?? ''),
-      anchors_total: isPdfPrimary ? pdfSupplement.value!.row_count : tenderPreview.value!.total,
-      anchors_json: isPdfPrimary ? pdfSupplement.value!.items : tenderPreview.value!.items,
+      anchors_total: isPdfPrimary ? effectivePdfItems.value.length : tenderPreview.value!.total,
+      anchors_json: isPdfPrimary ? effectivePdfItems.value : tenderPreview.value!.items,
       force: hasUnknown && forceUnknownCategory.value,
       source_type: isPdfPrimary ? 'pdf_primary' : 'excel',
       brand_requirement: tenderBrandRequirement.value,
@@ -500,56 +549,34 @@ async function confirmPendingItem(itemId: number, action: 'align' | 'exclude') {
 }
 
 
-// Per-supplier upload state for Step 2 (legacy slot mode)
-const supplierUploads = reactive<Record<number, {
-  job: ExtractionJob | null
-  items: QuoteExtractionItem[]
-  confirmed: boolean
-  batch_id?: string
-  unknown_brands: string[]
-}>>({})
-
-// ─── Batch upload state (new flow) ─────────────────────────────────────
-interface BatchFileEntry {
-  id: string           // unique key
-  filename: string
-  status: 'uploading' | 'processing' | 'done' | 'failed'
-  stage: string
-  progressPct: number
-  uploadPct: number
-  jobId: string | null
-  detectedSupplierName: string   // OCR-detected name (read-only source of truth)
-  finalSupplierName: string      // user-editable display name (always takes precedence)
-  matchedSupplierId: number | null  // set when user selects from dropdown; null = stranger
-  items: QuoteExtractionItem[]
-  confirmedSupplierId: number | null    // null for unknown suppliers
-  confirmedSubmissionId: number | null  // always set on confirm success
-  confirmed: boolean
-  error: string
-  pollTimer: ReturnType<typeof setInterval> | null
-}
-const batchFiles = ref<BatchFileEntry[]>([])
-const useBatchMode = computed(() => taskConfig.supplierIds.length === 0)
-
-const batchProgress = computed(() => {
-  const total = batchFiles.value.length
-  if (total === 0) return null
-  const done = batchFiles.value.filter((f) => f.status === 'done' || f.confirmed).length
-  const failed = batchFiles.value.filter((f) => f.status === 'failed').length
-  const processing = total - done - failed
-  return { total, done, failed, processing }
+// ─── Step 2: supplier quote upload (composable — R5 低垂果实轮抽出) ───────
+const {
+  supplierUploads,
+  batchFiles,
+  useBatchMode,
+  batchProgress,
+  canProceedFromUpload,
+  effectiveSubmissionIds,
+  effectiveSupplierIds,
+  isSingleSupplierMode,
+  slotQuality,
+  onExtracted,
+  confirmSupplier,
+  skipSupplier,
+  handleBatchFile,
+  batchStepState,
+  confirmBatchEntry,
+  removeBatchEntry,
+  removeAllBatchEntries,
+  restoreBatchFiles,
+  clearAllBatchFiles,
+} = useSupplierUpload({
+  taskConfig,
+  tenderCategory,
+  confirmedCategories,
+  categoryExplicitlySelected,
+  allSuppliers,
 })
-
-const BATCH_PROGRESS_STEPS = [
-  { key: 'upload', label: '上传', pct: 1 },
-  { key: 'received', label: '已接收', pct: 5 },
-  { key: 'render', label: '渲染 PDF', pct: 10 },
-  { key: 'split', label: '拆分页面', pct: 15 },
-  { key: 'recognize', label: '逐页识别', pct: 20 },
-  { key: 'merge', label: '合并结果', pct: 88 },
-  { key: 'cleanup', label: '整理结果', pct: 95 },
-  { key: 'done', label: '已识别', pct: 100 },
-] as const
 
 // Bid matrix result (Step 4)
 const matrixResult = ref<BidMatrixResult | null>(null)
@@ -595,13 +622,6 @@ async function handleCreateProject() {
 // ─── Computed ────────────────────────────────────────────────────────────
 const canProceedFromConfig = computed(() => !!taskConfig.projectId)
 
-const canProceedFromUpload = computed(() => {
-  if (useBatchMode.value) {
-    return batchFiles.value.filter((f) => f.confirmed).length >= 1
-  }
-  return taskConfig.supplierIds.every((sid) => supplierUploads[sid]?.confirmed === true)
-})
-
 const selectedSuppliers = computed(() =>
   allSuppliers.value.filter((s) => taskConfig.supplierIds.includes(s.id))
 )
@@ -612,17 +632,30 @@ const selectedProjectName = computed(() =>
 const matrixRows = computed(() => matrixResult.value?.rows ?? [])
 const matrixTotals = computed(() => matrixResult.value?.totals ?? [])
 const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
+
+// B3 兼容期收尾：供应商评标卡片原先按 t.supplier_id === s.id 做列身份 join
+// （10 处重复）；旧的 supplier_id 键已删除，MatrixTotal 改用通用 id 键
+// （legacy 模式下 submission_id 为 null，退回 id——此时二者同值）。收成一个
+// helper，不再复制十份同样的 find。
+function totalFor(s: { id: number }): MatrixTotal | undefined {
+  return matrixTotals.value.find((t) => (t.submission_id ?? t.id) === s.id)
+}
 const matrixSummary = computed(() => {
   if (!matrixResult.value) return null
-  const m = matrixResult.value as unknown as Record<string, any>
-  const rows = matrixResult.value.rows
-  const suppliers = matrixResult.value.suppliers
+  // B3：matrixResult 现在完整声明了 recommendation_level/award_mode/
+  // committee_required/price_ranking/risks/price_preferred_candidate 等字段
+  // （此前靠 Record<string,any> 旁路读取，此处一并接掉这个逃生舱）。
+  const m = matrixResult.value
+  const rows = m.rows
+  const suppliers = m.suppliers
   // 招标文件驱动：三态门禁 + 价格优选候选人（确定性，非自动定标）
-  const level = (m.recommendation_level as string) || (m.recommendation_blocked ? 'blocked' : 'conditional')
-  const awardMode = (m.award_mode as string) || 'single_supplier'
+  const level = m.recommendation_level || (m.recommendation_blocked ? 'blocked' : 'conditional')
+  const awardMode = m.award_mode || 'single_supplier'
   const allowSplit = awardMode === 'split_award'
   const pc = m.price_preferred_candidate || null
-  const pricePreferred = pc ? suppliers.find((s) => s.id === pc.supplier_id) : null
+  // B3 兼容期收尾：列身份 join 用 submission_id（legacy 模式下为 null，退回
+  // 通用列身份键 id——此时二者同值，见 design/22 §B3）。
+  const pricePreferred = pc ? suppliers.find((s) => s.id === (pc.submission_id ?? pc.id)) : null
   // 拆单/最优组合总价：仅当招标文件允许分项授标才计算并展示
   const optimalTotal = allowSplit
     ? Math.round(rows.reduce((sum, row) => {
@@ -640,10 +673,10 @@ const matrixSummary = computed(() => {
     award_mode: awardMode,
     allow_split: allowSplit,
     price_preferred_candidate: pricePreferred,
-    price_preferred_total: pc ? (pc.evaluated_total as number) : null,
+    price_preferred_total: pc ? pc.evaluated_total : null,
     committee_required: m.committee_required !== false,
-    ranking: (m.price_ranking as any[]) || [],
-    risks: (m.risks as string[]) || [],
+    ranking: m.price_ranking || [],
+    risks: m.risks || [],
     optimal_total: optimalTotal,
     anomaly_count: anomalyCount,
   }
@@ -692,10 +725,10 @@ async function fetchInsight() {
   insightResult.value = null
   try {
     // 携带评标上下文（policy/排名/风险），AI 仅据此解释；行数截断控制体积
-    const trimmed = {
+    const trimmed: BidMatrixResult = {
       ...matrixResult.value,
       rows: matrixResult.value.rows.slice(0, 50),
-    } as unknown as BidMatrixResult
+    }
     const { data } = await analysisApi.bidInsight(trimmed)
     insightResult.value = data
   } catch (e: any) {
@@ -734,21 +767,6 @@ const tenderMatchSummary = ref<AnchorMatchSummary | null>(null)
 const tenderUploading = ref(false)
 const anchorReviewResult = ref<AnchorReviewResult | null>(null)
 const anchorReviewLoading = ref(false)
-
-/** 从 axios 错误里取一条可读消息：detail 可能是字符串，也可能是结构化对象
- *  （如质量门 409 的 {error, message, failures}）。直接 message.error(对象) 会渲染成
- *  "[object Object]"，这里统一抽取 message/error 字段或 JSON 兜底。 */
-function extractErrMsg(e: unknown, fallback: string): string {
-  const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-  if (typeof d === 'string') return d
-  if (d && typeof d === 'object') {
-    const o = d as { message?: unknown; error?: unknown }
-    if (typeof o.message === 'string') return o.message
-    if (typeof o.error === 'string') return o.error
-    try { return JSON.stringify(d) } catch { return fallback }
-  }
-  return fallback
-}
 
 // Run tender list matching (called when entering Step 3)
 async function runTenderMatch(): Promise<boolean> {
@@ -820,28 +838,6 @@ async function runTenderMatchAndReview() {
   matchRunning.value = false
 }
 
-// All confirmed submission IDs (both known and unknown suppliers)
-const effectiveSubmissionIds = computed((): number[] => {
-  if (!useBatchMode.value) return []
-  return batchFiles.value
-    .filter(f => f.confirmed && f.confirmedSubmissionId != null)
-    .map(f => f.confirmedSubmissionId!)
-})
-
-// Known-supplier IDs only (for backward compat with non-batch mode)
-const effectiveSupplierIds = computed((): number[] => {
-  if (useBatchMode.value) {
-    return [...new Set(batchFiles.value.filter(f => f.confirmed && f.confirmedSupplierId).map(f => f.confirmedSupplierId!))]
-  }
-  return taskConfig.supplierIds
-})
-
-// Single-supplier mode: compare against history instead of across suppliers
-const isSingleSupplierMode = computed(() => {
-  const cols = useBatchMode.value ? effectiveSubmissionIds.value.length : effectiveSupplierIds.value.length
-  return cols === 1
-})
-
 // ─── Data fetching ───────────────────────────────────────────────────────
 async function fetchProjects() {
   try {
@@ -897,16 +893,30 @@ watch(tenderCategory, (cat) => {
   if (cat && confirmedCategories.value.length > 1) {
     categoryExplicitlySelected.value = true
   }
+  // R1 止血：alignmentFinalizationId/savedMatrixVersionId 是"对齐审核已完成"
+  // 门禁的钥匙，之前切品类完全不重置——A 品类 finalize 后切到 B 品类，
+  // saveMatrixVersion 会把 A 的 finalization_id 和 B 的 category 一起发给
+  // 后端，保存出一份身份对不上的比价版本。watch 只在值真变化时触发，
+  // 重置到 null 在首次赋值时也是无害的空操作，不需要额外判首次。
+  alignmentFinalizationId.value = null
+  savedMatrixVersionId.value = null
 })
 
 // 选择项目 / 刷新后恢复品类状态（404 = 新项目，静默处理）
-watch(() => taskConfig.projectId, async (pid) => {
+watch(() => taskConfig.projectId, async (pid, prevPid) => {
   confirmedCategories.value = []
   categorySessionMap.value = {}
   tenderCategory.value = ''
   taskConfig.category = ''
   tenderListSessionId.value = null
   categoryExplicitlySelected.value = false
+  // R1 止血：项目真的发生切换（而不是初次挂载从 undefined→pid）时，旧项目
+  // 会话内的报价卡片必须清空——否则 restoreBatchFiles 的"已有卡片则不覆盖"
+  // 早退逻辑会让旧项目的 batchFiles（含在途 pollTimer）原样留下，跟着新
+  // project_id 一起提交（跨项目报价串号）。
+  if (prevPid !== undefined) {
+    clearAllBatchFiles()
+  }
   if (!pid) return
   try {
     const { data } = await analysisApi.tenderListCurrentSessions({ project_id: pid })
@@ -924,21 +934,6 @@ watch(() => taskConfig.projectId, async (pid) => {
   // 刷新可恢复：重建供应商报价卡片（batchFiles 为空时才恢复，避免覆盖会话内上传）
   await restoreBatchFiles(pid)
 })
-
-watch(() => taskConfig.supplierIds, (ids, prev) => {
-  for (const sid of ids) {
-    if (!supplierUploads[sid]) {
-      supplierUploads[sid] = {
-        job: null, items: [], confirmed: false, unknown_brands: [],
-      }
-    }
-  }
-  for (const sid of (prev ?? [])) {
-    if (!ids.includes(sid)) {
-      delete supplierUploads[sid]
-    }
-  }
-}, { immediate: true })
 
 // ─── Step navigation ─────────────────────────────────────────────────────
 async function goNext() {
@@ -1019,428 +1014,8 @@ function goBack() {
   }
 }
 
-// ─── Step 2: per-supplier upload handlers ────────────────────────────────
-function onExtracted(supplierId: number, job: ExtractionJob) {
-  // AUDIT-FIX M9: runtime guard instead of unchecked cast
-  const items = asQuoteShape(job.result).items
-  supplierUploads[supplierId] = {
-    ...(supplierUploads[supplierId] || { items: [], confirmed: false, unknown_brands: [] }),
-    job,
-    items,
-    confirmed: false,
-  }
-}
-
-async function confirmSupplier(supplierId: number) {
-  const slot = supplierUploads[supplierId]
-  if (!slot || !slot.job) {
-    message.warning('请先上传该供应商的报价单')
-    return
-  }
-  const effectiveCategory = tenderCategory.value || taskConfig.category
-  if (!effectiveCategory) {
-    message.error('品类不能为空：请先完成招标清单识别后再入库')
-    return
-  }
-  try {
-    const { data } = await quoteApi.batchConfirm({
-      job_id: slot.job.id,
-      supplier_id: supplierId,
-      project_id: taskConfig.projectId,
-      category: effectiveCategory,
-      overrides: slot.items as unknown as Array<Record<string, unknown>>,
-      bid_status: taskConfig.bidStatus,
-    })
-    const result = data as BatchConfirmResult
-    slot.confirmed = true
-    slot.batch_id = result.batch_id
-    message.success(`已入库 ${result.line_count} 条报价`)
-  } catch (e) {
-    message.error(extractErrMsg(e, '入库失败'))
-  }
-}
-
-// Skip upload for a supplier (use existing historical data)
-function skipSupplier(supplierId: number) {
-  supplierUploads[supplierId] = {
-    job: null,
-    items: [],
-    confirmed: true,
-    unknown_brands: [],
-  }
-  message.info('已跳过该供应商上传，将使用历史数据')
-}
-
-// ─── Batch upload handlers ──────────────────────────────────────────────
-// NOTE: Excel/CSV files now go through the same intakeApi.upload → ExtractionJob →
-// batch-confirm pipeline as PDFs.  handleExcelBatchFile (legacy import_service fork)
-// has been removed.  quoteApi.import / import_service are still used by the
-// materials-library import screen; this compare flow no longer forks to them.
-
-function handleBatchFile(file: File) {
-  if (!file) return
-  const duplicatePending = batchFiles.value.some(
-    (entry) => entry.filename === file.name && !entry.confirmed,
-  )
-  if (duplicatePending) return
-
-    const entry: BatchFileEntry = {
-      id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      filename: file.name,
-      status: 'uploading',
-      stage: '准备上传',
-      progressPct: 1,
-      uploadPct: 1,
-      jobId: null,
-      detectedSupplierName: '',
-      finalSupplierName: '',
-      matchedSupplierId: null,
-      items: [],
-      confirmedSupplierId: null,
-      confirmedSubmissionId: null,
-      confirmed: false,
-      error: '',
-      pollTimer: null,
-    }
-    batchFiles.value.push(entry)
-    const reactiveEntry = batchFiles.value[batchFiles.value.length - 1]
-    uploadBatchFile(reactiveEntry, file)
-}
-
-async function uploadBatchFile(entry: BatchFileEntry, file: File) {
-  const form = new FormData()
-  form.append('file', file)
-  form.append('type', 'quote')
-  if (taskConfig.projectId) form.append('project_id', String(taskConfig.projectId))
-  if (taskConfig.category) form.append('category', taskConfig.category)
-  try {
-    const { data } = await intakeApi.upload(form, {
-      onUploadProgress: (evt) => {
-        if (!evt.total) return
-        const pct = Math.max(1, Math.min(99, Math.round((evt.loaded / evt.total) * 100)))
-        entry.uploadPct = pct
-        entry.progressPct = pct
-        entry.stage = `上传中 ${pct}%`
-      },
-    })
-    entry.jobId = data.id
-    syncBatchProgress(entry, data)
-    if (data.status === 'done') {
-      onBatchJobDone(entry, data)
-    } else if (data.status === 'failed') {
-      entry.status = 'failed'
-      entry.stage = '失败'
-      entry.error = data.error || '识别失败'
-    } else {
-      entry.status = 'processing'
-      startBatchPolling(entry)
-    }
-  } catch (e) {
-    entry.status = 'failed'
-    entry.stage = '失败'
-    entry.error = (e as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail
-      || (e as Error).message
-      || '上传失败'
-  }
-}
-
-function syncBatchProgress(entry: BatchFileEntry, job: ExtractionJob) {
-  if (job.status === 'pending') {
-    entry.status = 'processing'
-    entry.stage = job.progress_stage || '排队中'
-    entry.progressPct = job.progress_pct || 0
-  } else if (job.status === 'running') {
-    entry.status = 'processing'
-    entry.stage = job.progress_stage || '识别中'
-    entry.progressPct = job.progress_pct || 10
-  } else if (job.status === 'done') {
-    entry.status = 'done'
-    entry.stage = '已识别'
-    entry.progressPct = 100
-  } else if (job.status === 'failed') {
-    entry.status = 'failed'
-    entry.stage = job.progress_stage || '失败'
-  }
-}
-
-function currentBatchStepIndex(entry: BatchFileEntry) {
-  const stage = entry.stage || ''
-  if (entry.status === 'uploading') return 0
-  if (entry.status === 'done' || entry.confirmed) return BATCH_PROGRESS_STEPS.length - 1
-  if (stage.includes('已识别')) return 7
-  if (stage.includes('整理')) return 6
-  if (stage.includes('合并')) return 5
-  if (stage.includes('识别') || stage.includes('完成第') || stage.includes('并发')) return 4
-  if (stage.includes('拆分')) return 3
-  if (stage.includes('渲染') || stage.includes('准备')) return 2
-  if (stage.includes('接收') || stage.includes('排队')) return 1
-  for (let i = BATCH_PROGRESS_STEPS.length - 1; i >= 0; i--) {
-    if (entry.progressPct >= BATCH_PROGRESS_STEPS[i].pct) return i
-  }
-  return 0
-}
-
-function batchStepState(entry: BatchFileEntry, index: number) {
-  const current = currentBatchStepIndex(entry)
-  if (entry.status === 'failed' && index === current) return 'failed'
-  if (index < current) return 'completed'
-  if (index === current) return 'active'
-  return 'pending'
-}
-
-function startBatchPolling(entry: BatchFileEntry) {
-  if (entry.pollTimer) clearInterval(entry.pollTimer)
-  let failures = 0
-  entry.pollTimer = setInterval(async () => {
-    if (!entry.jobId) return
-    try {
-      const { data } = await intakeApi.getJob(entry.jobId)
-      failures = 0
-      syncBatchProgress(entry, data)
-      if (data.status === 'done') {
-        if (entry.pollTimer) clearInterval(entry.pollTimer)
-        entry.pollTimer = null
-        onBatchJobDone(entry, data)
-      } else if (data.status === 'failed') {
-        if (entry.pollTimer) clearInterval(entry.pollTimer)
-        entry.pollTimer = null
-        entry.status = 'failed'
-        entry.stage = '失败'
-        entry.error = data.error || '识别失败'
-      }
-    } catch {
-      failures++
-      if (failures >= 5) {
-        if (entry.pollTimer) clearInterval(entry.pollTimer)
-        entry.pollTimer = null
-        entry.status = 'failed'
-        entry.stage = '失败'
-        entry.error = '轮询超时'
-      }
-    }
-  }, 2000)
-}
-
-function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
-  entry.status = 'done'
-  entry.stage = '已识别'
-  entry.progressPct = 100
-  const shape = asQuoteShape(job.result)
-  entry.items = shape.items
-  entry.detectedSupplierName = shape.supplier_name || ''
-  // Auto-match against known suppliers; initialize finalSupplierName from OCR
-  if (entry.detectedSupplierName) {
-    const name = entry.detectedSupplierName.replace(/\s/g, '').toLowerCase()
-    const match = allSuppliers.value.find(
-      (s) => s.name.replace(/\s/g, '').toLowerCase() === name
-        || s.name.includes(entry.detectedSupplierName)
-    )
-    if (match) {
-      entry.matchedSupplierId = match.id
-      entry.finalSupplierName = match.name   // use canonical DB name when matched
-    } else {
-      entry.finalSupplierName = entry.detectedSupplierName
-    }
-  }
-}
-
-// ── 刷新可恢复：从后端重建 batchFiles（已入库 + 在途识别），续轮询/回填 items ──
-async function restoreBatchFiles(pid: number) {
-  if (batchFiles.value.length > 0) return   // 已有会话内卡片则不覆盖（仅刷新/深链时恢复）
-  let data
-  try {
-    ({ data } = await analysisApi.compareState({ project_id: pid }))
-  } catch {
-    return   // 新项目无状态，静默
-  }
-  const restored: BatchFileEntry[] = []
-  for (const s of data.submissions) {
-    restored.push({
-      id: `restored-sub-${s.submission_id}`,
-      filename: s.filename || `已入库报价 #${s.submission_id}`,
-      status: 'done', stage: `已入库 ${s.line_count} 条`,
-      progressPct: 100, uploadPct: 100,
-      jobId: s.job_id,
-      detectedSupplierName: s.supplier_raw_name,
-      finalSupplierName: s.supplier_raw_name,
-      matchedSupplierId: s.supplier_id,
-      items: [],
-      confirmedSupplierId: s.supplier_id,
-      confirmedSubmissionId: s.submission_id,
-      confirmed: true, error: '', pollTimer: null,
-    })
-  }
-  for (const j of data.inflight_jobs) {
-    restored.push({
-      id: `restored-job-${j.job_id}`,
-      filename: j.filename || '报价文件',
-      status: j.status === 'failed' ? 'failed' : 'processing',
-      stage: j.progress_stage || (j.status === 'done' ? '已识别' : '识别中'),
-      progressPct: j.progress_pct || 0, uploadPct: 100,
-      jobId: j.job_id,
-      detectedSupplierName: '', finalSupplierName: '', matchedSupplierId: null,
-      items: [],
-      confirmedSupplierId: null, confirmedSubmissionId: null,
-      confirmed: false, error: '', pollTimer: null,
-    })
-  }
-  batchFiles.value = restored
-  // 在途任务：拉一次最新 job → running 续轮询；done 回填 items 供"校对入库"。
-  for (const entry of batchFiles.value) {
-    if (entry.confirmed || !entry.jobId || entry.status === 'failed') continue
-    try {
-      const { data: job } = await intakeApi.getJob(entry.jobId)
-      syncBatchProgress(entry, job)
-      if (job.status === 'done') onBatchJobDone(entry, job)
-      else if (job.status === 'running' || job.status === 'pending') startBatchPolling(entry)
-    } catch { /* ignore transient */ }
-  }
-}
-
-async function confirmBatchEntry(entry: BatchFileEntry) {
-  if (!entry.jobId) return
-
-  // ── 品类校验 ──
-  const categories = confirmedCategories.value
-  const effectiveCategory =
-    tenderCategory.value || taskConfig.category ||
-    (categories.length === 1 ? categories[0] : '')
-  if (!effectiveCategory) {
-    message.error(categories.length > 1
-      ? '采购清单包含多个品类，请先选择本报价所属品类'
-      : '未恢复采购清单品类，请返回采购清单步骤重新确认')
-    return
-  }
-  if (categories.length > 1 && !categoryExplicitlySelected.value) {
-    message.error('采购清单包含多个品类，请先选择本报价所属品类')
-    return
-  }
-
-  // 用 finalSupplierName（用户编辑后的名称）作为权威名称
-  const supplierName = entry.finalSupplierName.trim() || entry.detectedSupplierName
-  if (!supplierName) {
-    message.warning('请输入供应商名称')
-    return
-  }
-
-  // ── 三方冲突警告：文件名提示 / OCR 识别 / 当前输入名称不一致时要求确认 ─────
-  const filenameHint = _extractSupplierHintFromFilename(entry.filename)
-  const ocrName = entry.detectedSupplierName
-  const conflicts: string[] = []
-  if (filenameHint && !supplierName.includes(filenameHint) && !filenameHint.includes(supplierName.slice(0, 4))) {
-    conflicts.push(`· 文件名提示：「${filenameHint}」`)
-  }
-  if (ocrName && ocrName !== supplierName && !ocrName.includes(supplierName) && !supplierName.includes(ocrName.slice(0, 4))) {
-    conflicts.push(`· OCR 识别：「${ocrName}」`)
-  }
-  if (conflicts.length > 0) {
-    const ok = window.confirm(
-      `供应商名称存在冲突，请确认：\n${conflicts.join('\n')}\n· 当前输入：「${supplierName}」\n\n确认以「${supplierName}」入库？`
-    )
-    if (!ok) return
-  }
-
-  try {
-    // supplier_id 由用户主动选择（matchedSupplierId）决定；编辑名称后若不再匹配则为 null（陌生供应商）
-    const supplierId = entry.matchedSupplierId ?? undefined
-    const { data } = await quoteApi.batchConfirm({
-      job_id: entry.jobId,
-      supplier_id: supplierId,
-      supplier_name: supplierName,
-      project_id: taskConfig.projectId,
-      category: effectiveCategory,
-      overrides: entry.items as unknown as Array<Record<string, unknown>>,
-      bid_status: taskConfig.bidStatus,
-    })
-    entry.confirmed = true
-    entry.confirmedSupplierId = data.supplier_id ?? null
-    entry.confirmedSubmissionId = data.submission_id ?? null
-    const unknownNote = supplierId ? '' : '（陌生供应商，仅用于本次比价）'
-    message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价`)
-  } catch (e: unknown) {
-    const resp = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-    if (resp && typeof resp === 'object' && (resp as Record<string, unknown>).error === 'supplier_alias_conflict') {
-      const d = resp as { message: string; candidates: { id: number; name: string; similarity: number }[] }
-      const topMatch = d.candidates[0]
-      // 自动选最相似的候选，提示用户确认
-      const confirmed = window.confirm(
-        `${d.message}\n\n最相似：「${topMatch.name}」(相似度 ${Math.round(topMatch.similarity * 100)}%)\n\n点「确定」合并到该供应商，点「取消」手动选择`
-      )
-      if (confirmed) {
-        entry.matchedSupplierId = topMatch.id
-        await confirmBatchEntry(entry)  // 用确认的 supplier_id 重试
-      } else {
-        message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
-      }
-    } else {
-      message.error(extractErrMsg(e, '入库失败'))
-    }
-  }
-}
-
-async function removeBatchEntry(entry: BatchFileEntry) {
-  if (entry.pollTimer) clearInterval(entry.pollTimer)
-  // 已入库 → supersede submission；在途/失败（有 jobId 无 submission）→ 标记 job removed；
-  // 二者皆持久化到后端，避免刷新后 compare-state 把卡片再拉回来。
-  try {
-    if (entry.confirmed && entry.confirmedSubmissionId != null) {
-      await quoteApi.supersedeSubmission(entry.confirmedSubmissionId)
-      message.success('已移除该报价')
-    } else if (entry.jobId) {
-      await quoteApi.removeJob(entry.jobId)
-    }
-  } catch (e: unknown) {
-    message.error(extractErrMsg(e, '移除失败'))
-    return
-  }
-  batchFiles.value = batchFiles.value.filter((f) => f.id !== entry.id)
-}
-
-// 一键移除：清空当前项目下全部供应商报价。
-// - 已入库：项目级 supersede（可复活）。
-// - 在途失败/已识别待确认（非运行中）：逐个标记 job removed。
-// - 运行中（识别未完）：保留，不强制中断后台线程。
-async function removeAllBatchEntries() {
-  const pid = taskConfig.projectId
-  if (pid) {
-    try {
-      const { data } = await quoteApi.supersedeProjectSubmissions(pid)
-      message.success(`已移除全部已入库报价（${data.count} 条）`)
-    } catch (e: unknown) {
-      message.error(extractErrMsg(e, '一键移除失败'))
-      return
-    }
-  }
-  // 非运行中的在途任务（失败/已识别待确认）→ 标记 removed
-  const inflightDone = batchFiles.value.filter(
-    (f) => !f.confirmed && f.jobId && (f.status === 'failed' || f.status === 'done'),
-  )
-  for (const f of inflightDone) {
-    try { await quoteApi.removeJob(f.jobId!) } catch { /* best-effort */ }
-  }
-  // 清理 UI：移除已入库 + 已处理在途；保留运行中的卡片（及其轮询）
-  for (const f of batchFiles.value) {
-    const keep = !f.confirmed && (f.status === 'uploading' || f.status === 'processing')
-    if (!keep && f.pollTimer) clearInterval(f.pollTimer)
-  }
-  batchFiles.value = batchFiles.value.filter(
-    (f) => !f.confirmed && (f.status === 'uploading' || f.status === 'processing'),
-  )
-}
-
-// 从文件名中提取供应商名称提示（用于冲突检测）
-// 例：「泰科龙投标文件.pdf」→「泰科龙」；「上海绵存报价单.xlsx」→「上海绵存」
-function _extractSupplierHintFromFilename(filename: string): string {
-  const base = filename.replace(/\.(pdf|xlsx?|csv|docx?)$/i, '')
-  // 按常见切割词分割，取第一个非空段
-  const parts = base.split(/[投标报价文件单_\-\s··【】()（）]+/)
-  return (parts[0] || '').trim()
-}
-
 onBeforeUnmount(() => {
-  for (const f of batchFiles.value) {
-    if (f.pollTimer) clearInterval(f.pollTimer)
-  }
+  clearAllBatchFiles()
   stopTenderPoll()
 })
 
@@ -1674,8 +1249,8 @@ async function runMatrix() {
             <span>材质覆盖：<strong :style="{ color: pdfQm.material_columns_filled_rate < 0.4 ? '#cf1322' : '#389e0d' }">{{ pct(pdfQm.material_columns_filled_rate) }}</strong></span>
             <span>来源追踪：<strong :style="{ color: pdfQm.source_ref_coverage < 1.0 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.source_ref_coverage) }}</strong></span>
             <span>数量解析：<strong :style="{ color: pdfQm.qty_parse_success_rate < 0.8 ? '#d46b08' : '#389e0d' }">{{ pct(pdfQm.qty_parse_success_rate) }}</strong></span>
-            <span v-if="pdfQm.table_grid_pages.length || pdfQm.html_fallback_pages.length" style="color:rgba(0,0,0,0.45)">
-              识别路径：<template v-if="pdfQm.table_grid_pages.length">{{ pdfQm.table_grid_pages.length }}页标准解析</template><template v-if="pdfQm.html_fallback_pages.length">{{ pdfQm.table_grid_pages.length ? ' · ' : '' }}{{ pdfQm.html_fallback_pages.length }}页OCR增强解析</template>
+            <span v-if="pdfQm.vl_direct_pages.length || pdfQm.table_grid_pages.length || pdfQm.html_fallback_pages.length" style="color:rgba(0,0,0,0.45)">
+              识别路径：<template v-if="pdfQm.vl_direct_pages.length">{{ pdfQm.vl_direct_pages.length }}页VL直抽</template><template v-if="pdfQm.table_grid_pages.length">{{ pdfQm.vl_direct_pages.length ? ' · ' : '' }}{{ pdfQm.table_grid_pages.length }}页标准解析</template><template v-if="pdfQm.html_fallback_pages.length">{{ (pdfQm.vl_direct_pages.length || pdfQm.table_grid_pages.length) ? ' · ' : '' }}{{ pdfQm.html_fallback_pages.length }}页OCR增强解析</template>
             </span>
           </div>
           <div v-if="pdfQm.seq_missing.length || pdfQm.seq_duplicate.length" style="margin-top:6px;font-size:12px;color:#d46b08">
@@ -1690,8 +1265,8 @@ async function runMatrix() {
           <div v-if="showQualityDetails && pdfDiagnostics.length" style="margin-top:8px">
             <div style="display:flex;flex-wrap:wrap;gap:4px">
               <a-tooltip v-for="d in pdfDiagnostics" :key="d.page"
-                :title="`第${d.page}页 · ${d.input_mode === 'table_grid' ? '标准解析' : 'OCR增强解析'}${d.fallback_reason ? '（原因：' + d.fallback_reason + '）' : ''} · 预计${d.expected_rows}行 · 提取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
-                <a-tag :color="d.input_mode === 'table_grid' ? 'green' : 'orange'"
+                :title="`第${d.page}页 · ${inputModeLabel(d.input_mode).text}${d.fallback_reason ? '（原因：' + d.fallback_reason + '）' : ''} · 预计${d.expected_rows}行 · 提取${d.extracted_rows}行${d.thinking_retry ? ' · 已重试' : ''}`">
+                <a-tag :color="inputModeLabel(d.input_mode).color"
                   style="cursor:default;font-size:11px;padding:0 6px;line-height:20px">
                   第{{ d.page }}页<template v-if="d.fallback_reason"> ⚠</template>
                 </a-tag>
@@ -1807,6 +1382,20 @@ async function runMatrix() {
                 参考清单 · {{ tenderPreview.total }} 条<template v-if="tenderCategory"> · {{ tenderCategory }}</template>
               </div>
             </div>
+            <!-- design/24 B1：多 Sheet 附件——自动挑了数据行数最多的一个，
+                 不一定是用户要的那个（真实附件常见"汇总表"排前面），给切换器改选 -->
+            <a-select
+              v-if="tenderPreview.sheets.length > 1"
+              :value="tenderPreview.selected_sheet"
+              size="small"
+              style="width:160px"
+              :disabled="tenderPreviewing"
+              @change="(v: string) => tenderFile && previewTenderList(tenderFile, v)"
+            >
+              <a-select-option v-for="s in tenderPreview.sheets" :key="s.name" :value="s.name">
+                {{ s.name }}{{ s.looks_like_list ? `（${s.row_count} 行）` : '（非清单）' }}
+              </a-select-option>
+            </a-select>
             <a-button size="small" type="link"
               @click="tenderPreview = null; tenderFile = null; reconcileResult = null; reconcileConfirmed = false; excelOnlyItemActions = {}">
               重新上传
@@ -1837,22 +1426,46 @@ async function runMatrix() {
               强制归入默认品类「{{ tenderCategory || taskConfig.category }}」（{{ tenderPreview.unknown_count }} 项未识别将写入审计标记）
             </a-checkbox>
           </div>
-          <!-- 字段差异摘要（reconcile 已完成时显示） -->
-          <div v-if="reconcileResult && reconcileResult.field_mismatches.length" style="margin-top:12px">
-            <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">
-              字段差异（{{ reconcileResult.field_mismatches.length }} 处）—— 以PDF主清单值为准
+          <!-- 差异摘要 + 确认（reconcile 已完成时显示）
+               R1 止血：此前这里只展示 field_mismatches，序号缺失
+               (seq_missing_in_pdf/xlsx) 完全没有列表可看；且
+               recommended_source==='excel' 时下方提示"请勾选「已确认差异」
+               后继续"，但页面上根本不存在这个勾选控件——reconcileConfirmed
+               永远是 false，第 1 步在这种情况下永久卡死。现在两类差异都
+               列出来，并且真的给了确认控件。 -->
+          <div v-if="reconcileResult && reconcileResult.recommended_source === 'excel'" style="margin-top:12px">
+            <div v-if="reconcileResult.field_mismatches.length" style="margin-bottom:10px">
+              <div style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:6px">
+                字段差异（{{ reconcileResult.field_mismatches.length }} 处）—— 以PDF主清单值为准
+              </div>
+              <a-table
+                :data-source="reconcileResult.field_mismatches"
+                :row-key="(_r: Record<string,unknown>, i: number) => i"
+                size="small" :pagination="{ pageSize: 5, size: 'small' }"
+                :columns="[
+                  { title: '序号', dataIndex: 'seq', width: 56 },
+                  { title: '字段', dataIndex: 'field', width: 60 },
+                  { title: 'Excel参考值', dataIndex: 'xlsx_value', ellipsis: true },
+                  { title: 'PDF主清单值', dataIndex: 'pdf_value', ellipsis: true },
+                ]"
+              />
             </div>
-            <a-table
-              :data-source="reconcileResult.field_mismatches"
-              :row-key="(_r: Record<string,unknown>, i: number) => i"
-              size="small" :pagination="{ pageSize: 5, size: 'small' }"
-              :columns="[
-                { title: '序号', dataIndex: 'seq', width: 56 },
-                { title: '字段', dataIndex: 'field', width: 60 },
-                { title: 'Excel参考值', dataIndex: 'xlsx_value', ellipsis: true },
-                { title: 'PDF主清单值', dataIndex: 'pdf_value', ellipsis: true },
-              ]"
-            />
+            <div
+              v-if="reconcileResult.seq_missing_in_pdf.length || reconcileResult.seq_missing_in_xlsx.length"
+              style="font-size:12px;color:rgba(0,0,0,0.55);margin-bottom:10px"
+            >
+              <div v-if="reconcileResult.seq_missing_in_pdf.length">
+                Excel 有、PDF 主清单缺失的序号：{{ reconcileResult.seq_missing_in_pdf.join('、') }}
+              </div>
+              <div v-if="reconcileResult.seq_missing_in_xlsx.length" style="margin-top:2px">
+                PDF 主清单有、Excel 缺失的序号：{{ reconcileResult.seq_missing_in_xlsx.join('、') }}
+              </div>
+            </div>
+            <div style="padding:8px 12px;background:#fff7e6;border:1px solid #ffa940;border-radius:4px">
+              <a-checkbox v-model:checked="reconcileConfirmed">
+                已核对以上差异，确认继续（后续按 Excel 清单为准）
+              </a-checkbox>
+            </div>
           </div>
         </div>
       </div>
@@ -1930,7 +1543,7 @@ async function runMatrix() {
                 {{ f.stage }} · {{ f.progressPct }}%
               </a-tag>
               <a-tag v-else-if="f.status === 'processing'" color="blue">
-                {{ f.stage }} · {{ f.progressPct }}%
+                {{ f.stage }}<template v-if="f.stageDetail">（{{ f.stageDetail }}）</template> · {{ f.progressPct }}%
               </a-tag>
               <a-tag v-else-if="f.status === 'failed'" color="red">失败</a-tag>
               <a-tag v-else-if="f.confirmed && !f.jobId" color="green">Excel 已导入</a-tag>
@@ -1959,7 +1572,7 @@ async function runMatrix() {
               v-if="f.status === 'uploading' || f.status === 'processing'"
               class="batch-card__progress-detail"
             >
-              当前：{{ f.stage }} · {{ f.progressPct }}%
+              当前：{{ f.stage }}<template v-if="f.stageDetail">（{{ f.stageDetail }}）</template> · {{ f.progressPct }}%
               <span v-if="f.jobId"> · 任务 {{ f.jobId.slice(0, 8) }}</span>
             </div>
             <div
@@ -1985,6 +1598,35 @@ async function runMatrix() {
             <div v-if="f.error" style="color:#ff4d4f;font-size:12px;margin-top:4px">{{ f.error }}</div>
 
             <div v-if="f.status === 'done' && !f.confirmed" class="batch-card__body">
+              <!-- 评审 R2：识别质量分层横幅——此前 BLOCKED/REVIEW 完全静默，
+                   人工只有在提交被 422 拒绝时才第一次知道有问题。 -->
+              <a-alert
+                v-if="f.quality?.quality_status && f.quality.quality_status !== 'PASS'"
+                :type="f.quality.quality_status === 'BLOCKED' ? 'error' : 'warning'"
+                show-icon
+                style="margin-bottom:8px"
+                :message="f.quality.quality_status === 'BLOCKED'
+                  ? '识别质量：BLOCKED —— 存在严重问题，不建议直接入库'
+                  : '识别质量：REVIEW —— 建议逐行核对后再入库'"
+              >
+                <template v-if="(f.quality.quality_blocking_reasons?.length ?? 0) > 0" #description>
+                  <ul style="margin:4px 0 0;padding-left:18px;font-size:12px">
+                    <li v-for="(r, i) in f.quality.quality_blocking_reasons" :key="i">{{ r }}</li>
+                  </ul>
+                </template>
+              </a-alert>
+              <div
+                v-if="(f.quality?.row_ledger?.dropped_rows ?? 0) > 0"
+                style="font-size:12px;color:#faad14;margin-bottom:8px"
+              >
+                ⚠ 识别 {{ f.quality!.row_ledger!.recognized_rows }}/{{ f.quality!.row_ledger!.expected_rows }} 行，
+                {{ f.quality!.row_ledger!.dropped_rows }} 行未识别到
+                <span v-if="f.quality!.row_ledger!.empty_pages.length">
+                  （{{ f.quality!.row_ledger!.empty_pages.length }} 页零产出）</span
+                ><span v-if="f.quality!.row_ledger!.short_pages.length">
+                  （{{ f.quality!.row_ledger!.short_pages.length }} 页产出不足）</span
+                >
+              </div>
               <div class="batch-card__supplier-row">
                 <span style="font-size:12px;color:rgba(0,0,0,0.55)">识别供应商：</span>
                 <a-auto-complete
@@ -2003,7 +1645,7 @@ async function runMatrix() {
                 />
                 <a-tag v-if="f.matchedSupplierId" color="blue" style="margin-left:4px;font-size:11px">已关联</a-tag>
                 <a-tag v-else style="margin-left:4px;font-size:11px">陌生</a-tag>
-                <a-button type="primary" size="small" @click="confirmBatchEntry(f)">校对入库</a-button>
+                <a-button type="primary" size="small" :loading="f.confirming" @click="confirmBatchEntry(f)">校对入库</a-button>
               </div>
             </div>
           </div>
@@ -2033,7 +1675,24 @@ async function runMatrix() {
               />
 
               <div v-if="(supplierUploads[s.id]?.items?.length ?? 0) > 0" style="margin-top:14px">
+                <!-- 评审 R2：同批量模式的质量分层横幅，legacy 模式（单供应商 tab）也接上 -->
                 <a-alert
+                  v-if="slotQuality(s.id)?.quality_status && slotQuality(s.id)!.quality_status !== 'PASS'"
+                  :type="slotQuality(s.id)!.quality_status === 'BLOCKED' ? 'error' : 'warning'"
+                  show-icon
+                  style="margin-bottom:10px"
+                  :message="slotQuality(s.id)!.quality_status === 'BLOCKED'
+                    ? '识别质量：BLOCKED —— 存在严重问题，不建议直接入库'
+                    : '识别质量：REVIEW —— 建议逐行核对后再入库'"
+                >
+                  <template v-if="(slotQuality(s.id)?.quality_blocking_reasons?.length ?? 0) > 0" #description>
+                    <ul style="margin:4px 0 0;padding-left:18px;font-size:12px">
+                      <li v-for="(r, i) in slotQuality(s.id)!.quality_blocking_reasons" :key="i">{{ r }}</li>
+                    </ul>
+                  </template>
+                </a-alert>
+                <a-alert
+                  v-else
                   type="info"
                   show-icon
                   message="识别完成，请核对后点击「校对入库」"
@@ -2254,7 +1913,7 @@ async function runMatrix() {
             <div>评标方法：合理低价评标价法 — 最低报价不保证中标；本项目单一中标人，不做拆单组合。</div>
             <div v-if="matrixSummary.ranking?.length" style="margin-top:4px">
               评标总价排名：
-              <span v-for="(r, i) in matrixSummary.ranking" :key="r.supplier_id">
+              <span v-for="(r, i) in matrixSummary.ranking" :key="r.submission_id ?? r.id">
                 {{ i + 1 }}.{{ r.name }} ¥{{ Math.round(r.evaluated_total).toLocaleString() }}<span v-if="i < matrixSummary.ranking.length - 1">　</span>
               </span>
             </div>
@@ -2295,7 +1954,7 @@ async function runMatrix() {
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">评标总价(含税)</span>
                   <span class="eval-card__metric-value">
-                    ¥{{ ((matrixTotals.find(t => t.supplier_id === s.id) as any)?.evaluated_total ?? matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
+                    ¥{{ (totalFor(s)?.evaluated_total ?? totalFor(s)?.total ?? 0).toLocaleString() }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
@@ -2303,45 +1962,45 @@ async function runMatrix() {
                   <span
                     class="eval-card__metric-value"
                     :style="{ color: normalizeAlert(
-                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
-                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                      Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
                     ) === 'normal' ? '#52c41a' : normalizeAlert(
-                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
-                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                      Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
                     ) === 'yellow' ? '#faad14' : '#ff4d4f' }"
                   >
-                    {{ formatDeviation(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) }}
+                    {{ formatDeviation(totalFor(s)?.avg_deviation ?? 0) }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">报价完整度</span>
                   <span class="eval-card__metric-value">
-                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0 }}/{{ matrixRows.length }}
+                    {{ totalFor(s)?.quoted_count ?? 0 }}/{{ matrixRows.length }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">异常项</span>
                   <span
                     class="eval-card__metric-value"
-                    :style="{ color: (matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) > 0 ? '#ff4d4f' : '#52c41a' }"
+                    :style="{ color: (totalFor(s)?.anomaly_count ?? 0) > 0 ? '#ff4d4f' : '#52c41a' }"
                   >
-                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0 }}
+                    {{ totalFor(s)?.anomaly_count ?? 0 }}
                   </span>
                 </div>
               </div>
               <div class="eval-card__tags">
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines ?? 0) > 0" color="orange">
-                  税口径假定含税 {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.tax_assumed_lines }} 行
+                <a-tag v-if="(totalFor(s)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
+                <a-tag v-if="(totalFor(s)?.tax_assumed_lines ?? 0) > 0" color="orange">
+                  税口径假定含税 {{ totalFor(s)?.tax_assumed_lines }} 行
                 </a-tag>
-                <a-tag v-else-if="(matrixTotals.find(t => t.supplier_id === s.id) as any)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines ?? 0) > 0" color="gold">
-                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.undecided_lines }} 行未决
+                <a-tag v-else-if="totalFor(s)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
+                <a-tag v-if="(totalFor(s)?.undecided_lines ?? 0) > 0" color="gold">
+                  {{ totalFor(s)?.undecided_lines }} 行未决
                 </a-tag>
-                <a-tag v-if="((matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines ?? 0) > 0" color="purple">
-                  {{ (matrixTotals.find(t => t.supplier_id === s.id) as any)?.qty_conflict_lines }} 行数量冲突
+                <a-tag v-if="(totalFor(s)?.qty_conflict_lines ?? 0) > 0" color="purple">
+                  {{ totalFor(s)?.qty_conflict_lines }} 行数量冲突
                 </a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
+                <a-tag v-if="(totalFor(s)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
               </div>
             </div>
           </a-col>
@@ -2420,7 +2079,7 @@ async function runMatrix() {
             <template #icon><LeftOutlined /></template>
             返回核查
           </a-button>
-          <a-button @click="runMatrix">
+          <a-button :loading="analyzing" @click="runMatrix">
             <template #icon><LineChartOutlined /></template>
             重新比价
           </a-button>

@@ -3,6 +3,7 @@ import logging
 import re as _re
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -17,29 +18,44 @@ from apps.api.schemas import (
     DashboardHeatmapData, DashboardBubbleData,
     AlignmentSuggestRequest, AlignmentSuggestResult,
     AlignmentApplyRequest, AlignmentApplyResult, AlignmentGroupOut,
+    AnchorReviewMatrixResult,
+    AnchorReviewResult,
+    AnchorReviewConfirmResult, AnchorReviewItemConfirmResult,
+    AnchorReviewBulkConfirmResult, AnchorReviewFinalizeResult,
+    BidAlignmentGroupDeleteResult, RefreshBaselinesResult,
+    TenderPreviewResultOut, SourceReconcileResultOut,
+    TenderListConfirmResult, TenderListCurrentSessionsResult,
+    TenderListCurrentResult, TenderListDeactivateResult, TenderListVersionOut,
+    CompareStateResult,
+    LlmFillResult,
+    TenderMatchResult,
+    BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
+    BidMatrixVersionApproveResult,
+    AnchorMissingAckRequest, AnchorMissingAckResult,
 )
-from apps.api.services.comparison import compare_price
-from apps.api.services.scoring import score_supplier, compare_multiple_suppliers
-from apps.api.services.statistics import (
+from apps.api.services.history.comparison import compare_price
+from apps.api.services.history.scoring import score_supplier, compare_multiple_suppliers
+from apps.api.services.history.statistics import (
     get_dashboard_summary,
     get_category_detail_stats,
     refresh_material_baselines,
     get_dashboard_heatmap,
     get_dashboard_bubble,
 )
-from apps.api.services.bid_insight import generate_bid_insight
+from apps.api.services.matrix.bid_insight import generate_bid_insight
+from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
 from apps.api.core.config import get_settings
 from apps.api.core.utils import parse_id_csv
 from apps.api.core.domain_config import (
     MATCH_PRICE_COVERAGE_THRESHOLD,
     MATCH_ARITHMETIC_MAX_ERROR_RATE,
-    MATCH_ARITHMETIC_VAT_TOLERANCE,
+    MATCH_DERIVED_TOTAL_MAX_RATE,
     MATCH_VAT_MISMATCH_BLOCK_RATE,
     MATCH_MAX_LINE_CONCENTRATION,
     MATCH_DECLARED_TOTAL_TOLERANCE,
 )
-from apps.api.services import tender_session_service
-from apps.api.services.tender_session_service import (
+from apps.api.services.tender import tender_session_service
+from apps.api.services.tender.tender_session_service import (
     get_current_confirmed_session,
     get_finalization_snapshot,
 )
@@ -50,6 +66,7 @@ from apps.api.services.audit import (
     EVENT_ALIGNMENT_ITEM_CONFIRM,
     EVENT_ALIGNMENT_BULK_CONFIRM,
     EVENT_LLM_FILL_PERSIST,
+    EVENT_ANCHOR_MISSING_ACK,
 )
 
 _SUMMARY_NAME_PAT = _re.compile(
@@ -91,7 +108,7 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
     return result
 
 
-@router.post("/bid-matrix")
+@router.post("/bid-matrix", response_model=BidMatrixResult)
 def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatrixResult:
     """横向对比矩阵 — F6.1 核心接口。
 
@@ -119,8 +136,8 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
     # v2.5: prefer anchor-full-axis matrix when TenderListSession exists
     result = None
     if body.project_id and body.category:
-        from apps.api.services.tender_list import rebuild_anchors
-        from apps.api.services.bid_matrix import build_anchor_matrix
+        from apps.api.services.tender.tender_list import rebuild_anchors
+        from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 
         session = get_current_confirmed_session(db, body.project_id, body.category)
         if session and session.anchors_json:
@@ -134,12 +151,10 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
             _used_sids = set(session.used_submission_ids or [])
             if not _used_sids:
                 _any_active_sub = (
-                    db.query(_BSCheck.id)
-                    .filter(
+                    db.scalar(select(_BSCheck.id).where(
                         _BSCheck.project_id == body.project_id,
                         _BSCheck.status.notin_(("rejected", "superseded")),
-                    )
-                    .first()
+                    ))
                 )
                 if _any_active_sub:
                     raise HTTPException(
@@ -148,17 +163,12 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                         "请重新执行「校对入库」→「对齐核查」后再生成矩阵。",
                     )
             else:
-                _sids_with_bql: set[int] = {
-                    row[0] for row in (
-                        db.query(_BQLCheck.submission_id)
-                        .filter(
-                            _BQLCheck.submission_id.in_(_used_sids),
-                            _BQLCheck.category == body.category,
-                        )
-                        .distinct()
-                        .all()
-                    )
-                }
+                _sids_with_bql: set[int] = set(db.scalars(
+                    select(_BQLCheck.submission_id).where(
+                        _BQLCheck.submission_id.in_(_used_sids),
+                        _BQLCheck.category == body.category,
+                    ).distinct()
+                ).all())
                 _missing_bql = sorted(sid for sid in _used_sids if sid not in _sids_with_bql)
                 if _missing_bql:
                     raise HTTPException(
@@ -182,12 +192,12 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
             if allowed_group_ids is not None:
                 from apps.api.models.bid_alignment import BidAlignmentGroup as _BAGCheck
                 _cur_gids = {
-                    gid for (gid,) in db.query(_BAGCheck.id).filter(
+                    gid for gid in db.scalars(select(_BAGCheck.id).where(
                         _BAGCheck.project_id == body.project_id,
                         _BAGCheck.category == body.category,
                         _BAGCheck.status == "confirmed",
                         _BAGCheck.tender_list_session_id == session.id,
-                    ).all()
+                    )).all()
                 }
                 if _cur_gids and not (allowed_group_ids & _cur_gids):
                     allowed_group_ids = None
@@ -262,7 +272,7 @@ def dashboard_bubble(
     return get_dashboard_bubble(db, date_from, date_to)
 
 
-@router.post("/refresh-baselines")
+@router.post("/refresh-baselines", response_model=RefreshBaselinesResult)
 def refresh_baselines(category: str | None = None, db: Session = Depends(get_db)):
     refresh_material_baselines(db, category)
     return {"status": "ok", "message": f"Baselines refreshed for {category or 'all categories'}"}
@@ -289,7 +299,7 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
       1. Pass `rows` directly (from OCR results before DB import)
       2. Pass `project_id + supplier_ids + category` (query confirmed quotes from DB)
     """
-    from apps.api.services.bid_alignment import suggest_alignment
+    from apps.api.services.alignment.bid_alignment import suggest_alignment
     from apps.api.services.llm_provider import get_dashscope_client
     from apps.api.models import Quote, Material, Supplier
 
@@ -310,26 +320,26 @@ def bid_alignment_suggest(body: AlignmentSuggestRequest, db: Session = Depends(g
         ROW_CAP = 75
         per_supplier = max(ROW_CAP // len(body.supplier_ids), 20)
 
-        from apps.api.services.quote_filters import valid_quote_filters as _vqf
-        base_q = db.query(Quote, Material, Supplier).join(
+        from apps.api.services.history.quote_filters import valid_quote_filters as _vqf
+        base_q = select(Quote, Material, Supplier).join(
             Material, Quote.material_id == Material.id
         ).join(
             Supplier, Quote.supplier_id == Supplier.id
-        ).filter(Quote.unit_price > 0, *_vqf())
+        ).where(Quote.unit_price > 0, *_vqf())
         if body.project_id:
-            base_q = base_q.filter(Quote.project_id == body.project_id)
+            base_q = base_q.where(Quote.project_id == body.project_id)
         if body.category:
-            base_q = base_q.filter(Material.category == body.category)
+            base_q = base_q.where(Material.category == body.category)
 
         results = []
         for sid in body.supplier_ids:
             chunk = (
                 base_q
-                .filter(Quote.supplier_id == sid)
+                .where(Quote.supplier_id == sid)
                 .order_by(Material.standard_name)
                 .limit(per_supplier)
-                .all()
             )
+            chunk = db.execute(chunk).all()
             results.extend(chunk)
 
         if not results:
@@ -424,7 +434,7 @@ def bid_alignment_apply(body: AlignmentApplyRequest, db: Session = Depends(get_d
         if fix.new_value is None:
             continue
         from apps.api.models.quote import Quote
-        quote = db.query(Quote).get(fix.quote_id)
+        quote = db.get(Quote, fix.quote_id)
         if quote and fix.field == "unit_price":
             quote.unit_price = fix.new_value
             fixes_applied += 1
@@ -445,13 +455,13 @@ def bid_alignment_groups(
 ):
     """获取已确认的对齐分组。"""
     from apps.api.models.bid_alignment import BidAlignmentGroup
-    q = db.query(BidAlignmentGroup)
+    q = select(BidAlignmentGroup)
     if project_id is not None:
-        q = q.filter(BidAlignmentGroup.project_id == project_id)
+        q = q.where(BidAlignmentGroup.project_id == project_id)
     if category:
-        q = q.filter(BidAlignmentGroup.category == category)
-    q = q.filter(BidAlignmentGroup.status == "confirmed")
-    groups = q.all()
+        q = q.where(BidAlignmentGroup.category == category)
+    q = q.where(BidAlignmentGroup.status == "confirmed")
+    groups = db.scalars(q).all()
 
     result = []
     for g in groups:
@@ -482,11 +492,11 @@ def bid_alignment_groups(
     return result
 
 
-@router.delete("/bid-alignment/groups/{group_id}")
+@router.delete("/bid-alignment/groups/{group_id}", response_model=BidAlignmentGroupDeleteResult)
 def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     """删除一个对齐分组（撤销对齐）。"""
     from apps.api.models.bid_alignment import BidAlignmentGroup
-    group = db.query(BidAlignmentGroup).get(group_id)
+    group = db.get(BidAlignmentGroup, group_id)
     if not group:
         raise HTTPException(404, "Alignment group not found")
     db.delete(group)
@@ -494,7 +504,7 @@ def bid_alignment_delete_group(group_id: int, db: Session = Depends(get_db)):
     return {"status": "ok", "deleted_group_id": group_id}
 
 
-@router.get("/anchor-review/matrix")
+@router.get("/anchor-review/matrix", response_model=AnchorReviewMatrixResult)
 def anchor_review_matrix(
     project_id: int = Query(...),
     category: str = Query(...),
@@ -510,7 +520,7 @@ def anchor_review_matrix(
     supplier_ids: 遗留兼容参数。submission_ids 存在时被忽略；仅当 submission_ids 和
     session.used_submission_ids 均为空时才作为降级路径使用。新客户端请传 submission_ids。
     """
-    from apps.api.services.bid_matrix import build_anchor_review_matrix
+    from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
 
     sids: list[int] | None = None
     _use_submission = True  # new BID path by default
@@ -538,17 +548,17 @@ def anchor_review_matrix(
                        "请先完成供应商报价上传并「开始匹配」后再查看复核矩阵。",
         })
 
-    try:
-        if _use_submission:
-            result = build_anchor_review_matrix(db, project_id, category, submission_ids=sids)
-        else:
-            result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)  # legacy
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    # build_anchor_review_matrix 现在抛 DomainError（评审 E1：ConflictError=无已确认
+    # session / ValidationError=submission_ids 为空），由 core/errors.py 的全局
+    # handler 统一映射，不用在这里再猜一次状态码。
+    if _use_submission:
+        result = build_anchor_review_matrix(db, project_id, category, submission_ids=sids)
+    else:
+        result = build_anchor_review_matrix(db, project_id, category, supplier_ids=sids)  # legacy
     return result
 
 
-@router.get("/anchor-review")
+@router.get("/anchor-review", response_model=AnchorReviewResult)
 def anchor_review(
     project_id: int = Query(...),
     category: str = Query(...),
@@ -568,7 +578,7 @@ def anchor_review(
     from apps.api.models.quote import Quote as QuoteModel
     from apps.api.models.material import Material as MaterialModel
     from apps.api.models.supplier import Supplier as SupplierModel
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
     sub_ids: list[int] | None = parse_id_csv(submission_ids, "submission_ids") if submission_ids else None
     sids: list[int] | None = parse_id_csv(supplier_ids, "supplier_ids") if supplier_ids else None
@@ -593,23 +603,23 @@ def anchor_review(
     _cur_session_id = _cur_session.id if _cur_session else None
 
     # 只拉当前 TenderListSession 的已确认锚点组（防历史数据污染）
-    _grp_q = db.query(BidAlignmentGroup).filter(
+    _grp_q = select(BidAlignmentGroup).where(
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
         BidAlignmentGroup.status == "confirmed",
     )
     if _cur_session_id:
-        _grp_q = _grp_q.filter(
+        _grp_q = _grp_q.where(
             BidAlignmentGroup.tender_list_session_id == _cur_session_id
         )
-    groups = _grp_q.all()
+    groups = db.scalars(_grp_q).all()
 
     # 构建 quote_id → (quote, material, supplier) 映射（旧路径）
     q_base = (
-        db.query(QuoteModel, MaterialModel, SupplierModel)
+        select(QuoteModel, MaterialModel, SupplierModel)
         .join(MaterialModel, QuoteModel.material_id == MaterialModel.id)
         .outerjoin(SupplierModel, QuoteModel.supplier_id == SupplierModel.id)
-        .filter(
+        .where(
             QuoteModel.project_id == project_id,
             MaterialModel.category == category,
         )
@@ -618,7 +628,7 @@ def anchor_review(
     # have a bound supplier (陌生供应商), the legacy path contributes nothing —
     # never run unfiltered (would leak全项目历史报价).
     if derived_supplier_ids:
-        all_rows = q_base.filter(QuoteModel.supplier_id.in_(derived_supplier_ids)).all()
+        all_rows = db.execute(q_base.where(QuoteModel.supplier_id.in_(derived_supplier_ids))).all()
     else:
         all_rows = []
     quote_map = {qt.id: (qt, mat, sup) for qt, mat, sup in all_rows}
@@ -633,13 +643,12 @@ def anchor_review(
     bql_map: dict = {}
     if _all_bql_ids:
         _bql_rows = (
-            db.query(_BQL, SupplierModel)
+            select(_BQL, SupplierModel)
             .join(_BidSub, _BQL.submission_id == _BidSub.id)
             .join(SupplierModel, _BidSub.supplier_id == SupplierModel.id)
-            .filter(_BQL.id.in_(_all_bql_ids))
-            .all()
+            .where(_BQL.id.in_(_all_bql_ids))
         )
-        bql_map = {bql.id: (bql, sup) for bql, sup in _bql_rows}
+        bql_map = {bql.id: (bql, sup) for bql, sup in db.execute(_bql_rows).all()}
 
     # 已匹配集合（两条路径分开追踪）
     matched_quote_ids: set[int] = set()
@@ -667,19 +676,19 @@ def anchor_review(
 
     # 残差:未匹配的新路径 BidQuoteLine 行
     _unmatched_bql_q = (
-        db.query(_BQL, SupplierModel)
+        select(_BQL, SupplierModel)
         .join(_BidSub, _BQL.submission_id == _BidSub.id)
         .join(SupplierModel, _BidSub.supplier_id == SupplierModel.id)
-        .filter(
+        .where(
             _BidSub.project_id == project_id,
             _BQL.category == category,
         )
     )
     # Authoritative submission-identity scoping for the new BQL residue path.
-    _unmatched_bql_q = _unmatched_bql_q.filter(_BidSub.id.in_(resolved_sub_ids))
+    _unmatched_bql_q = _unmatched_bql_q.where(_BidSub.id.in_(resolved_sub_ids))
     if matched_bql_ids:
-        _unmatched_bql_q = _unmatched_bql_q.filter(~_BQL.id.in_(matched_bql_ids))
-    for bql, sup in _unmatched_bql_q.all():
+        _unmatched_bql_q = _unmatched_bql_q.where(~_BQL.id.in_(matched_bql_ids))
+    for bql, sup in db.execute(_unmatched_bql_q).all():
         residue_quotes.append({
             "quote_id": None,
             "bid_quote_line_id": bql.id,
@@ -779,7 +788,7 @@ class _ItemConfirmBody(BaseModel):
     action: str  # "align" or "exclude"
 
 
-@router.post("/anchor-review/item-confirm")
+@router.post("/anchor-review/item-confirm", response_model=AnchorReviewItemConfirmResult)
 def anchor_review_item_confirm(
     body: _ItemConfirmBody,
     db: Session = Depends(get_db),
@@ -808,12 +817,49 @@ def anchor_review_item_confirm(
     return {"ok": True, "item_id": body.item_id, "action": body.action}
 
 
-@router.post("/tender-list/preview")
+@router.post("/anchor-review/missing-ack", response_model=AnchorMissingAckResult)
+def anchor_review_missing_ack(
+    body: AnchorMissingAckRequest,
+    db: Session = Depends(get_db),
+):
+    """复核者确认"这格确实无报价，符合预期"（docs/design/23）。
+
+    纯审计/UI 抑制标记：不创建报价、不改 cell_status、不进评标总价——
+    build_anchor_review_matrix 只在 cell_status 已经是 missing 时才查这张表，
+    查到与否不改变 cell_status 本身。acked=true/false 都是幂等操作。
+    """
+    from apps.api.services.alignment.anchor_missing_ack import set_missing_ack
+
+    set_missing_ack(
+        db, body.project_id, body.category, body.anchor_seq, body.submission_id,
+        body.acked, reason=body.reason,
+    )
+    write_domain_event(
+        db, user="system", event_type=EVENT_ANCHOR_MISSING_ACK,
+        identity={
+            "project_id": body.project_id, "category": body.category,
+            "anchor_seq": body.anchor_seq, "submission_id": body.submission_id,
+        },
+        after={"acked": body.acked},
+    )
+    db.commit()
+    return {
+        "ok": True, "anchor_seq": body.anchor_seq,
+        "submission_id": body.submission_id, "acked": body.acked,
+    }
+
+
+@router.post("/tender-list/preview", response_model=TenderPreviewResultOut)
 async def tender_list_preview(
     file: UploadFile = File(...),
+    # design/24 B1：多 Sheet 附件——不传时自动挑数据行数最多的候选 Sheet；
+    # 用户在预览里用 Sheet 切换器改选后，带着这个参数重新预览同一份文件。
+    sheet: str | None = Form(None),
 ):
     """解析采购清单 xlsx，返回品名/规格/数量预览，不跑嵌入，立即返回。"""
-    from apps.api.services.tender_list import parse_tender_xlsx
+    from apps.api.services.tender.tender_list import (
+        list_tender_sheets, parse_tender_xlsx, pick_default_sheet,
+    )
 
     name = (file.filename or "").lower()
     if not name.endswith((".xlsx", ".xls")):
@@ -821,12 +867,18 @@ async def tender_list_preview(
     content = await file.read()
     if not content:
         raise HTTPException(400, "文件为空")
+
+    sheets = list_tender_sheets(content)
+    resolved_sheet = sheet or pick_default_sheet(sheets)
+    if resolved_sheet is None:
+        raise HTTPException(400, "找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
+
     try:
-        anchors = parse_tender_xlsx(content)
+        anchors = parse_tender_xlsx(content, sheet=resolved_sheet)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    from apps.api.services.category_classify import classify_category
+    from apps.api.services.ingestion.category_classify import classify_category
 
     items = []
     breakdown: dict[str, int] = {}
@@ -862,6 +914,10 @@ async def tender_list_preview(
         "has_multiple_categories": len(breakdown) > 1,
         "unknown_count": unknown_count,
         "total": len(items),
+        # design/24 B1：全部候选 Sheet + 本次实际解析用的那个，供前端 Sheet 切换器用。
+        "sheets": [{"name": s.name, "looks_like_list": s.looks_like_list, "row_count": s.row_count}
+                   for s in sheets],
+        "selected_sheet": resolved_sheet,
     }
 
 
@@ -871,14 +927,14 @@ class _ReconcileBody(BaseModel):
     source_type: str = "excel_primary"  # "excel_primary" | "pdf_primary"
 
 
-@router.post("/tender-list/reconcile")
+@router.post("/tender-list/reconcile", response_model=SourceReconcileResultOut)
 def tender_list_reconcile(body: _ReconcileBody):
     """Excel 清单 vs PDF 投标清单对账。
 
     source_type="excel_primary"（默认）：Excel 为主，差异须人工确认。
     source_type="pdf_primary"：PDF 为主，Excel 仅参考，差异不阻断流程。
     """
-    from apps.api.services.source_reconcile import reconcile_anchors
+    from apps.api.services.tender.source_reconcile import reconcile_anchors
     return reconcile_anchors(body.xlsx_items, body.pdf_items, source_type=body.source_type)
 
 
@@ -887,7 +943,7 @@ class _AnchorConfirmBody(BaseModel):
     action: str  # "confirm" or "reject"
 
 
-@router.post("/anchor-review/confirm")
+@router.post("/anchor-review/confirm", response_model=AnchorReviewConfirmResult)
 def anchor_review_confirm(
     body: _AnchorConfirmBody,
     db: Session = Depends(get_db),
@@ -927,7 +983,7 @@ def anchor_review_confirm(
         return {"ok": True, "group_id": body.group_id, "status": "deleted"}
 
 
-@router.post("/tender-list/match")
+@router.post("/tender-list/match", response_model=TenderMatchResult)
 async def tender_list_match(
     file: UploadFile | None = File(None),
     project_id: int = Form(...),
@@ -941,7 +997,7 @@ async def tender_list_match(
     file 可选：提供时直接解析；省略时自动加载当前已确认的 TenderListSession。
     落组后，/bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
     """
-    from apps.api.services.anchor_match import import_and_match
+    from apps.api.services.alignment.anchor_match import import_and_match
 
     content: bytes | None = None
     if file is not None:
@@ -958,7 +1014,7 @@ async def tender_list_match(
     # If no file provided, reconstruct anchors from current TenderListSession (issue 6)
     prebuilt_anchors = None
     if content is None:
-        from apps.api.services.tender_list import rebuild_anchors
+        from apps.api.services.tender.tender_list import rebuild_anchors
         session = (
             get_current_confirmed_session(db, project_id, category)
             if category
@@ -966,7 +1022,7 @@ async def tender_list_match(
         )
         if session is None and category is None:
             # category 未指定时回退：找该项目最新的已确认 session
-            from apps.api.services.tender_session_service import get_any_current_confirmed_session
+            from apps.api.services.tender.tender_session_service import get_any_current_confirmed_session
             session = get_any_current_confirmed_session(db, project_id)
         if not session:
             raise HTTPException(
@@ -987,7 +1043,7 @@ async def tender_list_match(
         # (closes the gap where match ran but no session was persisted → matrix 409).
         if not category:
             raise HTTPException(400, "上传招标清单时必须指定 category（品类）")
-        from apps.api.services.tender_list import (
+        from apps.api.services.tender.tender_list import (
             parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
         )
         _s = get_current_confirmed_session(db, project_id, category)
@@ -1012,8 +1068,9 @@ async def tender_list_match(
                 })
 
             file_name = (file.filename or "") if file is not None else ""
+            from apps.api.services.tender import tender_session_service
             for cat, anchors_json in groups.items():
-                s = _save_tender_session(
+                s = tender_session_service.save_session(
                     db, project_id, cat, file_name, anchors_json, confirmed_by=None,
                 )
                 db.flush()
@@ -1021,7 +1078,7 @@ async def tender_list_match(
                     _tls_id = s.id
             db.commit()
             # 用本品类锚点匹配(避免拿全清单跨品类误配)
-            cur = tender_session_service.get_current_session(db, category, project_id=project_id)
+            cur = tender_session_service.get_current_session_any_status(db, category, project_id=project_id)
             if cur:
                 prebuilt_anchors = rebuild_anchors(cur)
 
@@ -1029,62 +1086,37 @@ async def tender_list_match(
     brand_ctx = None
     if _tls_id:
         from apps.api.models.tender_list_session import TenderListSession as _TLSb
-        from apps.api.services.brand_match import build_brand_context
+        from apps.api.services.supplier.brand_match import build_brand_context
         _tls_b = db.get(_TLSb, _tls_id)
         if _tls_b and (_tls_b.brand_requirement or _tls_b.supplier_brand_map):
             brand_ctx = build_brand_context(
                 _tls_b.brand_requirement, _tls_b.supplier_brand_map
             )
 
-    # ── 硬闸门 v4.1：submission_ids 显式传入时三重校验 ─────────────────────────
-    # 1. 属于当前项目且 status 非 rejected/superseded
-    # 2. 在当前品类下存在 BQL（防止 category 空导致静默跳过）
-    # 3. 数量必须与传入集合完全一致（防止 resolve 多返）
+    # ── 硬闸门 v4.1：submission_ids 显式传入时双重校验 ─────────────────────────
+    # 1. 归属 + 状态 + BQL 存在，权威实现是 bid_submission_resolve.resolve_active_
+    #    submissions（评审 D3：此前这里手写两条 where 子句，与该函数各自独立
+    #    维护、docstring 明写"MUST call this function"却没人调用，容易再次分叉）。
+    # 2. 综合数据质量门
     if sub_ids:
-        from apps.api.models.bid_submission import BidSubmission as _BSM, BidQuoteLine as _BQLM
+        from apps.api.models.bid_submission import BidQuoteLine as _BQLM
+        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         _cat_for_check = category or ""
 
-        # 校验 1：归属 + 状态
-        _valid_subs: set[int] = {
-            row[0] for row in (
-                db.query(_BSM.id)
-                .filter(
-                    _BSM.id.in_(sub_ids),
-                    _BSM.project_id == project_id,
-                    _BSM.status.notin_(["rejected", "superseded"]),
-                )
-                .all()
-            )
-        }
-        _invalid = [sid for sid in sub_ids if sid not in _valid_subs]
+        _valid_map = resolve_active_submissions(
+            db, project_id, _cat_for_check, submission_ids=sub_ids,
+        )
+        _invalid = [sid for sid in sub_ids if sid not in _valid_map]
         if _invalid:
             raise HTTPException(
                 409,
-                f"以下 submission 不属于当前项目或已被废弃（rejected/superseded）：{_invalid}。",
+                f"以下 submission 不可用：{_invalid}。可能原因——不属于当前项目、"
+                f"已被废弃（rejected/superseded），或在品类「{_cat_for_check}」下无 "
+                "BidQuoteLine（入库时 category 传空被静默跳过）。请确认归属与状态，"
+                "或重新执行「校对入库」（确认品类非空）后再对齐。",
             )
 
-        # 校验 2：BQL 存在
-        _subs_with_bql: set[int] = {
-            row[0] for row in (
-                db.query(_BSM.id)
-                .join(_BQLM, _BSM.id == _BQLM.submission_id)
-                .filter(
-                    _BSM.id.in_(sub_ids),
-                    _BQLM.category == _cat_for_check,
-                )
-                .all()
-            )
-        }
-        _missing_bql = [sid for sid in sub_ids if sid not in _subs_with_bql]
-        if _missing_bql:
-            raise HTTPException(
-                409,
-                f"以下 submission 在品类「{_cat_for_check}」下无 BidQuoteLine "
-                f"（入库时 category 传空被静默跳过）：{_missing_bql}。"
-                "请重新执行「校对入库」（确认品类非空）后再对齐。",
-            )
-
-        # 校验 3：综合数据质量门
+        # 校验 2：综合数据质量门
         # 检查项：price_coverage / arithmetic_error_rate / systematic_vat_mismatch /
         #         line_concentration / declared_total_mismatch / line_exceeds_declared_total
         from apps.api.models.extraction_job import ExtractionJob as _EJM
@@ -1102,16 +1134,27 @@ async def tender_list_match(
 
         _quality_failures = []
         for _sid in sub_ids:
-            _sub_obj = db.query(_BSM).filter(_BSM.id == _sid).first()
+            _sub_obj = _valid_map.get(_sid)
 
-            _all_bqls = (
-                db.query(_BQLM)
-                .filter(
-                    _BQLM.submission_id == _sid,
-                    _BQLM.category == _cat_for_check,
-                )
-                .all()
-            )
+            # 统一资格判据（submission_eligibility）：状态 / 声明总价闭环 / 列错位 /
+            # 合价来源 / 价格覆盖率。此前这里完全不看 checksum——一份闭环失败的报价
+            # 能直接通过 match 门进入矩阵。判据集中一处，各入口共享同一答案。
+            if _sub_obj is not None:
+                from apps.api.services.submission.submission_eligibility import evaluate_submission
+                _verdict = evaluate_submission(db, _sub_obj)
+                if not _verdict.eligible:
+                    _quality_failures.append({
+                        "submission_id": _sid,
+                        "issues": [{"check": r.code, "message": r.message, **r.evidence}
+                                   for r in _verdict.reasons],
+                        "eligibility": _verdict.to_dict(),
+                    })
+                    continue
+
+            _all_bqls = db.scalars(select(_BQLM).where(
+                _BQLM.submission_id == _sid,
+                _BQLM.category == _cat_for_check,
+            )).all()
             if not _all_bqls:
                 continue
 
@@ -1126,7 +1169,7 @@ async def tender_list_match(
             # ── Declared total from ExtractionJob._doc_meta ───────────────────
             _declared_total: float | None = None
             if _sub_obj and _sub_obj.job_id:
-                _job = db.query(_EJM).filter(_EJM.id == _sub_obj.job_id).first()
+                _job = db.get(_EJM, _sub_obj.job_id)
                 if _job and isinstance(_job.result, dict):
                     _dmeta = _job.result.get("_doc_meta") or {}
                     _dt = _dmeta.get("bid_total")
@@ -1151,27 +1194,57 @@ async def tender_list_match(
                 })
 
             # ── Check B: arithmetic — hard errors and systematic VAT mismatch ─
-            _evaluable = [
-                b for b in _eligible
-                if (b.qty or 0) > 0 and (b.unit_price or 0) > 0 and (b.total_price or 0) > 0
+            # 合价由 qty×单价 派生的行必须排除：它们的 |qty×price − total| 恒为 0，
+            # 留在样本里既不提供信息，又会把分母撑大、把真实错误稀释到阈值以下
+            # （2026-08-09 实测：浦东 20 条派生行掩盖了同批的列错位行）。
+            def _is_derived_total(b) -> bool:
+                meta = b.extraction_meta or {}
+                return (meta.get("total_source") == "derived"
+                        or "derived_total" in (meta.get("validation_flags") or []))
+
+            _derived = [b for b in _eligible if _is_derived_total(b)]
+            _non_derived = [b for b in _eligible if not _is_derived_total(b)]
+
+            # 派生行本身也是问题：原文没有合价，系统替它算了一个。占比过高时
+            # 这份报价的金额不可作为比价依据。
+            if _derived and len(_derived) / len(_eligible) > MATCH_DERIVED_TOTAL_MAX_RATE:
+                _issues.append({
+                    "check": "derived_total_rate",
+                    "eligible": len(_eligible),
+                    "derived": len(_derived),
+                    "rate": round(len(_derived) / len(_eligible), 4),
+                    "threshold": MATCH_DERIVED_TOTAL_MAX_RATE,
+                    "derived_rows": [
+                        {"bql_id": b.id, "raw_name": b.raw_name,
+                         "qty": b.qty, "unit_price": b.unit_price,
+                         "total_price": b.total_price}
+                        for b in _derived[:5]
+                    ],
+                })
+
+            # 算术闭合：唯一实现是 draft_integrity.check_row_arithmetic（评审 C2/D2）。
+            # 此前这里是一份独立副本，与共享实现三处分叉：容差硬编码 0.01 而非具名
+            # INTEGRITY_ARITHMETIC_TOLERANCE(0.005)；不识别"报价口径倍率"（按束/按根
+            # 报价，合价≈数量×单价×整数倍），会把合法的倍率关系误计成算术错误；
+            # 只传 unit_price/total_price 通用列——这在 BidQuoteLine 上其实是对的
+            # （二者已是确认时价格口径桥接后的 effective 值，见 quote_confirmation_
+            # service.py），传给共享实现后也自然只会命中它的通用列分支，行为一致。
+            # unit_price_excl_tax 是原始列但没有配对的 total_price_excl_tax 列，
+            # 因此不传它——传了也会因缺一半而被共享实现跳过，等价于不传。
+            _arith = {b.id: check_row_arithmetic(
+                {"qty": b.qty, "unit_price": b.unit_price, "total_price": b.total_price}
+            ) for b in _non_derived}
+            _evaluable = [b for b in _non_derived if _arith[b.id].status != "not_evaluable"]
+            _hard_errors = [
+                {"bql_id": b.id, "raw_name": b.raw_name, "qty": b.qty,
+                 "unit_price": b.unit_price, "total_price": b.total_price,
+                 "calc": (None if _arith[b.id].computed is None
+                          else round(_arith[b.id].computed, 2)),
+                 "deviation": round(_arith[b.id].deviation, 4)}
+                for b in _evaluable if _arith[b.id].status == "mismatch"
             ]
-            _hard_errors, _vat_suspects = [], []
-            for _b in _evaluable:
-                _calc = _b.qty * _b.unit_price
-                _denom = max(abs(_b.total_price), abs(_calc))
-                _dev = abs(_b.total_price - _calc) / _denom if _denom else 0.0
-                if _dev > MATCH_ARITHMETIC_VAT_TOLERANCE:
-                    _hard_errors.append({
-                        "bql_id": _b.id,
-                        "raw_name": _b.raw_name,
-                        "qty": _b.qty,
-                        "unit_price": _b.unit_price,
-                        "total_price": _b.total_price,
-                        "calc": round(_calc, 2),
-                        "deviation": round(_dev, 4),
-                    })
-                elif _dev > 0.01:
-                    _vat_suspects.append(_b.id)
+            _vat_suspects = [b.id for b in _evaluable
+                             if _arith[b.id].status == "tax_basis_suspect"]
 
             if _evaluable:
                 _arith_err_rate = len(_hard_errors) / len(_evaluable)
@@ -1255,8 +1328,11 @@ async def tender_list_match(
                 })
 
         if _quality_failures:
+            # 评审 E1：与 quote_confirmation_service.py 的结构完整性/声明总价等
+            # 数据质量门是同一类语义（数据被接受但需要人工复核才能继续），
+            # 统一 422（此前这里是 409，那边是 422，同一语义两个码）。
             raise HTTPException(
-                409,
+                422,
                 {
                     "error": "submission_quality_gate_failed",
                     "message": "以下 submission 未通过数据质量门，禁止对齐",
@@ -1276,18 +1352,21 @@ async def tender_list_match(
         raise HTTPException(400, str(e))
     except Exception as e:
         import traceback, logging
+        # 评审 E3：异常类名（type(e).__name__）此前直接拼进客户端可见的 detail——
+        # 服务端实现细节不该泄给客户端。完整信息（含类名）仍进日志，客户端只看到
+        # 通用消息，需要排查时查服务端日志。
         logging.error("tender-list/match error: %s\n%s", e, traceback.format_exc())
-        raise HTTPException(500, f"招标清单匹配失败：{type(e).__name__}: {e}")
+        raise HTTPException(500, "招标清单匹配失败，请稍后重试或联系管理员")
 
     # Enrich per_supplier (now keyed by submission_id) with names and doc_meta
     from apps.api.models import ExtractionJob, Supplier as SupplierModel
     from apps.api.models.bid_submission import BidSubmission as _BSSub
-    from apps.api.services.quote_readiness import assess_readiness
+    from apps.api.services.submission.quote_readiness import assess_readiness
 
     # Load BidSubmission records for submission-keyed stats
     sub_ids_for_lookup = [sid for sid in per_supplier.keys() if isinstance(sid, int) and sid > 0]
     sub_records: dict[int, _BSSub] = {}
-    for sub in db.query(_BSSub).filter(_BSSub.id.in_(sub_ids_for_lookup)).all():
+    for sub in db.scalars(select(_BSSub).where(_BSSub.id.in_(sub_ids_for_lookup))).all():
         sub_records[sub.id] = sub
 
     # Build display name: prefer Supplier.name if supplier_id set, else supplier_raw_name
@@ -1301,7 +1380,7 @@ async def tender_list_match(
 
     # Also include legacy supplier_id-keyed entries (old data)
     legacy_sids = [sid for sid in per_supplier.keys() if sid not in sub_records]
-    for sup in db.query(SupplierModel).filter(SupplierModel.id.in_(legacy_sids)).all():
+    for sup in db.scalars(select(SupplierModel).where(SupplierModel.id.in_(legacy_sids))).all():
         sub_display_names[sup.id] = sup.name
 
     # Load doc_meta from each submission's extraction job
@@ -1322,7 +1401,7 @@ async def tender_list_match(
 
     # v2.7+: persist used_submission_ids on TenderListSession
     if _tls_id:
-        from apps.api.services.tender_session_service import record_submission_scope
+        from apps.api.services.tender.tender_session_service import record_submission_scope
         # submission_ids 显式传入时精确写入，保证 Gate 一致性；
         # 否则从 per_supplier keys 推导（旧兼容路径）
         resolved_sub_ids = sorted(sub_ids) if sub_ids else sorted(
@@ -1359,9 +1438,9 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
     不从 Quote 读（因为 archive 可能尚未执行）。无 BidSubmission 则退回 Quote 路径。
     """
     from apps.api.models import Quote, Material
-    from apps.api.services.supplier_fill_llm import SupplierQuoteRow
-    from apps.api.services.canonical import extract_valve_canonical
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions
+    from apps.api.services.supplier.supplier_fill_llm import SupplierQuoteRow
+    from apps.api.services.ingestion.canonical import extract_valve_canonical
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
     # ── BQL 路径（优先）──────────────────────────────────────────────────────
     active_subs = resolve_active_submissions(db, project_id, category, [supplier_id])
@@ -1369,14 +1448,10 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
     if matching_sub:
         from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
         sub = matching_sub
-        bql_rows = (
-            db.query(BidQuoteLine)
-            .filter(
-                BidQuoteLine.submission_id == sub.id,
-                BidQuoteLine.category == category,
-            )
-            .all()
-        )
+        bql_rows = db.scalars(select(BidQuoteLine).where(
+            BidQuoteLine.submission_id == sub.id,
+            BidQuoteLine.category == category,
+        )).all()
         out = []
         for bql in bql_rows:
             canon = bql.canonical or extract_valve_canonical(bql.standard_name or "", bql.spec or "")
@@ -1399,17 +1474,17 @@ def _load_supplier_fill_rows(db, project_id: int, category: str, supplier_id: in
 
     # ── Quote 路径（旧数据 / 已归档）──────────────────────────────────────────
     from apps.api.models.supplier import Supplier as _Sup
-    from apps.api.services.quote_filters import valid_quote_filters as _vqf2
+    from apps.api.services.history.quote_filters import valid_quote_filters as _vqf2
     q = (
-        db.query(Quote, Material)
+        select(Quote, Material)
         .join(Material, Quote.material_id == Material.id)
         .join(_Sup, Quote.supplier_id == _Sup.id)
-        .filter(Quote.project_id == project_id, Quote.supplier_id == supplier_id, *_vqf2())
+        .where(Quote.project_id == project_id, Quote.supplier_id == supplier_id, *_vqf2())
     )
     if category:
-        q = q.filter(Material.category == category)
+        q = q.where(Material.category == category)
     out = []
-    for qt, m in q.all():
+    for qt, m in db.execute(q).all():
         ext = m.extended_attrs or {}
         meta = qt.extraction_meta_json or {}
         meta_canon = meta.get("canonical") or {}
@@ -1458,11 +1533,11 @@ def _persist_llm_fill(
     bql_sids: set = bql_supplier_ids or set()
 
     # replace 语义：将该 project/category 下所有旧 confirmed 组标为 superseded（软删）
-    old_confirmed = db.query(BidAlignmentGroup).filter(
+    old_confirmed = db.scalars(select(BidAlignmentGroup).where(
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
         BidAlignmentGroup.status == "confirmed",
-    ).all()
+    )).all()
     for g in old_confirmed:
         g.status = "superseded"
     db.flush()
@@ -1470,11 +1545,11 @@ def _persist_llm_fill(
     # B1: 替换组后，旧 finalize 快照锁定的是刚被 superseded 的组，必须一并作废。
     # 否则比价矩阵按过期快照(group_ids)过滤，会把当前新组全部排除 → 全「未报价」。
     from apps.api.models.alignment_finalization import AlignmentFinalization as _AF
-    db.query(_AF).filter(
+    invalidated_finalizations = db.execute(update(_AF).where(
         _AF.project_id == project_id,
         _AF.category == category,
         _AF.status == "finalized",
-    ).update({"status": "superseded"}, synchronize_session=False)
+    ).values(status="superseded")).rowcount
     db.flush()
 
     cells_by_seq: dict[int, list] = {}
@@ -1512,6 +1587,8 @@ def _persist_llm_fill(
             if row_id is None:
                 continue
             note = f"LLM cos={cell.confidence:.2f}"
+            if cell.aggregated_quote_ids:
+                note += " aggregated=" + ",".join(map(str, cell.aggregated_quote_ids))
             _submission_id = (
                 (bql_supplier_to_submission or {}).get(cell.supplier_id) if is_bql else None
             )
@@ -1543,6 +1620,7 @@ def _persist_llm_fill(
         identity={"project_id": project_id, "session_id": session_id},
         after={"category": category, "group_count": len(cells_by_seq), "supplier_count": len(results)},
     )
+    return invalidated_finalizations
 
 
 # ─── Dynamic suspect anchor selection ────────────────────────────────────────
@@ -1602,7 +1680,7 @@ def _select_suspect_anchor_seqs(anchors, results, supplier_ids: list[int]) -> se
     return suspect
 
 
-@router.post("/tender-list/llm-fill")
+@router.post("/tender-list/llm-fill", response_model=LlmFillResult)
 async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)):
     """N 个供应商填表 LLM 代理(replace 模式)。
 
@@ -1613,9 +1691,9 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     import os
     from apps.api.models import Supplier, Quote, Material
     from apps.api.models.alignment_finalization import AlignmentFinalization
-    from apps.api.services.tender_list import rebuild_anchors
-    from apps.api.services.anchor_match import embed_anchor_vecs, _embed_client
-    from apps.api.services.supplier_fill_llm import (
+    from apps.api.services.tender.tender_list import rebuild_anchors
+    from apps.api.services.alignment.anchor_match import embed_anchor_vecs, _embed_client
+    from apps.api.services.supplier.supplier_fill_llm import (
         AnchorView, fill_one_supplier, fill_one_supplier_anchor_centric, DEFAULT_FILL_MODEL,
     )
 
@@ -1623,7 +1701,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
         raise HTTPException(400, "v1 仅支持 mode='replace'")
 
     # 1. 解析 session + 重建锚点
-    from apps.api.services.tender_session_service import get_session_for_fill
+    from apps.api.services.tender.tender_session_service import get_session_for_fill
     session = get_session_for_fill(
         db, body.project_id, body.category, tls_id=body.tender_list_session_id
     )
@@ -1641,25 +1719,25 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
     # 2. 解析供应商集合
     sids = list(body.supplier_ids)
     if not sids:
-        from apps.api.services.quote_filters import valid_quote_filters as _vqf3
+        from apps.api.services.history.quote_filters import valid_quote_filters as _vqf3
         q = (
-            db.query(Quote.supplier_id)
+            select(Quote.supplier_id)
             .join(Material, Quote.material_id == Material.id)
             .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
-            .filter(Quote.project_id == body.project_id, Material.category == body.category, *_vqf3())
+            .where(Quote.project_id == body.project_id, Material.category == body.category, *_vqf3())
             .distinct()
         )
-        sids = [r[0] for r in q.all() if r[0]]
+        sids = [sid for sid in db.scalars(q).all() if sid]
     if not sids:
         raise HTTPException(400, "该项目/品类下没有可填表的供应商报价")
 
     sup_names = {
-        s.id: s.name for s in db.query(Supplier).filter(Supplier.id.in_(sids)).all()
+        s.id: s.name for s in db.scalars(select(Supplier).where(Supplier.id.in_(sids))).all()
     }
-    valid_sids = {row[0] for row in db.query(Supplier.id).all()}
+    valid_sids = set(db.scalars(select(Supplier.id)).all())
 
     # 3. 主线程读：每家 supplier rows(纯数据)；顺带记录哪些走 BQL 路径
-    from apps.api.services.bid_submission_resolve import resolve_active_submissions as _ras_fill
+    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions as _ras_fill
     _fill_active_subs = _ras_fill(db, body.project_id, body.category, sids)
     # _fill_active_subs is keyed by submission_id; derive supplier-based lookups for LLM fill path
     _bql_actual_supplier_ids: set[int] = {
@@ -1743,7 +1821,7 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
                         ),
                     )
                 except Exception as _exc:
-                    from apps.api.services.supplier_fill_llm import SupplierFillResult
+                    from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
                     _res = SupplierFillResult(supplier_id=sid, error=str(_exc))
                 return sid, _res
 
@@ -1795,20 +1873,16 @@ async def tender_list_llm_fill(body: _LlmFillBody, db: Session = Depends(get_db)
             )
 
     # 6b. 单写者落库 + 失效旧 finalization(replace 闭环)
-    _persist_llm_fill(db, body.project_id, body.category, session.id,
-                      results, seq_to_anchor, valid_sids,
-                      bql_supplier_ids=_bql_actual_supplier_ids,
-                      bql_supplier_to_submission=_bql_supplier_to_submission)
-    n_fin = db.query(AlignmentFinalization).filter(
-        AlignmentFinalization.project_id == body.project_id,
-        AlignmentFinalization.category == body.category,
-        AlignmentFinalization.status == "finalized",
-    ).update({"status": "superseded"})
+    n_fin = _persist_llm_fill(
+        db, body.project_id, body.category, session.id, results, seq_to_anchor, valid_sids,
+        bql_supplier_ids=_bql_actual_supplier_ids,
+        bql_supplier_to_submission=_bql_supplier_to_submission,
+    )
     db.commit()
 
     # 8. matrix_distribution：基于落库后矩阵，与 /bid-matrix 同源
-    from apps.api.services.bid_matrix import build_anchor_matrix as _bam_fn
-    from apps.api.services.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
+    from apps.api.services.matrix.bid_matrix import build_anchor_matrix as _bam_fn
+    from apps.api.services.matrix.matrix_stats import build_matrix_distribution_from_rows as _mdr_fn
     _bam_result = _bam_fn(
         db, tender_anchors, session.id, sids, body.project_id, body.category,
         used_submission_ids=[], submission_ids=[],
@@ -1998,7 +2072,7 @@ def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
         return supplier_brands
     from apps.api.models import Supplier
 
-    suppliers = db.query(Supplier).all()
+    suppliers = db.scalars(select(Supplier)).all()
     resolved: list[dict] = []
     for sb in supplier_brands:
         if not isinstance(sb, dict):
@@ -2023,7 +2097,7 @@ def _resolve_supplier_brands(db, supplier_brands: list | None) -> list | None:
     return resolved
 
 
-@router.post("/tender-list/confirm")
+@router.post("/tender-list/confirm", response_model=TenderListConfirmResult)
 def tender_list_confirm(
     body: _TenderListConfirmBody,
     db: Session = Depends(get_db),
@@ -2111,7 +2185,7 @@ def tender_list_confirm(
     }
 
 
-@router.get("/tender-list/current-sessions")
+@router.get("/tender-list/current-sessions", response_model=TenderListCurrentSessionsResult)
 def tender_list_current_sessions(
     project_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -2136,13 +2210,13 @@ def tender_list_current_sessions(
     }
 
 
-@router.get("/tender-list/current")
+@router.get("/tender-list/current", response_model=TenderListCurrentResult)
 def tender_list_current(
     project_id: int | None = Query(None),
     category: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    session = tender_session_service.get_current_session(db, category, project_id)
+    session = tender_session_service.get_current_session_any_status(db, category, project_id)
     if not session:
         raise HTTPException(404, "No current TenderListSession found")
     return {
@@ -2159,7 +2233,7 @@ def tender_list_current(
     }
 
 
-@router.get("/compare-state")
+@router.get("/compare-state", response_model=CompareStateResult)
 def compare_state(
     project_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -2175,23 +2249,17 @@ def compare_state(
     from apps.api.models.bid_submission import BidSubmission as _BS, BidQuoteLine as _BQL
     from apps.api.models.extraction_job import ExtractionJob as _EJ
 
-    subs = (
-        db.query(_BS)
-        .filter(
+    subs = db.scalars(
+        select(_BS).where(
             _BS.project_id == project_id,
             _BS.status.notin_(["rejected", "superseded"]),
         )
         .order_by(_BS.id.asc())
-        .all()
-    )
+    ).all()
     submissions_out = []
     for s in subs:
         job = db.get(_EJ, s.job_id) if s.job_id else None
-        line_count = (
-            db.query(_func.count(_BQL.id))
-            .filter(_BQL.submission_id == s.id)
-            .scalar()
-        ) or 0
+        line_count = db.scalar(select(_func.count(_BQL.id)).where(_BQL.submission_id == s.id)) or 0
         submissions_out.append({
             "submission_id": s.id,
             "job_id": s.job_id,
@@ -2210,16 +2278,14 @@ def compare_state(
     # confirmed → 已在 submissions_out；removed → 已被用户移除，二者皆不在途。
     # 不再反查 bid_submissions：job 自带生命周期，写时维护、读时直用。
     inflight_out = []
-    inflight_jobs = (
-        db.query(_EJ)
-        .filter(
+    inflight_jobs = db.scalars(
+        select(_EJ).where(
             _EJ.type == "quote",
             _EJ.lifecycle == "active",
             _func.json_extract(_EJ.context, "$.project_id") == project_id,
         )
         .order_by(_EJ.created_at.asc())
-        .all()
-    )
+    ).all()
     for j in inflight_jobs:
         inflight_out.append({
             "job_id": j.id,
@@ -2227,13 +2293,17 @@ def compare_state(
             "status": j.status,
             "progress_stage": j.progress_stage or "",
             "progress_pct": j.progress_pct or 0,
+            # design/24 B2：刷新恢复时也带上阶段内进度，不然刷新一下细粒度
+            # 进度就丢了，退回粗轴的 progress_pct。
+            "stage_current": j.stage_current,
+            "stage_total": j.stage_total,
             "has_result": bool(j.result),
         })
 
     return {"submissions": submissions_out, "inflight_jobs": inflight_out}
 
 
-@router.get("/tender-list/versions")
+@router.get("/tender-list/versions", response_model=list[TenderListVersionOut])
 def tender_list_versions(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2250,7 +2320,7 @@ def tender_list_versions(
     ]
 
 
-@router.delete("/tender-list/current")
+@router.delete("/tender-list/current", response_model=TenderListDeactivateResult)
 def tender_list_deactivate(
     project_id: int | None = Query(None),
     category: str = Query(...),
@@ -2263,7 +2333,7 @@ def tender_list_deactivate(
 
 # ── 对齐审核闸门 ──────────────────────────────────────────────────
 
-@router.post("/anchor-review/bulk-confirm")
+@router.post("/anchor-review/bulk-confirm", response_model=AnchorReviewBulkConfirmResult)
 def anchor_review_bulk_confirm(
     project_id: int = Query(...),
     category: str = Query(...),
@@ -2271,22 +2341,18 @@ def anchor_review_bulk_confirm(
 ):
     """批量确认所有 pending 对齐项（item 级），将 action='pending' 升为 'align'。"""
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-    group_ids = [
-        g.id for g in db.query(BidAlignmentGroup.id).filter(
+    group_ids = list(db.scalars(select(BidAlignmentGroup.id).where(
             BidAlignmentGroup.project_id == project_id,
             BidAlignmentGroup.category == category,
-        ).all()
-    ]
+    )).all())
     if not group_ids:
         return {"ok": True, "confirmed": 0}
-    updated = (
-        db.query(BidAlignmentItem)
-        .filter(
+    updated = db.execute(
+        update(BidAlignmentItem).where(
             BidAlignmentItem.group_id.in_(group_ids),
             BidAlignmentItem.action == "pending",
-        )
-        .update({"action": "align"})
-    )
+        ).values(action="align")
+    ).rowcount
     write_domain_event(
         db, user="system", event_type=EVENT_ALIGNMENT_BULK_CONFIRM,
         identity={"project_id": project_id},
@@ -2304,7 +2370,7 @@ class _FinalizeBody(BaseModel):
     finalized_by: str = ""
 
 
-@router.post("/anchor-review/finalize")
+@router.post("/anchor-review/finalize", response_model=AnchorReviewFinalizeResult)
 def anchor_review_finalize(
     body: _FinalizeBody,
     db: Session = Depends(get_db),
@@ -2313,7 +2379,7 @@ def anchor_review_finalize(
 
     force=True 时必须提供 reason 字段。
     """
-    from apps.api.services.alignment_service import finalize_alignment
+    from apps.api.services.alignment.alignment_service import finalize_alignment
 
     result = finalize_alignment(
         db,
@@ -2349,7 +2415,7 @@ class _BidMatrixSaveBody(BaseModel):
     recommended_supplier: str = ""
 
 
-@router.post("/bid-matrix/save")
+@router.post("/bid-matrix/save", response_model=BidMatrixSaveResult)
 def bid_matrix_save(
     body: _BidMatrixSaveBody,
     db: Session = Depends(get_db),
@@ -2368,15 +2434,13 @@ def bid_matrix_save(
         )
 
     # 计算版本号
-    last = (
-        db.query(BidMatrixVersion)
-        .filter(
+    last = db.scalars(
+        select(BidMatrixVersion).where(
             BidMatrixVersion.project_id == body.project_id,
             BidMatrixVersion.category == body.category,
         )
         .order_by(BidMatrixVersion.version.desc())
-        .first()
-    )
+    ).first()
     new_version = (last.version + 1) if last else 1
 
     bmv = BidMatrixVersion(
@@ -2400,17 +2464,17 @@ def bid_matrix_save(
     return {"ok": True, "id": bmv.id, "version": bmv.version}
 
 
-@router.get("/bid-matrix/versions")
+@router.get("/bid-matrix/versions", response_model=list[BidMatrixVersionListItem])
 def bid_matrix_versions(
     project_id: int | None = Query(None),
     category: str = Query(...),
     db: Session = Depends(get_db),
 ):
     from apps.api.models.bid_matrix_version import BidMatrixVersion
-    q = db.query(BidMatrixVersion).filter(BidMatrixVersion.category == category)
+    q = select(BidMatrixVersion).where(BidMatrixVersion.category == category)
     if project_id is not None:
-        q = q.filter(BidMatrixVersion.project_id == project_id)
-    versions = q.order_by(BidMatrixVersion.version.desc()).all()
+        q = q.where(BidMatrixVersion.project_id == project_id)
+    versions = db.scalars(q.order_by(BidMatrixVersion.version.desc())).all()
     return [
         {
             "id": v.id, "version": v.version, "status": v.status,
@@ -2423,7 +2487,7 @@ def bid_matrix_versions(
     ]
 
 
-@router.get("/bid-matrix/versions/{version_id}")
+@router.get("/bid-matrix/versions/{version_id}", response_model=BidMatrixVersionDetail)
 def bid_matrix_version_get(version_id: int, db: Session = Depends(get_db)):
     from apps.api.models.bid_matrix_version import BidMatrixVersion
     v = db.get(BidMatrixVersion, version_id)
@@ -2451,20 +2515,20 @@ class _ApproveBody(BaseModel):
     approved_by: str = ""
 
 
-@router.post("/bid-matrix/versions/{version_id}/approve")
+@router.post("/bid-matrix/versions/{version_id}/approve", response_model=BidMatrixVersionApproveResult)
 def bid_matrix_version_approve(
     version_id: int,
     body: _ApproveBody,
     db: Session = Depends(get_db),
 ):
     from apps.api.models.bid_matrix_version import BidMatrixVersion
-    from datetime import datetime as _dt
+    from apps.api.models._base import _now
     v = db.get(BidMatrixVersion, version_id)
     if not v:
         raise HTTPException(404, f"BidMatrixVersion {version_id} 不存在")
     v.status = "approved"
     v.review_note = body.note or None
     v.approved_by = body.approved_by or None
-    v.approved_at = _dt.utcnow()
+    v.approved_at = _now()
     db.commit()
     return {"ok": True, "id": v.id, "status": "approved"}

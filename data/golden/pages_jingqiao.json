@@ -1,0 +1,175 @@
+{
+  "doc": "jingqiao",
+  "doc_type": "tender",
+  "source_pdf": "金桥地体上盖招标文件.pdf",
+  "labeled_by": "claude_visual",
+  "note": "逐页角色真值=视觉判定；含金标行的页(p14-18)与行级golden(tender_jingqiao.json)交叉校验一致",
+  "pages": [
+    {
+      "page": 1,
+      "role": "cover",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "招标文件标题页+项目名"
+      ]
+    },
+    {
+      "page": 2,
+      "role": "other",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "目录/TOC"
+      ]
+    },
+    {
+      "page": 3,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "施工/技术条款正文"
+      ]
+    },
+    {
+      "page": 4,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 5,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "技术规范正文"
+      ]
+    },
+    {
+      "page": 6,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文(含营业执照字样但为正文)"
+      ]
+    },
+    {
+      "page": 7,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文"
+      ]
+    },
+    {
+      "page": 8,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "招标须知正文"
+      ]
+    },
+    {
+      "page": 9,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文"
+      ]
+    },
+    {
+      "page": 10,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文"
+      ]
+    },
+    {
+      "page": 11,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文"
+      ]
+    },
+    {
+      "page": 12,
+      "role": "technical_spec",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "条款正文"
+      ]
+    },
+    {
+      "page": 13,
+      "role": "brand_requirement",
+      "orientation": 0,
+      "has_golden_lines": false,
+      "evidence": [
+        "招标情况表/品牌要求表(小表,品牌字样,无明细行)"
+      ]
+    },
+    {
+      "page": 14,
+      "role": "tender_table_header",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "投标清单表头行(序号/名称/规格/含税合计/税率列名)+数据行"
+      ]
+    },
+    {
+      "page": 15,
+      "role": "tender_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "无表头,列结构续14页清单"
+      ]
+    },
+    {
+      "page": 16,
+      "role": "tender_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页清单"
+      ]
+    },
+    {
+      "page": 17,
+      "role": "tender_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页清单(命中golden最多)"
+      ]
+    },
+    {
+      "page": 18,
+      "role": "tender_table_continuation",
+      "orientation": 0,
+      "has_golden_lines": true,
+      "evidence": [
+        "续页清单末页(剩余行+合计)"
+      ]
+    }
+  ],
+  "version": 1,
+  "basis": "model-assisted visual labeling (qwen3-vl-flash montage + manual review)",
+  "verified_by": "manual-review-pending",
+  "verification_status": "pending"
+}

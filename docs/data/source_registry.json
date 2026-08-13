@@ -1,0 +1,127 @@
+{
+  "schema_version": "1",
+  "description": "Master source registry for historical procurement price data. SHA256 values are computed at export time (see docs/data/raw/<date>/manifest.json).",
+  "sources": [
+    {
+      "source_id": "bridge-tray",
+      "category": "桥架",
+      "profession": "电气",
+      "path": "docs/项目资料/材料汇总/0桥架报价单格式模板.xls",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "busbar",
+      "category": "母线槽",
+      "profession": "电气",
+      "path": "docs/项目资料/材料汇总/0母线报价单格式模板.xls",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "electrical-panel-original",
+      "category": "配电箱",
+      "profession": "电气",
+      "path": "docs/项目资料/材料汇总/0配电箱.xlsx",
+      "version_date": null,
+      "status": "superseded",
+      "authority": "original",
+      "supersedes": null,
+      "notes": "Superseded by electrical-panel-2026-05-20. Retained for diff audit only."
+    },
+    {
+      "source_id": "electrical-panel-2026-05-20",
+      "category": "配电箱",
+      "profession": "电气",
+      "path": "docs/项目资料/用户反馈/2026-05-20/0配电箱.xlsx",
+      "version_date": "2026-05-20",
+      "status": "active",
+      "authority": "customer_feedback",
+      "supersedes": "electrical-panel-original",
+      "notes": "Customer supplement adds brand data to enclosure rows. Values like 新增/利用原有箱体 in brand column → box_status_raw (see audits/配电箱_version_diff.csv)."
+    },
+    {
+      "source_id": "valve",
+      "category": "阀门",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0阀门询价格式.xls",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "ss-pipe",
+      "category": "不锈钢管",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0不锈钢管清单.xlsx",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "water-tank",
+      "category": "水箱",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0水箱报价清单.xlsx",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "submersible-pump",
+      "category": "潜水泵",
+      "profession": "给排水",
+      "path": "docs/项目资料/材料汇总/0潜水泵询价格式.xlsx",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "air-vent",
+      "category": "风口风阀",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0风口风阀报价单格式.xls",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "fan-coil",
+      "category": "风机盘管",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0风盘报价单格式.xls",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": ""
+    },
+    {
+      "source_id": "hvac-pump",
+      "category": "空调泵",
+      "profession": "暖通",
+      "path": "docs/项目资料/材料汇总/0空调泵询价格式 .xlsx",
+      "version_date": null,
+      "status": "active",
+      "authority": "original",
+      "supersedes": null,
+      "notes": "Source filename has a trailing space before the extension."
+    }
+  ]
+}

@@ -1,11 +1,13 @@
 """User management CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.enums import ROLE_ADMIN
+from apps.api.core.security import get_current_user, require_role
 from apps.api.models.user import User
-from apps.api.routes.auth import get_current_user
 from apps.api.routes.logs import write_log
 from apps.api.schemas.user import UserCreate, UserUpdate, UserOut
 
@@ -20,14 +22,14 @@ def list_users(
     role: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(User)
+    stmt = select(User)
     if keyword:
-        q = q.filter(User.username.contains(keyword) | User.nickname.contains(keyword))
+        stmt = stmt.where(User.username.contains(keyword) | User.nickname.contains(keyword))
     if role:
-        q = q.filter(User.role == role)
+        stmt = stmt.where(User.role == role)
 
-    total = q.count()
-    items = q.order_by(User.id).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(User.id).offset((page - 1) * page_size).limit(page_size)).all()
     return {
         "total": total,
         "page": page,
@@ -40,9 +42,9 @@ def list_users(
 def create_user(
     body: UserCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
 ):
-    if db.query(User).filter(User.username == body.username).first():
+    if db.scalar(select(User).where(User.username == body.username)):
         raise HTTPException(409, f"用户名 '{body.username}' 已存在")
 
     user = User(
@@ -61,7 +63,12 @@ def create_user(
 
 
 @router.put("/{user_id}")
-def update_user(user_id: int, body: UserUpdate, db: Session = Depends(get_db)):
+def update_user(
+    user_id: int,
+    body: UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
+):
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
@@ -75,6 +82,7 @@ def update_user(user_id: int, body: UserUpdate, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
+    write_log(db, user=current_user["sub"], module="用户管理", action="编辑用户", target=user.username)
     return UserOut.from_user(user).model_dump()
 
 
@@ -82,7 +90,7 @@ def update_user(user_id: int, body: UserUpdate, db: Session = Depends(get_db)):
 def toggle_status(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
 ):
     user = db.get(User, user_id)
     if not user:
@@ -99,7 +107,7 @@ def toggle_status(
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
 ):
     user = db.get(User, user_id)
     if not user:

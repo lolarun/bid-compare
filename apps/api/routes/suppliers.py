@@ -1,7 +1,7 @@
 """Supplier CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -20,16 +20,16 @@ def list_suppliers(
     merge_status: str = Query("active", description="active|merged|inactive|all"),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Supplier)
+    stmt = select(Supplier)
     if merge_status != "all":
-        q = q.filter(Supplier.merge_status == merge_status)
+        stmt = stmt.where(Supplier.merge_status == merge_status)
     if keyword:
-        q = q.filter(Supplier.name.contains(keyword) | Supplier.short_name.contains(keyword))
+        stmt = stmt.where(Supplier.name.contains(keyword) | Supplier.short_name.contains(keyword))
     if category:
-        q = q.filter(Supplier.categories.contains(f'"{category}"'))
+        stmt = stmt.where(Supplier.categories.contains(f'"{category}"'))
 
-    total = q.count()
-    items = q.order_by(Supplier.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(Supplier.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {
         "total": total,
         "page": page,
@@ -49,7 +49,7 @@ def search_suppliers(
 
     支持 Supplier.name / short_name 模糊匹配 + SupplierAlias 精确规范化匹配。
     """
-    from apps.api.services.supplier_resolve import search_suppliers_by_name
+    from apps.api.services.supplier.supplier_resolve import search_suppliers_by_name
     return search_suppliers_by_name(db, q, limit=limit, active_only=active_only)
 
 
@@ -65,7 +65,7 @@ def resolve_supplier_by_name(
       {matched: false, ambiguous: true, candidates: [...]}  歧义（多个候选）
       {matched: false, ambiguous: false}        未找到
     """
-    from apps.api.services.supplier_resolve import resolve_supplier
+    from apps.api.services.supplier.supplier_resolve import resolve_supplier
     result = resolve_supplier(db, name)
     if result.supplier:
         sup = result.supplier
@@ -94,7 +94,7 @@ def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
 
 @router.post("", response_model=SupplierOut, status_code=201)
 def create_supplier(body: SupplierCreate, db: Session = Depends(get_db)):
-    existing = db.query(Supplier).filter(Supplier.name == body.name).first()
+    existing = db.scalar(select(Supplier).where(Supplier.name == body.name))
     if existing:
         raise HTTPException(409, f"Supplier '{body.name}' already exists")
 
@@ -135,12 +135,8 @@ def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
     if not sup:
         raise HTTPException(404, "Supplier not found")
 
-    quote_count = db.query(func.count(Quote.id)).filter(
-        Quote.supplier_id == supplier_id
-    ).scalar() or 0
-    invitation_count = db.query(func.count(BidInvitation.id)).filter(
-        BidInvitation.supplier_id == supplier_id
-    ).scalar() or 0
+    quote_count = db.scalar(select(func.count(Quote.id)).where(Quote.supplier_id == supplier_id)) or 0
+    invitation_count = db.scalar(select(func.count(BidInvitation.id)).where(BidInvitation.supplier_id == supplier_id)) or 0
 
     if quote_count > 0 or invitation_count > 0:
         raise HTTPException(

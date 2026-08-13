@@ -12,7 +12,7 @@ from apps.api.models.project import Project
 from apps.api.models.supplier import Supplier
 from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
 from apps.api.models.extraction_job import ExtractionJob
-from apps.api.services.bid_submission_resolve import resolve_active_submissions
+from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
 
 
 def _job(db, tag: str) -> str:

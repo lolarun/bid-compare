@@ -6,15 +6,11 @@ import type {
   StandardizeResult, ExtendedAttrSchema, ImportResult,
   QuoteStats, CategoryDetailStats, MultiCompareResult,
   BidMatrixResult, BidInsight, BrandTier, User, LogEntry,
-  InviteResult, OcrResult,
   ExtractionJob, RecommendResponse, BatchConfirmResult,
   SaveInvitationsResponse,
   DashboardHeatmapData, DashboardBubbleData,
-  AlignmentRowInput, AlignmentSuggestResult,
-  AlignmentApplyGroup, AlignmentApplyFieldFix, AlignmentApplyResult,
-  AlignmentGroupOut,
   EnhanceResponse,
-  AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult, LlmFillResult,
+  AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
   CompareStateResult,
 } from './client'
@@ -120,6 +116,13 @@ export const quoteApi = {
     category: string
     overrides?: Array<Record<string, unknown>>
     bid_status?: string
+    // 评审 R2（第3块）：declared_total_mismatch 结构化错误的放行开关——
+    // 此前前端根本没有这个参数，用户永远无法在核对过差异后强制入库。
+    checksum_ack?: boolean
+    // design/24 B3：预演——跑一遍完全相同的判据、从不写库，一次性返回这份
+    // 文档所有的结构性疑点。收件箱（design/24 后续阶段）用它做"进收件箱前
+    // 预检"；本轮只接后端能力，UI 消费方留给前端 Stage 组件那一步接。
+    dry_run?: boolean
   }) => api.post<BatchConfirmResult>('/quotes/batch-confirm', data),
 }
 
@@ -164,45 +167,31 @@ export const analysisApi = {
     api.get<CategoryDetailStats>(`/analysis/category-stats/${category}`),
   refreshBaselines: (category?: string) =>
     api.post('/analysis/refresh-baselines', null, { params: { category } }),
-  // ── Bid Alignment ──
-  alignmentSuggest: (data: {
-    project_id?: number
-    category: string
-    supplier_ids: number[]
-    rows: AlignmentRowInput[]
-  }) =>
-    api.post<AlignmentSuggestResult>('/analysis/bid-alignment/suggest', data, { timeout: 180_000 }),
-  alignmentApply: (data: {
-    project_id?: number
-    category: string
-    groups: AlignmentApplyGroup[]
-    field_fixes: AlignmentApplyFieldFix[]
-  }) =>
-    api.post<AlignmentApplyResult>('/analysis/bid-alignment/apply', data),
-  alignmentGroups: (params?: { project_id?: number; category?: string }) =>
-    api.get<AlignmentGroupOut[]>('/analysis/bid-alignment/groups', { params }),
-  alignmentDeleteGroup: (groupId: number) =>
-    api.delete(`/analysis/bid-alignment/groups/${groupId}`),
+  // R1 止血：bid-alignment/suggest·apply·groups·groups/{id} 这一整组（旧的
+  // "AI 建议对齐"流程）已被 anchor-review/matrix 那套取代，四个 wrapper
+  // 零调用方，整组删除，不留半截。
   // ── Anchor / Tender-list ──
   tenderListPreview: (formData: FormData) =>
     api.post<TenderPreviewResult>('/analysis/tender-list/preview', formData),
   tenderListMatch: (formData: FormData) =>
     api.post<AnchorMatchSummary>('/analysis/tender-list/match', formData, { timeout: 180_000 }),
-  tenderListLlmFill: (data: {
-    project_id: number; category: string; supplier_ids?: number[];
-    tender_list_session_id?: number | null; k?: number; mode?: string; model?: string | null
-  }) =>
-    api.post<LlmFillResult>('/analysis/tender-list/llm-fill', data, { timeout: 600_000 }),
+  // tenderListLlmFill：零调用方（评审 E4 Tier 2 时已核实：功能完整但从未接
+  // 入 UI，见 docs/design/22）。wrapper 一并删除，恢复入口留给产品决策。
   anchorReviewMatrix: (params: { project_id: number; category: string; submission_ids?: string; supplier_ids?: string }) =>
     api.get<AnchorReviewMatrixResult>('/analysis/anchor-review/matrix', { params }),
   anchorReview: (params: { project_id: number; category: string; submission_ids?: string; supplier_ids?: string }) =>
     api.get<AnchorReviewResult>('/analysis/anchor-review', { params }),
-  anchorReviewConfirm: (data: { group_id: number; action: 'confirm' | 'reject' }) =>
-    api.post('/analysis/anchor-review/confirm', data),
+  // anchorReviewConfirm / anchorReviewBulkConfirm：零调用方（group 级批量
+  // 确认从未接入 UI，复核矩阵页面走的是 anchorReviewItemConfirm 逐项确认）。
   anchorReviewItemConfirm: (data: { item_id: number; action: 'align' | 'exclude' }) =>
     api.post('/analysis/anchor-review/item-confirm', data),
-  anchorReviewBulkConfirm: (params: { project_id: number; category: string }) =>
-    api.post('/analysis/anchor-review/bulk-confirm', null, { params }),
+  // design/23：复核者确认"这格确实无报价，符合预期"；acked:false 撤销确认。
+  anchorReviewMissingAck: (data: {
+    project_id: number; category: string; anchor_seq: string; submission_id: number; acked: boolean
+  }) =>
+    api.post<{ ok: boolean; anchor_seq: string; submission_id: number; acked: boolean }>(
+      '/analysis/anchor-review/missing-ack', data,
+    ),
   anchorReviewFinalize: (data: {
     project_id?: number; category: string; force?: boolean; reason?: string; finalized_by?: string
   }) =>
@@ -251,6 +240,21 @@ export const brandTierApi = {
     api.put<BrandTier>(`/brand-tiers/${id}`, data),
   delete: (id: number) =>
     api.delete(`/brand-tiers/${id}`),
+}
+
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+export const authApi = {
+  me: () =>
+    api.get<{
+      id: number
+      username: string
+      nickname: string
+      role: string
+      email: string
+      phone: string
+      status: string
+    }>('/auth/me'),
 }
 
 // ─── Users ───────────────────────────────────────────────────────────────────
@@ -304,13 +308,11 @@ export const inviteApi = {
     api.get<Array<Record<string, unknown>>>('/invite/tenders', { params }),
   getTender: (id: number) =>
     api.get<Record<string, unknown>>(`/invite/tenders/${id}`),
-  // Legacy v1 interface — kept for compatibility, no backend implementation.
-  recommendLegacy: (data: {
-    project_name: string
-    project_id?: number
-    specs: { category: string; sub_category: string; quantity?: number; budget?: number }[]
-  }) =>
-    api.post<InviteResult>('/invite/recommend', data),
+  // R1 止血：recommendLegacy 已删除。原注释说"no backend implementation"是
+  // 过时的——POST /invite/recommend 在 apps/api/routes/invite.py 里其实是
+  // 真实实现的路由，只是前端零调用方（当前邀标推荐走的是别的流程）。删的是
+  // 前端死 wrapper，不代表后端路由本身也该删——未核实是否有其他调用方
+  // （脚本/外部集成），不在这轮动它。
 }
 
 // ─── Export (Excel downloads) ────────────────────────────────────────────────
@@ -330,14 +332,7 @@ export const exportApi = {
     api.get('/export/logs', { params, responseType: 'blob' }),
 }
 
-// ─── OCR ─────────────────────────────────────────────────────────────────────
-
-export const ocrApi = {
-  parse: (formData: FormData) =>
-    api.post<OcrResult>('/quotes/ocr', formData, {
-      // Don't set Content-Type explicitly — axios will add the
-      // required boundary when sending FormData if we leave it alone.
-    }),
-  confirm: (data: { items: OcrResult['items']; batch_id?: string }) =>
-    api.post('/quotes/ocr/confirm', data),
-}
+// R1 止血：ocrApi 已删除 —— 指向的 /quotes/ocr、/quotes/ocr/confirm 两条路由
+// 在后端已不存在（grep apps/api/routes 零命中），调用必 404；前端也早已零
+// 调用方，是纯粹的死 wrapper。当前 OCR 增强上传走 intakeApi + ExtractionEditor，
+// 不是这套。

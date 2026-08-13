@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from sqlalchemy import select
 from PIL import Image
 from fastapi.testclient import TestClient
 
@@ -107,7 +108,7 @@ def _seed_from_csv(db, csv_path: Path, category: str, max_rows: int = 80) -> int
             else ""
         )
         if brand and brand not in {"nan", "None"}:
-            supplier = db.query(Supplier).filter_by(name=brand).first()
+            supplier = db.scalar(select(Supplier).where(Supplier.name == brand))
             if not supplier:
                 supplier = Supplier(name=brand)
                 db.add(supplier)
@@ -200,7 +201,7 @@ def seeded_client(temp_db, monkeypatch, fixture_dir, tmp_path):
     """TestClient with seeded DB (brand tiers + CSV history) + MockProvider + auth bypass."""
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
 
     from apps.api.intelligence.pipeline import ExtractionPipeline
@@ -367,6 +368,50 @@ class TestPhase2InviteFlow:
         assert r2.status_code == 200, r2.text
         assert r2.json()["tender_id"] == tender_id
 
+    def test_resave_with_tender_id_persists_cover_fields(self, seeded_client):
+        """R4: re-saving via tender_id must actually update the existing row's
+        cover-page scalars and items — previously the reuse branch only fed
+        them into the (transient) recommendation call and never wrote them
+        back onto the TenderDocument, so a corrected date/code/item after
+        first save silently vanished."""
+        r1 = seeded_client.post("/api/invite/save", json={
+            "project_name": "封面回填测试",
+            "project_code": "OLD-CODE",
+            "tender_date": "2026-01-01",
+            "deadline": "2026-01-15",
+            "items": [{"name": "阀门 DN50", "category": "阀门"}],
+        })
+        assert r1.status_code == 200, r1.text
+        tender_id = r1.json()["tender_id"]
+
+        r2 = seeded_client.post("/api/invite/save", json={
+            "tender_id": tender_id,
+            "project_name": "封面回填测试-改名",
+            "project_code": "NEW-CODE",
+            "tender_date": "2026-02-01",
+            "deadline": "2026-02-15",
+            "items": [
+                {"name": "阀门 DN50", "category": "阀门"},
+                {"name": "阀门 DN80", "category": "阀门"},
+            ],
+        })
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["tender_id"] == tender_id
+
+        from apps.api.core.database import SessionLocal
+        from apps.api.models import TenderDocument
+        db = SessionLocal()
+        try:
+            tender = db.get(TenderDocument, tender_id)
+            assert tender is not None
+            assert tender.project_name == "封面回填测试-改名"
+            assert tender.project_code == "NEW-CODE"
+            assert tender.tender_date == "2026-02-01"
+            assert tender.deadline == "2026-02-15"
+            assert len(tender.items or []) == 2
+        finally:
+            db.close()
+
 
 # ─── TestBrandRecommendation ────────────────────────────────────────────────
 class TestBrandRecommendation:
@@ -526,6 +571,71 @@ class TestBrandRecommendJingqiao:
 
 
 # ─── TestBrandRecommendE2E ──────────────────────────────────────────────────
+class TestSupplierInvitationEvidence:
+    """The actionable invitation path must persist deterministic evidence."""
+
+    def test_supplier_recommendation_and_saved_evidence(self, brand_client):
+        from apps.api.core.database import SessionLocal
+        from apps.api.models import Material, Quote, Supplier, TenderDocument
+
+        db = SessionLocal()
+        try:
+            supplier = Supplier(name="Evidence Supplier", cooperation_score=80)
+            material = Material(
+                standard_name="Evidence Cable Tray",
+                profession="电气",
+                category="桥架",
+                unit="m",
+                ref_price_reasonable_low=100,
+            )
+            db.add_all([supplier, material])
+            db.flush()
+            db.add_all([
+                Quote(
+                    material_id=material.id, supplier_id=supplier.id,
+                    unit_price=95, brand="Evidence Brand",
+                ),
+                # Excluded history must not be used as brand evidence.
+                Quote(
+                    material_id=material.id, supplier_id=supplier.id,
+                    unit_price=90, brand="Excluded Brand",
+                    bid_status="excluded_from_ref",
+                ),
+            ])
+            db.commit()
+        finally:
+            db.close()
+
+        items = [{"name": "桥架 300x100", "category": "桥架"}]
+        rec = brand_client.post("/api/invite/recommend", json={
+            "tender_items": items, "top_n": 5,
+        })
+        assert rec.status_code == 200, rec.text
+        suppliers = rec.json()["supplier_recommendations"]
+        evidence = next(item for item in suppliers if item["supplier_name"] == "Evidence Supplier")
+        assert evidence["reason"]["history_count"] == 1
+        assert "Evidence Brand" in evidence["reason"]["brands"]
+        assert "Excluded Brand" not in evidence["reason"]["brands"]
+
+        saved = brand_client.post("/api/invite/save", json={
+            "project_name": "Evidence Pilot",
+            "items": items,
+            "supplier_ids": [evidence["supplier_id"]],
+        })
+        assert saved.status_code == 200, saved.text
+        invitation = saved.json()["invitations"][0]
+        assert invitation["rank"] == evidence["rank"]
+        assert invitation["score"] == evidence["score"]
+
+        db = SessionLocal()
+        try:
+            tender = db.get(TenderDocument, saved.json()["tender_id"])
+            assert tender.recommendation_snapshot["selected_supplier_ids"] == [evidence["supplier_id"]]
+            assert tender.invitations[0].reason["history_count"] == 1
+        finally:
+            db.close()
+
+
 @pytest.mark.e2e
 class TestBrandRecommendE2E:
     """Fresh E2E: upload the real 金桥 PDF, parse tender items, then brand-recommend.
@@ -585,17 +695,17 @@ class TestInferCategories:
     """Unit test of the category-inference helper (no DB, no server)."""
 
     def test_explicit_category(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "X", "category": "桥架"}])
         assert cats == ["桥架"]
 
     def test_name_keyword_match(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "桥架300×200 镀锌"}])
         assert cats == ["桥架"]
 
     def test_dedupe(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([
             {"name": "桥架A"},
             {"name": "桥架B"},
@@ -604,6 +714,6 @@ class TestInferCategories:
         assert cats == ["桥架", "阀门"]
 
     def test_unknown_ignored(self):
-        from apps.api.services.supplier_recommend import infer_categories
+        from apps.api.services.supplier.supplier_recommend import infer_categories
         cats = infer_categories([{"name": "随便起的名字"}])
         assert cats == []

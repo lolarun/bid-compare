@@ -29,7 +29,7 @@ def _pct(rate: float) -> str:
 def main() -> None:
     from apps.api.core.config import get_settings
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
-    from apps.api.services.tender_pdf import extract_bidlist
+    from apps.api.services.tender.tender_pdf import extract_bidlist
 
     s = get_settings()
     if not s.DASHSCOPE_API_KEY:

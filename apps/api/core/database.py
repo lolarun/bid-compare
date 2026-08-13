@@ -1,19 +1,30 @@
 """SQLAlchemy database engine, session, and dependency injection."""
 
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 DB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 DB_DIR.mkdir(exist_ok=True)
 DB_PATH = DB_DIR / "mempas.db"
 
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+# 默认仍是生产库 data/mempas.db（24MB 真实数据）。允许 env 覆盖，是因为**在此之前
+# 没有任何办法让应用指向别处**：pytest 靠 conftest 的 temp_db 猴补丁绕开，但一旦跑
+# 真实 uvicorn 做端到端（前端 E2E 必须如此），上传的测试投标就直接写进生产库，
+# 违反 .claude/rules/database-safety.md 第一条。
+#
+# Alembic 的 env.py 是 `from apps.api.core.database import DATABASE_URL`，所以这里
+# 改一处，迁移也跟着指向同一个库——不会出现"表建在 A、数据写到 B"。
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{DB_PATH}"
+
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    # check_same_thread 是 SQLite 专有的；对其它后端传它会直接报错。
+    connect_args={"check_same_thread": False} if _IS_SQLITE else {},
 )
 
 
@@ -27,7 +38,9 @@ def _set_sqlite_pragma(dbapi_conn, _connection_record):
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    """SQLAlchemy 2.x declarative base for all ORM mappings."""
+
 
 
 def get_db():

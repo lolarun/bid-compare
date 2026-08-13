@@ -16,13 +16,13 @@ from fastapi.testclient import TestClient
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
     _hash_context,
 )
-from apps.api.services.standardize import standardize_name, standard_key
-from apps.api.services.supplier_recommend import (
+from apps.api.services.ingestion.standardize import standardize_name, standard_key
+from apps.api.services.supplier.supplier_recommend import (
     infer_categories,
     _is_category_token_match,
 )
@@ -44,7 +44,7 @@ class TestContextAwareIdempotency:
         self, db_session, tmp_path, monkeypatch, fixture_dir
     ):
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         pipeline = ExtractionPipeline(MockProvider(fixture_dir=fixture_dir))
         svc = DocumentIngestionService(db_session, pipeline)
@@ -63,7 +63,7 @@ class TestContextAwareIdempotency:
         self, db_session, tmp_path, monkeypatch, fixture_dir
     ):
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         pipeline = ExtractionPipeline(MockProvider(fixture_dir=fixture_dir))
         svc = DocumentIngestionService(db_session, pipeline)
@@ -91,19 +91,22 @@ class TestContextAwareIdempotency:
 # ─── Backend audit-fix B: batch_confirm idempotency ────────────────────────
 class TestBatchConfirmIdempotency:
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         canned = {
             "supplier_name": "TestSup",
             "items": [
+                # 正常报价单原文就有合价列。补上它不是"迎合门"，而是恢复夹具本意：
+                # 这些用例测的是幂等/形状守卫，不是"无合价时的行为"（那个由
+                # test_bql_e2e 的派生金额门用例覆盖）。
                 {"material": "桥架 A", "spec": "300×200", "brand": "良工",
-                 "qty": 10, "unit_price": 100},
+                 "qty": 10, "unit_price": 100, "total_price": 1000},
                 {"material": "桥架 B", "spec": "200×100", "brand": "良工",
-                 "qty": 20, "unit_price": 50},
+                 "qty": 20, "unit_price": 50, "total_price": 1000},
             ],
         }
 
@@ -112,8 +115,6 @@ class TestBatchConfirmIdempotency:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -181,17 +182,17 @@ class TestBatchConfirmShapeGuard:
     editor would hit the guard."""
 
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         canned = {
             "supplier_name": "X",
             "items": [
-                {"material": "Good", "qty": 1, "unit_price": 10},
-                {"material": "Good2", "qty": 2, "unit_price": 20},
+                {"material": "Good", "qty": 1, "unit_price": 10, "total_price": 10},
+                {"material": "Good2", "qty": 2, "unit_price": 20, "total_price": 40},
             ],
         }
 
@@ -200,8 +201,6 @@ class TestBatchConfirmShapeGuard:
 
         monkeypatch.setattr("apps.api.main._build_pipeline", builder)
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -223,7 +222,7 @@ class TestBatchConfirmShapeGuard:
                 "supplier_name": "S",
                 "category": "阀门",
                 "overrides": [
-                    {"material": "OK", "qty": 1, "unit_price": 10},
+                    {"material": "OK", "qty": 1, "unit_price": 10, "total_price": 10},
                     "string not a dict",
                     None,
                 ],
@@ -264,10 +263,10 @@ class TestBatchConfirmShapeGuard:
             job.result = {
                 "supplier_name": "X",
                 "items": [
-                    {"material": "Good", "qty": 1, "unit_price": 10},
+                    {"material": "Good", "qty": 1, "unit_price": 10, "total_price": 10},
                     "not a dict",
                     None,
-                    {"material": "Good2", "qty": 2, "unit_price": 20},
+                    {"material": "Good2", "qty": 2, "unit_price": 20, "total_price": 40},
                 ],
             }
             db.commit()
@@ -342,10 +341,10 @@ class TestCategoryTokenMatch:
 # ─── Backend audit-fix H5: invite/save with all-invalid supplier_ids ───────
 class TestInviteSaveValidation:
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         monkeypatch.setattr(
@@ -353,8 +352,6 @@ class TestInviteSaveValidation:
             lambda: ExtractionPipeline(MockProvider()),
         )
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -386,22 +383,20 @@ class TestOrphanProjectGuard:
     batch-confirm must NOT silently null it; it should 400."""
 
     @pytest.fixture
-    def client(self, temp_db, monkeypatch, tmp_path):
+    def client(self, temp_db, monkeypatch, tmp_path, auth_override):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         canned = {
             "supplier_name": "X",
-            "items": [{"material": "桥架 A", "qty": 1, "unit_price": 100}],
+            "items": [{"material": "桥架 A", "qty": 1, "unit_price": 100, "total_price": 100}],
         }
         monkeypatch.setattr(
             "apps.api.main._build_pipeline",
             lambda: ExtractionPipeline(MockProvider(canned=canned)),
         )
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -479,7 +474,7 @@ class TestPeriodicStuckJobSweep:
 
         from apps.api.main import _periodic_stuck_job_sweep
         from apps.api.models import ExtractionJob
-        from apps.api.services.document_ingestion import JobStatus
+        from apps.api.services.ingestion.document_ingestion import JobStatus
 
         monkeypatch.setattr("apps.api.main.STUCK_JOB_SWEEP_S", 0.05)
         monkeypatch.setattr("apps.api.main.STUCK_JOB_MAX_AGE_MINUTES", 5)
@@ -525,10 +520,8 @@ class TestSupplierDeletionGuard:
     """Policy: suppliers referenced by quotes/invitations cannot be deleted."""
 
     @pytest.fixture
-    def client(self, temp_db):
+    def client(self, temp_db, auth_override):
         from apps.api.main import app
-        from apps.api.routes.auth import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
         with TestClient(app) as c:
             yield c
 
@@ -704,45 +697,22 @@ class TestConcurrentInviteSave:
         finally:
             db.close()
 
-        # Step 2: patch BidInvitation queries to return None ONLY for the
-        # exact existence-check call in the route. We do this by replacing
-        # Query.filter_by's first() on a per-call basis via a sentinel.
-        # (No recommend function in the save route — nothing to patch there.)
-
-        # Patch the existence check inside the loop. We monkeypatch
-        # `Session.query` to inject a wrapper that returns None for
-        # BidInvitation existence checks.
+        # Step 2: force the first SQLAlchemy 2.x scalar existence lookup to
+        # return None.  The route then attempts an insert, receives the
+        # unique-key IntegrityError, and must re-fetch the peer's row.
         from sqlalchemy.orm import Session
-        original_query = Session.query
+        original_scalar = Session.scalar
         lie_count = {"n": 0}
 
-        class LyingFirst:
-            def __init__(self, real_query):
-                self._q = real_query
+        def patched_scalar(self, statement, *args, **kw):
+            columns = getattr(statement, "column_descriptions", [])
+            entities = {item.get("entity") for item in columns}
+            if BidInvitation in entities and lie_count["n"] == 0:
+                lie_count["n"] += 1
+                return None
+            return original_scalar(self, statement, *args, **kw)
 
-            def filter_by(self, **kw):
-                self._kw = kw
-                return self
-
-            def first(self):
-                # Lie ONCE for the BidInvitation existence check
-                if (
-                    "tender_id" in self._kw
-                    and "supplier_id" in self._kw
-                    and lie_count["n"] == 0
-                ):
-                    lie_count["n"] += 1
-                    return None
-                return self._q.filter_by(**self._kw).first()
-
-        def patched_query(self, *entities, **kw):
-            real = original_query(self, *entities, **kw)
-            # Only intercept queries that look up BidInvitation
-            if entities and entities[0] is BidInvitation:
-                return LyingFirst(real)
-            return real
-
-        monkeypatch.setattr(Session, "query", patched_query)
+        monkeypatch.setattr(Session, "scalar", patched_scalar)
 
         # Step 3: call the route — it will try to add a duplicate, hit
         # IntegrityError, recover, and return the pre-existing row.
@@ -800,7 +770,7 @@ class TestThreadPoolExtraction:
     def test_health_queue_endpoint(self, temp_db, monkeypatch, tmp_path):
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
         monkeypatch.setattr(
             "apps.api.main._build_pipeline",
@@ -821,14 +791,14 @@ class TestThreadPoolExtraction:
         monkeypatch.setenv("EXTRACTION_MODE", "inline")
         monkeypatch.setenv("LLM_PROVIDER", "mock")
         monkeypatch.setattr(
-            "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+            "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
         )
 
         from apps.api.core import runtime as rt
         from apps.api.intelligence.pipeline import ExtractionPipeline
         from apps.api.intelligence.providers.mock import MockProvider
         from apps.api.models import ExtractionJob
-        from apps.api.services.document_ingestion import (
+        from apps.api.services.ingestion.document_ingestion import (
             DocumentIngestionService, IngestionType,
         )
 

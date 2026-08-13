@@ -10,6 +10,7 @@ from apps.api.models import (
     DEFAULT_SCORING_WEIGHTS, DEFAULT_THRESHOLDS,
 )
 from apps.api.main import app
+from apps.api.routes.auth import get_current_user
 
 from fastapi.testclient import TestClient
 
@@ -49,6 +50,9 @@ def client(db_session):
         yield db_session
 
     app.dependency_overrides[get_db] = _override
+    # API routes are authenticated in production.  Keep legacy endpoint tests
+    # focused on their behaviour by providing one explicit test identity.
+    app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "role": "管理员"}
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

@@ -12,7 +12,7 @@ These tests verify:
 import json
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.database import Base
@@ -150,10 +150,10 @@ def _seed_scope_data(db):
         db.flush()
         # Items for in-scope suppliers only
         for sup in [s1, s2, s3]:
-            qt = db.query(Quote).filter(
+            qt = db.scalar(select(Quote).where(
                 Quote.material_id == mat.id,
                 Quote.supplier_id == sup.id,
-            ).first()
+            ))
             if qt:
                 item = BidAlignmentItem(
                     group_id=grp.id,
@@ -188,10 +188,10 @@ def _seed_scope_data(db):
     )
     db.add(old_grp)
     db.flush()
-    qt_hist = db.query(Quote).filter(
+    qt_hist = db.scalar(select(Quote).where(
         Quote.material_id == mats[0].id,
         Quote.supplier_id == s_hist.id,
-    ).first()
+    ))
     if qt_hist:
         db.add(BidAlignmentItem(
             group_id=old_grp.id,

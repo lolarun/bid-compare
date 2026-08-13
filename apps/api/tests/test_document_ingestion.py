@@ -9,10 +9,9 @@ import pytest
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
-from apps.api.intelligence.prompts import TENDER_PROMPT
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.models import ExtractionJob
-from apps.api.services.document_ingestion import (
+from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
     IngestionType,
     JobStatus,
@@ -38,7 +37,7 @@ def pipeline(fixture_dir):
 def service(db_session, pipeline, tmp_path, monkeypatch):
     # Redirect uploads to tmp_path so we don't pollute repo
     monkeypatch.setattr(
-        "apps.api.services.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
     )
     return DocumentIngestionService(db_session, pipeline)
 
@@ -107,6 +106,19 @@ class TestRunJob:
         assert job.status == JobStatus.DONE.value
         assert job.result["project_name"].startswith("测试招标")
         assert len(job.result["items"]) == 3
+
+    def test_stage_progress_resets_between_stages(self, service, db_session):
+        """design/24 B2：完成时 stage_current/stage_total 必须是 None——
+        渲染阶段（有页数）之后还要经过没有细粒度进度的阶段（读取封面信息/
+        整理结果），如果不显式清空，用户会在识别完成后还看着"8/8 页"的
+        残影，其实早就换阶段了。"""
+        c = _png_bytes()
+        job = service.create_job(c, "q.png", IngestionType.QUOTE)
+        service.run_job(job.id)
+        db_session.refresh(job)
+        assert job.status == JobStatus.DONE.value
+        assert job.stage_current is None
+        assert job.stage_total is None
 
 
 class TestStuckJobRecovery:

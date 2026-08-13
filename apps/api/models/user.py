@@ -1,19 +1,10 @@
 """User account model."""
 
-import hashlib
-import secrets
-
 from sqlalchemy import Column, DateTime, Integer, String
 
 from apps.api.core.database import Base
+from apps.api.core.security import hash_password, verify_password
 from apps.api.models._base import _now
-
-
-def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    if salt is None:
-        salt = secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260_000)
-    return h.hex(), salt
 
 
 class User(Base):
@@ -33,8 +24,7 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     def verify_password(self, password: str) -> bool:
-        h, _ = _hash_password(password, self.password_salt)
-        return h == self.password_hash
+        return verify_password(password, self.password_salt, self.password_hash)
 
     def set_password(self, password: str) -> None:
-        self.password_hash, self.password_salt = _hash_password(password)
+        self.password_hash, self.password_salt = hash_password(password)

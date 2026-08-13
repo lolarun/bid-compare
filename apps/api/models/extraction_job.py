@@ -42,6 +42,13 @@ class ExtractionJob(Base):
     confidence = Column(Float, nullable=True)
     progress_stage = Column(String(100), default="")
     progress_pct = Column(Integer, default=0)
+    # design/24 B2：阶段内进度，弥补 progress_pct 是全局单轴、长阶段（逐页识别）
+    # 长期卡在一个数字不动的问题（用户反馈 #4）。stage_total 可空——最长的那个
+    # 阶段（VL 模型一次流式调用）没有总数可言，只能报"已转录 N 行"（单调递增）；
+    # 有页数概念的阶段（渲染/拆分）才两个都填。前端按 stage_total is null 区分
+    # "有进度条"和"只有一个递增计数"两种渲染方式。
+    stage_current = Column(Integer, nullable=True)
+    stage_total = Column(Integer, nullable=True)
 
     # Provider telemetry
     provider = Column(String(64), default="")

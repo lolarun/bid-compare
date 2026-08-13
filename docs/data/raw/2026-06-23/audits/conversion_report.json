@@ -1,0 +1,72 @@
+{
+  "pass": true,
+  "sources": [
+    {
+      "source_id": "bridge-tray",
+      "source_rows": 4106,
+      "exported_rows": 4106,
+      "pass": true
+    },
+    {
+      "source_id": "busbar",
+      "source_rows": 340,
+      "exported_rows": 340,
+      "pass": true
+    },
+    {
+      "source_id": "electrical-panel-2026-05-20",
+      "source_rows": 56799,
+      "exported_rows": 56799,
+      "pass": true
+    },
+    {
+      "source_id": "valve",
+      "source_rows": 1862,
+      "exported_rows": 1862,
+      "pass": true
+    },
+    {
+      "source_id": "ss-pipe",
+      "source_rows": 1187,
+      "exported_rows": 1187,
+      "pass": true
+    },
+    {
+      "source_id": "water-tank",
+      "source_rows": 69,
+      "exported_rows": 69,
+      "pass": true
+    },
+    {
+      "source_id": "submersible-pump",
+      "source_rows": 1270,
+      "exported_rows": 1270,
+      "pass": true
+    },
+    {
+      "source_id": "air-vent",
+      "source_rows": 6244,
+      "exported_rows": 6244,
+      "pass": true
+    },
+    {
+      "source_id": "fan-coil",
+      "source_rows": 252,
+      "exported_rows": 252,
+      "pass": true
+    },
+    {
+      "source_id": "hvac-pump",
+      "source_rows": 112,
+      "exported_rows": 112,
+      "pass": true
+    }
+  ],
+  "pdb_diff": {
+    "added_sheets": [],
+    "removed_sheets": [],
+    "common_sheets_count": 9,
+    "changed_cells": 1127,
+    "box_status_raw_candidates": 0
+  }
+}

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from apps.api.core.config import get_settings
 from apps.api.core.database import init_db, SessionLocal
+from apps.api.core.errors import register_exception_handlers
 from apps.api.core.runtime import (
     get_pool_stats,
     set_runtime_pipeline,
@@ -23,8 +24,9 @@ from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
 from apps.api.intelligence.base import ProviderError
 from apps.api.routes import all_routers
-from apps.api.routes.auth import router as auth_router, get_current_user
-from apps.api.services.document_ingestion import DocumentIngestionService
+from apps.api.routes.auth import router as auth_router
+from apps.api.core.security import get_current_user
+from apps.api.services.ingestion.document_ingestion import DocumentIngestionService
 
 log = logging.getLogger("mempas")
 
@@ -155,6 +157,7 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan,
 )
+register_exception_handlers(app)  # DomainError → HTTP (评审 E2, core/errors.py)
 
 settings = get_settings()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", settings.CORS_ORIGINS).split(",")

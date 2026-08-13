@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from apps.api.core.domain_config import (
     MATCH_ARITHMETIC_PASS_THRESHOLD as _ARITHMETIC_PASS_THRESHOLD,
+    EXTRACTION_ARITHMETIC_TOLERANCE,
 )
 
 
@@ -34,11 +35,21 @@ class SourceRef:
 
 # ─── Single extracted row ─────────────────────────────────────────────────────
 
+# 评审 N2：build_draft/parse_csv 是报价与招标共用的解析器（vl_quote.py docstring
+# "两种文档的行为差异只在'有哪些列、每列叫什么'"），"这一行是明细而非小计/合计"
+# 这个判据同样与文档类型无关——但字面值一直叫 "quote_line"，招标清单里没有一行
+# 是"报价"，词表名字跟着共享代码泄了过去。改字面值要牵动 quote_confirmation_
+# service.py 的持久化路径与审计日志（audit.normalize_row_type 另有一份 quote
+# 专属词表，历史值不宜改），故不改值本身，只给"文档类型无关的明细行"这个概念
+# 一个不带 quote 语义的名字，供 tender 侧消费点引用。
+DETAIL_ROW_TYPE = "quote_line"
+
+
 @dataclass
 class DraftRow:
     """One row as the recognizer sees it — raw cells preserved, fields standardised."""
     row_index: int
-    row_type: str           # quote_line|subtotal|grand_total|section_header|remark|invalid
+    row_type: str           # quote_line(=DETAIL_ROW_TYPE)|subtotal|grand_total|section_header|remark|invalid
     raw_cells: dict         # original OCR header→value mapping (never modified)
     fields: dict            # standardised fields (§4 superset; missing keys = None/"")
     source_ref: SourceRef
@@ -67,6 +78,87 @@ class PageMetric:
     tile_count: int = 0
     rotation_applied: int = 0        # 0|90|180|270 — degrees rotated before re-OCR (orientation correction)
     shadow_diff: dict | None = None  # Phase B shadow mode: per-page deterministic-vs-LLM comparison
+
+
+# ─── Row conservation ledger (doc/19 §L3) ────────────────────────────────────
+# 让"丢行"从静默变成必须解释的事。本轮 E2E 里远东 19 页丢了 14 页、招标清单 184 行
+# 进 92 行出，全程没有任何一个环节报错——因为没有任何东西知道"应该有多少行"。
+
+@dataclass
+class PageDrop:
+    """一页产出低于预期时的记账条目。reason 必须能指向具体环节，不接受空值。"""
+    page: int
+    role: str
+    reason: str                 # empty_html | no_table_structure | no_grids | exception:* | under_extracted
+    expected: int = 0
+    extracted: int = 0
+    rotation_applied: int = 0
+
+    @property
+    def lost(self) -> int:
+        return max(0, self.expected - self.extracted)
+
+
+@dataclass
+class RowLedger:
+    """识别阶段的行数守恒台账：应有 → 识别，逐页记录去向。"""
+    target_pages: int = 0
+    expected_rows: int = 0          # 各目标页 expected_rows 之和（OCR 见到的 <tr> 规模）
+    recognized_rows: int = 0        # 实际进入 draft.rows 的行数
+    empty_pages: list = field(default_factory=list)   # list[PageDrop] — 颗粒无收的页
+    short_pages: list = field(default_factory=list)   # list[PageDrop] — 有产出但低于预期的页
+
+    @property
+    def dropped_rows(self) -> int:
+        return max(0, self.expected_rows - self.recognized_rows)
+
+    def to_dict(self) -> dict:
+        return {
+            "target_pages": self.target_pages,
+            "expected_rows": self.expected_rows,
+            "recognized_rows": self.recognized_rows,
+            "dropped_rows": self.dropped_rows,
+            "empty_pages": [
+                {"page": d.page, "role": d.role, "reason": d.reason,
+                 "expected": d.expected, "rotation_applied": d.rotation_applied}
+                for d in self.empty_pages
+            ],
+            "short_pages": [
+                {"page": d.page, "role": d.role, "reason": d.reason,
+                 "expected": d.expected, "extracted": d.extracted,
+                 "lost": d.lost, "rotation_applied": d.rotation_applied}
+                for d in self.short_pages
+            ],
+        }
+
+
+def build_row_ledger(page_metrics: list, target_pages: list, recognized_rows: int) -> RowLedger:
+    """从页级指标汇总台账。每一个零产出/欠产出的页都必须带着 reason 出现在台账里。"""
+    targets = set(target_pages or [])
+    ledger = RowLedger(target_pages=len(targets), recognized_rows=recognized_rows)
+    for m in page_metrics:
+        if targets and m.page not in targets:
+            continue
+        # expected_rows 只在走 TableGrid 路径时才有值；html_fallback 页是 0，
+        # 直接求和会得到一个比实际识别行数还小的分母（实测远东 expected=11 /
+        # recognized=114 / dropped=0，22 行缺口一条没记账）。回落到 OCR 的 <tr>
+        # 计数，保证分母始终是"这一页上确实存在多少行"。
+        expected = m.expected_rows or m.row_count
+        m = replace(m, expected_rows=expected) if expected != m.expected_rows else m
+        ledger.expected_rows += expected
+        if m.extracted_rows == 0 and m.expected_rows > 0:
+            ledger.empty_pages.append(PageDrop(
+                page=m.page, role=m.role, reason=m.fallback_reason or "no_rows_extracted",
+                expected=m.expected_rows, extracted=0,
+                rotation_applied=m.rotation_applied,
+            ))
+        elif m.extracted_rows < m.expected_rows:
+            ledger.short_pages.append(PageDrop(
+                page=m.page, role=m.role, reason=m.fallback_reason or "under_extracted",
+                expected=m.expected_rows, extracted=m.extracted_rows,
+                rotation_applied=m.rotation_applied,
+            ))
+    return ledger
 
 
 # ─── Document quality report (§6) ─────────────────────────────────────────────
@@ -171,6 +263,8 @@ class ExtractionDraft:
     # 召回页未通过合入门禁的行：隔离在此，**不进 rows / 不进比价 / 不入库**，
     # 仅供核对 UI 展示供用户人工裁决（§1.1 REVIEW：暴露难度、预填候选，不静默填值）。
     review_candidates: list = field(default_factory=list)  # list[DraftRow]
+    # 行数守恒台账（doc/19 §L3）：应有 → 识别，逐页记录去向和原因。
+    ledger: "RowLedger | None" = None
 
 
 # ─── Quality gate logic (thresholds centralised here) ────────────────────────
@@ -183,6 +277,10 @@ _REVIEW_PAGE_RATIO = 0.30           # if > 30% target pages are under-extracted 
 _ARITH_MISMATCH_BLOCKED_COUNT = 3        # ≥3 flagged rows → BLOCKED
 _ARITH_MISMATCH_BLOCKED_RATIO = 0.02     # >2% of quote lines → BLOCKED
 _ARITH_MISMATCH_BLOCKED_AMOUNT_RATIO = 0.10  # >10% of total amount → BLOCKED
+# 识别阶段的单行算术容差：domain_config.EXTRACTION_ARITHMETIC_TOLERANCE（评审
+# D5：此前是本文件内的模块级常量，未集中管理；值本身有意比入库门更宽，见该
+# 常量定义处的注释，搬迁不改值）。
+_ARITHMETIC_ROW_TOLERANCE = EXTRACTION_ARITHMETIC_TOLERANCE
 
 
 def compute_quality(
@@ -205,7 +303,7 @@ def compute_quality(
     review_hints: list[str] = []
 
     # — Row type counts —
-    quote_lines = [r for r in rows if r.row_type == "quote_line"]
+    quote_lines = [r for r in rows if r.row_type == DETAIL_ROW_TYPE]
     subtotals   = [r for r in rows if r.row_type == "subtotal"]
     totals      = [r for r in rows if r.row_type == "grand_total"]
 
@@ -218,20 +316,22 @@ def compute_quality(
     bbox_ok = sum(1 for r in rows if r.source_ref.bbox is not None)
 
     # — Arithmetic consistency —
+    # 口径与单行判据统一走 draft_integrity.check_row_arithmetic，全仓只此一份实现
+    # （CLAUDE.md：同一业务结果不得各算各的）。它相对本处旧实现有两点改进：
+    #   1. 单价与合价**按税基成对**取值，不再出现"不含税单价 vs 含税合价"这种比错尺子；
+    #   2. 合价/(数量×单价) 落在简单倍数上的行判为报价口径（按根/按束报价），
+    #      计入通过而非算术错误——倍率是报价方式的选择，不是错误。
+    from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
+
     arith_pass = 0
     arith_total = 0
     for r in quote_lines:
-        f = r.fields
-        try:
-            qty   = float(f.get("qty") or 0)
-            price = float(f.get("unit_price_excl_tax") or f.get("unit_price") or 0)
-            total = float(f.get("total_price_excl_tax") or f.get("total_price") or 0)
-            if qty > 0 and price > 0 and total > 0:
-                arith_total += 1
-                if abs(qty * price - total) / total < 0.03:
-                    arith_pass += 1
-        except (TypeError, ValueError):
-            pass
+        res = check_row_arithmetic(r.fields, tolerance=_ARITHMETIC_ROW_TOLERANCE)
+        if res.status == "not_evaluable":
+            continue
+        arith_total += 1
+        if res.status in ("ok", "multiplier"):
+            arith_pass += 1
 
     arith_rate = round(arith_pass / arith_total, 3) if arith_total > 0 else 1.0
 

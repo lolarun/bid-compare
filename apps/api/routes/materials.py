@@ -1,7 +1,7 @@
 """Material CRUD API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -12,7 +12,7 @@ from apps.api.schemas import (
     StandardizeRequest, StandardizeResult,
     ExtendedAttrSchema,
 )
-from apps.api.services.standardize import standardize_name
+from apps.api.services.ingestion.standardize import standardize_name
 
 router = APIRouter(prefix="/api/materials", tags=["materials"])
 
@@ -20,9 +20,9 @@ router = APIRouter(prefix="/api/materials", tags=["materials"])
 def _generate_code(db: Session, profession: str, category: str) -> str:
     prof_abbr = PROFESSION_ABBR.get(profession, "OT")
     cat_abbr = CATEGORY_ABBR.get(category, "OTH")
-    last = db.query(Material).filter(
+    last = db.scalar(select(Material).where(
         Material.material_code.like(f"{prof_abbr}-{cat_abbr}-%")
-    ).order_by(Material.material_code.desc()).first()
+    ).order_by(Material.material_code.desc()))
 
     seq = int(last.material_code.split("-")[-1]) + 1 if last else 1
     return f"{prof_abbr}-{cat_abbr}-{seq:05d}"
@@ -39,24 +39,24 @@ def list_materials(
     include_disabled: bool = False,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Material)
+    stmt = select(Material)
     if not include_disabled:
-        q = q.filter(or_(Material.status.is_(None), Material.status != "disabled"))
+        stmt = stmt.where(or_(Material.status.is_(None), Material.status != "disabled"))
     if profession:
-        q = q.filter(Material.profession == profession)
+        stmt = stmt.where(Material.profession == profession)
     if category:
-        q = q.filter(Material.category == category)
+        stmt = stmt.where(Material.category == category)
     if sub_category:
-        q = q.filter(Material.sub_category == sub_category)
+        stmt = stmt.where(Material.sub_category == sub_category)
     if keyword:
-        q = q.filter(
+        stmt = stmt.where(
             Material.standard_name.contains(keyword)
             | Material.spec.contains(keyword)
             | Material.material_code.contains(keyword)
         )
 
-    total = q.count()
-    items = q.order_by(Material.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(Material.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {
         "total": total,
         "page": page,
@@ -67,12 +67,12 @@ def list_materials(
 
 @router.get("/categories", response_model=list[dict])
 def list_categories(db: Session = Depends(get_db)):
-    rows = db.query(
+    rows = db.execute(select(
         Material.profession, Material.category,
         func.count(Material.id).label("count"),
-    ).filter(
+    ).where(
         or_(Material.status.is_(None), Material.status != "disabled")
-    ).group_by(Material.profession, Material.category).all()
+    ).group_by(Material.profession, Material.category)).all()
     return [
         {"profession": r.profession, "category": r.category, "count": r.count}
         for r in rows

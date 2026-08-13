@@ -8,15 +8,23 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.enums import ROLE_ADMIN, ROLE_BUYER
+from apps.api.core.security import require_role
 from apps.api.core.utils import parse_id_csv
 from apps.api.models.material import Material
 from apps.api.models.supplier import Supplier
 from apps.api.models.quote import Quote
 from apps.api.models.project import Project
-router = APIRouter(prefix="/api/export", tags=["export"])
+
+router = APIRouter(
+    prefix="/api/export",
+    tags=["export"],
+    dependencies=[Depends(require_role(ROLE_ADMIN, ROLE_BUYER))],
+)
 
 # ── Shared styles ────────────────────────────────────────────────────────────
 
@@ -74,7 +82,7 @@ def _to_streaming(wb: Workbook, filename: str) -> StreamingResponse:
 @router.get("/dashboard")
 def export_dashboard(db: Session = Depends(get_db)):
     """导出仪表盘报表 — 包含采购概览 + 品类统计。"""
-    from apps.api.services.statistics import get_dashboard_summary
+    from apps.api.services.history.statistics import get_dashboard_summary
     summary = get_dashboard_summary(db)
 
     wb = Workbook()
@@ -91,11 +99,10 @@ def export_dashboard(db: Session = Depends(get_db)):
 
     # Category breakdown sheet
     ws2 = wb.create_sheet("品类统计")
-    cats = (
-        db.query(Material.category, Quote.supplier_id)
+    cats = db.execute(
+        select(Material.category, Quote.supplier_id)
         .outerjoin(Quote, Quote.material_id == Material.id)
-        .all()
-    )
+    ).all()
     cat_stats: dict[str, dict] = {}
     for cat, sid in cats:
         if cat not in cat_stats:
@@ -121,7 +128,7 @@ def export_dashboard(db: Session = Depends(get_db)):
 @router.get("/suppliers")
 def export_suppliers(db: Session = Depends(get_db)):
     """导出供应商名单。"""
-    rows = db.query(Supplier).order_by(Supplier.id).all()
+    rows = db.scalars(select(Supplier).order_by(Supplier.id)).all()
 
     wb = Workbook()
     ws = wb.active
@@ -148,10 +155,10 @@ def export_materials(
     db: Session = Depends(get_db),
 ):
     """导出物料主数据标准库。"""
-    q = db.query(Material).order_by(Material.profession, Material.category, Material.id)
+    stmt = select(Material).order_by(Material.profession, Material.category, Material.id)
     if category:
-        q = q.filter(Material.category == category)
-    rows = q.all()
+        stmt = stmt.where(Material.category == category)
+    rows = db.scalars(stmt).all()
 
     wb = Workbook()
     ws = wb.active
@@ -182,23 +189,23 @@ def export_quotes(
     db: Session = Depends(get_db),
 ):
     """导出采购历史数据（支持筛选条件透传）。"""
-    q = (
-        db.query(Quote, Material.standard_name, Material.spec, Material.category,
+    stmt = (
+        select(Quote, Material.standard_name, Material.spec, Material.category,
                  Supplier.name.label("supplier_name"), Project.name.label("project_name"))
         .outerjoin(Material, Quote.material_id == Material.id)
         .outerjoin(Supplier, Quote.supplier_id == Supplier.id)
         .outerjoin(Project, Quote.project_id == Project.id)
     )
     if category:
-        q = q.filter(Material.category == category)
+        stmt = stmt.where(Material.category == category)
     if supplier_id:
-        q = q.filter(Quote.supplier_id == supplier_id)
+        stmt = stmt.where(Quote.supplier_id == supplier_id)
     if project_id:
-        q = q.filter(Quote.project_id == project_id)
+        stmt = stmt.where(Quote.project_id == project_id)
     if alert_level:
-        q = q.filter(Quote.alert_level == alert_level)
+        stmt = stmt.where(Quote.alert_level == alert_level)
 
-    rows = q.order_by(Quote.id.desc()).limit(10000).all()
+    rows = db.execute(stmt.order_by(Quote.id.desc()).limit(10000)).all()
 
     wb = Workbook()
     ws = wb.active
@@ -246,7 +253,7 @@ def export_bid_matrix(
     """
     sids = parse_id_csv(supplier_ids, "supplier_ids")
 
-    from apps.api.services.bid_export_service import get_bid_matrix_for_export
+    from apps.api.services.matrix.bid_export_service import get_bid_matrix_for_export
     if project_id and category:
         result = get_bid_matrix_for_export(db, project_id, category, sids)
     else:
@@ -474,7 +481,7 @@ def export_bid_matrix(
 
     # Totals row (quoted-only — same as backend); leading blanks match col_offset
     totals_data = (["汇总", "", "", "", "", "", ""] if is_anchor else ["汇总", "", "", ""])
-    totals_map = {t["supplier_id"]: t for t in result["totals"]}
+    totals_map = {t["id"]: t for t in result["totals"]}
     for s in suppliers:
         t = totals_map.get(s["id"])
         totals_data.append(f"¥{t['total']:,.0f}" if t else "")

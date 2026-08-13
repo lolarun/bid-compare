@@ -8,10 +8,10 @@ Locks the two safety gates of finalize_alignment():
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
 
+from apps.api.core.errors import ConflictError, ValidationError
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-from apps.api.services.alignment_service import finalize_alignment
+from apps.api.services.alignment.alignment_service import finalize_alignment
 
 
 def _group(db, project_id, category, status="confirmed"):
@@ -39,7 +39,7 @@ def _item(db, group_id, action="align", spec_note=""):
 
 
 def test_force_without_reason_raises_400(db_session):
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         finalize_alignment(db_session, project_id=1, category="阀门", force=True, reason="")
     assert exc_info.value.status_code == 400
 
@@ -48,7 +48,7 @@ def test_pending_items_block_without_force(db_session):
     g = _group(db_session, project_id=2, category="阀门")
     _item(db_session, g.id, action="pending")
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(ConflictError) as exc_info:
         finalize_alignment(db_session, project_id=2, category="阀门", force=False)
     assert exc_info.value.status_code == 409
     assert "pending" in str(exc_info.value.detail)
@@ -70,7 +70,7 @@ def test_valve_type_conflict_blocks_without_force(db_session):
     g = _group(db_session, project_id=4, category="阀门")
     _item(db_session, g.id, action="align", spec_note="valve_type_conflict:butterfly_vs_gate")
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(ConflictError) as exc_info:
         finalize_alignment(db_session, project_id=4, category="阀门", force=False)
     assert exc_info.value.status_code == 409  # gate blocks: conflict items found
 

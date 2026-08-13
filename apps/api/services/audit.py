@@ -39,6 +39,7 @@ EVENT_ALIGNMENT_ITEM_CONFIRM = "alignment_item_confirm"
 EVENT_ALIGNMENT_BULK_CONFIRM = "alignment_bulk_confirm"
 EVENT_ALIGNMENT_FINALIZE = "alignment_finalize"
 EVENT_LLM_FILL_PERSIST = "llm_fill_persist"
+EVENT_ANCHOR_MISSING_ACK = "anchor_missing_ack"  # design/23
 
 # Canonical RowType vocabulary (§11.4): maps legacy/dual-enum names → canonical
 _ROW_TYPE_NORMALIZE: dict[str, str] = {

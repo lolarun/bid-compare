@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
     DASHSCOPE_LLM_MODEL: str = "qwen3.6-flash"
 
+    # ── 报价识别 ────────────────────────────────────────────────────────────
+    # 报价走 VL-direct（整份页面图像 → 视觉模型 → CSV）。legacy 的报价分支已归档，
+    # 故**没有 QUOTE_RECOGNIZER 开关**——留着它就等于留着"这次是哪条路"的疑问。
+    # 招标清单仍走 legacy（services/tender_pdf.py），见 docs/design/21 Phase 2。
+    #
+    # **不复用 DASHSCOPE_LLM_MODEL**：那是通用文本模型，改它会影响其它调用方。
+    DASHSCOPE_QUOTE_VL_MODEL: str = "qwen3.7-plus"
+    # 方向预检模型。判定的是"这页要不要转"，与抽取分开配置。
+    DASHSCOPE_QUOTE_ORIENT_MODEL: str = "qwen3.7-plus"
+    # 方向预检投票轮数。实测单轮不稳（同份同配置跑出 3/10、10/10、10/10）；
+    # 但投票只降低崩塌概率、不消除，无过半共识的页一律不转并标 REVIEW。
+    QUOTE_ORIENT_VOTES: int = 3
+
     # OCR PDF render quality (Layer 0). Higher = clearer small-font scanned tables
     # (reduces 形近字 OCR errors like 闸阀→阀阀, 橡胶瓣→橡胶海). Defaults preserve
     # prior behavior (2.0 / 2400); raise via env after A/B confirms improvement.
@@ -69,13 +82,16 @@ PROFESSION_ABBR = {
 }
 
 CATEGORY_ABBR = {
-    "桥架": "BRG", "母线槽": "BUS", "配电箱": "PDB",
+    "桥架": "BRG", "母线槽": "BUS", "配电箱": "PDB", "电缆": "CBL",
     "阀门": "VLV", "不锈钢管": "SSP", "水箱": "WTK", "潜水泵": "SMP",
     "风口风阀": "FAV", "风机盘管": "FCU", "空调泵": "ACP",
 }
 
+# NOTE: key order matters — enhance._guess_category returns the first category
+# whose name appears in the material name, so 桥架 must stay ahead of 电缆
+# ("电缆桥架" is a tray, not a cable).
 PROFESSION_MAP = {
-    "桥架": "电气", "母线槽": "电气", "配电箱": "电气",
+    "桥架": "电气", "母线槽": "电气", "配电箱": "电气", "电缆": "电气",
     "阀门": "给排水", "不锈钢管": "给排水", "水箱": "给排水", "潜水泵": "给排水",
     "风口风阀": "暖通", "风机盘管": "暖通", "空调泵": "暖通",
 }
@@ -101,6 +117,7 @@ DEFAULT_THRESHOLDS = {
     "桥架":     {"yellow": 0.08, "red": 0.15},
     "母线槽":   {"yellow": 0.06, "red": 0.12},
     "配电箱":   {"yellow": 0.08, "red": 0.15},
+    "电缆":     {"yellow": 0.05, "red": 0.10},
     "阀门":     {"yellow": 0.06, "red": 0.12},
     "不锈钢管": {"yellow": 0.05, "red": 0.10},
     "水箱":     {"yellow": 0.08, "red": 0.15},
@@ -108,6 +125,23 @@ DEFAULT_THRESHOLDS = {
     "风口风阀": {"yellow": 0.07, "red": 0.13},
     "风机盘管": {"yellow": 0.07, "red": 0.13},
     "空调泵":   {"yellow": 0.06, "red": 0.12},
+}
+
+# Comparison policy is configuration, not a route-local category exception.
+COMPARISON_PROFILE_BY_CATEGORY = {
+    "配电箱": {
+        "key": "panel_horizontal",
+        "history_baseline": False,
+        "review_hint": "以同一轮次整箱横向报价为主；历史数据仅供查阅，不参与基准偏差。",
+    },
+    # Cable unit prices are quoted against a declared base copper price and
+    # adjusted by formula, so historical unit prices are not comparable across
+    # rounds. Horizontal comparison only, and the base price must be checked.
+    "电缆": {
+        "key": "cable_horizontal",
+        "history_baseline": False,
+        "review_hint": "电缆单价按基准铜价报价并随铜价调差；仅做本轮横向比价，比价前须确认各家基准铜价一致。",
+    },
 }
 
 # ─── Extended attribute schemas per category ────────────────────────────────

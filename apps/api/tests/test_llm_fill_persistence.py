@@ -92,7 +92,7 @@ class TestReplaceSupersedes:
 
     def test_new_groups_written_as_confirmed(self, db_session):
         """Groups written by the new LLM-fill run have status='confirmed'."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult, FillCell
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult, FillCell
 
         cell = FillCell(
             anchor_seq=5, quote_id=99, supplier_id=7, status="quoted", action="align",
@@ -101,7 +101,7 @@ class TestReplaceSupersedes:
         res = SupplierFillResult(supplier_id=7)
         res.cells = [cell]
 
-        from apps.api.services.tender_list import TenderAnchor
+        from apps.api.services.tender.tender_list import TenderAnchor
         anchor = TenderAnchor(seq=5, name="截止阀", spec="DN50 PN16", pressure="PN16")
 
         from apps.api.routes.analysis import _persist_llm_fill
@@ -122,7 +122,7 @@ class TestReplaceSupersedes:
 class TestSafetyGate:
     def test_error_result_detected(self):
         """SupplierFillResult.error is non-empty when LLM call failed."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
         r.error = "ConnectionError: timeout after 300s"
 
@@ -135,7 +135,7 @@ class TestSafetyGate:
 
     def test_no_error_passes_gate(self):
         """Clean result passes the safety gate check."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
 
         sids = [7]
@@ -145,7 +145,7 @@ class TestSafetyGate:
 
     def test_gate_does_not_block_when_force_partial(self):
         """force_partial=True means errors are tolerated — no failed list checked."""
-        from apps.api.services.supplier_fill_llm import SupplierFillResult
+        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult
         r = SupplierFillResult(supplier_id=7)
         r.error = "LLM rate limit"
 
@@ -158,43 +158,8 @@ class TestSafetyGate:
         )
         assert blocked is False
 
-
-# ── source_ref robustness ─────────────────────────────────────────────────────
-
-class TestSourceRefRobustness:
-    """_assign_source_ref_from_grids must never raise on bad LLM output."""
-
-    def _make_grid(self):
-        from apps.api.intelligence.table_parser import TableGrid, TableRow
-        row = TableRow(row_index=3, row_type="quote_line",
-                       cells={"名称": "截止阀", "数量": "10"})
-        return TableGrid(page=2, table_index=0, header=["名称", "数量"],
-                         col_map={"名称": "name", "数量": "qty"}, rows=[row])
-
-    def test_valid_index_sets_source_ref(self):
-        from apps.api.intelligence.pipeline import _assign_source_ref_from_grids
-        item = {"material": "截止阀", "table_index": 0, "row_index": 3}
-        _assign_source_ref_from_grids([item], [self._make_grid()])
-        assert item["source_ref"] == {"page": 2, "table": 0, "row": 3}
-        assert "source_ref_invalid" not in item
-
-    def test_non_integer_row_index_marks_invalid(self):
-        from apps.api.intelligence.pipeline import _assign_source_ref_from_grids
-        item = {"material": "截止阀", "table_index": 0, "row_index": "第3行"}
-        _assign_source_ref_from_grids([item], [self._make_grid()])
-        assert "source_ref_invalid" in item
-        assert "material" in item  # item kept
-
-    def test_out_of_range_index_marks_invalid(self):
-        from apps.api.intelligence.pipeline import _assign_source_ref_from_grids
-        item = {"material": "截止阀", "table_index": 0, "row_index": 99}
-        _assign_source_ref_from_grids([item], [self._make_grid()])
-        assert "source_ref_invalid" in item
-        assert item["source_ref"]["valid"] is False
-
-    def test_none_row_index_leaves_item_unchanged(self):
-        from apps.api.intelligence.pipeline import _assign_source_ref_from_grids
-        item = {"material": "截止阀", "table_index": 0}  # no row_index key
-        _assign_source_ref_from_grids([item], [self._make_grid()])
-        assert "source_ref" not in item
-        assert "source_ref_invalid" not in item
+# TestSourceRefRobustness removed 2026-08-11 (best-practice review F1/F2):
+# _assign_source_ref_from_grids and table_parser.TableGrid/TableRow were part
+# of the legacy OCR→HTML→TableGrid chain, deleted as production-unreachable.
+# The VL-direct path builds source_ref from row.source_ref (extraction_draft.py)
+# directly, with no separate grid-index-lookup step to test.

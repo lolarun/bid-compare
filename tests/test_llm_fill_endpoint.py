@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-import apps.api.services.anchor_match as am
+import apps.api.services.alignment.anchor_match as am
 from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.models.alignment_finalization import AlignmentFinalization

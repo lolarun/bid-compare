@@ -9,6 +9,7 @@ Verifies:
   6. multi align item: lowest effective price is selected (not highest)
 """
 import pytest
+from sqlalchemy import select
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,7 +17,7 @@ from apps.api.models import Material, Supplier, Project, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.schemas.analysis import BidMatrixResult
-from apps.api.services.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
+from apps.api.services.matrix.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
 
 
 # ─── Minimal TenderAnchor stub ────────────────────────────────────────────────
@@ -114,8 +115,8 @@ def anchor_setup(db_session):
     db_session.commit()
 
     anchors = [
-        _Anchor(seq=1, name="闸阀", spec="DN50"),
-        _Anchor(seq=2, name="蝶阀", spec="DN100"),  # no group — both missing
+        _Anchor(seq=1, name="闸阀", spec="DN50", qty=10.0),
+        _Anchor(seq=2, name="蝶阀", spec="DN100", qty=1.0),  # no group — both missing
     ]
 
     return {
@@ -196,7 +197,7 @@ def test_pending_cell_excluded_from_totals(anchor_setup):
         project_id=s["proj"].id,
         category="阀门",
     )
-    totals_by_sid = {t["supplier_id"]: t for t in result["totals"]}
+    totals_by_sid = {t["id"]: t for t in result["totals"]}
     sup_b_total = totals_by_sid[s["sup_b"].id]
 
     # Supplier B only has a pending item — quoted_count must be 0
@@ -220,7 +221,7 @@ def test_align_cell_contributes_to_totals(anchor_setup):
         project_id=s["proj"].id,
         category="阀门",
     )
-    totals_by_sid = {t["supplier_id"]: t for t in result["totals"]}
+    totals_by_sid = {t["id"]: t for t in result["totals"]}
     sup_a_total = totals_by_sid[s["sup_a"].id]
     assert sup_a_total["quoted_count"] == 1
     assert sup_a_total["total"] > 0
@@ -238,7 +239,7 @@ def test_pending_cell_has_price_and_item_id(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_b = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_b"].id)
+    cell_b = next(c for c in row1["suppliers"] if c["id"] == s["sup_b"].id)
 
     assert cell_b["cell_status"] == CELL_PENDING
     assert cell_b["price"] == 120.0, "Pending cell should expose reference price (method A)"
@@ -258,7 +259,7 @@ def test_align_cell_is_lowest_correct(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_a = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_a"].id)
+    cell_a = next(c for c in row1["suppliers"] if c["id"] == s["sup_a"].id)
     assert cell_a["cell_status"] == CELL_QUOTED
     # Only supplier A has a quoted price, so it's the lowest by default
     assert cell_a["is_lowest"] is True
@@ -285,7 +286,7 @@ def test_multi_align_items_lowest_price_selected(anchor_setup):
 
     # Add second align item to the existing group for anchor_seq=1
     from apps.api.models.bid_alignment import BidAlignmentGroup as BAG
-    grp = db.query(BAG).filter(BAG.anchor_seq == "1").first()
+    grp = db.scalar(select(BAG).where(BAG.anchor_seq == "1"))
     item2 = BidAlignmentItem(
         group_id=grp.id, quote_id=qt_a2.id,
         supplier_id=s["sup_a"].id, action="align",
@@ -303,7 +304,7 @@ def test_multi_align_items_lowest_price_selected(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_a = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_a"].id)
+    cell_a = next(c for c in row1["suppliers"] if c["id"] == s["sup_a"].id)
 
     # Should pick the lower price (100, not 200)
     assert cell_a["price"] == 100.0, (

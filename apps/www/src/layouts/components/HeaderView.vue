@@ -15,6 +15,7 @@ import {
 } from '@ant-design/icons-vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
+import { ROLE_TAG_COLOR } from '@/types/role'
 import { ref } from 'vue'
 
 const route = useRoute()
@@ -31,6 +32,16 @@ const breadcrumbs = computed(() => {
 })
 
 const isFullscreen = ref(false)
+
+const roleColor = computed(() => {
+  const role = userStore.userInfo?.role
+  if (!role) return 'default'
+  return ROLE_TAG_COLOR[role as keyof typeof ROLE_TAG_COLOR] || 'default'
+})
+
+const displayName = computed(() => {
+  return userStore.userInfo?.nickname || userStore.userInfo?.username || '用户'
+})
 
 async function toggleFullscreen() {
   if (!document.fullscreenElement) {
@@ -76,11 +87,9 @@ function handleLogout() {
     </div>
 
     <div class="header-view__right">
-      <a-select :value="'admin'" size="small" class="header-view__role" :bordered="false">
-        <a-select-option value="admin">系统管理员</a-select-option>
-        <a-select-option value="buyer">比价员</a-select-option>
-        <a-select-option value="viewer">查看者</a-select-option>
-      </a-select>
+      <a-tag v-if="userStore.userInfo" :color="roleColor" class="header-view__role-tag">
+        {{ userStore.userInfo.role }}
+      </a-tag>
 
       <a-tooltip title="帮助中心">
         <QuestionCircleOutlined class="header-view__icon" @click="router.push('/help')" />
@@ -103,7 +112,7 @@ function handleLogout() {
           <a-avatar :size="28" style="background-color: #1677ff">
             <template #icon><UserOutlined /></template>
           </a-avatar>
-          <span class="header-view__username">{{ userStore.userInfo?.nickname || '管理员' }}</span>
+          <span class="header-view__username">{{ displayName }}</span>
         </span>
         <template #overlay>
           <a-menu>
@@ -185,13 +194,12 @@ function handleLogout() {
     margin-left: auto;
   }
 
-  &__role {
-    width: 120px;
-
-    :deep(.ant-select-selector) {
-      background: transparent !important;
-      color: @text-color-secondary;
-    }
+  &__role-tag {
+    margin: 0;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 20px;
+    padding: 0 8px;
   }
 
   &__icon {
