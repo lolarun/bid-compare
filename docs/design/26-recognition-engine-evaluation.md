@@ -175,6 +175,14 @@ infrastructure).
 | **Run-to-run stability** | Each document ≥3 runs | Amount-delta distribution, never a single-run number (HANDOFF §6 lesson 1 — qwen itself swings 0.18% between runs) |
 | 亨通 65.4% | Dedicated root-cause via the proper adapter | Model vs scorer vs golden-side error resolved before any 亨通 accuracy claim |
 
+> **P1-stage evidence, not a P2 pass** (2026-08-13 review): a single offline
+> run against the cached Paddle output now returns 浦东 to **137/136** rows
+> (was 274/136 before the copy-detect fix) with row precision 95.6%, field
+> exact-rate ~96% on the matched rows — a large improvement, but **not** the
+> P2 bar itself (single run, not ≥3; 137≠136; residual field mismatches
+> unexplained). Keep this row open until the formal P2 run confirms it —
+> do not treat the P1 fix as having already cleared this line.
+
 ## 7. P2-adjunct — one-shot dual-engine comparison batch (replaces shadow)
 
 The previously-planned standing production shadow is **dropped**: the product
