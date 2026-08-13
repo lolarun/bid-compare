@@ -311,6 +311,43 @@ def _looks_like_quote_table(header: list[str]) -> bool:
     return any(kw in h for h in header for kw in _QUOTE_TABLE_HINTS)
 
 
+# 全角/半角标点等价——"材料（设备）名称"（真表头，全角括号）跟"材料(设备)名称"
+# （续页表头重复行，半角括号）字面不相等，但是同一个词。浦东电缆实测复现：不做
+# 归一化，逐字匹配会直接漏判。只归一化标点，不归一化字母数字——不能把两个本来
+#不同的词碰巧削成一样。
+_PUNCT_NORMALIZE = str.maketrans("（）【】：，", "()[]:,")
+
+
+def _normalize_label(s: str) -> str:
+    return s.translate(_PUNCT_NORMALIZE).strip()
+
+
+def _is_divider_row(row: list[str], header: list[str]) -> bool:
+    """跳过"看着像数据、实际是装饰性分节/表头重复行"的行——不是 `_classify_row_type`
+    的小计/合计（那些是真数据，只是汇总），是压根不该进清单的噪声。两种形状（浦东
+    电缆实测复现）：
+
+    1. 分节标题行：Paddle 把"矿物电缆:"这类分节标题单独切成一张"表"，同一段文字
+       重复铺满整行每一列——不是数据，非空单元格几乎全相等就是这种标记。
+    2. 表头重复行：续页把列标签文字本身（"材料(设备)名称,规格型号,..."）当数据行
+       带了进来——续页没有自己的表头，`build_quote_csv` 沿用上一张真表头时，如果
+       这张"表"本身只是"分节标题+表头重复"两行，两行都会被当数据吃进来。
+       这里判据是行内容与当前表头逐位重合度高（标点归一化后比较）。
+
+    两种形状都源于同一个上游动作（续页沿用上一份表头时把整张原始 grid 当数据，
+    不再区分它是不是真的续页数据）——本函数只做最后一道过滤，不改动上游续页判定，
+    避免影响真正的续页数据。"""
+    vals = [c.strip() for c in row if c and c.strip()]
+    if len(vals) >= 3 and len(set(vals)) == 1:
+        return True  # 同一段文字铺满整行
+    header_set = {_normalize_label(h) for h in header if h and h.strip()}
+    if len(vals) >= 2 and header_set:
+        hits = sum(1 for v in vals if _normalize_label(v) in header_set)
+        if hits / len(vals) >= 0.8:
+            return True  # 这一行几乎就是表头文字本身
+    return False
+
+
 # CSV 列顺序跟 PROMPT_QUOTE_CSV 的契约一致：row_type 第一列，copy_no 倒数第二列，
 # page 最后一列（vl_quote.parse_csv 靠这几个位置的语义、不靠位置本身解析，但保持
 # 同一约定方便人工读原始 CSV 时核对）。
@@ -379,6 +416,8 @@ def build_quote_csv(doc_json: dict) -> str | None:
             for row in data_rows:
                 if not any((c or "").strip() for c in row):
                     continue  # 全空行（合并单元格续行的占位符）
+                if _is_divider_row(row, header):
+                    continue  # 分节标题/表头重复行——不是清单数据
                 fields = _extract_row_fields(col_map, row)
                 if not fields.get("name") and not fields.get("qty"):
                     continue  # 关键字段都拿不到，大概率是脏行
