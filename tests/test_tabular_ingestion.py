@@ -59,12 +59,18 @@ def test_quote_fact_to_item_dict_key_contract():
     assert d2["source_ref"] == {"sheet": "Sheet1", "row": 3}
 
 
-def test_quote_fact_derives_total_price():
-    """__post_init__ should compute total_price = qty * unit_price when absent."""
+def test_quote_fact_does_not_silently_derive_total_price():
+    """合并前审计（Fable复核，2026-08-09 quote_fact.py:129-134 的意图变更）：
+    权威 total_price 在缺失时保持 None，不再被 qty*unit_price 静默覆盖——
+    禁止未经确认自动改写原值。派生候选值改落 derived_total_candidate，
+    total_source 标 missing，供入库门（doc/19 §L2）据此要求人工补写。
+    这条测试原先断言的正是被有意移除的旧行为。"""
     from apps.api.intelligence.quote_fact import QuoteFact
 
     fact = QuoteFact(material="蝶阀", qty=5.0, unit_price=200.0)
-    assert fact.total_price == pytest.approx(1000.0)
+    assert fact.total_price is None
+    assert fact.derived_total_candidate == pytest.approx(1000.0)
+    assert fact.total_source == "missing"
 
 
 # ─── CSV helpers ───────────────────────────────────────────────────────────────
@@ -98,10 +104,13 @@ def test_basic_csv_no_total_row():
         items = result["items"]
         assert len(items) == 3, f"Expected 3, got {len(items)}"
 
-        # total_price derived from qty × unit_price
-        assert items[0]["total_price"] == pytest.approx(1000.0)
-        assert items[1]["total_price"] == pytest.approx(400.0)
-        assert items[2]["total_price"] == pytest.approx(600.0)
+        # 合并前审计（Fable复核）：total_price 不再被静默派生（2026-08-09
+        # quote_fact.py:129-134），权威值缺失时保持 None；qty×单价的候选值
+        # 改落 derived_total_candidate，不冒充已确认金额。
+        for item, expected in zip(items, (1000.0, 400.0, 600.0)):
+            assert item["total_price"] is None
+            assert item["derived_total_candidate"] == pytest.approx(expected)
+            assert item["total_source"] == "missing"
 
         # canonical should have dn extracted from spec
         for item in items:
