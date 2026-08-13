@@ -28,6 +28,36 @@
 
 ---
 
+## 合并检查点（2026-08-12，`codex/agent-rebuild` → `main`）
+
+> 长期挂账的"4 个既有失败"（本文其他章节仍会提到旧数字，如 §1 的 811、
+> §5 的 35/613——那些是各自章节写下时的历史快照，不回填）在这次合并前审计
+> （Fable 复核）中查明并清零：`test_profession_map`/`test_category_abbr`
+> 断言 `len(PROFESSION_MAP)==10`，品类表合法增长到 11 个后没跟上；
+> `test_quote_fact_derives_total_price`/`test_basic_csv_no_total_row` 断言
+> `total_price` 会被静默派生，但 `quote_fact.py:129-134` 记录这是 2026-08-09
+> 有意移除的行为（CLAUDE.md"禁止未经确认自动覆盖原值"）。两组都是测试断言
+> 没跟上有意变更，不是回归——已改写断言，不是放宽或跳过。
+
+**当前真实基线**：`pytest apps/api/tests tests -q` → **815 passed, 0 failed,
+1 skipped, 7 deselected(@e2e)**，333.17s。`apps/www`：`vue-tsc -b` 干净，
+`vitest run` 6 files / 65 tests 全绿。这是合并到 main 那一刻的基线，之后
+任何一轮报告"既有失败"前，先确认是不是又需要一次这样的审计，不要不假思索
+沿用本文其他章节的旧数字。
+
+**识别引擎替换探索（design/25 前置调研，未落地代码）**：客户反馈现有 PDF
+识别耗时慢，对照 WPS。排查发现：① 招标文件原生 PDF 走文字层直抽，7 月百度
+实验验证 17.7s/100% 可行；② 候选模型 PaddleOCR-VL 在行级序号召回率上
+7 份投标 PDF 里 6 份达标（含项目最难样本泰科龙转置表格 100%），耗时优势
+9-20 倍；③ 拼图省时间的路线已否决（分辨率与召回绑定，大图上传本身会失败）；
+④ 逐字段准确率解析器有已知列对齐缺陷，数字不可信，只有行级/序号级召回率
+可信。证据链：`scripts/{try_paddleocr_vl,score_paddleocr_vl,stitch_vs_multi_bench}.py`
++ `outputs/{baidu_paddleocr_vl,baidu_unlimited_ocr}/`（gitignore，不随代码走，
+需要复现请重跑脚本）。是否立项、Phase 划分见后续 `docs/design/25`（未写，
+待讨论：轨A 是否独立先行、Phase 2 通过线数字、亨通 65.4% 召回率归因）。
+
+---
+
 ## 现状速览（2026-08-11）
 
 | 链路 | 识别器 | 最近一次实测 |
