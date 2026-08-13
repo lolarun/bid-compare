@@ -7,9 +7,11 @@
 `vl_quote.py` 的 `VLCall` 注入是同一个道理（`.claude/rules/recognition.md`）。
 
 跟脚本版的三点差异：
-1. 复用 `dashscope_ocr.py` 已经有的重试/退避基础设施（`_MAX_RETRIES=5`、指数
-   退避+抖动），不是重新发明一套——两个 provider 面对的是同一类瞬时网络故障
-   （连接失败/超时/限流），没有理由用两套不同的容错策略。
+1. 重试/退避参数（`_MAX_RETRIES=5`、指数退避+抖动）沿用 `dashscope_ocr.py`
+   同一组已验证过的数值，但是**本模块内独立实现**，不是从那边 import——
+   `dashscope_ocr.py` 属于 qwen 链路，design/26 P4 要整体删除，import 它等于
+   让本模块依赖一个即将消失的东西；重复这几行代码换来的是两条 provider
+   互不牵连，qwen 删除时这里不需要跟着动一个字。
 2. 每次提交/查询遇到非 200 的业务错误码都记录**完整响应体**，不只是失败就
    抛异常——design/26 P2 报预算前要核实有没有撞到限流/配额，这层日志是唯一
    的证据来源（脚本版探索阶段只把错误打印到终端，不落 log，事后查不到）。
@@ -32,8 +34,9 @@ from apps.api.intelligence.base import ProviderError
 
 log = logging.getLogger(__name__)
 
-# 跟 dashscope_ocr.py 同一套数值——不是巧合，是有意复用同一份"网络层容错够
-# 用多少次/退避多久"的既有结论，不为 Paddle 另起一套没有依据的参数。
+# 跟 dashscope_ocr.py 取同一套数值（独立定义，不 import——见模块文档差异 1），
+# 不为 Paddle 另起一套没有依据的参数，沿用同一份"网络层容错够用多少次/退避
+# 多久"的既有结论。
 _MAX_RETRIES = 5
 _RETRY_BASE = 2          # 指数退避基数：2, 4, 8, 16, 32（叠加抖动）
 _RETRY_MAX = 30          # 封顶 30s
