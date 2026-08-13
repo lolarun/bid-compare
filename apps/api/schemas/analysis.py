@@ -934,6 +934,13 @@ class BatchConfirmResult(BaseModel):
     # design/24 B0：非 None = 识别到多份合法副本（copy_no），本次只选了其中
     # 一份入库。同一条 §4 证据链要求——不能让 response_model 把这条悄悄吃掉。
     copy_dedup: dict | None = None
+    # design/24 B3：dry_run=true 时的响应形状——从不写库，issues 收集本次会
+    # 命中的全部结构性疑点（不是只有第一个）。真实写入路径这四个字段恒为
+    # None/false，前端用 dry_run 字段本身判断走哪条渲染分支。
+    dry_run: bool | None = None
+    would_succeed: bool | None = None
+    issues: list[dict] = []
+    already_stored: bool | None = None
     model_config = {"extra": "ignore"}
 
 

@@ -30,6 +30,7 @@ from apps.api.models import (
 from apps.api.services.ingestion.standardize import standardize_name
 from apps.api.intelligence.price_basis import derive_price_basis
 from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
+from apps.api.services.submission import dry_run_cache
 from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_NOT_QUOTED,
     ARITHMETIC_FLAG,
@@ -224,7 +225,7 @@ def _truncation_from_items(items: list[dict]):
     return corroborate_truncation(rep, items) if rep.suspects else rep
 
 
-def _gate_integrity(db: Session, items: list[dict]) -> dict:
+def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> dict:
     """列错位 / 重复行门。两者的处置**不同**，因为它们的合法性不同：
 
     - **列错位**：数据列数与表头不一致，按列名取到的每个值都可能是别的列的值。
@@ -238,6 +239,11 @@ def _gate_integrity(db: Session, items: list[dict]) -> dict:
 
     放行 BLOCKED 行的唯一方式是用户在预览里标 `integrity_ack=true`，与派生金额门一致。
     返回给响应体的告警摘要；不改写任何原值。
+
+    design/24 B3：`dry_run=True` 时，命中阻断也不 raise/rollback——把原本要 raise
+    的 payload 塞进返回值的 "blocking_issue" 键，让调用方（confirm_batch）继续往
+    下跑完整条链路，一次收集所有门的问题，而不是在这里就打断。`dry_run=False`
+    时的行为（包括 rollback 时机）与改动前逐字节一致——真实路径不受这轮改动影响。
     """
     dup = find_duplicate_rows(items)
     arith = check_arithmetic(items)
@@ -279,24 +285,26 @@ def _gate_integrity(db: Session, items: list[dict]) -> dict:
     ]
 
     if block_rows:
-        db.rollback()
-        raise ReviewRequiredError(
-            {
-                "error": "structural_integrity_requires_review",
-                "message": (
-                    f"{len(block_rows)} 行未通过结构完整性检查"
-                    f"（列错位 {len(shifted)} 行 / 重复 {len(blocking_dup)} 行 / "
-                    f"算术不闭合 {len(blocking_arith)} 行，"
-                    f"重复金额占比 {dup.amount_ratio:.1%}，"
-                    f"算术错误率 {arith.error_rate:.1%}）。"
-                    f"系统不会代为删除或重排，请核对原文后逐行确认。"
-                ),
-                "review_rows": block_rows[:50],
-                "review_row_count": len(block_rows),
-                "duplicates": dup.to_dict(),
-                "arithmetic": arith.to_dict(),
-            },
-        )
+        payload = {
+            "error": "structural_integrity_requires_review",
+            "message": (
+                f"{len(block_rows)} 行未通过结构完整性检查"
+                f"（列错位 {len(shifted)} 行 / 重复 {len(blocking_dup)} 行 / "
+                f"算术不闭合 {len(blocking_arith)} 行，"
+                f"重复金额占比 {dup.amount_ratio:.1%}，"
+                f"算术错误率 {arith.error_rate:.1%}）。"
+                f"系统不会代为删除或重排，请核对原文后逐行确认。"
+            ),
+            "review_rows": block_rows[:50],
+            "review_row_count": len(block_rows),
+            "duplicates": dup.to_dict(),
+            "arithmetic": arith.to_dict(),
+        }
+        if not dry_run:
+            db.rollback()
+            raise ReviewRequiredError(payload)
+    else:
+        payload = None
 
     return {"duplicate_verdict": dup.verdict,
             "duplicate_rows": len(dup_rows),
@@ -304,15 +312,26 @@ def _gate_integrity(db: Session, items: list[dict]) -> dict:
             "column_shift_rows": len(shifted),
             "arithmetic": arith.to_dict(),
             "truncation": trunc.to_dict() if trunc else None,
-            "warnings": warn_rows[:50]}
+            "warnings": warn_rows[:50],
+            "blocking_issue": payload}
 
 
-def confirm_batch(db: Session, body) -> dict:
+def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
     """将 OCR 提取结果暂存为 BidSubmission + BidQuoteLine（P0 新版）。
 
     `body` must have the same fields as BatchConfirmRequest in routes/quotes.py.
 
     Returns the response dict the route should return directly.
+
+    design/24 B3（dry_run）：请求形状校验（job/supplier/project/category/items
+    形状——第一段，到 items 列表建好为止）**不受 dry_run 影响，始终立即 raise**：
+    这些是"请求本身不成立"，不是"文档内容有疑点"，dry-run 预览一个不存在的
+    job 没有意义。从结构完整性门开始，四道数据质量门（结构完整性/原文无合价/
+    全部跳过/声明总价核对）在 dry_run=True 时改为**收集而非阻断**——让入库
+    循环整条链路都跑完，一次性报出所有疑点，而不是像真实路径那样命中第一道
+    就停（真实路径的行为逐字节不变，见各处 `if not dry_run` 分支）。dry_run
+    永远不 commit，函数末尾统一 rollback，包括 project 自动建档这类中途 flush
+    的副作用。
     """
     job = db.get(ExtractionJob, body.job_id)
     if not job:
@@ -402,6 +421,18 @@ def confirm_batch(db: Session, body) -> dict:
     # 借口，不是在防真疑点。
     items, copy_dedup = _dedupe_copies(items, _declared_total(job))
 
+    # design/24 B4：dry_run 命中缓存直接返回，不碰 DB。真实写入路径不查缓存——
+    # 缓存只为"反复预览、不打算真写"这个场景服务，写入必须永远走一遍真实判据。
+    cache_hit_key: str | None = None
+    if dry_run:
+        cache_hit_key = dry_run_cache.cache_key(
+            body.job_id, items, category=default_category,
+            supplier_id=body.supplier_id, checksum_ack=getattr(body, "checksum_ack", False),
+        )
+        cached = dry_run_cache.get(cache_hit_key)
+        if cached is not None:
+            return cached
+
     # ── 幂等：BidSubmission.batch_id 检查（一个 job 最多一条 BidSubmission）────────
     batch_id = f"BID-{job.id}"
     prior_submission = db.scalar(select(BidSubmission).where(BidSubmission.batch_id == batch_id))
@@ -433,29 +464,35 @@ def confirm_batch(db: Session, body) -> dict:
                 )
             ) or 0.0
             checksum = _build_checksum(job, float(prior_sum), prior_line_count)
+            idempotent_issue = None
             if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
-                raise ReviewRequiredError(
-                    {
-                        "error": "declared_total_mismatch",
-                        "message": (
-                            f"该 job 已入库 {prior_line_count} 行，但明细合价之和 "
-                            f"{checksum['line_sum']:,.2f} 与声明总价 "
-                            f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
-                            f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%}。"
-                            f"**数据已在库中**，需人工核对后确认或重新识别。"
-                        ),
-                        "checksum": checksum,
-                        "already_stored": True,
-                        "submission_id": prior_submission.id,
-                    },
-                )
-            if job.lifecycle != "confirmed":
-                job.lifecycle = "confirmed"
-                db.commit()
+                payload = {
+                    "error": "declared_total_mismatch",
+                    "message": (
+                        f"该 job 已入库 {prior_line_count} 行，但明细合价之和 "
+                        f"{checksum['line_sum']:,.2f} 与声明总价 "
+                        f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
+                        f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%}。"
+                        f"**数据已在库中**，需人工核对后确认或重新识别。"
+                    ),
+                    "checksum": checksum,
+                    "already_stored": True,
+                    "submission_id": prior_submission.id,
+                }
+                # dry_run：已入库这件事本身不该被 dry-run "预览"到——库里已经有
+                # 数据了，不是"将要写什么"。仍按 checksum 现状报一条 issue，
+                # 但不 raise（没有事务要保护，这条分支从不写任何东西）。
+                if not dry_run:
+                    raise ReviewRequiredError(payload)
+                idempotent_issue = payload
+            if not dry_run:
+                if job.lifecycle != "confirmed":
+                    job.lifecycle = "confirmed"
+                    db.commit()
             # 注意：这里不带 copy_dedup——它是对本次 items 重算的结果，跟
             # prior_line_count（数据库里实际存的、可能是本轮 B0 修复前写入的）
             # 不是同一件事，混进响应会误导前端以为库里的数据也经过了去重。
-            return {
+            result = {
                 "status": "ok",
                 "submission_id": prior_submission.id,
                 "line_count": prior_line_count,
@@ -468,6 +505,12 @@ def confirm_batch(db: Session, body) -> dict:
                 "idempotent": True,
                 "checksum": checksum,
             }
+            if dry_run:
+                result["dry_run"] = True
+                result["already_stored"] = True
+                result["would_succeed"] = idempotent_issue is None
+                result["issues"] = [idempotent_issue] if idempotent_issue else []
+            return result
         if _stale:
             deleted = db.execute(
                 delete(BidQuoteLine).where(BidQuoteLine.submission_id == prior_submission.id)
@@ -507,8 +550,7 @@ def confirm_batch(db: Session, body) -> dict:
     job.lifecycle = "confirmed"
 
     if not items:
-        db.commit()
-        return {
+        result = {
             "status": "ok",
             "submission_id": submission.id,
             "line_count": 0,
@@ -519,12 +561,22 @@ def confirm_batch(db: Session, body) -> dict:
             "project_id": project.id if project else None,
             "batch_id": batch_id,
         }
+        if dry_run:
+            db.rollback()
+            result["dry_run"] = True
+            result["would_succeed"] = True
+            result["issues"] = []
+            if cache_hit_key:
+                dry_run_cache.put(cache_hit_key, result)
+        else:
+            db.commit()
+        return result
 
     # ── 结构完整性门（doc/19 §L4）──────────────────────────────────────────────
     # 在写任何一行之前先看**表的形状**：列错位与重复行是下游唯一察觉不到的两类缺陷，
     # 错位后的金额仍是合法数字、重复行仍能通过逐行算术校验。两者都只标注和阻断，
     # 不删行、不改值、不猜正确列序——恢复正确值必须回原始页面重读。
-    integrity = _gate_integrity(db, items)
+    integrity = _gate_integrity(db, items, dry_run=dry_run)
 
     # ── 逐行处理 → BidQuoteLine ────────────────────────────────────────────────
     from apps.api.services.history.comparison import get_category_thresholds, determine_alert
@@ -720,31 +772,44 @@ def confirm_batch(db: Session, body) -> dict:
             errors.append({"row": idx + 1, "reason": f"{type(e).__name__}: {e}"})
             skipped_count += 1
 
+    # design/24 B3：dry_run 时四道门（结构完整性/原文无合价/全部跳过/声明总价）
+    # 全部改"收集不阻断"——issues 攒够了再一次性报给调用方，而不是命中第一道
+    # 就 raise+rollback，逼用户来回提交四次才看全四个问题。真实路径（dry_run=
+    # False）三处 `if not dry_run` 分支之外的代码逐字节未变——命中即 rollback+
+    # raise，跟改动前完全一样。
+    issues: list[dict] = []
+    if integrity.get("blocking_issue"):
+        issues.append(integrity["blocking_issue"])
+
     # ── 派生金额安全闭环（doc/19 §L2）──────────────────────────────────────
     # 原文无合价且未经人工确认的行，一律阻断自动确认：回滚整个事务，不写
     # BidQuoteLine，不把 job 标成 confirmed。试点期采用最保守规则——**单行即阻断**，
     # 不用占比阈值：亨通实测单行列错位即可造成约 2000 万误差，5% 的行数门槛护不住。
     if missing_total_rows:
-        db.rollback()
-        raise ReviewRequiredError(
-            {
-                "error": "missing_total_requires_review",
-                "message": (
-                    f"{len(missing_total_rows)} 行原文无合价。系统不会代为计算，"
-                    f"请在预览中人工补写或确认后再提交。"
-                ),
-                "review_rows": missing_total_rows[:50],
-                "review_row_count": len(missing_total_rows),
-            },
-        )
+        payload = {
+            "error": "missing_total_requires_review",
+            "message": (
+                f"{len(missing_total_rows)} 行原文无合价。系统不会代为计算，"
+                f"请在预览中人工补写或确认后再提交。"
+            ),
+            "review_rows": missing_total_rows[:50],
+            "review_row_count": len(missing_total_rows),
+        }
+        if dry_run:
+            issues.append(payload)
+        else:
+            db.rollback()
+            raise ReviewRequiredError(payload)
 
     # 强校验：items 非空但全部被跳过 → 回滚并返回 422
     if items and line_count == 0:
-        db.rollback()
         reason_summary = "; ".join({e["reason"] for e in errors[:3]}) if errors else "品类无效或所有行被过滤"
-        raise ReviewRequiredError(
-            f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}",
-        )
+        all_skipped_msg = f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}"
+        if dry_run:
+            issues.append({"error": "all_rows_skipped", "message": all_skipped_msg})
+        else:
+            db.rollback()
+            raise ReviewRequiredError(all_skipped_msg)
 
     # ── 声明总价闭环门（提交前，阻断）──────────────────────────────────────
     # 2026-08-09 修正：这段原本在 db.commit() **之后**执行，阈值 5%，只写 job.result
@@ -755,19 +820,49 @@ def confirm_batch(db: Session, body) -> dict:
     # 对不上时要么是漏行、要么是读错值，两种都不该静默入库。
     checksum = _build_checksum(job, line_total_sum, line_count)
     if checksum["status"] == "fail" and not getattr(body, "checksum_ack", False):
-        db.rollback()
-        raise ReviewRequiredError(
-            {
-                "error": "declared_total_mismatch",
-                "message": (
-                    f"明细合价之和 {checksum['line_sum']:,.2f} 与文件声明总价 "
-                    f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
-                    f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%} 的允许范围。"
-                    f"通常意味着漏行或数值读错，请核对后再提交。"
-                ),
-                "checksum": checksum,
-            },
-        )
+        payload = {
+            "error": "declared_total_mismatch",
+            "message": (
+                f"明细合价之和 {checksum['line_sum']:,.2f} 与文件声明总价 "
+                f"{checksum['declared']:,.2f} 相差 {checksum['delta_pct']}%，"
+                f"超过 {CHECKSUM_BLOCK_DELTA_RATIO:.1%} 的允许范围。"
+                f"通常意味着漏行或数值读错，请核对后再提交。"
+            ),
+            "checksum": checksum,
+        }
+        if dry_run:
+            issues.append(payload)
+        else:
+            db.rollback()
+            raise ReviewRequiredError(payload)
+
+    if dry_run:
+        # 先把要用的值读出来再 rollback——rollback 之后 submission/project 这些
+        # 从未提交过的 ORM 对象会被 session 过期/摘除，再访问属性会炸
+        # （DetachedInstanceError 之类），不是"读到旧值"那么温和。
+        result = {
+            "status": "ok",
+            "dry_run": True,
+            "would_succeed": len(issues) == 0,
+            "issues": issues,
+            "submission_id": submission.id,
+            "line_count": line_count,
+            "skipped_count": skipped_count,
+            "not_quoted_rows": len(not_quoted_rows),
+            "not_quoted_detail": not_quoted_rows[:50],
+            "integrity": integrity,
+            "checksum": checksum,
+            "errors": errors,
+            "unknown_brands": sorted(unknown_brands),
+            "supplier_id": submission.supplier_id,
+            "project_id": project.id if project else None,
+            "batch_id": batch_id,
+            "copy_dedup": copy_dedup,
+        }
+        db.rollback()   # 从不写：submission/lines/job.lifecycle 全部撤销
+        if cache_hit_key:
+            dry_run_cache.put(cache_hit_key, result)
+        return result
 
     job.result = {**(job.result or {}), "_checksum": checksum}
     ctx = dict(job.context or {})

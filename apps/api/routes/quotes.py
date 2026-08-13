@@ -52,6 +52,9 @@ class BatchConfirmRequest(BaseModel):
     category: str = ""
     overrides: list[dict[str, Any]] | None = None
     bid_status: str = ""
+    # design/24 B3：预演——跑一遍完全相同的判据，从不写库，把这份文档所有的
+    # 结构性疑点一次性收集返回，而不是等用户真点「校对入库」才逐个撞见。
+    dry_run: bool = False
 
 
 @router.get("", response_model=QuoteListResult)
@@ -389,7 +392,7 @@ def batch_confirm(body: BatchConfirmRequest = Body(...), db: Session = Depends(g
     - 归档到 Quote 须显式调用 POST /api/quotes/archive-prices。
     """
     from apps.api.services.submission.quote_confirmation_service import confirm_batch
-    return confirm_batch(db, body)
+    return confirm_batch(db, body, dry_run=body.dry_run)
 
 
 # ─── Archive prices: BidSubmission → Quote（显式归档）────────────────────────

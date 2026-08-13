@@ -119,6 +119,10 @@ export const quoteApi = {
     // 评审 R2（第3块）：declared_total_mismatch 结构化错误的放行开关——
     // 此前前端根本没有这个参数，用户永远无法在核对过差异后强制入库。
     checksum_ack?: boolean
+    // design/24 B3：预演——跑一遍完全相同的判据、从不写库，一次性返回这份
+    // 文档所有的结构性疑点。收件箱（design/24 后续阶段）用它做"进收件箱前
+    // 预检"；本轮只接后端能力，UI 消费方留给前端 Stage 组件那一步接。
+    dry_run?: boolean
   }) => api.post<BatchConfirmResult>('/quotes/batch-confirm', data),
 }
 

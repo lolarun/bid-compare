@@ -628,6 +628,16 @@ export interface CopyDedupInfo {
   selection_basis: 'closest_to_declared_total' | 'largest_row_count'
 }
 
+// design/24 B3：dry_run=true 时四道数据质量门的统一疑点形状——error 是稳定的
+// 判别键（"structural_integrity_requires_review" 等），message 是人话摘要，
+// 其余字段随 error 类型而定（checksum/review_rows/duplicates/...），前端按
+// error 分支处理，不强行统一成一个大而全的接口。
+export interface BatchConfirmIssue {
+  error: string
+  message: string
+  [key: string]: unknown
+}
+
 export interface BatchConfirmResult {
   status: string
   submission_id: number
@@ -641,6 +651,11 @@ export interface BatchConfirmResult {
   idempotent?: boolean
   // design/24 B0：非 null = 识别到多份合法副本，本次只选了一份入库。
   copy_dedup?: CopyDedupInfo | null
+  // design/24 B3：dry_run=true 的响应形状——从不写库，issues 收集本次会命中
+  // 的全部疑点（不是只有第一个）。真实写入路径这三个字段恒为 undefined。
+  dry_run?: boolean
+  would_succeed?: boolean
+  issues?: BatchConfirmIssue[]
 }
 
 export interface SavedInvitation {
