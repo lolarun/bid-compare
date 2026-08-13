@@ -33,7 +33,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from e2e_diff import diff_doc  # noqa: E402
-from try_paddleocr_vl import DOCS, SEVEN_QUOTE_DOCS, OUT_DIR  # noqa: E402
+from try_paddleocr_vl import DOCS, SEVEN_QUOTE_DOCS, OUT_DIR, _git_sha  # noqa: E402
+
+# design/26 §3.3：本脚本的列位置映射有已知未解决的缺陷——同一张表不同行对
+# "空单元格"的处理方式不一致，导致固定表头位置的映射会在部分行上错位
+# （已用 seq=1 vs seq=3 两行实测证实）。逐字段准确率数字**不可信**，这不是
+# 本轮 P0 要修的东西——正式修法是 P1 的 ExtractionDraft 适配器（design/26 §5），
+# 不是继续在这个探索脚本里打补丁。P0 只做 SHA 绑定，不碰这层解析逻辑。
+KNOWN_LIMITATION = (
+    "字段级数字有已知列漂移缺陷（design/26 §3.3），仅供方向参考，不作为"
+    "验收依据——验收走 P1 适配器 + 生产四道门（design/26 §5-6）。"
+)
 
 # 表头关键词 → golden 字段名（e2e_diff._FIELD_MAP 用的那套名字）。
 # 顺序有意义：更具体的（"不含税"）排在通用的（"单价"）前面，避免通用词提前命中。
@@ -209,8 +219,11 @@ def main() -> int:
         results.append({"doc": doc_key, "extracted_rows": len(draft_rows), "summary": scored["summary"]})
 
     (OUT_DIR / "field_score_summary.json").write_text(
-        json.dumps(results, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    print(f"\n完整字段级指标 → {OUT_DIR}/field_score_summary.json")
+        json.dumps({
+            "code_sha": _git_sha(), "known_limitation": KNOWN_LIMITATION,
+            "docs": doc_keys, "runs": results,
+        }, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    print(f"\n完整字段级指标 → {OUT_DIR}/field_score_summary.json（{KNOWN_LIMITATION}）")
     return 0
 
 

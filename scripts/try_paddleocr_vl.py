@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import re
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +44,18 @@ ENV_PATH = REPO / "apps" / "api" / ".env"
 OUT_DIR = REPO / "outputs" / "baidu_paddleocr_vl"
 PRJ1 = REPO / "docs/test1/prj1"
 TEST = REPO / "docs/test"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, text=True).strip()
+    except Exception:                                              # noqa: BLE001
+        return "unknown"
 
 # 跟 scripts/vl_prod_e2e.py 的 DOCS 保持同一套七份文档，方便和生产识别器的结果对照。
 DOCS = {
@@ -221,6 +235,10 @@ def run_one(doc_key: str, *, api_key: str, secret_key: str,
                       if golden_seqs else None),
         "missing_seqs": missing,   # golden 有、这次没找到的序号——真正的漏行
         "extra_seqs": extra,       # 这次多出来的、golden 没有的序号——多半是别的表格串进来了
+        # design/26 P0：产物必须能倒推是哪份代码、哪份 PDF、哪个 API 端点跑出来的——
+        # 上一轮探索脚本没绑这个，事后没法说清楚一批数字是怎么来的。
+        "pdf_sha256": _sha256(pdf_path),
+        "api_endpoint": TASK_URL,
     }
     (OUT_DIR / f"{doc_key}.analysis.json").write_text(
         json.dumps(analysis, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -274,6 +292,7 @@ def main() -> int:
     manifest_path = OUT_DIR / "manifest_batch.json"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps({
+        "code_sha": _git_sha(), "api_endpoint": TASK_URL,
         "merge_tables": a.merge_tables, "recognize_seal": a.recognize_seal,
         "docs": doc_keys, "runs": results,
     }, ensure_ascii=False, indent=1), encoding="utf-8")
