@@ -60,7 +60,11 @@ def _coerce_num(v):
 
 
 def _norm_str(s) -> str:
-    return str(s or "").strip().replace(" ", "").replace("（", "(").replace("）", ")").lower()
+    # "\\n"（反斜杠+n 两个字符，不是真换行）——Paddle 对跨行换行的表格单元格
+    # 输出里带的字面转义序列（亨通/浦东实测复现："预分支电缆头\nRTTYZ-..."），
+    # 内容其实一致，不剥离会被当成两个不同字符串误判成字段不符。
+    return (str(s or "").strip().replace(" ", "").replace("\\n", "")
+           .replace("（", "(").replace("）", ")").lower())
 
 
 def _extract_val(draft_fields: dict, golden_field: str):
@@ -215,6 +219,118 @@ def _content_match(
     return gi_to_draft, gi_to_score
 
 
+# ── 分块内容对齐（同文档内类目段落顺序颠倒时的修正）─────────────────────────
+#
+# `_content_match` 的 DP 要求两侧下标同步递增（"保持行序"），这在**同一个
+# 类目连续出现**时是对的；但报价清单的物理顺序不等于 golden 的 canonical
+# 顺序——供应商可能先印"普通电缆"段再印"矿物电缆"段，golden 却是反过来
+# （block_alignment.py 早就记录过同一个事实："报价清单的物理顺序不等于招标
+# 清单顺序"，那是给报价→招标对齐用的两级方案）。段落顺序整段颠倒时，
+# `_content_match` 只能匹配其中一段——匹配了在后一段（对应 golden 靠前的
+# 下标）就再也回不去匹配前一段。亨通实测：65.4% 的召回率精确等于"两个类目
+# 段只有一段被算对"（89/136），核对过 MY/GOLDEN 两侧的段落边界完全证实这个
+# 假设，不是识别缺陷，是打分器的顺序假设在这类文档上不成立。
+#
+# 修法：先按 name 值把两侧都切成连续区块，配对区块，再在每一对内部复用
+# 上面完全不变的 `_content_match`——不改行级判据本身，只是不再把整份文档
+# 硬按一条序列对齐。
+
+
+def _row_name(x) -> str:
+    """统一取 name：quote_lines 是 DraftRow（.fields），golden_rows 是 dict。"""
+    if hasattr(x, "fields"):
+        return x.fields.get("name") or ""
+    return x.get("raw_name") or x.get("name") or ""
+
+
+def _split_blocks_by_name(items: list) -> list[tuple[int, int]]:
+    """按 name 值切连续区块，返回 [(start, end_inclusive), ...]。
+
+    相邻区块的 name 若互为子串就合并——OCR 偶尔把同一类目名拆成两种写法
+    （"普通电缆" 读成 "普通"，见亨通实测）不该被当成一个新类目段。不用相似度
+    阈值：矿物电缆/普通电缆共享"电缆"后缀，阈值稍松就会把两个真正不同的
+    类目误合并成一个块，抵消这层修复的意义；子串包含关系比模糊阈值精确。
+    """
+    if not items:
+        return []
+    blocks = []
+    start = 0
+    cur_name = _row_name(items[0])
+    for i in range(1, len(items)):
+        name = _row_name(items[i])
+        if name == cur_name or (name and cur_name and (name in cur_name or cur_name in name)):
+            continue
+        blocks.append((start, i - 1))
+        start, cur_name = i, name
+    blocks.append((start, len(items) - 1))
+    return blocks
+
+
+def _match_blocks(q_blocks: list[tuple[int, int]], quote_lines: list,
+                  g_blocks: list[tuple[int, int]], golden_rows: list):
+    """按块首行 name 相似度贪心配对。两侧块数通常很少（同一份文档内的
+    大类目段落，2-5 个），不需要 block_alignment.py 那套数量序列 + LLM 兜底
+    的完整流程——那是为跨文档（报价 vs 招标，块数可能到十几个、类目命名
+    可能不一致）设计的；这里是同一份文档内部段落顺序颠倒，直接按名称配对
+    更直接、更透明，没必要复用一套更重的机制。"""
+    used_g: set[int] = set()
+    pairs: list[tuple[tuple | None, tuple | None]] = []
+    for qb in q_blocks:
+        q_name = _row_name(quote_lines[qb[0]])
+        best_gi, best_score = None, -1.0
+        for gi, gb in enumerate(g_blocks):
+            if gi in used_g:
+                continue
+            score = _name_sim(q_name, _row_name(golden_rows[gb[0]]))
+            if score > best_score:
+                best_gi, best_score = gi, score
+        if best_gi is not None:
+            used_g.add(best_gi)
+            pairs.append((qb, g_blocks[best_gi]))
+        else:
+            pairs.append((qb, None))
+    for gi, gb in enumerate(g_blocks):
+        if gi not in used_g:
+            pairs.append((None, gb))  # 没有对应报价段的 golden 段——原样保留，计入 missing
+    return pairs
+
+
+def _content_match_blocked(quote_lines: list, golden_rows: list, min_score: float = 0.40):
+    """先分块配对，再在每一对内部跑不变的 `_content_match`。两种情况退回
+    原算法，不做分块：
+    - 单块文档（只有一个类目、或没分出块）——分块没有意义。
+    - 报价侧块数远多于 golden 侧（实测宏胜：14 vs 2）——name 字段本身在这份
+      文档上不可靠，不是类目段落颠倒，是抽取层的噪声（Paddle 把跨行换行的
+      长名称，如"预分支电缆头"，拆成"预分支"/"电缆头"两行，各自继承同一个
+      spec，制造出大量伪类目段）。这种情况下贪心配对会把报价侧多出来的块
+      配不上任何 golden 块直接丢弃——那些块里的真实数据行会被整段判"没
+      匹配上"，比不分块还差（宏胜实测：分块后 recall 从 100% 掉到 28.7%）。
+      块数比例失衡本身就是"这次分块不可信"的信号，宁可退回对整份文档做
+      一次 DP（对真正顺序颠倒的文档不完美，但不会把干净的数据行成段丢弃）。
+    """
+    if not quote_lines or not golden_rows:
+        return _content_match(quote_lines, golden_rows, min_score=min_score)
+
+    q_blocks = _split_blocks_by_name(quote_lines)
+    g_blocks = _split_blocks_by_name(golden_rows)
+    if len(q_blocks) <= 1 or len(g_blocks) <= 1 or len(q_blocks) > len(g_blocks) * 3:
+        return _content_match(quote_lines, golden_rows, min_score=min_score)
+
+    gi_to_draft: dict[int, object] = {}
+    gi_to_score: dict[int, int] = {}
+    for qb, gb in _match_blocks(q_blocks, quote_lines, g_blocks, golden_rows):
+        if qb is None or gb is None:
+            continue
+        q_slice = quote_lines[qb[0]:qb[1] + 1]
+        g_slice = golden_rows[gb[0]:gb[1] + 1]
+        sub_gi_to_draft, sub_gi_to_score = _content_match(q_slice, g_slice, min_score=min_score)
+        for local_gi, draft_r in sub_gi_to_draft.items():
+            global_gi = gb[0] + local_gi
+            gi_to_draft[global_gi] = draft_r
+            gi_to_score[global_gi] = sub_gi_to_score[local_gi]
+    return gi_to_draft, gi_to_score
+
+
 def diff_doc(doc_name: str, golden: dict, draft_rows: list, field_sources: dict | None = None) -> dict:
     """golden vs draft rows → 行级+字段级指标 + 逐行 diff。
 
@@ -256,7 +372,7 @@ def diff_doc(doc_name: str, golden: dict, draft_rows: list, field_sources: dict 
     if use_content_align:
         # 内容对齐使用全部 golden 行（不过滤 seq）
         all_golden_rows = golden["rows"]
-        gi_to_draft, gi_to_score = _content_match(quote_lines, all_golden_rows)
+        gi_to_draft, gi_to_score = _content_match_blocked(quote_lines, all_golden_rows)
         # 构建对齐对列表，复用下方字段统计循环
         content_pairs: list[tuple[dict, object]] = [
             (all_golden_rows[gi], draft_r)

@@ -53,6 +53,9 @@ from apps.api.core.utils import parse_num
 from apps.api.intelligence.copy_detect import detect_copies
 from apps.api.intelligence.extraction_draft import ExtractionDraft
 from apps.api.intelligence.vl_quote import build_draft, map_columns
+from apps.api.services.ingestion.draft_integrity import (
+    AMOUNT_NOT_QUOTED, AMOUNT_VALUE, classify_amount_cell,
+)
 
 log = logging.getLogger(__name__)
 
@@ -311,6 +314,27 @@ def _looks_like_quote_table(header: list[str]) -> bool:
     return any(kw in h for h in header for kw in _QUOTE_TABLE_HINTS)
 
 
+# 数量/单价/合价这几个槽位——判"这一行到底像不像报价数据"用它们，不用 name
+# （name 位一样会被续页误吸收的无关表格填上文字，靠它挡不住，亨通实测复现）。
+_NUMERIC_FIELD_KEYS = ("qty", "unit_price_excl_tax", "total_price_excl_tax", "tax_amount",
+                       "unit_price_incl_tax", "total_price_incl_tax", "unit_price", "total_price")
+
+
+def _has_plausible_numeric_signal(fields: dict) -> bool:
+    """这几个数值槽位一个都没填——正常（小计/合计行，或者这行确实没报价），
+    不能因为空就拒。但凡填了字，至少要有一个能解析成数，或者是"/"、"无"这类
+    明确的"不报价"标记（跟 draft_integrity.classify_amount_cell 同一套判据，
+    不是本模块另起一套）——否则这些槽位上塞的是自由文本，说明这一行根本不是
+    报价数据，是续页误把毫不相关的表格（亨通实测：附录里的"偏差说明"条款表）
+    当成续页数据吃了进来：qty 位是"偏离"、"偏差说明"这种自由文本，不是任何
+    合法的数量语义，而现有"name 或 qty 非空即收"的判据挡不住——那两个字段
+    这里都是"非空"，只是内容驴唇不对马嘴。"""
+    populated = [fields.get(k) for k in _NUMERIC_FIELD_KEYS if fields.get(k)]
+    if not populated:
+        return True
+    return any(classify_amount_cell(v) in (AMOUNT_VALUE, AMOUNT_NOT_QUOTED) for v in populated)
+
+
 # 全角/半角标点等价——"材料（设备）名称"（真表头，全角括号）跟"材料(设备)名称"
 # （续页表头重复行，半角括号）字面不相等，但是同一个词。浦东电缆实测复现：不做
 # 归一化，逐字匹配会直接漏判。只归一化标点，不归一化字母数字——不能把两个本来
@@ -421,6 +445,8 @@ def build_quote_csv(doc_json: dict) -> str | None:
                 fields = _extract_row_fields(col_map, row)
                 if not fields.get("name") and not fields.get("qty"):
                     continue  # 关键字段都拿不到，大概率是脏行
+                if not _has_plausible_numeric_signal(fields):
+                    continue  # 数值槽位塞的是自由文本——多半是续页误吸收了不相关表格
                 # 未被槽位认领的原始列（专业/型号/工作压力/材质×）**不**在这里
                 # 自行保留成额外 CSV 列：曾经这样做过，后果是原始中文表头文字
                 # （比如"型号"）会在 CSV 回灌进 `parse_csv` 时被它自己的
