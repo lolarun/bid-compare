@@ -56,6 +56,10 @@ export interface BatchFileEntry {
   detectedSupplierName: string   // OCR-detected name (read-only source of truth)
   finalSupplierName: string      // user-editable display name (always takes precedence)
   matchedSupplierId: number | null  // set when user selects from dropdown; null = stranger
+  // design/24：文件名/OCR识别/当前输入名称三者不一致时的提示——纯展示，从不阻断
+  // 入库（用户反馈 #6："能不能用个UI控件？或者说这个都不应该有提示"，决策是
+  // "不再打断，卡片内联标注"）。空数组 = 三者一致，卡片不显示这块。
+  nameConflictHints: string[]
   items: QuoteExtractionItem[]
   quality: QualityMeta | null   // 评审 R2：BLOCKED/REVIEW 横幅 + 台账，job.result._quality
   confirmedSupplierId: number | null    // null for unknown suppliers
@@ -263,6 +267,7 @@ export function useSupplierUpload(deps: {
       detectedSupplierName: '',
       finalSupplierName: '',
       matchedSupplierId: null,
+      nameConflictHints: [],
       items: [],
       quality: null,
       confirmedSupplierId: null,
@@ -439,6 +444,7 @@ export function useSupplierUpload(deps: {
         detectedSupplierName: s.supplier_raw_name,
         finalSupplierName: s.supplier_raw_name,
         matchedSupplierId: s.supplier_id,
+        nameConflictHints: [],
         items: [],
         quality: null,
         confirmedSupplierId: s.supplier_id,
@@ -456,6 +462,7 @@ export function useSupplierUpload(deps: {
         progressPct: j.progress_pct || 0, uploadPct: 100,
         jobId: j.job_id,
         detectedSupplierName: '', finalSupplierName: '', matchedSupplierId: null,
+        nameConflictHints: [],
         items: [],
         quality: null,
         confirmedSupplierId: null, confirmedSubmissionId: null,
@@ -503,22 +510,11 @@ export function useSupplierUpload(deps: {
       return
     }
 
-    // ── 三方冲突警告：文件名提示 / OCR 识别 / 当前输入名称不一致时要求确认 ─────
-    const filenameHint = _extractSupplierHintFromFilename(entry.filename)
-    const ocrName = entry.detectedSupplierName
-    const conflicts: string[] = []
-    if (filenameHint && !supplierName.includes(filenameHint) && !filenameHint.includes(supplierName.slice(0, 4))) {
-      conflicts.push(`· 文件名提示：「${filenameHint}」`)
-    }
-    if (ocrName && ocrName !== supplierName && !ocrName.includes(supplierName) && !supplierName.includes(ocrName.slice(0, 4))) {
-      conflicts.push(`· OCR 识别：「${ocrName}」`)
-    }
-    if (conflicts.length > 0) {
-      const ok = window.confirm(
-        `供应商名称存在冲突，请确认：\n${conflicts.join('\n')}\n· 当前输入：「${supplierName}」\n\n确认以「${supplierName}」入库？`
-      )
-      if (!ok) return
-    }
+    // ── 三方名称提示：文件名提示 / OCR 识别 / 当前输入名称不一致时仅提示，不拦截 ──
+    // design/24：用户反馈 #6 认为弹窗打断没有意义——当前输入的名称已经是用户
+    // 编辑过的权威值，系统没有立场替用户判断"这就是有问题"。改成非阻断的卡片
+    // 内联提示（entry.nameConflictHints），入库照常进行。
+    entry.nameConflictHints = computeNameConflictHints(entry, supplierName)
 
     entry.confirming = true
     try {
@@ -540,22 +536,10 @@ export function useSupplierUpload(deps: {
       const unknownNote = supplierId ? '' : '（陌生供应商，仅用于本次比价）'
       message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价${copyDedupNote(data.copy_dedup)}`)
     } catch (e: unknown) {
-      const resp = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-      if (resp && typeof resp === 'object' && (resp as Record<string, unknown>).error === 'supplier_alias_conflict') {
-        const d = resp as { message: string; candidates: { id: number; name: string; similarity: number }[] }
-        const topMatch = d.candidates[0]
-        // 自动选最相似的候选，提示用户确认
-        const confirmed = window.confirm(
-          `${d.message}\n\n最相似：「${topMatch.name}」(相似度 ${Math.round(topMatch.similarity * 100)}%)\n\n点「确定」合并到该供应商，点「取消」手动选择`
-        )
-        if (confirmed) {
-          entry.matchedSupplierId = topMatch.id
-          entry.confirming = false  // 重试前先解锁，否则 confirmBatchEntry 递归调用会被自己的守卫挡住
-          await confirmBatchEntry(entry)  // 用确认的 supplier_id 重试
-        } else {
-          message.warning(`请在「供应商」下拉里手动选择正确的供应商后再入库`)
-        }
-      } else if (await handleBatchConfirmError(e, message)) {
+      // 注：后端 confirm_batch 从未产出过 "supplier_alias_conflict" 这个错误形状
+      // （供应商同名合并走 /suppliers 的另一条独立解析路径），此前这里有一段处理
+      // 它的 window.confirm 分支是永远走不到的死代码，一并清掉。
+      if (await handleBatchConfirmError(e, message)) {
         entry.confirming = false
         await confirmBatchEntry(entry, true)  // 用户核对差异后确认强制入库
       }
@@ -623,6 +607,25 @@ export function useSupplierUpload(deps: {
     return (parts[0] || '').trim()
   }
 
+  // design/24：文件名提示 / OCR 识别 / 当前输入名称三者不一致时的人话提示——
+  // 纯展示用途，不做任何判断谁对谁错、不阻断任何操作。导出给 Stage 组件在用户
+  // 编辑名称输入框时实时调用，让卡片内联提示随输入更新（而不是只在点「校对入库」
+  // 那一刻才算一次）。
+  function computeNameConflictHints(entry: BatchFileEntry, typedName?: string): string[] {
+    const supplierName = (typedName ?? entry.finalSupplierName).trim()
+    if (!supplierName) return []
+    const filenameHint = _extractSupplierHintFromFilename(entry.filename)
+    const ocrName = entry.detectedSupplierName
+    const hints: string[] = []
+    if (filenameHint && !supplierName.includes(filenameHint) && !filenameHint.includes(supplierName.slice(0, 4))) {
+      hints.push(`文件名提示：「${filenameHint}」`)
+    }
+    if (ocrName && ocrName !== supplierName && !ocrName.includes(supplierName) && !supplierName.includes(ocrName.slice(0, 4))) {
+      hints.push(`OCR 识别：「${ocrName}」`)
+    }
+    return hints
+  }
+
   // R1 止血：停掉所有在途轮询并清空报价文件卡片（批量模式 + legacy 单供应商
   // tab 两套状态都要清）。之前只在 onBeforeUnmount 用过一次——切项目时完全没
   // 调用，导致旧项目的 batchFiles（含仍在跑的 pollTimer）原样留在页面上，
@@ -659,5 +662,6 @@ export function useSupplierUpload(deps: {
     removeAllBatchEntries,
     restoreBatchFiles,
     clearAllBatchFiles,
+    computeNameConflictHints,
   }
 }
