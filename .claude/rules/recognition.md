@@ -12,12 +12,18 @@ paths:
 
 # 识别链路规则
 
-- 报价与招标识别的唯一路径是 VL-direct（`intelligence/vl_quote.py` / `vl_tender.py`）：
+- **视觉识别**的唯一路径是 VL-direct（`intelligence/vl_quote.py` / `vl_tender.py`）：
   整份文档一次性渲染、整份送视觉模型一次调用，CSV → `ExtractionDraft`。legacy 逐页
   OCR→HTML→TableGrid→LLM 链路已物理删除（2026-08-11，最佳实践评审 F1/F2）。不得以任何
   理由重新描述或引入"部分表格走确定性 TableGrid、复杂表头走 LLM fallback"的双路径
   架构——`provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
   （`pipeline.py` 的两处 `hasattr` 检查是防御性守卫，不是路径选择）。
+- 招标文件另有**文档级**文字层直抽（`tender_text_layer.py`，docs/design/25 轨A）：
+  原生 PDF 检测到可用文字层且清单表可确定性抽取时**整份**走直抽、完全不调用视觉
+  模型；检测失败或抽取不可信时**整份**回落 VL-direct。这与上一条禁止的双路径不冲突
+  ——被禁止的是"同一份文档内按表复杂度分流 + 能力探测静默降级"，允许的是文档级
+  二选一且来源诚实标注（`input_mode="text_layer"`，不冒充 `vl_direct`）。不得把它
+  演化成文档内混合抽取。
 - 持久化标签值是 `"vl_direct"`，与模块名 `vl_quote.py` 不一致是**有意的**（评审 N1：
   模块 2026-08-11 改名，存量 `job.result` 里的标签不迁移）。三个键同义、都指这条
   识别路径：`fields.parser_mode` / `PageMetric.input_mode` / `meta.recognizer`。

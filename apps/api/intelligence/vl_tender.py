@@ -129,13 +129,19 @@ def build_tender_fields(cell, raw_cells: dict, cmap: dict) -> dict:
 def build_tender_draft(text: str, *, file_path: str, page_count: int,
                        processed_pages: list[int],
                        rotations: dict[int, int] | None = None,
-                       unresolved_pages: Sequence[int] = ()) -> ExtractionDraft:
-    """招标 CSV → ExtractionDraft。结构门与报价侧完全一致，只换列表与字段。"""
+                       unresolved_pages: Sequence[int] = (),
+                       parser_mode: str = "vl_direct") -> ExtractionDraft:
+    """招标 CSV → ExtractionDraft。结构门与报价侧完全一致，只换列表与字段。
+
+    `parser_mode`：docs/design/25 轨A（文字层直抽）传 "text_layer"，CSV 来自
+    pdfplumber 而非视觉模型——透传给 build_draft，不在这层丢掉。
+    """
     return build_draft(
         text, file_path=file_path, page_count=page_count,
         processed_pages=processed_pages, rotations=rotations,
         unresolved_pages=unresolved_pages,
         doc_type="tender", slots=TENDER_SLOTS, field_builder=build_tender_fields,
+        parser_mode=parser_mode,
     )
 
 
