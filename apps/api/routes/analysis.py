@@ -852,9 +852,14 @@ def anchor_review_missing_ack(
 @router.post("/tender-list/preview", response_model=TenderPreviewResultOut)
 async def tender_list_preview(
     file: UploadFile = File(...),
+    # design/24 B1：多 Sheet 附件——不传时自动挑数据行数最多的候选 Sheet；
+    # 用户在预览里用 Sheet 切换器改选后，带着这个参数重新预览同一份文件。
+    sheet: str | None = Form(None),
 ):
     """解析采购清单 xlsx，返回品名/规格/数量预览，不跑嵌入，立即返回。"""
-    from apps.api.services.tender.tender_list import parse_tender_xlsx
+    from apps.api.services.tender.tender_list import (
+        list_tender_sheets, parse_tender_xlsx, pick_default_sheet,
+    )
 
     name = (file.filename or "").lower()
     if not name.endswith((".xlsx", ".xls")):
@@ -862,8 +867,14 @@ async def tender_list_preview(
     content = await file.read()
     if not content:
         raise HTTPException(400, "文件为空")
+
+    sheets = list_tender_sheets(content)
+    resolved_sheet = sheet or pick_default_sheet(sheets)
+    if resolved_sheet is None:
+        raise HTTPException(400, "找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
+
     try:
-        anchors = parse_tender_xlsx(content)
+        anchors = parse_tender_xlsx(content, sheet=resolved_sheet)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -903,6 +914,10 @@ async def tender_list_preview(
         "has_multiple_categories": len(breakdown) > 1,
         "unknown_count": unknown_count,
         "total": len(items),
+        # design/24 B1：全部候选 Sheet + 本次实际解析用的那个，供前端 Sheet 切换器用。
+        "sheets": [{"name": s.name, "looks_like_list": s.looks_like_list, "row_count": s.row_count}
+                   for s in sheets],
+        "selected_sheet": resolved_sheet,
     }
 
 

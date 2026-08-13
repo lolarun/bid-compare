@@ -696,6 +696,12 @@ class TenderPreviewItemOut(BaseModel):
     canonical: dict[str, str | None] = {}
 
 
+class TenderSheetInfoOut(BaseModel):
+    name: str
+    looks_like_list: bool
+    row_count: int
+
+
 class TenderPreviewResultOut(BaseModel):
     items: list[TenderPreviewItemOut]
     detected_category: str
@@ -703,6 +709,10 @@ class TenderPreviewResultOut(BaseModel):
     has_multiple_categories: bool
     unknown_count: int
     total: int
+    # design/24 B1：多 Sheet 支持——候选 Sheet 列表 + 本次实际用的那个，
+    # 前端据此渲染 Sheet 切换器；单 Sheet 文件 sheets 长度为 1，行为不变。
+    sheets: list[TenderSheetInfoOut] = []
+    selected_sheet: str | None = None
 
 
 class SourceReconcileMismatchOut(BaseModel):

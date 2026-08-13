@@ -156,11 +156,97 @@ def group_anchors_by_category(
     return groups
 
 
-def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
+@dataclass
+class SheetInfo:
+    """design/24 B1：一个 Sheet 的采购清单候选摘要，供预览的 Sheet 切换器用。"""
+
+    name: str
+    looks_like_list: bool   # 能否找到规范表头(_find_header_row 命中)
+    row_count: int          # looks_like_list=True 时是数据行数，否则是非空单元格粗计数
+
+
+def _load_sheet_rows(
+    source: str | bytes | io.BytesIO, sheet: str | None = None,
+) -> tuple[list[list], str]:
+    """打开 workbook，取指定 Sheet(或默认 active)的原始行。
+
+    Returns:
+        (rows, resolved_sheet_name)
+    """
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
+    wb = openpyxl.load_workbook(source, data_only=True, read_only=True)
+    try:
+        ws = wb[sheet] if sheet else wb.active
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        return rows, ws.title
+    finally:
+        wb.close()
+
+
+def list_tender_sheets(source: str | bytes | io.BytesIO) -> list[SheetInfo]:
+    """design/24 B1：列出 Excel 全部 Sheet，标注哪些像采购清单。
+
+    "像清单" = 能找到规范表头(_find_header_row 命中)——与 parse_tender_xlsx
+    判定表头的规则完全同一份，不另起一套"猜测"逻辑。真正需要解析出锚点时仍
+    只应调用 parse_tender_xlsx，这里只给预览用的候选摘要。
+    """
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
+    wb = openpyxl.load_workbook(source, data_only=True, read_only=True)
+    try:
+        out: list[SheetInfo] = []
+        for name in wb.sheetnames:
+            rows = [list(r) for r in wb[name].iter_rows(values_only=True)]
+            header_idx = _find_header_row(rows) if rows else None
+            if header_idx is None:
+                non_empty = sum(
+                    1 for r in rows if any(c is not None and str(c).strip() for c in r)
+                )
+                out.append(SheetInfo(name=name, looks_like_list=False, row_count=non_empty))
+                continue
+            colmap, mat_cols, has_subheader = _map_columns(rows, header_idx)
+            data_start = header_idx + (2 if has_subheader else 1)
+            n = 0
+            for ri in range(data_start, len(rows)):
+                row = rows[ri]
+                seq = _cell(row, colmap.get("seq"))
+                if seq is None or str(seq).strip() == "":
+                    continue
+                if any(m in str(seq) for m in _FOOTER_MARKERS):
+                    break
+                name_v = _cell(row, colmap.get("name"))
+                if name_v is None or str(name_v).strip() == "":
+                    continue
+                n += 1
+            out.append(SheetInfo(name=name, looks_like_list=True, row_count=n))
+        return out
+    finally:
+        wb.close()
+
+
+def pick_default_sheet(sheets: list[SheetInfo]) -> str | None:
+    """design/24 B1 auto-detect 规则：候选 Sheet 里数据行数最多的那个，不是第一个
+    header 匹配的。真实附件常有"汇总表"排在前面且表头形似——选行数最多的更稳。
+
+    没有任何 Sheet 像清单时返回 None，调用方据此决定是否报错。
+    """
+    candidates = [s for s in sheets if s.looks_like_list]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda s: s.row_count).name
+
+
+def parse_tender_xlsx(
+    source: str | bytes | io.BytesIO, sheet: str | None = None,
+) -> list[TenderAnchor]:
     """解析招标清单 xlsx,返回锚点行列表。
 
     Args:
         source: 文件路径、字节内容或 BytesIO。
+        sheet: 指定 Sheet 名；None 时用 workbook 的 active sheet(单 Sheet 文件的
+            默认行为不变)。多 Sheet 场景下调用方应先用 list_tender_sheets +
+            pick_default_sheet 选定，再传进来——本函数本身不做多 Sheet 探测。
 
     Returns:
         TenderAnchor 列表(已剔除标题行、表头行、表尾说明行)。
@@ -168,12 +254,7 @@ def parse_tender_xlsx(source: str | bytes | io.BytesIO) -> list[TenderAnchor]:
     Raises:
         ValueError: 找不到可识别的表头(规范表头缺失)。
     """
-    if isinstance(source, (bytes, bytearray)):
-        source = io.BytesIO(source)
-    wb = openpyxl.load_workbook(source, data_only=True, read_only=True)
-    ws = wb.active
-    rows = [list(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
+    rows, _ = _load_sheet_rows(source, sheet)
     if not rows:
         raise ValueError("空工作表")
 

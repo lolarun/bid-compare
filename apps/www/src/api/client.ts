@@ -868,6 +868,12 @@ export interface TenderPreviewItem {
   source_ref?: Record<string, unknown>
 }
 
+export interface TenderSheetInfo {
+  name: string
+  looks_like_list: boolean
+  row_count: number
+}
+
 export interface TenderPreviewResult {
   items: TenderPreviewItem[]
   detected_category: string
@@ -875,6 +881,9 @@ export interface TenderPreviewResult {
   has_multiple_categories: boolean
   unknown_count: number
   total: number
+  // design/24 B1：多 Sheet 候选 + 本次实际用的那个，驱动 Sheet 切换器。
+  sheets: TenderSheetInfo[]
+  selected_sheet: string | null
 }
 
 export interface TenderListConfirmSession {

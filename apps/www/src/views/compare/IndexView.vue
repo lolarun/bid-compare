@@ -118,27 +118,33 @@ function stopTenderPoll() {
 }
 
 // ── Excel 主清单预览 ───────────────────────────────────────────────────────
-async function previewTenderList(file: File) {
+// design/24 B1：sheet 有值 = 用户在切换器里改选了 Sheet，重新预览同一份文件——
+// 这时只是换一屏数据，不是换文件，不能把 PDF 补充/对账状态一起清空。
+async function previewTenderList(file: File, sheet?: string) {
   tenderPreviewing.value = true
-  tenderPreview.value = null
+  if (!sheet) tenderPreview.value = null
   tenderJobError.value = ''
   try {
     const form = new FormData()
     form.append('file', file)
+    if (sheet) form.append('sheet', sheet)
     const { data } = await analysisApi.tenderListPreview(form)
     tenderFile.value = file
     tenderPreview.value = data
     tenderCategory.value = data.detected_category
-    // Reset PDF supplement + reconcile when Excel changes
-    pdfSupplement.value = null
-    tenderBrandRequirement.value = []
-    tenderSupplierBrands.value = []
-    tenderDetectedPages.value = null
-    tenderPdfFile.value = null
-    reconcileResult.value = null
-    reconcileConfirmed.value = false
-    showExcelPanel.value = true   // 上传 Excel 后自动展开参考面板
-    message.success(`参考清单已预览：${data.total} 条采购项`)
+    if (!sheet) {
+      // Reset PDF supplement + reconcile when Excel changes (genuinely new file only)
+      pdfSupplement.value = null
+      tenderBrandRequirement.value = []
+      tenderSupplierBrands.value = []
+      tenderDetectedPages.value = null
+      tenderPdfFile.value = null
+      reconcileResult.value = null
+      reconcileConfirmed.value = false
+      showExcelPanel.value = true   // 上传 Excel 后自动展开参考面板
+    }
+    const sheetNote = data.sheets.length > 1 ? `（Sheet「${data.selected_sheet}」）` : ''
+    message.success(`参考清单已预览${sheetNote}：${data.total} 条采购项`)
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       ?? (e as Error).message
@@ -1376,6 +1382,20 @@ async function runMatrix() {
                 参考清单 · {{ tenderPreview.total }} 条<template v-if="tenderCategory"> · {{ tenderCategory }}</template>
               </div>
             </div>
+            <!-- design/24 B1：多 Sheet 附件——自动挑了数据行数最多的一个，
+                 不一定是用户要的那个（真实附件常见"汇总表"排前面），给切换器改选 -->
+            <a-select
+              v-if="tenderPreview.sheets.length > 1"
+              :value="tenderPreview.selected_sheet"
+              size="small"
+              style="width:160px"
+              :disabled="tenderPreviewing"
+              @change="(v: string) => tenderFile && previewTenderList(tenderFile, v)"
+            >
+              <a-select-option v-for="s in tenderPreview.sheets" :key="s.name" :value="s.name">
+                {{ s.name }}{{ s.looks_like_list ? `（${s.row_count} 行）` : '（非清单）' }}
+              </a-select-option>
+            </a-select>
             <a-button size="small" type="link"
               @click="tenderPreview = null; tenderFile = null; reconcileResult = null; reconcileConfirmed = false; excelOnlyItemActions = {}">
               重新上传
