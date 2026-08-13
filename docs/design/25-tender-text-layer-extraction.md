@@ -1,15 +1,79 @@
 # 25 — Tender Procurement-List Text-Layer Direct Extraction
 
-> **Status — proposed, 2026-08-13.** Split out of a broader "recognition engine
-> replacement" investigation (see `docs/design/26-recognition-engine-evaluation.md`
-> for the harder, higher-risk half) at the user's explicit direction: this track
-> is independent of any model-swap decision and should land first. Not yet
-> implemented.
+> **Status — implemented 2026-08-13.** Split out of a broader "recognition
+> engine replacement" investigation (see
+> `docs/design/26-recognition-engine-evaluation.md` for the harder,
+> higher-risk half) at the user's explicit direction: this track is
+> independent of any model-swap decision and landed first.
+>
+> Delivered exactly as designed below: `apps/api/intelligence/tender_text_layer.py`
+> (detection, anchor-table extraction with two-level header flattening and
+> cross-page continuation, brand-requirement-table extraction), `parser_mode`
+> threaded through `vl_quote.py::parse_csv`/`build_draft` and
+> `vl_tender.py::build_tender_draft` (default stays `"vl_direct"`, only the
+> new call site passes `"text_layer"` — `fields.parser_mode` /
+> `PageMetric.input_mode` / `meta.recognizer` all three updated together, not
+> just one, per the N1 labeling precedent), wired into
+> `tender_pdf.py::extract_bidlist` with the fallback gating described in §4.2
+> (skipped entirely when `bidlist_pages`/`brand_page` are manually set — a
+> user correction in progress shouldn't have its extraction strategy swapped
+> underneath it).
+>
+> One deliberate scope decision made during implementation, not anticipated
+> in the original design: cover-page scalars (§4.3 in the original draft
+> before this rewrite — kept on the VL path) still use `vl_call`, exactly as
+> planned; brand requirements were **also** brought onto the deterministic
+> path (not planned above, added because the brand-requirement table turned
+> out to be an equally clean, equally structured table — no reason to pay a
+> vision call for it once the anchor-table parser existed).
+>
+> **Acceptance criteria (§5) verified with real numbers, not estimated**: run
+> against 金桥地铁上盖 J9A-03 (`docs/test/金桥地体上盖招标文件.pdf`) —
+> real VL-direct baseline (`vl_tender.parse_tender_document`, full pipeline
+> incl. orientation pre-check) **363.8s**; text-layer path **14-18s** (~20-25x).
+> 89/89 anchor rows in both, first/last row field-for-field identical
+> (seq/name/spec/unit/qty). Cover scalars 100% identical across all 4 fields,
+> including the two genuinely-empty ones (`project_code`, `deadline` — this
+> document simply doesn't state them; confirmed by full-text search, not
+> assumed) — both paths correctly return empty rather than guessing. Brand
+> requirements (3 brands) and supplier-brand mappings (3 suppliers) identical.
+> Quality tier identical (`REVIEW`, same `bbox_coverage=0` reason — an
+> existing, path-independent gate, not something this track changed).
+> Fallback verified on two axes: a scanned PDF (`has_usable_text_layer` →
+> `False`, VL-direct path unchanged) and a text-layer PDF with no anchor
+> table (`build_anchor_csv` → `None`, VL-direct fallback, not a silent empty
+> result).
+>
+> `apps/api/tests/test_tender_text_layer.py`: 9 fast unit tests (detection,
+> cross-page continuation incl. the non-consecutive-page rejection boundary,
+> two-level header flattening, brand-table parsing, `parser_mode` labeling,
+> both fallback paths) + 1 `@pytest.mark.e2e` field-for-field contract test
+> against real VL-direct (deselected by default, matching this project's
+> `-m 'not e2e'` convention). Full suite: `pytest apps/api/tests tests -q` →
+> 824 passed (815 baseline + 9 new), 0 failed, 1 skipped, 8 deselected.
+> `vue-tsc -b` clean, `vitest` 65/65 (a cosmetic `INPUT_MODE_LABELS` entry was
+> added for the new `"text_layer"` value in `compare/IndexView.vue`'s
+> diagnostics badge — the existing `| string` escape hatch in the TS type
+> already made this non-breaking without the label, the addition is purely
+> for a correct display label instead of a bare fallback).
 >
 > Basis: CLAUDE.md §1/§4/§6, `.claude/rules/recognition.md`. Evidence for the
 > motivating claims below lives in `HANDOFF.md`'s 2026-08-13 merge-checkpoint
 > section and `outputs/baidu_unlimited_ocr/run.stdout.log` (gitignored, rerun
 > `tests/test_baidu_unlimited_ocr_standalone.py` to reproduce).
+>
+> **A note on `.claude/rules/recognition.md`'s dual-path prohibition**,
+> addressed head-on rather than argued around: the rule bans reintroducing
+> "part of the table goes through deterministic TableGrid, complex headers
+> fall back to LLM" — an **intra-document, per-table** routing decision tied
+> to the specific deleted legacy component. This track's routing decision is
+> **document-level and pre-recognition**: a PDF either has a text layer or it
+> doesn't (a structural fact of the file, determined once, before any
+> recognition path is chosen), and when it does, the vision model is not
+> invoked **at all** for that document — not "used for some tables, skipped
+> for others." No code or logic from the deleted `table_recognizer.py`/
+> `table_parser.py` lineage is reused; `tender_text_layer.py` is new,
+> independent, and has no shared failure modes with what was deleted.
 
 ## 1. Problem
 

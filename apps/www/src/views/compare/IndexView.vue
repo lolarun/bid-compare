@@ -305,8 +305,11 @@ function pct(n: number | undefined | null): string {
 // 'html_fallback' 只可能出现在已删除 legacy 链路的旧快照回放里。之前的
 // 二元判断把 vl_direct 全部误判成"OCR增强解析"（橙色，暗示降级路径）——
 // 而它其实是当前唯一的正式路径，不该带警示色。
+// design/25（轨A）：'text_layer' 是原生 PDF 文字层直抽——不调用视觉模型，
+// 不是降级，标绿；只在招标采购清单侧出现。
 const INPUT_MODE_LABELS: Record<string, { text: string; color: string }> = {
   vl_direct: { text: 'VL 直抽', color: 'green' },
+  text_layer: { text: '文字层直抽', color: 'green' },
   table_grid: { text: '标准解析', color: 'green' },
   html_fallback: { text: 'OCR增强解析', color: 'orange' },
 }

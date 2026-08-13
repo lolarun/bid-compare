@@ -348,6 +348,7 @@ def _num(x):
 def parse_csv(text: str, page_count: int, *,
               slots: dict[str, list[tuple[str, ...]]] | None = None,
               field_builder: "FieldBuilder | None" = None,
+              parser_mode: str = "vl_direct",
               ) -> tuple[list[_ParsedRow], list[str], dict]:
     """CSV 文本 → 结构化行 + 表头 + 诊断。
 
@@ -384,7 +385,10 @@ def parse_csv(text: str, page_count: int, *,
         used = set(cmap.values())
         builder = field_builder or build_quote_fields
         fields = builder(lambda slot: cell(row, slot), raw_cells, cmap)
-        fields["parser_mode"] = "vl_direct"
+        # design/25：parser_mode 必须诚实反映真实来源——轨A（文字层直抽）传
+        # "text_layer" 进来时不能被这里悄悄改回 "vl_direct"（评审 N1 的教训：
+        # 标签是身份声明，不是可以顺手统一的字符串）。默认值维持向后兼容。
+        fields["parser_mode"] = parser_mode
         flags: list[str] = []
         if i in shifted:
             flags.append("column_shift")
@@ -445,15 +449,19 @@ def build_draft(text: str, *, file_path: str, page_count: int,
                 declared_total: float | None = None,
                 doc_type: str = "quote",
                 slots: dict[str, list[tuple[str, ...]]] | None = None,
-                field_builder: FieldBuilder | None = None) -> ExtractionDraft:
-    """模型返回的 CSV → ExtractionDraft（含逐行来源、质量与行数台账）。
+                field_builder: FieldBuilder | None = None,
+                parser_mode: str = "vl_direct") -> ExtractionDraft:
+    """CSV → ExtractionDraft（含逐行来源、质量与行数台账）。CSV 的来源不限于模型——
+    docs/design/25 的文字层直抽（轨A）复用同一套结构门，只是 `text` 来自 pdfplumber
+    拼装而非视觉模型，`parser_mode="text_layer"` 如实标注。
 
     `doc_type` 只影响**价格相关的门**：招标采购清单本来就没有价格列（那是留给
     投标人填的空表），对它做"读到行却读不到钱"的判定会把每一份都误判成 BLOCKED。
     结构、截断、序号、页码归属这些判据两种文档完全一样，不区分。
     """
     parsed, header, diag = parse_csv(text, page_count,
-                                     slots=slots, field_builder=field_builder)
+                                     slots=slots, field_builder=field_builder,
+                                     parser_mode=parser_mode)
     _assign_pages(parsed, page_count)
 
     rows: list[DraftRow] = []
@@ -479,7 +487,7 @@ def build_draft(text: str, *, file_path: str, page_count: int,
 
     metrics = [
         PageMetric(page=p, page_index=p - 1, role="quote_table",
-                   input_mode="vl_direct", table_count=1,
+                   input_mode=parser_mode, table_count=1,
                    row_count=per_page_rows.get(p, 0),
                    expected_rows=per_page_rows.get(p, 0),
                    extracted_rows=per_page_rows.get(p, 0),
@@ -533,7 +541,7 @@ def build_draft(text: str, *, file_path: str, page_count: int,
         doc_type=doc_type, source_file=file_path,
         page_count=page_count, processed_page_count=len(processed_pages),
         target_pages=list(processed_pages), rows=rows,
-        meta={"supplier_name": supplier_name, "recognizer": "vl_direct",
+        meta={"supplier_name": supplier_name, "recognizer": parser_mode,
               "doc_type": doc_type,
               "csv_header": header, "diagnostics": diag,
               "rotations": dict(rotations or {}),

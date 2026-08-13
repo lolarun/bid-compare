@@ -116,6 +116,10 @@ def _build_quality_metrics(items_out: list[dict], page_metrics: list) -> dict:
         for m in page_metrics
         if m.input_mode == "html_fallback"
     ]
+    # docs/design/25（轨A）：文字层直抽的 PageMetric.input_mode 是 "text_layer"，
+    # 不匹配上面三个既有分类——不补的话这批页会在诊断里"消失"（vl/tg/fb 都不含
+    # 它们），不是没触发，是分类表没跟上新来源。
+    tl_pages = [m.page for m in page_metrics if m.input_mode == "text_layer"]
 
     return {
         "seq_missing": seq_missing,
@@ -128,6 +132,7 @@ def _build_quality_metrics(items_out: list[dict], page_metrics: list) -> dict:
         "vl_direct_pages": vl_pages,
         "table_grid_pages": tg_pages,
         "html_fallback_pages": fb_pages,
+        "text_layer_pages": tl_pages,
     }
 
 
@@ -173,16 +178,41 @@ def extract_bidlist(
     from apps.api.intelligence.vl_tender import parse_tender_document
 
     s = get_settings()
-    parsed = parse_tender_document(
-        file_path,
-        vl_call=lambda imgs, prompt: provider.vl_extract_csv(
-            imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
-        orient_call=lambda parts, prompt: provider.vl_extract_csv(
-            [b for _t, b in parts], prompt,
-            model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
-        progress_cb=progress_cb,
-        target_pages=bidlist_pages or None,
-    )
+
+    def _vl_call(imgs, prompt):
+        return provider.vl_extract_csv(imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL)
+
+    # docs/design/25（轨A）：原生 PDF（有可用文字层）走确定性文字层直抽，完全
+    # 不调用视觉模型；只在 §检测 判无文字层，或抽出来的结构不可信（返回 None）
+    # 时整份回落下面的 VL-direct 路径——不是"部分表格结构化、部分兜底"的混合，
+    # 是文档级的二选一。手动指定过 bidlist_pages/brand_page 时不尝试这条路：
+    # 用户手动修正意味着已经在用 VL 路径的页面/品牌页覆盖机制排查问题，此时
+    # 悄悄换一条抽取路径会让"修正"失去对象。
+    parsed = None
+    if bidlist_pages is None and brand_page is None:
+        from apps.api.intelligence.tender_text_layer import (
+            has_usable_text_layer, parse_tender_document_text_layer,
+        )
+        if has_usable_text_layer(file_path):
+            try:
+                parsed = parse_tender_document_text_layer(
+                    file_path, vl_call=_vl_call, progress_cb=progress_cb)
+            except Exception:                                    # noqa: BLE001
+                log.warning("tender_text_layer 抽取异常，回落 VL-direct", exc_info=True)
+                parsed = None
+            if parsed is not None:
+                log.info("tender_pdf.extract_bidlist: 文字层直抽命中，跳过 VL-direct")
+
+    if parsed is None:
+        parsed = parse_tender_document(
+            file_path,
+            vl_call=_vl_call,
+            orient_call=lambda parts, prompt: provider.vl_extract_csv(
+                [b for _t, b in parts], prompt,
+                model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+            progress_cb=progress_cb,
+            target_pages=bidlist_pages or None,
+        )
     draft = parsed.draft
     # Excel 对账：与识别器无关（只吃 DraftRow）。失败只记录不抛——对账是校验，
     # 不是识别本身。
