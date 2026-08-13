@@ -14,6 +14,12 @@
 >    offline dual-engine comparison batch (§7); the four acceptance gaps in §6
 >    (field-level accuracy, duplicate copies, mixed orientation, run-to-run
 >    stability) are the go/no-go itself and are NOT compressible.
+> 3. **Direct replacement — no runtime qwen fallback, no engine config flag,
+>    no dormancy period** ("直接替换", 2026-08-13). Paddle-BLOCKED documents
+>    dead-stop honestly into the doubt inbox with the existing manual/Excel
+>    recourse; qwen and its DashScope dependency are deleted in the same
+>    round as the cutover. The project is pre-launch on a dedicated branch —
+>    git is the rollback mechanism, dead code kept "just in case" is not.
 >
 > Track A (tender text-layer direct extraction, design/25) is **kept in front
 > of** the new engine — it is deterministic parsing, not a recognition model,
@@ -37,15 +43,23 @@ scanned document    ───────▶  PaddleOCR-VL  (the ONE visual engi
         │
         BLOCKED / untrusted (document-level, labeled — never silent)
         ▼
-fallback            ───────▶  qwen VL-direct (retained, also the future
-                              "targeted re-read" engine)
+                              honest dead-stop: quality gate → doubt inbox →
+                              manual recourse (Excel direct upload via
+                              tabular_ingestion, or re-scan). NO fallback engine.
 ```
 
+**No runtime engine fallback — user decision 2026-08-13 ("直接替换").** The
+charter requires honest BLOCKED, not a backup model; the manual escape hatch
+(deterministic Excel upload) already exists in production. This also applies
+design/21's own lesson: the legacy chain kept "as fallback" became unreachable
+dead code that later required its own physical-deletion round — a dormant
+qwen fallback would repeat exactly that.
+
 Every hop is document-level either/or with an honest `parser_mode` /
-`input_mode` label (`text_layer` / `paddle_vl` / `vl_direct`) — the same
-boundary pattern design/25 established and `.claude/rules/recognition.md` now
-codifies. What stays forbidden: within-document per-table routing, and
-capability-sniffing silent degradation.
+`input_mode` label (`text_layer` / `paddle_vl`) — the same boundary pattern
+design/25 established and `.claude/rules/recognition.md` now codifies. What
+stays forbidden: within-document per-table routing, and capability-sniffing
+silent degradation.
 
 ## 2. Why this is an engineering project, not a config flip
 
@@ -179,30 +193,37 @@ output; adjust **only** gates that demonstrably misfire, each change carrying
 its derivation in the comment (existing convention). Silently inheriting
 qwen's calibration risks systematic false pass/fail on the new path.
 
-## 9. P4 — production wiring
+## 9. P4 — production wiring (direct replacement, no engine flag)
 
-- `RECOGNITION_ENGINE: paddle | qwen` setting, default `paddle` after P2
-  passes; `parser_mode="paddle_vl"` honest label (never impersonates
-  `vl_direct`).
-- Document-level fallback to qwen on BLOCKED/untrusted — labeled and logged,
-  same pattern as Track A's fallback (allowed: visible document-level
-  either/or; forbidden: silent capability-sniffed degradation).
+- **No `RECOGNITION_ENGINE` config** — a switch with one valid value is
+  noise (user decision: 直接替换). The cutover is a code change; rollback is
+  a git revert.
+- `parser_mode="paddle_vl"` honest label (never impersonates `vl_direct`).
+- Paddle BLOCKED/untrusted → the document stays BLOCKED per the existing
+  quality-tier semantics, visible in the doubt inbox; recourse is the
+  existing manual/Excel path. No second engine is invoked.
 - `.claude/rules/recognition.md` first bullet amended again: "the sole visual
-  engine is configurable (`RECOGNITION_ENGINE`), default PaddleOCR-VL" —
-  single-source-of-truth obligation, do NOT leave the rule saying VL-direct
-  is sole while code says otherwise.
+  engine is PaddleOCR-VL (`paddle_vl`)" — single-source-of-truth obligation,
+  do NOT leave the rule saying VL-direct is sole while code says otherwise.
 - design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific;
   the Paddle path reports `stage_current/stage_total` **per page** (natively
   available, simpler than the token-stream proxy).
 
-## 10. qwen's downgraded role (not deleted)
+## 10. qwen deletion (same round as cutover)
 
-(a) Fallback when Paddle is BLOCKED; (b) the engine behind "targeted re-read"
-(designed-but-unimplemented, HANDOFF) — a 0.9B model is fast but has a real
-capability ceiling; a slower general VL model is the right tool for residual
-hard cases. **Not separately funded**: orientation-precheck optimization —
-if this project succeeds the 3-vote orientation cost disappears wholesale;
-if it fails, revisit then.
+P4 deletes the qwen path outright — `vl_quote.py`'s VL-direct recognizer, the
+3-vote orientation pre-check, `dashscope_ocr.py`'s quote-side surface
+(`_mm_stream` and friends), and the DashScope config/keys. No dormant module,
+no unreachable branch: design/21's legacy chain already demonstrated where
+"keep it as a fallback" ends up, and this project is pre-launch on its own
+branch, so `git revert` is the rollback mechanism.
+
+`vl_tender.py` stays only if the tender path still needs it after the Paddle
+adapter covers scanned tenders — resolve that during P4, don't leave it
+ambiguous. The "targeted re-read" concept loses its designated engine; if it
+is ever funded, engine selection restarts from evidence.
+**Not separately funded**: orientation-precheck optimization — the 3-vote
+orientation cost disappears wholesale with the qwen path.
 
 ## 11. Risks (stated up front)
 
@@ -215,6 +236,10 @@ if it fails, revisit then.
 3. **Bid documents to a third-party cloud** — same class as the existing
    DashScope flow, but a different vendor; worth one confirmation against
    the customer contract before production default flips.
+4. **No automated recourse for Paddle-BLOCKED scans** (consequence of the
+   no-fallback decision): a layout Paddle chokes on has only the manual/
+   Excel path until re-scan. Accepted trade-off — P2's corpus bounds the
+   expected BLOCKED rate before cutover, and the project is pre-launch.
 
 ## 12. Open items
 
