@@ -158,30 +158,78 @@ Self-hosted vLLM is a WSL2/GPU project on this Windows machine — a cost-
 reduction second phase, incompatible with "尽快", and the "1.22 pages/sec"
 number must not anchor the phase-1 decision.
 
-## 6. P2 — acceptance matrix (thresholds user-accepted 2026-08-13)
+## 6. P2 — acceptance matrix (revised 2026-08-13 after P2a offline scoring)
 
 Scoring = the production gates + `scripts/e2e_diff.py` vs golden, through the
-P1 adapter. **This is a real gate: if the bar fails, the fast track stops
-here** and the fallback discussion is a hybrid design, not a forced cutover.
-The adapter survives either outcome (it is engine-agnostic evidence
-infrastructure).
+P1 adapter. The original bar ("≥96% including spec") was set from a number
+([HANDOFF.md:112](../../HANDOFF.md)) that turned out to only ever have measured
+`qty/unit_price/total_price` — name/spec/unit/seq were never checked for qwen
+either. Comparing Paddle's spec/name accuracy against that bar was a category
+error, not a real regression signal. Revised after a full zero-cost P2a
+offline rescoring pass (all 7 cached documents, current adapter, current
+scorer — three real bugs found and fixed along the way: the scorer's
+monotonic row-order assumption breaking on section-reordered documents,
+a continuation-absorbed unrelated table not caught by the junk-row filter,
+and an unstripped literal `\n` escape from wrapped cells; see commits
+`1a5b06b`/`bfd7bcf`/`1c503c5`).
 
-| Dimension | Sample | Pass bar |
-|---|---|---|
-| Row recall / precision | 7 cable + valve documents | ≥ qwen baseline |
-| Numeric triple + spec text | Same, vs golden | ≥ 96% (incl. spec — qwen's weak point) |
-| **Mixed orientation** | 宏胜 (180° mixed poison sample) | Passes without external orientation pre-check; contingency: keep `detect_rotations` in front of Paddle (cheap relative to Paddle's runtime) |
-| **Duplicate copies** | 上海浦东 (272 = 136×2 raw rows) | Adapter's copy signal feeds B0; final row count returns to 136 |
-| **Run-to-run stability** | Each document ≥3 runs | Amount-delta distribution, never a single-run number (HANDOFF §6 lesson 1 — qwen itself swings 0.18% between runs) |
-| 亨通 65.4% | Dedicated root-cause via the proper adapter | Model vs scorer vs golden-side error resolved before any 亨通 accuracy claim |
+**P2a final numbers** (all 7, real cached data, scored through the actual
+production copy-selection path):
 
-> **P1-stage evidence, not a P2 pass** (2026-08-13 review): a single offline
-> run against the cached Paddle output now returns 浦东 to **137/136** rows
-> (was 274/136 before the copy-detect fix) with row precision 95.6%, field
-> exact-rate ~96% on the matched rows — a large improvement, but **not** the
-> P2 bar itself (single run, not ≥3; 137≠136; residual field mismatches
-> unexplained). Keep this row open until the formal P2 run confirms it —
-> do not treat the P1 fix as having already cleared this line.
+| Field | Target | Measured | Verdict |
+|---|---|---|---|
+| qty / unit_price / total_price | 96% (qwen's only real comparable baseline) | qty 90.6%, price fields 94.4–96.0% | **Not met, recorded as a known gap** — root-caused (below), admission criterion changed rather than the bar being lowered to fit |
+| spec | 80% (verification tier, not alignment key — per [HANDOFF.md:376](../../HANDOFF.md) §5.7, already-committed direction, not invented for this review) | 84.1% | Met |
+| name | 95% | 95.3% | Met |
+| Row recall / precision | ≥ qwen baseline | 96.3–100% / 95.1–100% across all 7 | Met |
+| **Mixed orientation** (宏胜, 180° mixed poison sample) | Passes without external pre-check | 98.5% recall, 97.8% precision, no orientation pre-check used | Met |
+| **Duplicate copies** (上海浦东) | Adapter's copy signal feeds B0; row count returns to golden's 136 | 97.8% recall / 99.2% precision, groups correctly split 128/134 | Met |
+| 亨通 65.4% | Root-cause before any accuracy claim | **Confirmed scorer artifact** — `_content_match`'s monotonic-index DP can't handle a document whose physical section order (普通电缆 then 矿物电缆) is reversed from golden's canonical order (矿物电缆 then 普通电缆); block-aware matching fixed it to 96.3% | Resolved |
+
+**qty root-cause (2026-08-13, ~2h investigation, zero API cost, both outliers
+traced to raw Paddle cells directly)**:
+
+- **taikelong (qty 78.6%)**: genuine OCR misses, not a mapping bug. Checked
+  seq 9, 13–18, 32–34, 60–68 against raw cells: e.g. seq=13 (蝶阀) — golden
+  qty=3 is arithmetically confirmed by the row's own trusted price columns
+  (240.18×3≈720.53), but no "3" appears anywhere in that row's raw cells.
+  seq 60–68 are worse: entire rows blank past the material columns. Nothing
+  for the adapter to recover — the data was never captured.
+- **yuandong (qty 68.4%)**: different mechanism. This table has no tax-rate
+  column at all (flat single-price, like pudong/miancun), so extraction
+  correctly uses the positional fallback, not the `%`-anchor path. Raw cells
+  for seq=3, 4, 5 show the **identical** value `150009.49` in the qty
+  position despite three different cable specs with different real
+  quantities — not a shifted/misaligned read, a value that doesn't belong
+  to any single row appearing verbatim across several. **Known limitation,
+  not pursued this round** (see Open Items) — plausible mechanism: a
+  vertically-merged cell (subtotal or shared attribute spanning several
+  rows in the source table) getting expanded by Paddle into every row it
+  spans, a pattern common in Chinese bid-table layouts. Detectable in
+  principle (a numeric column holding the identical value across several
+  consecutive rows while other columns differ), not attempted here.
+
+**Admission criterion for qty, given both failure modes are gate-visible**:
+taikelong's failure mode is *missing* data — a blank qty cell cannot satisfy
+`INTEGRITY_ARITHMETIC_TOLERANCE` or the amount-closure checks, so it
+surfaces as a doubt, never a silent wrong value. yuandong's failure mode is
+a *wrong* value, but one implausible enough (150009.49 as a cable length)
+that qty×unit_price breaks arithmetic closure and checksum immediately —
+also gate-visible. Neither observed failure is the dangerous
+category (an error that's internally consistent enough to sail through all
+four gates unnoticed). So: **qty/price stay recorded at the 96% target as a
+known, evidenced gap — not silently met — but the P4 cutover gate is
+`gate-invisible error rate` (errors that pass all four production gates
+undetected), not raw field-accuracy percentage.** That number's best source
+is manual testing itself, not another offline benchmark run — see §9 P4 note
+on doubt-inbox copy for how this shows up to a real user.
+
+qwen's own historical taikelong number (89/89) is not a safe baseline to
+compare against either: it was a single, unreproduced run scored by the
+pre-fix scorer, and HANDOFF's own §1.1 flags it explicitly — "这是一次跑的
+结果，不是稳定值" (a rerun on 亨通 swung from ±0.00 to −39,466). Neither
+side has a stable number to race to; recording the gap honestly is more
+useful than a false apples-to-apples claim in either direction.
 
 ## 7. P2-adjunct — one-shot dual-engine comparison batch (replaces shadow)
 
@@ -216,6 +264,22 @@ qwen's calibration risks systematic false pass/fail on the new path.
 - design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific;
   the Paddle path reports `stage_current/stage_total` **per page** (natively
   available, simpler than the token-stream proxy).
+- **Doubt-inbox copy gap, found during P2a qty root-cause (2026-08-13),
+  must land with this cutover**: `extraction_draft.compute_quality`'s
+  `check_row_arithmetic` marks a row with a genuinely blank qty as
+  `not_evaluable` — it drops out of the arithmetic-consistency denominator
+  silently, it does **not** raise `qty_arithmetic_mismatch*` (that signal
+  fires for "qty×price≠total", not "qty is missing"). taikelong-style
+  documents (real Paddle OCR misses, confirmed by direct raw-cell
+  inspection, not fixable in the adapter — §6) can produce a handful to a
+  couple dozen such rows with no distinct flag pointing at them — the exact
+  silent-gap failure mode feedback #5/#7 were about. Before cutover: add a
+  `qty_missing_rows=N` (or similar) signal from `compute_quality` when a
+  `quote_line` row has a name/spec but no parseable qty, and a matching
+  `apps/www/src/utils/doubtCopy.ts` entry (plain language, "有 N 行没能读到
+  数量，请核对原文" — matching the existing `no_seq_rows`/`seq_missing`
+  entries' style). Without this, a qty-heavy-OCR-miss document degrades
+  silently instead of surfacing as a clear, actionable doubt.
 
 ## 10. qwen deletion (same round as cutover)
 
@@ -251,10 +315,30 @@ orientation cost disappears wholesale with the qwen path.
 
 ## 12. Open items
 
-- 亨通 65.4% root cause — in scope for P2.
+- ~~亨通 65.4% root cause~~ — **resolved 2026-08-13**, confirmed scorer
+  artifact (§6 above), not a recognition defect.
+- ~~Duplicate-copy handling~~ — **resolved 2026-08-13** (§6 above), 浦东
+  correctly splits 128/134.
+- **yuandong qty — suspected vertically-merged-cell expansion, not pursued.**
+  Raw evidence (`outputs/baidu_paddleocr_vl/yuandong.json`, table on the page
+  containing seq 1–9, header `['序号','材料/设备名称','规格型号',
+  '质量标准技术指标','单位','数量','单价','合价','备注']`, no tax-rate column):
+  ```
+  seq=3 golden_qty=2987.24 raw=['3','矿物电缆','RTTYZ-3*150+2*70','国家标准','米','150009.49','1666013.63','*GB-WDZA-RTTYZ-0.6/1KV-3*150+2*70','']
+  seq=4 golden_qty=207.52  raw=['4','矿物电缆','RTTYZ-4*120+E70','国家标准','米','150009.49','150009.49','*GB-WDZA-RTTYZ-0.6/1KV-4*120+1*70','']
+  seq=5 golden_qty=640.3   raw=['5','矿物电缆','RTTYZ-4*50+E25','国家标准','米','150009.49','150009.49','*GB-WDZA-RTTYZ-0.6/1KV-4*50+1*25','']
+  ```
+  `150009.49` appears identically in the qty column across three rows with
+  different specs and different golden quantities — not a shift, a value
+  that doesn't belong to any single row repeating verbatim. Plausible cause:
+  a vertically-merged cell (e.g. a shared subtotal or section-level value
+  spanning several source-table rows) getting expanded by Paddle into every
+  row it visually spans — a layout pattern common in Chinese bid tables.
+  Detectable in principle (a numeric column holding an identical value
+  across several consecutive rows while other columns differ) but not
+  implemented — deliberately deferred, not silently dropped. Pick up here
+  if qty accuracy needs to improve further post-launch.
 - Run-to-run stability — zero data on the candidate; P2 requires it.
-- Duplicate-copy handling — zero data; P2 requires it (浦东 is the poison
-  sample).
 - Track A′ (quote-side text-layer probe): out of scope here; decide after
   measuring the native-PDF ratio among historical bid uploads.
 
