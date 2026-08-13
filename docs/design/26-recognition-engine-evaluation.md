@@ -1,18 +1,24 @@
-# 26 — Recognition Engine Candidate Evaluation (Scanned Bid PDFs)
+# 26 — Recognition Engine Replacement (PaddleOCR-VL for all scanned PDFs)
 
-> **Status — proposed, 2026-08-13.** Covers the harder half of a
-> "recognition engine replacement" investigation prompted by a customer
-> complaint (slow recognition, WPS comparison) — the scanned bid/quote side.
-> The easier, independent half (tender procurement lists with a text layer)
-> is split out to `docs/design/25-tender-text-layer-extraction.md` per the
-> user's explicit direction (2026-08-13): Track A ships first, on its own
-> schedule, with zero coupling to this document's decisions.
+> **Status — CONFIRMED, 2026-08-13. Ready for implementation (not started).**
+> Originally scoped as "candidate evaluation, scanned bid PDFs only"; re-scoped
+> and finalized after two user decisions (2026-08-13):
 >
-> User has confirmed two of this document's open questions from the prior
-> discussion round: Track A is independently prioritized (see above), and
-> the Phase 2 pass-threshold matrix in §6 is accepted as proposed. Hengtong's
-> 65.4% recall root cause (§6, row 6) remains open and is scoped as part of
-> Phase 2's own evaluation work, not a prerequisite to starting it.
+> 1. **PaddleOCR-VL becomes the sole visual recognition engine for ALL scanned
+>    PDFs — tender and bid alike.** Routing is by actual PDF characteristics,
+>    never by document type (the "bids are scans, tenders are native" pattern is
+>    a property of the current 7-document sample, not of the population —
+>    CLAUDE.md §1 forbids baking sample properties into architecture).
+> 2. **Speed priority ("尽快") compresses the process, not the acceptance
+>    bars.** The standing production shadow phase is replaced by a one-shot
+>    offline dual-engine comparison batch (§7); the four acceptance gaps in §6
+>    (field-level accuracy, duplicate copies, mixed orientation, run-to-run
+>    stability) are the go/no-go itself and are NOT compressible.
+>
+> Track A (tender text-layer direct extraction, design/25) is **kept in front
+> of** the new engine — it is deterministic parsing, not a recognition model,
+> costs nothing, and was just shipped and accepted. Replacing it with Paddle
+> would buy no simplification.
 >
 > Basis: CLAUDE.md §1/§4/§6, `.claude/rules/recognition.md`,
 > `.claude/rules/tests.md`. Evidence: `scripts/{try_paddleocr_vl,
@@ -20,52 +26,65 @@
 > baidu_unlimited_ocr}/` (gitignored — rerun the scripts to reproduce) +
 > `HANDOFF.md`'s 2026-08-13 merge-checkpoint section.
 
-## 1. Why this is a evaluation project, not a swap
+## 1. Target end-state: three-layer routing, all by PDF reality
 
-`vl_quote.py`'s bid/quote recognizer only talks to the rest of the pipeline
-through one contract: `ExtractionDraft`, built by `build_draft()`. Alignment,
-the quality gates, `copy_no` dedup, dry-run confirmation, and every design/24
-frontend surface all consume that shape and nothing upstream of it. Swapping
-the model or provider behind that boundary is architecturally invisible to
-everything downstream — **provided** the new path produces the same shape
-with the same honesty guarantees (no silent row drops, no silently-derived
-amounts, REVIEW/BLOCKED gates fed real signal). That precondition is the
-actual size of this project: not "call a different API," but "prove the new
-path can honestly fill every field the current path's quality gates depend
-on." This is why it's a full evaluation project and not a config flip.
+```
+usable text layer?  ──yes──▶  text-layer direct extraction (design/25 Track A,
+        │                     deterministic, no model — tender today; quote-side
+        no                    extension "Track A′" is a separate later decision)
+        ▼
+scanned document    ───────▶  PaddleOCR-VL  (the ONE visual engine, both doc types)
+        │
+        BLOCKED / untrusted (document-level, labeled — never silent)
+        ▼
+fallback            ───────▶  qwen VL-direct (retained, also the future
+                              "targeted re-read" engine)
+```
 
-## 2. Evidence gathered so far (2026-08-12/13 exploratory session)
+Every hop is document-level either/or with an honest `parser_mode` /
+`input_mode` label (`text_layer` / `paddle_vl` / `vl_direct`) — the same
+boundary pattern design/25 established and `.claude/rules/recognition.md` now
+codifies. What stays forbidden: within-document per-table routing, and
+capability-sniffing silent degradation.
 
-All of the following is real, measured, and reproducible via the scripts
-named in the header — not modeled or estimated.
+## 2. Why this is an engineering project, not a config flip
 
-### 2.1 Image-stitching is a dead end
+`vl_quote.py`'s recognizer talks to the rest of the pipeline through one
+contract: `ExtractionDraft`, built by `build_draft()`. Alignment, the quality
+gates, `copy_no` dedup, dry-run confirmation, and every design/24 frontend
+surface consume that shape and nothing upstream of it. Swapping the engine
+behind that boundary is architecturally invisible downstream — **provided**
+the new path fills the same shape with the same honesty guarantees. Three
+things qwen does via prompt rules have no counterpart in PaddleOCR-VL (a
+non-conversational document parser) and must be reimplemented
+deterministically in the adapter: `row_type` classification, page attribution
+(Paddle parses per page — natively better than qwen's self-reported pages),
+and **duplicate-copy detection** (Paddle has no `copy_no` concept; §6).
 
-Tested whether combining N page images into one composite image (instead of
-sending N separate image parts in the VL-direct call, which is already a
-single API call — see `.claude/rules/recognition.md`, "整份文档一次调用")
-would save time. Result: yes, materially (467s → 188s on 凯硕新正/19 pages),
-but only by degrading resolution enough to lose ~1/3 of rows (100% → 67.4%
-recall). Attempts to preserve resolution by raising the pixel budget produced
-base64 payloads (37-96MB) that failed to upload at all (`WinError 10053`
-connection aborted / write-timeout, reproduced 3 times at different pixel
-targets). **Conclusion: not a viable direction, no further investigation
-planned.**
+## 3. Evidence gathered so far (2026-08-12/13 exploratory session)
 
-### 2.2 PaddleOCR-VL — candidate model
+All of the following is real, measured, and reproducible via the scripts named
+in the header — not modeled or estimated.
 
-A 0.9B-parameter open-source vision-language model purpose-built for document
-parsing (tables/formulas/seals/skew), self-hostable (PaddlePaddle/vLLM/
-SGLang/llama.cpp/MLX) or available via Baidu Cloud's hosted
-"文档解析（PaddleOCR-VL）" API (`aip.baidubce.com/.../paddle-vl-parser`,
-same OAuth credentials already in `apps/api/.env` as the
-`BAIDU_UNLIMITED_OCR_*` keys used for the 2026-07-13 prior experiment).
-Published benchmarks: 96.3% OmniDocBench v1.6 overall, table TEDS 91.71/94.67,
-cross-page table merging (v1.5+), 1.22 pages/sec at vLLM throughput.
+### 3.1 Image-stitching is a dead end
 
-**Measured on this project's own 7-document benchmark corpus** (row-level
-sequence-presence recall — see §2.3 for what this metric does and does not
-prove):
+Tested whether combining N page images into one composite image would save
+time. Result: yes, materially (467s → 188s on 凯硕新正/19 pages), but only by
+degrading resolution enough to lose ~1/3 of rows (100% → 67.4% recall).
+Attempts to preserve resolution produced 37-96MB payloads that failed to
+upload at all (reproduced 3×). **Closed: not a viable direction.**
+
+### 3.2 PaddleOCR-VL — the candidate
+
+0.9B-parameter open-source vision-language model purpose-built for document
+parsing (tables/formulas/seals/skew), self-hostable (vLLM/SGLang/llama.cpp)
+or via Baidu Cloud's hosted API (same OAuth credentials already in
+`apps/api/.env` as the `BAIDU_UNLIMITED_OCR_*` keys). Published: 96.3%
+OmniDocBench v1.6, table TEDS 91.71/94.67, cross-page table merging (v1.5+),
+1.22 pages/sec at vLLM throughput.
+
+**Measured on this project's own 7-document corpus** (row-level
+sequence-presence recall — see §3.3 for what this does and does not prove):
 
 | Document | Pages | Time | Seq recall | Has 序号 column |
 |---|---|---|---|---|
@@ -77,140 +96,138 @@ prove):
 | 宏胜 | 11 | 20s | 100% (136/136) | No — content-align verified |
 | 亨通 | 11 | 24s | **65.4%** | No — content-align verified |
 
-vs. current VL-direct baseline: ~630-710s total (orientation pre-check +
-extraction) for a comparably-sized document. **9-20x time advantage**, and
-critically, **100% row coverage on 泰科龙**, the one document that has
-defeated every fast-path attempt tried in this project's history to date
-(this session's own stitching experiment, and the 2026-07-13 Baidu OCR
-experiment which got only 59-70% on it).
+vs. current VL-direct baseline: ~630-710s (orientation pre-check + extraction)
+for a comparably-sized document. **9-20× time advantage**, and **100% row
+coverage on 泰科龙** — the document that defeated every prior fast-path
+attempt (this session's stitching, and the 2026-07-13 Baidu OCR run's 59-70%).
 
-### 2.3 What this metric does and does not prove
+### 3.3 What the metric does and does not prove
 
-"Seq recall" checks whether a valid row-identity value (either a printed
-序号 column, or — when absent — content-aligned name+spec+qty matching,
-reusing `scripts/e2e_diff.py::diff_doc()`'s existing `content_align` mode)
-was found for each golden row. It does **not** check that every field within
-a found row is correct. An exploratory field-level scorer
-(`scripts/score_paddleocr_vl.py`) was built and hit a real, diagnosed
-limitation: some rows have empty cells that are not consistently represented
-as empty placeholders in PaddleOCR-VL's `matrix`/`cells` output, causing
-column-position drift that a fixed-header-index mapper cannot safely resolve
-(verified concretely — see the row-1-vs-row-3 comparison in this session's
-transcript, same table, same header, different effective column alignment).
-**Field-level accuracy is not yet a trustworthy number for this candidate.**
-Building a parser that handles this correctly is comparable in scope to work
-already invested in this project's own quote-line validation logic
-(`quote_fact.py`'s arithmetic checks) — real work, scoped into Phase 2 below,
-not something to rush.
+"Seq recall" checks row-identity presence (printed 序号, or content-aligned
+name+spec+qty when absent). It does **not** check per-field correctness. An
+exploratory field-level scorer hit a real, diagnosed limitation: empty cells
+are not consistently represented as placeholders in Paddle's `matrix`/`cells`
+output, causing column-position drift a fixed-header-index mapper cannot
+safely resolve. **Field-level accuracy is not yet a trustworthy number** —
+solved once, correctly, in the Phase P1 adapter, never再 in throwaway scripts.
 
-## 3. Architecture: how a new provider plugs in
+## 4. Compressed implementation plan (~4-5 working days)
 
-No new abstraction is needed. `LLMProvider` (the existing interface
-`DashScopeOCRProvider` implements) already defines the seam; a new provider
-implements `vl_extract_csv` (or an equivalent structured-output method) and
-`recognize_quote_vl`'s `vl_call`/`orient_call` injection points stay
-unchanged. The two `hasattr(provider, "vl_extract_csv")` checks in
-`pipeline.py` are defensive guards (per `.claude/rules/recognition.md`), not
-a path-selection mechanism — a new provider either implements the interface
-or the call fails loudly. No dual-path architecture is introduced by this
-project; at any point in time exactly one provider is live per the existing
-single-path rule, with `qwen VL-direct` and the candidate trading which one
-that is across Phase 3/4 below.
+| Phase | Content | Est. |
+|---|---|---|
+| **P0** | Evidence infrastructure: parameterize the two exploratory scripts to `scripts/` conventions; bind `outputs/baidu_paddleocr_vl/` artifacts to code SHA / PDF SHA / model version in `docs/data/source_registry.json` | 0.5d |
+| **P1** | **Adapter + provider** (critical path, §5) | 1-2d |
+| **P2** | **Acceptance matrix, one shot** (§6) — **go/no-go lives here** | 1d |
+| **P3** | Threshold spot-recalibration (§8) | 0.5d |
+| **P4** | Production wiring (§9) | 0.5d |
+| **P5** | prj2 full-flow UI regression: upload → doubt inbox (dry-run, copy-dedup plain-language item) → matrix → export, in the browser | 0.5d |
 
-## 4. Phase 0 — evidence infrastructure adoption (~half day)
+## 5. P1 — adapter and provider
 
-1. Parameterize the two exploratory scripts (`try_paddleocr_vl.py`,
-   `score_paddleocr_vl.py`) to `scripts/` conventions properly (they're
-   already read-only/output-to-`outputs/`, but harden CLI args, remove any
-   remaining hardcoded assumptions from the exploratory-script phase).
-2. Bind `outputs/baidu_paddleocr_vl/` artifacts to code SHA / PDF SHA / model
-   version in `docs/data/source_registry.json` or an equivalent manifest —
-   this project has previously lost reproducibility on exploratory results
-   that couldn't be traced back to a specific code state; don't repeat that
-   here.
+Core trick: **the adapter serializes Paddle's `cells` matrix into canonical
+CSV (`csv.writer`, empty cells as explicit empty fields) and feeds the
+existing `build_draft()`** — `parse_csv`, the four gates, quality tiers and
+the ledger run unchanged, so field-level validation comes for free and there
+is zero drift between "what the eval says" and "what production enforces"
+(the same zero-drift argument as design/24's dry-run). The adapter itself
+implements the three prompt-rule replacements from §2:
 
-## 5. Phase 1 — (moved) — see `docs/design/25`
+- `row_type`: deterministic keyword rules (小计/合计/总计) — no model judgment;
+- `page`: from Paddle's native per-page structure;
+- **copy detection**: structural — sequence-axis restarts and/or repeated row
+  blocks synthesize `copy_no` groups feeding the existing B0 dedup unchanged.
+  This detector also hardens the qwen path (which today depends on the model
+  honoring prompt rule 3), so it is shared infrastructure, not Paddle-only.
 
-Tender-side text-layer extraction. Independent, ships on its own schedule,
-no dependency on this document.
+Deployment for evaluation **and first production cut: cloud API** (zero ops).
+Self-hosted vLLM is a WSL2/GPU project on this Windows machine — a cost-
+reduction second phase, incompatible with "尽快", and the "1.22 pages/sec"
+number must not anchor the phase-1 decision.
 
-## 6. Phase 2 — candidate evaluation (design review before code lands)
+## 6. P2 — acceptance matrix (thresholds user-accepted 2026-08-13)
 
-**Core principle: evaluate the candidate through the production seam, not by
-hardening the exploratory scorer.** The field-level scoring gap identified in
-§2.3 gets solved once, correctly, as a `PaddleOCR-VL output → ExtractionDraft`
-adapter (the `matrix`/`cells` structure is more regular than free-form CSV —
-the empty-cell drift problem gets fixed once in the adapter, not worked
-around per-script) — and then this project's **existing** `compute_quality`
-+ the four quality gates + `scripts/e2e_diff.py` become the real scorer for
-free. No new validation logic gets invented in a throwaway script.
-
-Evaluation matrix (thresholds accepted by user, 2026-08-13):
+Scoring = the production gates + `scripts/e2e_diff.py` vs golden, through the
+P1 adapter. **This is a real gate: if the bar fails, the fast track stops
+here** and the fallback discussion is a hybrid design, not a forced cutover.
+The adapter survives either outcome (it is engine-agnostic evidence
+infrastructure).
 
 | Dimension | Sample | Pass bar |
 |---|---|---|
 | Row recall / precision | 7 cable + valve documents | ≥ qwen baseline |
-| Numeric triple + spec text | Same, vs golden | ≥ 96% (including spec — qwen's known weak point) |
-| **Mixed orientation** | 宏胜 (180° mixed-orientation poison sample) | Passes without an external orientation pre-check, or Track B's time advantage is roughly halved |
-| **Duplicate copies (正本/副本)** | 上海浦东 (272 = 136×2 raw rows) | Adapter must emit a copy signal feeding B0's dedup, or an equivalent structural duplicate-detection |
-| **Run-to-run stability** | Each document, ≥3 runs | Amount-delta distribution, never a single-run number (HANDOFF §6 lesson 1 applies verbatim — qwen itself has 0.18% run-to-run variance and 3/10↔10/10 orientation collapse) |
-| 亨通 65.4% | Dedicated root-cause | Determine whether the shortfall is the model, the exploratory scorer, or golden-side error — before this document can claim any accuracy number for 亨通 |
+| Numeric triple + spec text | Same, vs golden | ≥ 96% (incl. spec — qwen's weak point) |
+| **Mixed orientation** | 宏胜 (180° mixed poison sample) | Passes without external orientation pre-check; contingency: keep `detect_rotations` in front of Paddle (cheap relative to Paddle's runtime) |
+| **Duplicate copies** | 上海浦东 (272 = 136×2 raw rows) | Adapter's copy signal feeds B0; final row count returns to 136 |
+| **Run-to-run stability** | Each document ≥3 runs | Amount-delta distribution, never a single-run number (HANDOFF §6 lesson 1 — qwen itself swings 0.18% between runs) |
+| 亨通 65.4% | Dedicated root-cause via the proper adapter | Model vs scorer vs golden-side error resolved before any 亨通 accuracy claim |
 
-**Deployment form during evaluation**: cloud API (fast, zero ops). Note for
-whoever makes the eventual production-hosting decision: **this machine is
-Windows** — self-hosted vLLM most likely means WSL2 or a dedicated GPU box,
-a real production cost that the "1.22 pages/sec" vLLM-throughput number does
-not include. Don't let that number anchor the evaluation-phase deployment
-choice.
+## 7. P2-adjunct — one-shot dual-engine comparison batch (replaces shadow)
 
-## 7. Phase 3 — shadow running (after Phase 2 passes)
+The previously-planned standing production shadow is **dropped**: the product
+is in manual-testing stage, a long shadow adds latency without adding
+decision-relevant data. Instead: run both engines once over the 7-document
+corpus + prj2's 4 bids, machine-diff the two `ExtractionDraft` sets
+(`block_alignment`-style), file the diff report with the P2 results. Same
+evidence, days earlier.
 
-New provider runs behind `LLMProvider`, production traffic double-runs both
-paths, records-only (no user-facing switch), reconciled via
-`block_alignment`-style diffing between the two drafts — same pattern as the
-existing Phase B-1 shadow precedent in this codebase. Re-calibrate
-`INTEGRITY_*`/`SEQ_*` thresholds on the shadow data during this phase — those
-thresholds were calibrated against qwen VL-direct's specific failure-mode
+## 8. P3 — threshold recalibration
+
+`INTEGRITY_*`/`SEQ_*` were calibrated on qwen VL-direct's failure-mode
 distribution (drop-rate/amount-defect correlation, truncation shape, seq
-coverage distribution); a different model has a different failure
-distribution and silently keeping qwen's calibration risks systematic false
-pass/fail on the new path.
+coverage). After the P2 runs, inspect each gate's hit distribution on Paddle
+output; adjust **only** gates that demonstrably misfire, each change carrying
+its derivation in the comment (existing convention). Silently inheriting
+qwen's calibration risks systematic false pass/fail on the new path.
 
-## 8. Phase 4 — cutover and qwen's downgraded role
+## 9. P4 — production wiring
 
-Cutover criteria locked in this document once Phase 3 data exists (zero net
-loss across N shadow documents + stability distribution not worse than qwen).
-qwen VL-direct is **not deleted** — it downgrades to two roles: (a) fallback
-when the candidate is BLOCKED or a document has no text layer, and (b) the
-engine behind "targeted re-read" (a designed-but-unimplemented feature
-already named in `HANDOFF.md`) — a 0.9B model is fast but has a real
-capability ceiling; a slower, general VL model is the right tool for the
-residual hard cases once the fast path handles the common case.
+- `RECOGNITION_ENGINE: paddle | qwen` setting, default `paddle` after P2
+  passes; `parser_mode="paddle_vl"` honest label (never impersonates
+  `vl_direct`).
+- Document-level fallback to qwen on BLOCKED/untrusted — labeled and logged,
+  same pattern as Track A's fallback (allowed: visible document-level
+  either/or; forbidden: silent capability-sniffed degradation).
+- `.claude/rules/recognition.md` first bullet amended again: "the sole visual
+  engine is configurable (`RECOGNITION_ENGINE`), default PaddleOCR-VL" —
+  single-source-of-truth obligation, do NOT leave the rule saying VL-direct
+  is sole while code says otherwise.
+- design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific;
+  the Paddle path reports `stage_current/stage_total` **per page** (natively
+  available, simpler than the token-stream proxy).
 
-**Not separately funded**: orientation-precheck optimization. If Track B
-succeeds, the whole 3-vote LLM-based orientation-detection cost disappears
-(PaddleOCR-VL handles skew/rotation natively per §2.2). If Track B fails,
-revisit optimizing it then — investing in it now is work that either gets
-thrown away or was never needed.
+## 10. qwen's downgraded role (not deleted)
 
-## 9. Two carry-forward notes
+(a) Fallback when Paddle is BLOCKED; (b) the engine behind "targeted re-read"
+(designed-but-unimplemented, HANDOFF) — a 0.9B model is fast but has a real
+capability ceiling; a slower general VL model is the right tool for residual
+hard cases. **Not separately funded**: orientation-precheck optimization —
+if this project succeeds the 3-vote orientation cost disappears wholesale;
+if it fails, revisit then.
 
-1. **design/24 B2's "已转录 N 行" stage-progress text is qwen-streaming-
-   specific.** A new provider's progress data source changes with it
-   (local/self-hosted inference reports progress per-page naturally, which
-   is arguably easier to surface than the current streaming-token-count
-   proxy) — whichever adapter lands in Phase 2 needs its own
-   `stage_current`/`stage_total` wiring note, not a silent reuse of
-   `dashscope_ocr.py::_mm_stream`'s counting logic.
-2. **Spec-text stays a validation signal, not an alignment key**
-   (HANDOFF §5.7) — this holds regardless of which model produces the spec
-   text. Do not revert this because a new model happens to read specs more
-   reliably; the reasoning behind demoting spec-text was about alignment
-   robustness, not about any one model's current accuracy.
+## 11. Risks (stated up front)
 
-## 10. Open items
+1. **P2 is a genuine gate, not a ritual** — field-level accuracy is unknown
+   today; the plan front-loads it to day 2-3. Worst case loses only the P1
+   adapter, which is reusable for any future candidate.
+2. **Cloud API quota/rate limits** — the 2026-07-13 Baidu experiment hit
+   quota exhaustion mid-run; the ≥3-run stability requirement doubles as a
+   rate-limit probe. Write observed limits into the P2 report.
+3. **Bid documents to a third-party cloud** — same class as the existing
+   DashScope flow, but a different vendor; worth one confirmation against
+   the customer contract before production default flips.
 
-- Hengtong 65.4% root cause (§6, row 6) — not resolved, in scope for Phase 2.
-- Run-to-run stability — zero data yet on the candidate; Phase 2 requires it.
-- Duplicate-copy (正本/副本) handling on the candidate — zero data yet;
-  Phase 2 requires it (上海浦东 is the designated poison sample).
+## 12. Open items
+
+- 亨通 65.4% root cause — in scope for P2.
+- Run-to-run stability — zero data on the candidate; P2 requires it.
+- Duplicate-copy handling — zero data; P2 requires it (浦东 is the poison
+  sample).
+- Track A′ (quote-side text-layer probe): out of scope here; decide after
+  measuring the native-PDF ratio among historical bid uploads.
+
+## Appendix — superseded content
+
+The original "proposed" version of this document scoped the engine swap to
+scanned **bid** PDFs only and planned a standing production shadow phase
+(old §7). Both were superseded by the 2026-08-13 user decisions recorded in
+the status banner; the evidence sections (§3) carry over unchanged.
