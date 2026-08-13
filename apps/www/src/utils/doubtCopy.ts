@@ -83,6 +83,10 @@ const RULES: TranslatedRule[] = [
     render: (m) => `有 ${m[1]} 行没有原文序号，无法用序号核对身份，建议人工确认这些行对应原文的哪一行。`,
   },
   {
+    test: /^qty_missing_rows=(\d+)$/,
+    render: (m) => `有 ${m[1]} 行没能识别出数量，会影响这些行的合价核算，建议人工核对原文补全数量。`,
+  },
+  {
     test: /^orientation_unresolved_pages=(\[.*\])$/,
     render: (m) => `有几页（页码 ${m[1]}）的文字方向没能自动判断（可能是扫描件倾斜），建议人工检查这几页有没有被读对。`,
   },

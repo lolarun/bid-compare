@@ -13,6 +13,12 @@ describe('doubtCopy', () => {
       expect(translateReason('no_seq_rows=137')).toContain('137 行没有原文序号')
     })
 
+    it('translates qty_missing_rows', () => {
+      const r = translateReason('qty_missing_rows=4')
+      expect(r).toContain('4 行没能识别出数量')
+      expect(r).not.toContain('qty_missing_rows')
+    })
+
     it('translates bbox_coverage=0', () => {
       expect(translateReason('bbox_coverage=0 (no row-level localization)')).toContain('像素坐标')
     })

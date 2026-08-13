@@ -481,10 +481,19 @@ def build_quote_csv(doc_json: dict) -> str | None:
             is_quote_header = _looks_like_quote_table(header)
             in_gap = (last_price_page is not None and isinstance(page_num, int)
                      and page_num - last_price_page <= _MAX_CONTINUATION_GAP)
+            # 续页候选表的实际列数不能比上一张报价表的表头窄太多——真正的续页
+            # 数据行宽度跟表头基本一致（偶有 ±1 的行级噪声，见模块文档"已知
+            # 缺陷"）；宏胜/亨通实测复现：附录里的"招标文件条目号/偏离说明"
+            # 条款表只有 4 列，价格表表头有 8-19 列，同样没有报价关键词、同样
+            # 在相邻页范围内，会被当成续页吃进来。阈值取严格大于一半——宏胜
+            # 实测 4/8 恰好卡在"不超过一半"的边界上，`>=` 会放行，必须用 `>`。
+            # 真续页的列数噪声观测到的最大情况也就一两列，这个阈值不会误伤。
+            width_plausible = (not last_header
+                               or max((len(r) for r in grid), default=0) > len(last_header) / 2)
             if is_quote_header:
                 last_header = header
                 last_price_page = page_num if isinstance(page_num, int) else last_price_page
-            elif last_header is not None and in_gap:
+            elif last_header is not None and in_gap and width_plausible:
                 # 续页没有自己的表头行——沿用同一份文档上一次成功识别的表头**文字**。
                 # 列映射不再需要按续页宽度重算：字段值改由 `_extract_row_fields` 逐行
                 # 按税率锚点重新定位，天然不依赖表头页跟续页的列数是否一致

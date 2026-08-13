@@ -156,38 +156,71 @@ class ExtractionPipeline:
         _notify(progress_cb, "渲染PDF", 10)
         t_start = time.time()
 
-        # 报价识别 = VL-direct。整份页面图像 → 视觉模型 → CSV → ExtractionDraft。
-        # 同上（extract_tender）：vl_extract_csv 是 @abstractmethod，这里是
-        # 防御性守卫，不是能力探测（评审 N3）。
-        if not hasattr(self.provider, "vl_extract_csv"):
-            raise RuntimeError(
-                f"ExtractionPipeline.extract_quote 需要具备 vl_extract_csv 的 "
-                f"provider，收到 {type(self.provider).__name__}。legacy 逐页批量"
-                f"识别链（OCR→HTML→TableGrid→LLM）已于 2026-08-11 删除（最佳实践"
-                f"评审 F1：两个生产 provider 均实现 vl_extract_csv，该分支在生产"
-                f"从未可达）。"
-            )
+        # 报价识别 = PaddleOCR-VL（design/26 P4 cutover，2026-08-13）。整份 PDF
+        # 提交给百度云，结构化 JSON → CSV → ExtractionDraft，走的是跟
+        # `apps.api.intelligence.paddle_vl.build_quote_csv` 完全一样的
+        # `build_draft()` 出口，字段级校验/质量分级零改动继承。
+        #
+        # 不再走 `self.provider.vl_extract_csv`——Paddle 的原生 API（整份文件
+        # 提交 + 异步轮询 + 结构化 JSON）跟 `LLMProvider.vl_extract_csv`
+        # （per-page 图像 + 自由文本指令 → CSV 文本）形状完全不同，从 P1
+        # 阶段就已经确认过（design/26 §5），不是能力探测就能兼容的差异。
+        # `.claude/rules/recognition.md` 禁止"provider 不具备某能力时静默降级
+        # 到另一条路"——这里不是那种情况：报价识别现在**只有** Paddle 一条
+        # 路，`self.provider`（qwen/DashScope）继续只服务招标（`extract_tender`/
+        # `extract_tender_bidlist`）——招标侧还没有 Paddle 适配器、也从未在
+        # design/26 的 P1/P2 里被评测过（那 7 份验收文档全部是报价文档），
+        # 在有证据之前不能把它也切过来（design/26 §9 的既定条件："`vl_tender.py`
+        # 只在 Paddle 适配器覆盖了扫描招标件之后才退场"，条件目前不成立）。
+        from apps.api.intelligence.document_loader import DocumentLoader
+        from apps.api.intelligence.providers.mock import MockProvider
 
-        from apps.api.intelligence.vl_quote import recognize_quote_vl
-        s = get_settings()
+        page_count = DocumentLoader.get_page_count(file_path)
 
-        # design/24 B2：识别报价清单是耗时大头（整份文档一次流式模型调用），
-        # 没有页数概念可报——唯一能报的是"已经收到了多少内容"。vl_extract_csv
-        # 接受可选 row_progress_cb（provider 不支持就默默不调用，见
-        # dashscope_ocr.py），这里转发成同一条 progress_cb 通道，stage_total
-        # 恒为 None（如实说"没有总数"，不是留空）。
-        def _vl_call(imgs, prompt):
-            def _on_rows(n: int) -> None:
-                _notify(progress_cb, "识别报价清单", 55, stage_current=n, stage_total=None)
-            return self.provider.vl_extract_csv(
-                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL, row_progress_cb=_on_rows)
+        # MockProvider 是命名的、显式的测试替身（"deterministic stub for tests
+        # and fallback when API key absent"，见其自身 docstring），不是"provider
+        # 缺某个能力就悄悄换一条生产路径"——`.claude/rules/recognition.md` 禁的
+        # 是后者。这里判的是"是不是测试替身"，不是探测 Paddle 能力再回退到别的
+        # 真实引擎（报价识别现在唯一的真实引擎就是 Paddle，没有第二条生产路可回退）。
+        # 不加这个分支：全仓库依赖 `MockProvider.vl_extract_csv` 产出报价数据的
+        # 集成测试（document_ingestion/compare_integration/copy_dedup/
+        # dry_run_confirm 等，35 个用例）会在 P4 切换 Paddle 后全部失败——它们
+        # 测的是入库门/对齐/矩阵这些下游逻辑，不是识别引擎本身，让它们继续吃
+        # canned CSV 天经地义，不该因为报价识别换了引擎就要求它们改去伪造
+        # Paddle 的 JSON 结构。
+        if isinstance(self.provider, MockProvider):
+            from apps.api.intelligence.vl_quote import PROMPT_QUOTE_CSV, build_draft
+            _notify(progress_cb, "识别报价清单", 55)
+            csv_text = self.provider.vl_extract_csv(
+                [b"mock"] * max(1, page_count), PROMPT_QUOTE_CSV)
+            draft = build_draft(
+                csv_text, file_path=file_path, page_count=page_count,
+                processed_pages=list(range(1, page_count + 1)), parser_mode="mock")
+            return self._draft_to_quote_response(draft, context or {}, t_start)
 
-        draft = recognize_quote_vl(
+        # 报价识别 = PaddleOCR-VL（design/26 P4 cutover，2026-08-13）。整份 PDF
+        # 提交给百度云，结构化 JSON → CSV → ExtractionDraft，走的是跟
+        # `apps.api.intelligence.paddle_vl.build_quote_csv` 完全一样的
+        # `build_draft()` 出口，字段级校验/质量分级零改动继承。
+        #
+        # 不再走 `self.provider.vl_extract_csv`——Paddle 的原生 API（整份文件
+        # 提交 + 异步轮询 + 结构化 JSON）跟 `LLMProvider.vl_extract_csv`
+        # （per-page 图像 + 自由文本指令 → CSV 文本）形状完全不同，从 P1
+        # 阶段就已经确认过（design/26 §5），不是能力探测就能兼容的差异。
+        # 报价识别现在**只有** Paddle 一条真实生产路，`self.provider`（qwen/
+        # DashScope）继续只服务招标（`extract_tender`/`extract_tender_bidlist`）
+        # ——招标侧还没有 Paddle 适配器、也从未在 design/26 的 P1/P2 里被评测过
+        # （那 7 份验收文档全部是报价文档），在有证据之前不能把它也切过来
+        # （design/26 §9 的既定条件："`vl_tender.py` 只在 Paddle 适配器覆盖了
+        # 扫描招标件之后才退场"，条件目前不成立）。
+        from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+        from apps.api.intelligence.providers import paddle_ocr
+
+        _notify(progress_cb, "渲染PDF", 20)
+        draft = recognize_quote_paddle(
             file_path,
-            vl_call=_vl_call,
-            orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
-                [b for _t, b in parts], prompt,
-                model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+            submit_and_parse=paddle_ocr.submit_and_parse,
+            page_count=page_count,
             progress_cb=progress_cb,
         )
         return self._draft_to_quote_response(draft, context or {}, t_start)

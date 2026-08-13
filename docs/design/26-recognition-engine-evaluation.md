@@ -279,14 +279,22 @@ qwen's calibration risks systematic false pass/fail on the new path.
 - Paddle BLOCKED/untrusted → the document stays BLOCKED per the existing
   quality-tier semantics, visible in the doubt inbox; recourse is the
   existing manual/Excel path. No second engine is invoked.
-- `.claude/rules/recognition.md` first bullet amended again: "the sole visual
-  engine is PaddleOCR-VL (`paddle_vl`)" — single-source-of-truth obligation,
-  do NOT leave the rule saying VL-direct is sole while code says otherwise.
-- design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific;
-  the Paddle path reports `stage_current/stage_total` **per page** (natively
-  available, simpler than the token-stream proxy).
-- **Doubt-inbox copy gap, found during P2a qty root-cause (2026-08-13),
-  must land with this cutover**: `extraction_draft.compute_quality`'s
+- `.claude/rules/recognition.md` first bullet amended — DONE: quote-side sole
+  engine is PaddleOCR-VL (`paddle_vl.py` + `providers/paddle_ocr.py`,
+  bypassing `LLMProvider`); tender-side is unchanged (`vl_tender.py`,
+  DashScope/qwen) since Paddle was never evaluated there — the rule now
+  states both explicitly instead of describing a single unified path.
+- design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific
+  and gone with it (checked, not assumed: Baidu's poll response is a single
+  status field — `running`/`success`/`failed` — with no per-page breakdown,
+  so per-page progress is **not actually available** from this API despite
+  what an earlier draft of this doc assumed). `recognize_quote_paddle`
+  reports 3 coarse stages instead (submit/parse/assemble, ~20/70/90%) — a
+  real regression in progress granularity during the (short) wait, not
+  a wash; acceptable given Paddle's own runtime is 20-25x shorter than the
+  qwen call it replaces (§6 P2b timing).
+- **Doubt-inbox copy gap, found during P2a qty root-cause (2026-08-13) —
+  DONE, landed with this cutover**: `extraction_draft.compute_quality`'s
   `check_row_arithmetic` marks a row with a genuinely blank qty as
   `not_evaluable` — it drops out of the arithmetic-consistency denominator
   silently, it does **not** raise `qty_arithmetic_mismatch*` (that signal
@@ -294,13 +302,14 @@ qwen's calibration risks systematic false pass/fail on the new path.
   documents (real Paddle OCR misses, confirmed by direct raw-cell
   inspection, not fixable in the adapter — §6) can produce a handful to a
   couple dozen such rows with no distinct flag pointing at them — the exact
-  silent-gap failure mode feedback #5/#7 were about. Before cutover: add a
-  `qty_missing_rows=N` (or similar) signal from `compute_quality` when a
-  `quote_line` row has a name/spec but no parseable qty, and a matching
-  `apps/www/src/utils/doubtCopy.ts` entry (plain language, "有 N 行没能读到
-  数量，请核对原文" — matching the existing `no_seq_rows`/`seq_missing`
-  entries' style). Without this, a qty-heavy-OCR-miss document degrades
-  silently instead of surfacing as a clear, actionable doubt.
+  silent-gap failure mode feedback #5/#7 were about. Fixed: `compute_quality`
+  now counts `quote_line` rows with `qty is None` (excluding `not_quoted`
+  rows, which are a legitimate empty qty) and emits `qty_missing_rows=N`
+  into `review_hints`; `doubtCopy.ts` translates it to "有 N 行没能识别出
+  数量，会影响这些行的合价核算，建议人工核对原文补全数量。" — matching the
+  existing `no_seq_rows`/`seq_missing` entries' style. Covered by
+  `apps/api/tests/test_quality_gate_qty_missing.py` (missing-qty fires,
+  `not_quoted` doesn't, all-present doesn't) and a `doubtCopy.test.ts` case.
 
 ## 10. qwen deletion (same round as cutover)
 

@@ -12,12 +12,21 @@ paths:
 
 # 识别链路规则
 
-- **视觉识别**的唯一路径是 VL-direct（`intelligence/vl_quote.py` / `vl_tender.py`）：
-  整份文档一次性渲染、整份送视觉模型一次调用，CSV → `ExtractionDraft`。legacy 逐页
-  OCR→HTML→TableGrid→LLM 链路已物理删除（2026-08-11，最佳实践评审 F1/F2）。不得以任何
-  理由重新描述或引入"部分表格走确定性 TableGrid、复杂表头走 LLM fallback"的双路径
-  架构——`provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
-  （`pipeline.py` 的两处 `hasattr` 检查是防御性守卫，不是路径选择）。
+- **视觉识别**整份文档一次性渲染、整份送视觉模型一次调用，CSV → `ExtractionDraft`，
+  legacy 逐页 OCR→HTML→TableGrid→LLM 链路已物理删除（2026-08-11，最佳实践评审
+  F1/F2）。**报价侧**（quote）唯一路径是 PaddleOCR-VL（`intelligence/paddle_vl.py` +
+  `providers/paddle_ocr.py`，design/26 P4，2026-08-13 起）：`pipeline.py::extract_quote`
+  直接、无条件调用 `paddle_ocr.submit_and_parse`，不经过 `LLMProvider` 抽象——这不是
+  "能力探测后选路径"，是唯一路径本身换了实现；`cells` 矩阵拼装成规范 CSV 后复用
+  `vl_quote.build_draft()` 做 CSV→`ExtractionDraft`（`vl_quote.py` 在报价侧收缩为纯
+  CSV 解析器，不再持有视觉调用）。`extract_quote` 里对 `MockProvider` 的
+  `isinstance` 分支是唯一例外，且只服务测试替身（35 个既有集成测试依赖
+  `MockProvider.vl_extract_csv` 产出报价数据）——按类名识别一个自我声明的测试
+  桩，不是探测真实生产引擎的能力后静默降级，两者不可混同。**招标侧**（tender）
+  仍走 `intelligence/vl_tender.py`，经 `LLMProvider.vl_extract_csv`（DashScope/qwen）
+  ——design/26 全程只评估了报价侧，招标侧未验证 Paddle 前不得下线或改写这条路径。
+  `provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
+  （`pipeline.py` 的 `hasattr` 检查是防御性守卫，不是路径选择）。
 - 招标文件另有**文档级**文字层直抽（`tender_text_layer.py`，docs/design/25 轨A）：
   原生 PDF 检测到可用文字层且清单表可确定性抽取时**整份**走直抽、完全不调用视觉
   模型；检测失败或抽取不可信时**整份**回落 VL-direct。这与上一条禁止的双路径不冲突

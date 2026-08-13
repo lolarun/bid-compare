@@ -335,6 +335,17 @@ def compute_quality(
 
     arith_rate = round(arith_pass / arith_total, 3) if arith_total > 0 else 1.0
 
+    # — Missing-qty rows (design/26 §9)：not_evaluable 行在上面的循环里被 continue
+    # 跳过，只是不计入算术自洽的分母——分母不虚高是对的，但这些行本身就此从
+    # blocking/review_hints 里彻底消失，界面上看起来"跟没发生一样"。qty 是
+    # 唯一在这轮门槛决策里保留 96% 硬指标的字段（qty×单价=合价，误差会传导到
+    # 评标总价），"读不出数量"不能是无声的——跟 `not_quoted`（原文明确不报价，
+    # 合法）分开统计，只数"该有数但读不出"这一类。
+    qty_missing_count = sum(
+        1 for r in quote_lines
+        if r.fields.get("qty") is None and not r.fields.get("not_quoted")
+    )
+
     # — Tax basis consistency —
     tax_bases = set()
     for r in quote_lines:
@@ -499,6 +510,8 @@ def compute_quality(
     )
     if no_seq_count > 0:
         review_hints.append(f"no_seq_rows={no_seq_count}")
+    if qty_missing_count > 0:
+        review_hints.append(f"qty_missing_rows={qty_missing_count}")
 
     if blocking:
         status = "BLOCKED"
