@@ -63,6 +63,7 @@ from apps.api.core.domain_config import (
     COPY_MAX_COPIES,
     COPY_MIN_BLOCK_LEN,
     COPY_ROW_SIMILARITY_MIN,
+    COPY_SPLIT_SEARCH_TOLERANCE_FRAC,
 )
 
 
@@ -73,12 +74,38 @@ def _similarity(a: list, b: list) -> float:
 
 
 def _try_split(keys: list, k: int) -> list[int] | None:
-    """按 k 等份的名义切点分段（长度不要求相等，只要求相近），逐段跟第一段比
-    相似度。全部达标就返回每行所属第几份，否则返回 None。"""
+    """按 k 份分段，逐段跟第一段比相似度。全部达标就返回每行所属第几份，
+    否则返回 None。
+
+    K=2（最常见——正本+副本×1）单独处理：**局部搜索最优切点**，不是只信
+    名义中点（n/2）。两份副本各自独立 OCR，行数不对称的来源不止"多读/漏读
+    一两行"，抽取层任何一处只对其中一份生效的行为变化（比如按内容做的
+    跨行换行合并，两份副本的换行位置/次数天然不会完全一致）都会让真实边界
+    偏离中点——浦东实测：改动抽取逻辑后中点相似度从 0.97 掉到 0.82，真实
+    边界在搜索范围内，仍能找回。
+
+    K>2 时维持只试名义切点：内部切点有 K-1 个，各自独立搜索的组合复杂度
+    不值得为更少见的场景（三份及以上）增加实现复杂度。
+    """
     n = len(keys)
     nominal = n / k
     if nominal < COPY_MIN_BLOCK_LEN:
         return None
+
+    if k == 2:
+        base = round(nominal)
+        tol = max(COPY_MIN_BLOCK_LEN, round(nominal * COPY_SPLIT_SEARCH_TOLERANCE_FRAC))
+        best_split, best_ratio = None, -1.0
+        for s in range(max(COPY_MIN_BLOCK_LEN, base - tol),
+                       min(n - COPY_MIN_BLOCK_LEN, base + tol) + 1):
+            seg0, seg1 = keys[:s], keys[s:]
+            r = _similarity(seg0, seg1)
+            if r > best_ratio:
+                best_ratio, best_split = r, s
+        if best_split is not None and best_ratio >= COPY_ROW_SIMILARITY_MIN:
+            return [1] * best_split + [2] * (n - best_split)
+        return None
+
     splits = [round(nominal * i) for i in range(k + 1)]
     splits[-1] = n  # 四舍五入可能让最后一个切点差 1，强制对齐到序列末尾
     segments = [keys[splits[i]:splits[i + 1]] for i in range(k)]

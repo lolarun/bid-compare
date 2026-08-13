@@ -28,11 +28,17 @@ def test_no_repetition_stays_single_copy():
     assert detect_copies(rows) == [1] * len(rows)
 
 
-def test_uneven_length_does_not_force_a_split():
-    # 长度不能被任何候选 K 整除（这里是质数）——宁可漏判重复，不可误判正常清单。
+def test_uneven_length_still_detected_via_local_split_search():
+    # 长度不能被任何候选 K 整除（9 行，除了 K=3 之外都除不尽）——K=2 靠局部
+    # 切点搜索（不是只信名义中点）依然能找到 [a,b,c,d] vs [a,b,c,d,e] 这个
+    # 切法：副本 2 多读了一行，这正是"各份副本可能各自多读/漏读一两行"要
+    # 覆盖的场景，不该因为整除不了就放弃（design/26 P1 二次复核后收紧了这条：
+    # 早期版本在这个用例上判单份，是判据形状问题，不是需要保留的正确行为）。
     block = [("a", 1), ("b", 2), ("c", 3), ("d", 4)]
-    rows = block + block + [("e", 5)]  # 9 行，9 不能被 2..6 里除 3 之外整除干净且相等
-    assert detect_copies(rows) == [1] * len(rows)
+    rows = block + block + [("e", 5)]
+    assert detect_copies(rows) == [1, 1, 1, 1, 2, 2, 2, 2, 2]
+
+
 
 
 def test_fine_grained_near_duplicate_caught_by_coarse_name_tier():

@@ -143,6 +143,61 @@ def _split_header_and_rows(grid: list[list[str]]) -> tuple[list[str], list[list[
     return header0, grid[1:]
 
 
+def _looks_like_wrap_continuation(prev_row: list[str], row: list[str],
+                                  name_idx: int, spec_idx: int | None) -> bool:
+    """`row` 是不是 `prev_row` 名称跨行换行被拆出来的续行，不是独立的一条数据。
+
+    实测两种形状（宏胜"预分支电缆头"复现，都是同一个根因——Paddle 把单元格
+    内的物理换行拆成了两条 matrix 行）：
+    1. 数值列被整段复制：续行 name 列之后所有列跟上一行逐位相等。
+    2. 数值列整段清空、只有 spec 位留了一小段文字：那是被截断文本的尾巴
+       （"...4X150+E" 续到下一行变成"70"），其余列全空。
+
+    两种形状共同的判据：**除了 name/spec 两列，其余列要么跟上一行相等、
+    要么是空**——真正独立的一行不可能在数量/单价/合价这些字段上跟前一行
+    完全重合或干脆没有任何自己的数据。name/spec 列的具体下标由调用方按这张
+    表实际的表头传入，不假定固定在 0/1（不同文档的列序不一样）。"""
+    skip = {name_idx} | ({spec_idx} if spec_idx is not None else set())
+    for i in range(max(len(prev_row), len(row))):
+        if i in skip:
+            continue
+        a = (prev_row[i] if i < len(prev_row) else "") or ""
+        b = (row[i] if i < len(row) else "") or ""
+        if b.strip() and b.strip() != a.strip():
+            return False
+    return True
+
+
+def _merge_wrapped_rows(data_rows: list[list[str]], name_idx: int,
+                        spec_idx: int | None) -> list[list[str]]:
+    """把"名称跨行换行被拆成两条 matrix 行"的续行折回上一行，返回过滤/合并后
+    的数据行列表。name 列片段拼接；spec 列只在续行有**新内容**（不是上一行的
+    原样重复）时才拼接——`_looks_like_wrap_continuation` 允许 spec 位不参与
+    "其余列"的相等/空校验，正是因为这一位是唯一可能带续行内容的列，合并时
+    要单独处理，不能跟其余列一视同仁地要求"相等或空"。"""
+    out: list[list[str]] = []
+    for row in data_rows:
+        if out and _looks_like_wrap_continuation(out[-1], row, name_idx, spec_idx):
+            prev = out[-1]
+            merged = list(prev)
+            r_name = (row[name_idx] if name_idx < len(row) else "") or ""
+            p_name = (prev[name_idx] if name_idx < len(prev) else "") or ""
+            if name_idx >= len(merged):
+                merged += [""] * (name_idx + 1 - len(merged))
+            merged[name_idx] = p_name + r_name
+            if spec_idx is not None:
+                r_spec = (row[spec_idx] if spec_idx < len(row) else "") or ""
+                p_spec = (prev[spec_idx] if spec_idx < len(prev) else "") or ""
+                if r_spec.strip() and r_spec.strip() != p_spec.strip():
+                    if spec_idx >= len(merged):
+                        merged += [""] * (spec_idx + 1 - len(merged))
+                    merged[spec_idx] = p_spec + r_spec
+            out[-1] = merged
+        else:
+            out.append(row)
+    return out
+
+
 def _classify_columns(header: list[str]) -> dict[int, str]:
     """列 → 槽位，只按表头文字（`map_columns`，跟 qwen 路径同一套关键词表）。
     只给"材质区块之前"稳定不受行级掉格影响的字段（目前是 name/spec）当权威
@@ -254,7 +309,10 @@ def _extract_row_fields(col_map: dict[int, str], row: list[str]) -> dict[str, st
     fields: dict[str, str] = {}
     for i, slot in col_map.items():
         if slot in ("seq", "name", "spec") and i < len(row) and row[i]:
-            fields[slot] = row[i]
+            val = row[i]
+            if slot in ("name", "spec"):
+                val = _strip_wrap_escape(val)
+            fields[slot] = val
 
     rate_idx = _locate_tax_rate_idx(row)
     if rate_idx is not None:
@@ -344,6 +402,15 @@ _PUNCT_NORMALIZE = str.maketrans("（）【】：，", "()[]:,")
 
 def _normalize_label(s: str) -> str:
     return s.translate(_PUNCT_NORMALIZE).strip()
+
+
+def _strip_wrap_escape(s: str) -> str:
+    """去掉字面转义序列 "\\n"（反斜杠+n 两个字符，不是真换行）——Paddle 对
+    跨行换行的单元格输出带这个转义序列（"预分支电缆头\\nRTTYZ-..."），内容
+    其实是一个词，不剥离会在 name/spec 里留下肉眼可见的噪声（跟 e2e_diff.py
+    的 `_norm_str` 同一个发现、同一个理由，这里是生产落值，那边是评分归一化，
+    两处独立剥离，不是同一份代码）。"""
+    return s.replace("\\n", "")
 
 
 def _is_divider_row(row: list[str], header: list[str]) -> bool:
@@ -436,6 +503,12 @@ def build_quote_csv(doc_json: dict) -> str | None:
             # name 列下标：col_map 是 idx->slot，找 slot=="name" 的那个下标——
             # 用来判定小计/合计/总计行（那几行通常只在 name 列写字，其余列留空）。
             name_idx = next((i for i, s in col_map.items() if s == "name"), None)
+            spec_idx = next((i for i, s in col_map.items() if s == "spec"), None)
+            if name_idx is not None:
+                # 名称跨行换行被 Paddle 拆成两条 matrix 行（"预分支"/"电缆头"
+                # 分别成行，实测宏胜复现）——先折回一行，再进入逐行抽取，否则
+                # 这两条碎片各自当成一条脏行处理，name/spec 都不完整。
+                data_rows = _merge_wrapped_rows(data_rows, name_idx, spec_idx)
 
             for row in data_rows:
                 if not any((c or "").strip() for c in row):

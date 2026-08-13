@@ -20,9 +20,13 @@ from __future__ import annotations
 from apps.api.intelligence.paddle_vl import (
     _classify_trailing_cells,
     _extract_row_fields,
+    _has_plausible_numeric_signal,
     _locate_tax_rate_idx,
+    _looks_like_wrap_continuation,
+    _merge_wrapped_rows,
     _parse_rate,
     _resolve_matrix,
+    _strip_wrap_escape,
     build_quote_csv,
 )
 
@@ -138,6 +142,87 @@ def test_extract_row_fields_no_anchor_falls_back_to_col_map():
     fields = _extract_row_fields(col_map, row)
     assert fields["seq"] == "3"
     assert fields["name"] == "合计"
+
+
+# ─── §4b 数值合理性护栏：挡住续页误吸收的无关表格 ──────────────────────────────
+
+def test_plausible_numeric_signal_all_empty_is_ok():
+    # 小计/合计行，或者这行确实没报价——数值槽位全空是正常情况，不能因为空就拒。
+    assert _has_plausible_numeric_signal({"name": "合计"}) is True
+
+
+def test_plausible_numeric_signal_real_number_passes():
+    assert _has_plausible_numeric_signal({"qty": "12", "total_price": "3600.00"}) is True
+
+
+def test_plausible_numeric_signal_not_quoted_marker_passes():
+    assert _has_plausible_numeric_signal({"qty": "/"}) is True
+
+
+def test_plausible_numeric_signal_free_text_rejected():
+    # 亨通实测复现：跟报价完全无关的"偏差说明"条款表被续页误吸收，qty 位
+    # 塞的是"偏离"这种自由文本——挡住，不能被"非空即收"的旧判据放过。
+    assert _has_plausible_numeric_signal({"qty": "偏离", "name": "1"}) is False
+    assert _has_plausible_numeric_signal({"total_price": "偏差说明"}) is False
+
+
+# ─── §4c 跨行换行名称合并：宏胜"预分支电缆头"实测复现 ──────────────────────────
+
+def test_strip_wrap_escape_removes_literal_backslash_n():
+    assert _strip_wrap_escape("预分支电缆头\\nRTTYZ-4x120+E70") == "预分支电缆头RTTYZ-4x120+E70"
+
+
+def test_wrap_continuation_detected_when_tail_columns_duplicate():
+    # 形态一：数值列被整段复制（宏胜 page2 实测：'预分支'/'电缆头' 两行
+    # 除 name 外逐位相等）。
+    prev = ["预分支", "RTTYZ-4x16+E16-RTTYZ-4x10+E10", "国标", "套", "12", "300", "3600.00", ""]
+    row = ["电缆头", "RTTYZ-4x16+E16-RTTYZ-4x10+E10", "国标", "套", "12", "300", "3600.00", ""]
+    assert _looks_like_wrap_continuation(prev, row, name_idx=0, spec_idx=1) is True
+
+
+def test_wrap_continuation_detected_when_tail_columns_empty_with_spec_fragment():
+    # 形态二：数值列整段清空，spec 位留了被截断文本的尾巴（宏胜 page8 实测）。
+    prev = ["预分支", "YFD-WDZA-YJY-3x240+2x120-YFD-WDZA-YJY-4X150+E", "国标", "套", "2", "516", "516"]
+    row = ["电缆头", "70", "", "", "", "", ""]
+    assert _looks_like_wrap_continuation(prev, row, name_idx=0, spec_idx=1) is True
+
+
+def test_wrap_continuation_rejected_when_tail_column_differs():
+    # 反例：某一列既非空又跟上一行对不上——是真的新数据，不是续行。
+    prev = ["阀门A", "DN20", "个", "1", "10.00"]
+    row = ["阀门B", "DN25", "个", "1", "20.00"]
+    assert _looks_like_wrap_continuation(prev, row, name_idx=0, spec_idx=1) is False
+
+
+def test_merge_wrapped_rows_concatenates_name_and_keeps_data():
+    rows = [
+        ["预分支", "RTTYZ-4x16+E16-RTTYZ-4x10+E10", "国标", "套", "12", "300", "3600.00", ""],
+        ["电缆头", "RTTYZ-4x16+E16-RTTYZ-4x10+E10", "国标", "套", "12", "300", "3600.00", ""],
+    ]
+    merged = _merge_wrapped_rows(rows, name_idx=0, spec_idx=1)
+    assert len(merged) == 1
+    assert merged[0][0] == "预分支电缆头"
+    assert merged[0][1] == "RTTYZ-4x16+E16-RTTYZ-4x10+E10"  # 重复值不拼接
+    assert merged[0][4] == "12"  # 数值数据保留
+
+
+def test_merge_wrapped_rows_appends_truncated_spec_tail():
+    rows = [
+        ["预分支", "YFD-WDZA-YJY-3x240+2x120-YFD-WDZA-YJY-4X150+E", "国标", "套", "2", "516", "516"],
+        ["电缆头", "70", "", "", "", "", ""],
+    ]
+    merged = _merge_wrapped_rows(rows, name_idx=0, spec_idx=1)
+    assert len(merged) == 1
+    assert merged[0][0] == "预分支电缆头"
+    assert merged[0][1] == "YFD-WDZA-YJY-3x240+2x120-YFD-WDZA-YJY-4X150+E70"
+
+
+def test_merge_wrapped_rows_leaves_unrelated_rows_untouched():
+    rows = [
+        ["阀门A", "DN20", "个", "1", "10.00"],
+        ["阀门B", "DN25", "个", "1", "20.00"],
+    ]
+    assert _merge_wrapped_rows(rows, name_idx=0, spec_idx=1) == rows
 
 
 # ─── §5 整份 CSV 拼装：续页相邻页限制、无报价表返回 None ─────────────────────

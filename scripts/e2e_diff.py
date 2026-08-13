@@ -268,30 +268,77 @@ def _split_blocks_by_name(items: list) -> list[tuple[int, int]]:
 
 def _match_blocks(q_blocks: list[tuple[int, int]], quote_lines: list,
                   g_blocks: list[tuple[int, int]], golden_rows: list):
-    """按块首行 name 相似度贪心配对。两侧块数通常很少（同一份文档内的
-    大类目段落，2-5 个），不需要 block_alignment.py 那套数量序列 + LLM 兜底
-    的完整流程——那是为跨文档（报价 vs 招标，块数可能到十几个、类目命名
-    可能不一致）设计的；这里是同一份文档内部段落顺序颠倒，直接按名称配对
-    更直接、更透明，没必要复用一套更重的机制。"""
-    used_g: set[int] = set()
-    pairs: list[tuple[tuple | None, tuple | None]] = []
-    for qb in q_blocks:
+    """先按块首行 name 相似度给每个 golden 块找一个报价侧锚点块，再把没被
+    选中当锚点的报价块**就近并入相邻锚点**——不能直接丢弃。
+
+    报价侧块数经常比 golden 侧碎（宏胜实测：'预分支电缆头' 这类长名称被
+    Paddle 从跨行换行拆成独立小段，即便先做过合并，仍会比 golden 的 2 个
+    大类目多出几个 3-5 行的小块）。旧版"多出来的块配不上就整块丢弃"曾把
+    宏胜的 recall 从 100% 打到 28.7%——那些块里是真实数据，只是块级判据
+    比它们的名称粒度粗。就近并入（前面有锚点就跟前一个，之前没出现过
+    锚点就跟后一个）不丢任何一行，只是把它们记到粒度更粗的那个类目里，
+    跟 golden 的粒度一致。
+
+    两侧块数通常很少（同一份文档内的大类目段落，2-6 个），不需要
+    block_alignment.py 那套数量序列 + LLM 兜底的完整流程——那是为跨文档
+    （报价 vs 招标）设计的；这里是同一份文档内部段落顺序颠倒/碎片化，
+    直接按名称配对 + 就近合并更直接、更透明。"""
+    # 锚点认领必须按**全局最高分优先**，不能按报价块的出现顺序逐个贪心——
+    # 逐个贪心会让排在前面、只是弱相似的块（比如"预分支电缆头"跟"普通电缆"
+    # 沾一点边）抢先认领掉一个 golden 块，等到后面真正高分的块（"普通电缆"
+    # 对"普通电缆"，score=1.0）出场时这个 golden 块已经被占用——实测复现：
+    # 会把"预分支电缆头"错配成"普通电缆"的锚点，反而让真正的"普通电缆"块
+    # 沦为孤儿。全局按分数降序认领，才能保证高置信度的匹配不被出场顺序抢走。
+    candidates: list[tuple[float, int, int]] = []  # (score, qi, gi)
+    for qi, qb in enumerate(q_blocks):
         q_name = _row_name(quote_lines[qb[0]])
-        best_gi, best_score = None, -1.0
         for gi, gb in enumerate(g_blocks):
-            if gi in used_g:
-                continue
             score = _name_sim(q_name, _row_name(golden_rows[gb[0]]))
-            if score > best_score:
-                best_gi, best_score = gi, score
-        if best_gi is not None:
-            used_g.add(best_gi)
-            pairs.append((qb, g_blocks[best_gi]))
+            if score > 0:
+                candidates.append((score, qi, gi))
+    candidates.sort(key=lambda c: -c[0])
+
+    used_g: set[int] = set()
+    used_q: set[int] = set()
+    anchor_for_q: dict[int, int] = {}
+    for score, qi, gi in candidates:
+        if qi in used_q or gi in used_g:
+            continue
+        used_q.add(qi)
+        used_g.add(gi)
+        anchor_for_q[qi] = gi
+
+    # 就近归属：从前往后扫，遇到锚点块就切换"当前归属"；非锚点块并入当前
+    # 归属。序列最前面、还没遇到过锚点的非锚点块，扫完后回填给后面第一个
+    # 锚点——它们仍然属于某个类目，只是排在锚点识别出来之前。
+    assign: list[int | None] = [None] * len(q_blocks)
+    current = None
+    for qi in range(len(q_blocks)):
+        if qi in anchor_for_q:
+            current = anchor_for_q[qi]
+        assign[qi] = current
+    next_anchor = None
+    for qi in range(len(q_blocks) - 1, -1, -1):
+        if qi in anchor_for_q:
+            next_anchor = anchor_for_q[qi]
+        elif assign[qi] is None:
+            assign[qi] = next_anchor
+
+    # 按 gi 合并连续同归属的报价块区间——归属结果本身是按原始顺序做的前向
+    # 归并，同一 gi 的报价块在序列里天然连续，直接取整体首尾即可。
+    ranges_by_g: dict[int, tuple[int, int]] = {}
+    for qi, gi in enumerate(assign):
+        if gi is None:
+            continue
+        s, e = q_blocks[qi]
+        if gi in ranges_by_g:
+            ranges_by_g[gi] = (min(ranges_by_g[gi][0], s), max(ranges_by_g[gi][1], e))
         else:
-            pairs.append((qb, None))
+            ranges_by_g[gi] = (s, e)
+
+    pairs: list[tuple[tuple | None, tuple | None]] = []
     for gi, gb in enumerate(g_blocks):
-        if gi not in used_g:
-            pairs.append((None, gb))  # 没有对应报价段的 golden 段——原样保留，计入 missing
+        pairs.append((ranges_by_g.get(gi), gb))
     return pairs
 
 
