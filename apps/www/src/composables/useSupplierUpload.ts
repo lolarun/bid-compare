@@ -18,6 +18,7 @@ import type {
   QuoteExtractionItem,
   QualityMeta,
   BatchConfirmResult,
+  CopyDedupInfo,
   Supplier,
 } from '@/api/client'
 import { asQuoteShape, asQualityMeta } from '@/utils/extraction'
@@ -62,6 +63,14 @@ export const BATCH_PROGRESS_STEPS = [
   { key: 'cleanup', label: '整理结果', pct: 95 },
   { key: 'done', label: '已识别', pct: 100 },
 ] as const
+
+// design/24 B0：入库成功但识别到多份合法副本时，附一句人话说明——不加的话
+// 用户会盯着 line_count 比预期少一半却不知道为什么（浦东 272 行只入了 136，
+// 不说明就是新的"死胡同"，正是这轮改造要消灭的那种体验）。
+function copyDedupNote(dedup: CopyDedupInfo | null | undefined): string {
+  if (!dedup) return ''
+  return `（识别到 ${dedup.total_copies} 份重复副本，已选第 ${dedup.selected_copy_no} 份入库，其余 ${dedup.dropped_rows} 行作证据留存）`
+}
 
 export function useSupplierUpload(deps: {
   taskConfig: UploadTaskConfig
@@ -194,7 +203,7 @@ export function useSupplierUpload(deps: {
       const result = data as BatchConfirmResult
       slot.confirmed = true
       slot.batch_id = result.batch_id
-      message.success(`已入库 ${result.line_count} 条报价`)
+      message.success(`已入库 ${result.line_count} 条报价${copyDedupNote(result.copy_dedup)}`)
     } catch (e) {
       if (await handleBatchConfirmError(e, message)) {
         confirmingSuppliers.value[supplierId] = false  // 重试前先解锁，避免被自己的守卫挡住
@@ -510,7 +519,7 @@ export function useSupplierUpload(deps: {
       entry.confirmedSupplierId = data.supplier_id ?? null
       entry.confirmedSubmissionId = data.submission_id ?? null
       const unknownNote = supplierId ? '' : '（陌生供应商，仅用于本次比价）'
-      message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价`)
+      message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价${copyDedupNote(data.copy_dedup)}`)
     } catch (e: unknown) {
       const resp = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
       if (resp && typeof resp === 'object' && (resp as Record<string, unknown>).error === 'supplier_alias_conflict') {

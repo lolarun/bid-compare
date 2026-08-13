@@ -573,6 +573,10 @@ export interface QuoteExtractionItem {
   category?: string
   standard_name?: string
   standard_spec?: string
+  // design/24 B0：识别到重复副本（正本/副本）时标注属于第几份，1/2/…。
+  // 必须往返到 batch-confirm——后端靠它挑一份入库，此前前端round-trip 从
+  // 未保留过，副本信息在编辑表格这一步就已经丢了。
+  copy_no?: string
 }
 
 export interface RecommendReason {
@@ -614,6 +618,16 @@ export interface RecommendResponse {
   data_gaps: string[]
 }
 
+export interface CopyDedupInfo {
+  total_copies: number
+  copy_nos: string[]
+  selected_copy_no: string
+  selected_rows: number
+  dropped_rows: number
+  dropped_by_copy: Record<string, number>
+  selection_basis: 'closest_to_declared_total' | 'largest_row_count'
+}
+
 export interface BatchConfirmResult {
   status: string
   submission_id: number
@@ -625,6 +639,8 @@ export interface BatchConfirmResult {
   project_id: number | null
   batch_id: string
   idempotent?: boolean
+  // design/24 B0：非 null = 识别到多份合法副本，本次只选了一份入库。
+  copy_dedup?: CopyDedupInfo | null
 }
 
 export interface SavedInvitation {
@@ -981,7 +997,7 @@ export interface ReviewRow {
   row_status: 'ok' | 'partial' | 'pending' | 'missing'
   quoted_count: number
   covered_count: number
-  cells: Record<string, ReviewCell>   // keyed by str(supplier_id)
+  cells: Record<string, ReviewCell>   // keyed by str(col_id)：submission 模式下为 submission_id
 }
 
 export interface ReviewSupplier {

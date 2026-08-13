@@ -139,7 +139,10 @@ class MockProvider(LLMProvider):
                 "detail", cell(it.get("material")), cell(it.get("spec")),
                 cell(it.get("brand")), cell(it.get("unit")), cell(it.get("qty")),
                 cell(it.get("unit_price")), cell(it.get("total_price")),
-                "1", str(i + 1),
+                # design/24 B0：此前硬编码 "1"，canned 数据里的 copy_no 从未被读过——
+                # 想测"多副本"场景（如 test_copy_dedup.py）时数据从下游看永远只有一份，
+                # 门根本测不到。default 仍是 "1"，不设置 copy_no 的既有测试行为不变。
+                cell(it.get("copy_no")) or "1", str(i + 1),
             ])
             for i, it in enumerate(items)
         ]

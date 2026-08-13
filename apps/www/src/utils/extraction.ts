@@ -113,6 +113,9 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
         if (typeof rest.category === 'string')      hidden.category      = rest.category
         if (typeof rest.standard_name === 'string') hidden.standard_name = rest.standard_name
         if (typeof rest.standard_spec === 'string') hidden.standard_spec = rest.standard_spec
+        // design/24 B0：副本编号必须往返，否则后端拿到的 items 里 copy_no
+        // 全部丢失，重复副本判别只能靠"内容重复"去猜，等于没有这个字段。
+        if (typeof rest.copy_no === 'string') hidden.copy_no = rest.copy_no
         // 价格口径桥接字段：数值字段统一 asNumOrNull，basis 字符串，flags 数组
         const basis: Partial<QuoteExtractionItem> = {
           unit_price_incl_tax: asNumOrNull(unit_price_incl_tax),

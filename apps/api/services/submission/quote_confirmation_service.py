@@ -68,18 +68,88 @@ def _num_or_none(v: Any) -> float | None:
         return None
 
 
+def _declared_total(job) -> float | None:
+    """文件封面声明总价（`_doc_meta.bid_total`），没有就是 None。
+
+    被 `_build_checksum`（明细合价之和 vs 声明总价）和 `_dedupe_copies`
+    （多副本时选哪一份）共用同一个取值口径——两处都是"拿文档自己的事实做
+    判据"，抽出来避免两份实现悄悄漂移。
+    """
+    doc_meta = (job.result or {}).get("_doc_meta") or {}
+    declared = doc_meta.get("bid_total")
+    try:
+        return float(declared) if declared is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe_copies(items: list[dict], declared_total: float | None) -> tuple[list[dict], dict | None]:
+    """design/24 B0：VL-direct 提示词第 3 条要求"同一份清单在文件里重复出现
+    （正本与副本、汇总与明细）时照实全部输出，不合并不丢弃"，每行标 copy_no
+    属于第几份——**识别层这样做是对的**，是下游从没处理过 copy_no（`grep
+    services/ copy_no` 零消费方）。结果是一份清单的两份合法副本被结构完整性门
+    /checksum 误判成"重复行占比 50%"甚至 BLOCKED——浦东 272=136×2 正是这个
+    缺陷的实例，不是识别 bug（design/24 §4 B0 已核实并记录取证过程）。
+
+    在任何门禁/入库判断之前，按 copy_no 分组选定一份：
+    - 声明总价已知：选合价之和与声明总价最接近的一组（文档自己的事实，不是猜——
+      与 `_build_checksum` 同一口径，选出来的那组自然会通过后续 checksum 门）。
+    - 声明总价未知：退回行数最多的一组（更完整，比"总是选第一份"更安全——
+      模型偶尔会把某一份副本识别得残缺）。
+
+    未选中的副本**不从 items 里删除源数据**——本函数只返回"这次要入库的那份"，
+    其余副本仍完整保留在 job.result 里（调用方从不改写 job.result），只是本次
+    确认不写入 BidQuoteLine。只有 0/1 个 copy_no 分组时不触发（report=None），
+    行为与本轮改动前完全一致。
+    """
+    groups: dict[str, list[dict]] = {}
+    for it in items:
+        cn = str(it.get("copy_no") or "").strip()
+        groups.setdefault(cn, []).append(it)
+    if len(groups) <= 1:
+        return items, None
+
+    def _group_sum(group: list[dict]) -> float:
+        total = 0.0
+        for it in group:
+            v = it.get("total_price_incl_tax")
+            if v in (None, ""):
+                v = it.get("total_price")
+            try:
+                total += float(v) if v not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                pass
+        return total
+
+    if declared_total:
+        selected_cn = min(groups, key=lambda cn: abs(_group_sum(groups[cn]) - declared_total))
+        basis = "closest_to_declared_total"
+    else:
+        selected_cn = max(groups, key=lambda cn: len(groups[cn]))
+        basis = "largest_row_count"
+
+    selected = groups[selected_cn]
+    dropped_by_copy = {cn: len(g) for cn, g in groups.items() if cn != selected_cn}
+    report = {
+        "total_copies": len(groups),
+        "copy_nos": sorted(groups.keys()),
+        "selected_copy_no": selected_cn,
+        "selected_rows": len(selected),
+        "dropped_rows": sum(dropped_by_copy.values()),
+        "dropped_by_copy": dropped_by_copy,
+        "selection_basis": basis,
+    }
+    log.info("batch_confirm: copy_dedup %s", report)
+    return selected, report
+
+
 def _build_checksum(job, line_total_sum: float, line_count: int) -> dict:
     """明细合价之和 vs 文件声明总价。
 
     三态，**`unknown` 不等于通过**：文件没给声明总价时我们就是没有这个证据，
     调用方不得把它当成"校验过了"。
     """
-    doc_meta = (job.result or {}).get("_doc_meta") or {}
-    declared = doc_meta.get("bid_total")
-    try:
-        declared = float(declared) if declared is not None else None
-    except (TypeError, ValueError):
-        declared = None
+    declared = _declared_total(job)
     if not declared or declared <= 0 or line_count <= 0:
         log.info("checksum_sample status=unknown line_count=%s line_sum=%.2f declared=%s",
                  line_count, line_total_sum, declared)
@@ -327,6 +397,11 @@ def confirm_batch(db: Session, body) -> dict:
         else:
             shape_errors.append({"row": idx + 1, "reason": f"not an object: {type(item).__name__}"})
 
+    # design/24 B0：多份合法副本（copy_no）先选定一份，不让重复副本冒充"重复行"
+    # 去踩结构完整性/checksum 门。必须在任何门禁之前做——晚了就是在给假疑点找
+    # 借口，不是在防真疑点。
+    items, copy_dedup = _dedupe_copies(items, _declared_total(job))
+
     # ── 幂等：BidSubmission.batch_id 检查（一个 job 最多一条 BidSubmission）────────
     batch_id = f"BID-{job.id}"
     prior_submission = db.scalar(select(BidSubmission).where(BidSubmission.batch_id == batch_id))
@@ -377,6 +452,9 @@ def confirm_batch(db: Session, body) -> dict:
             if job.lifecycle != "confirmed":
                 job.lifecycle = "confirmed"
                 db.commit()
+            # 注意：这里不带 copy_dedup——它是对本次 items 重算的结果，跟
+            # prior_line_count（数据库里实际存的、可能是本轮 B0 修复前写入的）
+            # 不是同一件事，混进响应会误导前端以为库里的数据也经过了去重。
             return {
                 "status": "ok",
                 "submission_id": prior_submission.id,
@@ -710,6 +788,7 @@ def confirm_batch(db: Session, body) -> dict:
             "category": default_category,
             "batch_id": batch_id,
             "checksum_status": checksum["status"],
+            "copy_dedup": copy_dedup,
         },
         meta={"skipped_count": skipped_count},
     )
@@ -733,4 +812,8 @@ def confirm_batch(db: Session, body) -> dict:
         "supplier_id": submission.supplier_id,
         "project_id": project.id if project else None,
         "batch_id": batch_id,
+        # design/24 B0：非 None 表示识别到多份合法副本（copy_no），本次只选了
+        # 其中一份入库——前端据此提示用户"识别到 N 份重复清单，已选第 X 份"，
+        # 而不是让用户看着 line_count 比预期少一半却不知道为什么。
+        "copy_dedup": copy_dedup,
     }

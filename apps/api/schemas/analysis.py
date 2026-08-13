@@ -159,7 +159,7 @@ class ReviewRow(BaseModel):
     row_status: str  # ok|partial|pending|missing
     quoted_count: int
     covered_count: int
-    cells: dict[str, ReviewCell]  # keyed by str(supplier_id)
+    cells: dict[str, ReviewCell]  # keyed by str(col_id)：submission 模式下为 submission_id
     model_config = {"extra": "ignore"}
 
 
@@ -921,6 +921,9 @@ class BatchConfirmResult(BaseModel):
     not_quoted_rows: int | None = None
     not_quoted_detail: list[dict] | None = None
     integrity: dict | None = None
+    # design/24 B0：非 None = 识别到多份合法副本（copy_no），本次只选了其中
+    # 一份入库。同一条 §4 证据链要求——不能让 response_model 把这条悄悄吃掉。
+    copy_dedup: dict | None = None
     model_config = {"extra": "ignore"}
 
 
