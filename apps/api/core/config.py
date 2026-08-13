@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     OCR_RENDER_SCALE: float = 2.0
     OCR_MAX_EDGE_PX: int = 2400
 
+    # ── PaddleOCR-VL（百度智能云，design/26 §5 P1）────────────────────────────
+    # 沿用 scripts/try_paddleocr_vl.py 已经在用的同一对键名——同一个百度云应用
+    # 的 APP_ID/API_KEY/SECRET_KEY，之前挂在 unlimited-ocr-parser 产品下，现在
+    # 复用到 paddle-vl-parser 端点，不是新申请的凭据，不需要用户重新配置 .env。
+    BAIDU_UNLIMITED_OCR_API_KEY: str = ""
+    BAIDU_UNLIMITED_OCR_SECRET_KEY: str = ""
+
     # File storage
     UPLOAD_DIR: str = "data/uploads"
 
