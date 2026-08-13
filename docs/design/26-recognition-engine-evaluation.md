@@ -231,6 +231,27 @@ pre-fix scorer, and HANDOFF's own §1.1 flags it explicitly — "这是一次跑
 side has a stable number to race to; recording the gap honestly is more
 useful than a false apples-to-apples claim in either direction.
 
+**P2b — real API run (2026-08-13), 21 calls (7 docs × 3 runs), production
+code path (`paddle_ocr.submit_and_parse`, the exact function P4 wires in —
+not the exploratory script), every raw response persisted with SHA-bound
+manifest before scoring**. Closes the last open §6 dimension:
+
+- **Run-to-run stability**: row recall/precision are tight across all 3 runs
+  per document — e.g. hengtong 96.3–97.1%, hongsheng 97.1–98.5%, the other 5
+  documents perfectly stable run-to-run. In the same magnitude as qwen's own
+  documented ~0.18% swing (HANDOFF §6 lesson 1), not a red flag.
+- **Field accuracy across 21 runs** (mean/min/max): name 94.8% (85.1–100%),
+  spec 85.3% (58.7–100%), qty 90.5% (66.2–100%), price fields 94.0–96.1%.
+  Consistent with the P2a offline numbers above (fresh API calls, not an
+  artifact of reusing stale cached data).
+- **Timing** (serial baseline, real network calls): taikelong (53 pages)
+  49.4s; the other 6 documents (11–31 pages) 17.1–27.6s. Confirms design/25's
+  ~20-25x speedup claim held up against real, non-cached production-path
+  calls, not just the earlier exploratory-script numbers.
+- **Cost**: 21 calls, ≈500 pages processed without error (no quota-exceeded
+  response in any call — logged and would have surfaced per the P0/P1
+  error-logging convention if hit).
+
 ## 7. P2-adjunct — one-shot dual-engine comparison batch (replaces shadow)
 
 The previously-planned standing production shadow is **dropped**: the product
@@ -338,7 +359,8 @@ orientation cost disappears wholesale with the qwen path.
   across several consecutive rows while other columns differ) but not
   implemented — deliberately deferred, not silently dropped. Pick up here
   if qty accuracy needs to improve further post-launch.
-- Run-to-run stability — zero data on the candidate; P2 requires it.
+- ~~Run-to-run stability~~ — **resolved 2026-08-13** (§6 P2b above), 21 real
+  API calls, tight variance across all 7 documents.
 - Track A′ (quote-side text-layer probe): out of scope here; decide after
   measuring the native-PDF ratio among historical bid uploads.
 
