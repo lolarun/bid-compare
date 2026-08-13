@@ -240,12 +240,12 @@ export interface MultiCompareResult {
 export type CellStatus = 'quoted' | 'aggregated' | 'pending' | 'excluded' | 'missing'
 
 export interface SupplierCell {
-  // B3（评审 identity-key rename）：supplier_id 历史上一直是"列身份"（submission
-  // 模式下实际是 BidSubmission.id），名不副实。submission_id 是新增同义正名键，
-  // submission 模式下 = supplier_id 的值，legacy 模式为 null。supplier_id 兼容期
-  // 内保持原值不变——现有按 supplier_id 做的行内 join（cell.supplier_id===label.id）
-  // 依然正确，不需要在兼容期内改写。
-  supplier_id: number
+  // B3 兼容期收尾（design/22 §B3）：原 supplier_id 历史上一直是"列身份"
+  // （submission 模式下实际是 BidSubmission.id），名不副实，且这个粒度从没
+  // 消费方需要真正的供应商 FK（那个 FK 在 SupplierLabel.supplier_id 上）。
+  // 已改为通用列身份键 id（= submission_id when available, else supplier_id，
+  // 与 SupplierLabel.id 对称）。join 请用 submission_id ?? id。
+  id: number
   submission_id: number | null
   price: number | null
   total: number | null
@@ -293,8 +293,8 @@ export interface BidMatrixMeta {
 }
 
 export interface MatrixTotal {
-  // B3：见 SupplierCell 顶部注释，同一条 col_id/submission_id 正名规则。
-  supplier_id: number
+  // B3 兼容期收尾：见 SupplierCell 顶部注释，同一条 id/submission_id 规则。
+  id: number
   submission_id: number | null
   total: number
   avg_deviation: number | null  // null when quoted_count=0（无报价时不计偏差）
@@ -343,8 +343,8 @@ export interface MatrixDistribution {
 }
 
 export interface SupplierEvaluation {
-  supplier_id: number
-  submission_id: number | null   // B3：同上，与 supplier_id 同义正名
+  id: number
+  submission_id: number | null   // B3 兼容期收尾：同上，与 id 对称
   name: string | null
   letter: string | null
   evaluated_total: number
@@ -363,8 +363,8 @@ export interface SupplierEvaluation {
 }
 
 export interface CommonComparable {
-  supplier_ids: number[]
-  submission_ids: number[] | null  // B3：同义正名，submission 模式下等于 supplier_ids
+  ids: number[]
+  submission_ids: number[] | null  // B3 兼容期收尾：同义正名，submission 模式下等于 ids
   line_count: number
   subtotals: Record<string, number>
 }

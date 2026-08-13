@@ -29,9 +29,12 @@ const emit = defineEmits<{
   (e: 'confirmItem', itemId: number, action: 'align' | 'exclude'): void
 }>()
 
+// B3 兼容期收尾（design/22 §B3）：列身份 join 原先按 t.supplier_id === s.id，
+// 现改用 submission_id（legacy 模式下为 null，退回通用列身份键 id——此时
+// 二者同值）。
 const totalsBySupplier = computed(() => {
   const map = new Map<number, MatrixTotal>()
-  for (const t of props.totals) map.set(t.supplier_id, t)
+  for (const t of props.totals) map.set(t.submission_id ?? t.id, t)
   return map
 })
 
@@ -47,7 +50,7 @@ const completeness = computed(() => {
       const status = cell.cell_status
       const isConfirmed = !status || status === 'quoted' || status === 'aggregated'
       if (cell.price !== null && isConfirmed) {
-        const entry = map.get(cell.supplier_id)
+        const entry = map.get(cell.submission_id ?? cell.id)
         if (entry) entry.quoted++
       }
     }
@@ -221,7 +224,7 @@ async function handleExport() {
             <!-- Supplier cells -->
             <td
               v-for="cell in rows[vRow.index].suppliers"
-              :key="cell.supplier_id"
+              :key="cell.submission_id ?? cell.id"
               :class="cellClass(cell)"
             >
               <!-- quoted / aggregated / legacy (no cell_status) -->

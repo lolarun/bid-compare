@@ -27,12 +27,11 @@ def _compute_recommendation(
     产出：评标总价排名(价格优选候选人) + 共同可比金额 + 未决行金额 + 非价格因素证据缺口 +
     三态 recommendation_level。LLM 仅据此解释，不得改选。
 
-    B3（评审 identity-key rename）：col_id 在 submission 列模式下实际是
-    BidSubmission.id，但每个字典历史上只写了 "supplier_id" 这一个键——名字与
-    实际身份不符。这里新增同义的 "submission_id" 键（=col_id，仅
-    use_submission_mode 时非空），"supplier_id" 键保持原值不变（兼容期内旧
-    前端代码不受影响）。兼容期结束、前端全部迁移到 submission_id 后，
-    "supplier_id" 才可以改为真正的供应商 FK 或删除。
+    B3 兼容期收尾（design/22 §B3）：col_id 在 submission 列模式下实际是
+    BidSubmission.id。历史上字典键叫 "supplier_id"，名字与实际身份不符，且
+    这个粒度从没人需要真正的供应商 FK（那个 FK 在 SupplierLabel.supplier_id
+    上）。已改为通用列身份键 "id"（=col_id），"submission_id" 键并存
+    （=col_id，仅 use_submission_mode 时非空，与 SupplierLabel 对称）。
     """
     label_by = {sl["id"]: sl for sl in supplier_labels}
     per = {cid: {"evaluated_total": 0.0, "confirmed_lines": 0, "qty_conflict_lines": 0,
@@ -42,7 +41,7 @@ def _compute_recommendation(
     evaluable_by_line: list[set] = []
     for row in rows:
         eset: set = set()
-        cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
+        cell_by = {c["id"]: c for c in row["suppliers"]}
         for cid in col_ids:
             c = cell_by.get(cid, {})
             st = c.get("eval_status")
@@ -74,7 +73,7 @@ def _compute_recommendation(
         full = (total_anchors > 0 and p["confirmed_lines"] == total_anchors)
         eligible = full and cs != "fail"
         supplier_eval.append({
-            "supplier_id": cid,
+            "id": cid,
             "submission_id": cid if use_submission_mode else None,
             "name": label_by.get(cid, {}).get("name"),
             "letter": label_by.get(cid, {}).get("letter"),
@@ -100,14 +99,14 @@ def _compute_recommendation(
         [s for s in supplier_eval if s["eligible_for_ranking"]],
         key=lambda s: s["evaluated_total"],
     )
-    ranked_ids = [s["supplier_id"] for s in ranked]
+    ranked_ids = [s["id"] for s in ranked]
     # 共同可比金额：所有入排名供应商**均可评标**的行
     common_lines = 0
     common_sub = {cid: 0.0 for cid in ranked_ids}
     for ridx, row in enumerate(rows):
         if ranked_ids and all(cid in evaluable_by_line[ridx] for cid in ranked_ids):
             common_lines += 1
-            cell_by = {c["supplier_id"]: c for c in row["suppliers"]}
+            cell_by = {c["id"]: c for c in row["suppliers"]}
             for cid in ranked_ids:
                 common_sub[cid] += cell_by[cid].get("eval_amount") or 0.0
     price_preferred = ranked[0] if ranked else None
@@ -165,7 +164,7 @@ def _compute_recommendation(
         "price_preferred_candidate": price_preferred,
         "supplier_evaluation": supplier_eval,
         "common_comparable": {
-            "supplier_ids": ranked_ids,
+            "ids": ranked_ids,
             "submission_ids": ranked_ids if use_submission_mode else None,
             "line_count": common_lines,
             "subtotals": {str(k): round(v, 2) for k, v in common_sub.items()},

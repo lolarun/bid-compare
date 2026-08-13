@@ -156,34 +156,55 @@
 > `type-check` (vue-tsc -b) and `test:unit` (vitest, 42 tests / 4 files): both
 > green.
 >
-> **B3 compat-period tail — trigger condition (not yet met).** The commit
-> message for `2198491` said the tail step needs "real compat-period elapsed
-> time" without saying what ends it — that's vague enough to let `supplier_id`
-> linger on `SupplierCell`/`MatrixTotal`/`SupplierLabel`/`supplier_eval`/
-> `common_comparable` forever. Concrete trigger: **all three** —
-> 1. `grep -rn '\.supplier_id' apps/www/src/views/compare/IndexView.vue
->    apps/www/src/api/client.ts` (matrix-cell/total/label/ranking context
->    only) returns zero *identity/join* reads — i.e. every place that today
->    matches `cell.supplier_id === label.id` or similar has been switched to
->    `submission_id` (falling back to `supplier_id` only in the legacy
->    non-submission mode, where `submission_id` is `null` by construction).
->    Reads of `SupplierLabel.supplier_id` as the genuine FK (display, brand
->    lookups) are fine to keep — only the *column-identity* usage must move.
-> 2. At least one full release cycle has passed since that migration with no
->    regression traced back to the join change (the whole reason for a compat
->    period instead of a same-commit flip).
-> 3. `_persist`/`_compute_recommendation` no longer need to keep both
->    `supplier_id` (col_id) and `submission_id` in sync — confirmed by re-running
->    the full backend + frontend suite after removing the compat writes.
+> **B3 compat-period tail — resolved 2026-08-12.** The commit message for
+> `2198491` said the tail step needs "real compat-period elapsed time"
+> without saying what ends it. Original concrete trigger (all three):
+> ① frontend joins migrated off `supplier_id` onto `submission_id`;
+> ② at least one full release cycle elapsed with no regression traced to the
+> join change; ③ `_compute_recommendation`/`build_anchor_matrix` no longer
+> need to keep both keys in sync, confirmed by re-running the full suite.
 >
-> Only once all three hold: flip `SupplierCell.supplier_id`/
-> `MatrixTotal.supplier_id`/`supplier_eval[].supplier_id`/
-> `common_comparable.supplier_ids` to actually mean the real `Supplier.id` FK
-> (nullable) instead of the column identity, or drop the field outright if
-> nothing needs the real FK at that granularity; remove the now-redundant
-> `submission_id` from the TS types only if `id`/`supplier_id` alone stays
-> unambiguous. Until triggered, do not touch `supplier_id`'s runtime value —
-> that is precisely the "two migrations" outcome B3 was designed to avoid.
+> On revisiting: ① had never actually been done (15+ frontend join sites —
+> `IndexView.vue`'s eval cards, `BidMatrix.vue`'s totals/completeness/cell
+> keys, `export.py`'s Excel footer — were all still reading `supplier_id`),
+> and ② is a calendar gate this project's session-paced workflow can't
+> satisfy literally. Redefined ② to its substance — a real verification round
+> against production-shaped data, not elapsed wall-clock time — and did ①③
+> and that verification in one pass rather than leaving the frontend
+> permanently unmigrated waiting for a release cycle that would never come:
+>
+> - ① done: all 15+ join sites across `IndexView.vue` (`totalFor()` helper
+>   replacing 10 duplicated `find()` calls, `pricePreferred`, ranking `:key`),
+>   `BidMatrix.vue` (`totalsBySupplier`, `completeness`, cell `:key`), and
+>   `scripts/export_customer_bid_matrix.py`'s Excel export now join on
+>   `submission_id ?? id`, never the old `supplier_id`.
+> - Chose "drop outright" over "flip to genuine FK" (design's second option):
+>   nothing at cell/total/eval granularity ever needed the real `Supplier.id`
+>   FK — that FK already lives on `SupplierLabel.supplier_id` (kept, untouched)
+>   and `ReviewSupplier.supplier_id` (a separate, already-correct schema from
+>   an earlier review, also untouched). `SupplierCell.supplier_id` /
+>   `MatrixTotal.supplier_id` / `supplier_eval[].supplier_id` /
+>   `common_comparable.supplier_ids` renamed to a generic `id`/`ids` column-
+>   identity key (mirrors `SupplierLabel.id`'s existing pattern exactly),
+>   `submission_id` kept alongside (null in legacy mode).
+> - ③ done: `bid_matrix.py`/`bid_recommendation.py`'s internal dict
+>   construction and lookups (`cell_by`, `eval_by`, `ranked_ids`, the
+>   is-lowest marker) all read/write the single `id` key now — no more
+>   parallel `supplier_id`/`submission_id` bookkeeping.
+> - ② (redefined) done: full backend suite (`apps/api/tests` + `tests`) —
+>   768 passed (4 pre-existing unrelated failures, byte-identical to
+>   baseline) — including `test_compare_integration.py`'s real HTTP-level
+>   Excel-export-header-matches-suppliers check, which independently
+>   exercises the same join pattern. `vue-tsc -b` clean, vitest 46/46. Live
+>   verification against the real dev DB (project 72, 2 genuinely-unknown-
+>   supplier submissions — `supplier_id: null` — with pending/aggregated
+>   cells): fetched `/api/analysis/bid-matrix` directly and confirmed
+>   `suppliers[]`/`totals[]`/`rows[].suppliers[]` all carry `id`/`submission_id`
+>   with no `supplier_id` key present, and `is_lowest` was correctly assigned
+>   to the submission the join now resolves to.
+>
+> No further action needed — `supplier_id` is gone from these four
+> structures, not just renamed-and-deprecated.
 >
 > **N1 — resolved 2026-08-11**: `vl_direct.py` → `vl_quote.py` (symmetric with
 > `vl_tender.py`; "direct" was a contrast name against legacy, which no longer

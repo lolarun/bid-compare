@@ -272,7 +272,7 @@ class TestPhase3CompareFlow:
 
         # Totals carry total + avg_deviation per supplier
         for t in matrix["totals"]:
-            assert "supplier_id" in t
+            assert "id" in t
             assert "total" in t
             assert "avg_deviation" in t
 

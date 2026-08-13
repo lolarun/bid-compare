@@ -122,7 +122,7 @@ def test_unspecified_single_column_included_as_incl_tax():
 def test_unspecified_assumed_not_basis_confirmed_but_ranked():
     """单一价格列假定含税的供应商：纳入排名（eligible），但 basis_confirmed=False，
     且产出 tax_assumed_lines 风险提示（诚实标注假定，不冒充确认）。"""
-    rows = [_row({"supplier_id": 1, "evaluable": True, "eval_status": "ok",
+    rows = [_row({"id": 1, "evaluable": True, "eval_status": "ok",
                   "eval_amount": 93, "alert_level": "normal", "tender_qty": 1,
                   "incl_unit": 93, "price": 93, "tax_basis_assumed": True})]
     rec = _compute_recommendation(rows, [1], _LABELS[:1], 1, {1: "unknown"}, POLICY)
@@ -155,7 +155,7 @@ def _row(*cells):
 
 
 def _ev(sid, evaluable, amount, status="ok", alert="normal"):
-    return {"supplier_id": sid, "evaluable": evaluable, "eval_amount": amount,
+    return {"id": sid, "evaluable": evaluable, "eval_amount": amount,
             "eval_status": status, "alert_level": alert, "tender_qty": 1,
             "incl_unit": amount, "price": amount}
 
@@ -169,8 +169,8 @@ def test_price_ranking_matches_evaluated_total():
             _row(_ev(1, True, 100), _ev(2, True, 120))]
     rec = _compute_recommendation(rows, [1, 2], _LABELS, 2, {1: "unknown", 2: "unknown"}, POLICY)
     assert rec["recommendation_level"] == "conditional"
-    assert [r["supplier_id"] for r in rec["price_ranking"]] == [1, 2]
-    assert rec["price_preferred_candidate"]["supplier_id"] == 1
+    assert [r["id"] for r in rec["price_ranking"]] == [1, 2]
+    assert rec["price_preferred_candidate"]["id"] == 1
     assert rec["supplier_evaluation"][0]["evaluated_total"] == 200
 
 
@@ -190,19 +190,19 @@ def test_checksum_fail_excludes_from_ranking():
 
 def test_undecided_supplier_not_eligible_but_shown():
     """税口径未确认的供应商 → 不入排名，但 supplier_evaluation 仍展示（未决金额）。"""
-    rows = [_row(_ev(1, True, 100), {"supplier_id": 2, "evaluable": False,
+    rows = [_row(_ev(1, True, 100), {"id": 2, "evaluable": False,
                  "eval_status": "basis_unconfirmed", "alert_level": "normal",
                  "tender_qty": 2, "incl_unit": None, "price": 50})]
     rec = _compute_recommendation(rows, [1, 2], _LABELS, 1, {1: "unknown", 2: "unknown"}, POLICY)
-    se = {s["supplier_id"]: s for s in rec["supplier_evaluation"]}
+    se = {s["id"]: s for s in rec["supplier_evaluation"]}
     assert se[2]["eligible_for_ranking"] is False
     assert se[2]["undecided_lines"] == 1 and se[2]["undecided_amount"] == 100  # 2×50
-    assert [r["supplier_id"] for r in rec["price_ranking"]] == [1]
+    assert [r["id"] for r in rec["price_ranking"]] == [1]
 
 
 def test_blocked_still_has_ai_context():
     """blocked 时仍产出可供 AI 解释的上下文（policy/风险/非价格因素），prompt 不崩。"""
-    rows = [_row({"supplier_id": 1, "evaluable": False, "eval_status": "basis_unconfirmed",
+    rows = [_row({"id": 1, "evaluable": False, "eval_status": "basis_unconfirmed",
                   "alert_level": "normal", "tender_qty": 1, "incl_unit": None, "price": 10})]
     rec = _compute_recommendation(rows, [1], _LABELS[:1], 1, {1: "unknown"}, POLICY)
     assert rec["recommendation_level"] == "blocked"

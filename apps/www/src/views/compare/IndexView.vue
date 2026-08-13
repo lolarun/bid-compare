@@ -15,6 +15,7 @@ import type {
   Project,
   Supplier,
   BidMatrixResult,
+  MatrixTotal,
   BidInsight,
   ExtractionJob,
   AnchorMatchSummary,
@@ -625,6 +626,14 @@ const selectedProjectName = computed(() =>
 const matrixRows = computed(() => matrixResult.value?.rows ?? [])
 const matrixTotals = computed(() => matrixResult.value?.totals ?? [])
 const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
+
+// B3 兼容期收尾：供应商评标卡片原先按 t.supplier_id === s.id 做列身份 join
+// （10 处重复）；旧的 supplier_id 键已删除，MatrixTotal 改用通用 id 键
+// （legacy 模式下 submission_id 为 null，退回 id——此时二者同值）。收成一个
+// helper，不再复制十份同样的 find。
+function totalFor(s: { id: number }): MatrixTotal | undefined {
+  return matrixTotals.value.find((t) => (t.submission_id ?? t.id) === s.id)
+}
 const matrixSummary = computed(() => {
   if (!matrixResult.value) return null
   // B3：matrixResult 现在完整声明了 recommendation_level/award_mode/
@@ -638,8 +647,9 @@ const matrixSummary = computed(() => {
   const awardMode = m.award_mode || 'single_supplier'
   const allowSplit = awardMode === 'split_award'
   const pc = m.price_preferred_candidate || null
-  // pc.supplier_id 兼容期内仍是准确的列身份（=col_id），与 s.id 的 join 不受影响。
-  const pricePreferred = pc ? suppliers.find((s) => s.id === pc.supplier_id) : null
+  // B3 兼容期收尾：列身份 join 用 submission_id（legacy 模式下为 null，退回
+  // 通用列身份键 id——此时二者同值，见 design/22 §B3）。
+  const pricePreferred = pc ? suppliers.find((s) => s.id === (pc.submission_id ?? pc.id)) : null
   // 拆单/最优组合总价：仅当招标文件允许分项授标才计算并展示
   const optimalTotal = allowSplit
     ? Math.round(rows.reduce((sum, row) => {
@@ -1883,7 +1893,7 @@ async function runMatrix() {
             <div>评标方法：合理低价评标价法 — 最低报价不保证中标；本项目单一中标人，不做拆单组合。</div>
             <div v-if="matrixSummary.ranking?.length" style="margin-top:4px">
               评标总价排名：
-              <span v-for="(r, i) in matrixSummary.ranking" :key="r.supplier_id">
+              <span v-for="(r, i) in matrixSummary.ranking" :key="r.submission_id ?? r.id">
                 {{ i + 1 }}.{{ r.name }} ¥{{ Math.round(r.evaluated_total).toLocaleString() }}<span v-if="i < matrixSummary.ranking.length - 1">　</span>
               </span>
             </div>
@@ -1924,7 +1934,7 @@ async function runMatrix() {
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">评标总价(含税)</span>
                   <span class="eval-card__metric-value">
-                    ¥{{ (matrixTotals.find(t => t.supplier_id === s.id)?.evaluated_total ?? matrixTotals.find(t => t.supplier_id === s.id)?.total ?? 0).toLocaleString() }}
+                    ¥{{ (totalFor(s)?.evaluated_total ?? totalFor(s)?.total ?? 0).toLocaleString() }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
@@ -1932,45 +1942,45 @@ async function runMatrix() {
                   <span
                     class="eval-card__metric-value"
                     :style="{ color: normalizeAlert(
-                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
-                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                      Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
                     ) === 'normal' ? '#52c41a' : normalizeAlert(
-                      Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
-                        : Math.abs(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
+                      Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.05 ? 'normal'
+                        : Math.abs(totalFor(s)?.avg_deviation ?? 0) <= 0.1 ? 'yellow' : 'red'
                     ) === 'yellow' ? '#faad14' : '#ff4d4f' }"
                   >
-                    {{ formatDeviation(matrixTotals.find(t => t.supplier_id === s.id)?.avg_deviation ?? 0) }}
+                    {{ formatDeviation(totalFor(s)?.avg_deviation ?? 0) }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">报价完整度</span>
                   <span class="eval-card__metric-value">
-                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0 }}/{{ matrixRows.length }}
+                    {{ totalFor(s)?.quoted_count ?? 0 }}/{{ matrixRows.length }}
                   </span>
                 </div>
                 <div class="eval-card__metric">
                   <span class="eval-card__metric-label">异常项</span>
                   <span
                     class="eval-card__metric-value"
-                    :style="{ color: (matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) > 0 ? '#ff4d4f' : '#52c41a' }"
+                    :style="{ color: (totalFor(s)?.anomaly_count ?? 0) > 0 ? '#ff4d4f' : '#52c41a' }"
                   >
-                    {{ matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0 }}
+                    {{ totalFor(s)?.anomaly_count ?? 0 }}
                   </span>
                 </div>
               </div>
               <div class="eval-card__tags">
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.tax_assumed_lines ?? 0) > 0" color="orange">
-                  税口径假定含税 {{ matrixTotals.find(t => t.supplier_id === s.id)?.tax_assumed_lines }} 行
+                <a-tag v-if="(totalFor(s)?.quoted_count ?? 0) === matrixRows.length" color="green">报价完整</a-tag>
+                <a-tag v-if="(totalFor(s)?.tax_assumed_lines ?? 0) > 0" color="orange">
+                  税口径假定含税 {{ totalFor(s)?.tax_assumed_lines }} 行
                 </a-tag>
-                <a-tag v-else-if="matrixTotals.find(t => t.supplier_id === s.id)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.undecided_lines ?? 0) > 0" color="gold">
-                  {{ matrixTotals.find(t => t.supplier_id === s.id)?.undecided_lines }} 行未决
+                <a-tag v-else-if="totalFor(s)?.basis_confirmed === false" color="orange">税口径待确认</a-tag>
+                <a-tag v-if="(totalFor(s)?.undecided_lines ?? 0) > 0" color="gold">
+                  {{ totalFor(s)?.undecided_lines }} 行未决
                 </a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.qty_conflict_lines ?? 0) > 0" color="purple">
-                  {{ matrixTotals.find(t => t.supplier_id === s.id)?.qty_conflict_lines }} 行数量冲突
+                <a-tag v-if="(totalFor(s)?.qty_conflict_lines ?? 0) > 0" color="purple">
+                  {{ totalFor(s)?.qty_conflict_lines }} 行数量冲突
                 </a-tag>
-                <a-tag v-if="(matrixTotals.find(t => t.supplier_id === s.id)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
+                <a-tag v-if="(totalFor(s)?.anomaly_count ?? 0) === 0" color="cyan">无异常</a-tag>
               </div>
             </div>
           </a-col>

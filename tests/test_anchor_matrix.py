@@ -197,7 +197,7 @@ def test_pending_cell_excluded_from_totals(anchor_setup):
         project_id=s["proj"].id,
         category="阀门",
     )
-    totals_by_sid = {t["supplier_id"]: t for t in result["totals"]}
+    totals_by_sid = {t["id"]: t for t in result["totals"]}
     sup_b_total = totals_by_sid[s["sup_b"].id]
 
     # Supplier B only has a pending item — quoted_count must be 0
@@ -221,7 +221,7 @@ def test_align_cell_contributes_to_totals(anchor_setup):
         project_id=s["proj"].id,
         category="阀门",
     )
-    totals_by_sid = {t["supplier_id"]: t for t in result["totals"]}
+    totals_by_sid = {t["id"]: t for t in result["totals"]}
     sup_a_total = totals_by_sid[s["sup_a"].id]
     assert sup_a_total["quoted_count"] == 1
     assert sup_a_total["total"] > 0
@@ -239,7 +239,7 @@ def test_pending_cell_has_price_and_item_id(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_b = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_b"].id)
+    cell_b = next(c for c in row1["suppliers"] if c["id"] == s["sup_b"].id)
 
     assert cell_b["cell_status"] == CELL_PENDING
     assert cell_b["price"] == 120.0, "Pending cell should expose reference price (method A)"
@@ -259,7 +259,7 @@ def test_align_cell_is_lowest_correct(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_a = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_a"].id)
+    cell_a = next(c for c in row1["suppliers"] if c["id"] == s["sup_a"].id)
     assert cell_a["cell_status"] == CELL_QUOTED
     # Only supplier A has a quoted price, so it's the lowest by default
     assert cell_a["is_lowest"] is True
@@ -304,7 +304,7 @@ def test_multi_align_items_lowest_price_selected(anchor_setup):
         category="阀门",
     )
     row1 = next(r for r in result["rows"] if r["anchor_seq"] == "1")
-    cell_a = next(c for c in row1["suppliers"] if c["supplier_id"] == s["sup_a"].id)
+    cell_a = next(c for c in row1["suppliers"] if c["id"] == s["sup_a"].id)
 
     # Should pick the lower price (100, not 200)
     assert cell_a["price"] == 100.0, (

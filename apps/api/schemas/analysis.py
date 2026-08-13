@@ -218,12 +218,14 @@ class AnchorMissingAckResult(BaseModel):
 # ─── Bid Matrix ───────────────────────────────────────────────────────────────
 
 class SupplierCell(BaseModel):
-    # B3（评审 identity-key rename）：supplier_id 这个键名历史上一直是"列身份"
-    # （submission 模式下实际是 BidSubmission.id，legacy 模式下才真是 Supplier.id）——
-    # 名不副实。submission_id 是新增的同义正名键，submission 模式下=supplier_id 的值，
-    # legacy 模式下为 None。supplier_id 兼容期内保持原值不变，不做静默语义翻转；
-    # 兼容期结束、前端全量迁移到 submission_id 后才可能改为真正的供应商 FK 或移除。
-    supplier_id: int
+    # B3 兼容期收尾（design/22 §B3，三个触发条件核实后完成）：原来的
+    # supplier_id 键名历史上一直是"列身份"（submission 模式下实际是
+    # BidSubmission.id，legacy 模式下才真是 Supplier.id）——名不副实，且没有
+    # 任何消费方在这个粒度需要真正的供应商 FK（真正的供应商 FK 在
+    # SupplierLabel.supplier_id 上，那个字段不受影响）。改为通用列身份键
+    # `id`（= submission_id when available, else supplier_id），与
+    # SupplierLabel 的 id 语义对称；submission_id 保留，legacy 模式下为 None。
+    id: int
     submission_id: int | None = None
     price: float | None
     total: float | None
@@ -292,8 +294,8 @@ class MatrixRow(BaseModel):
 
 
 class MatrixTotal(BaseModel):
-    # B3：见 SupplierCell 顶部注释，同一条 col_id/submission_id 正名规则。
-    supplier_id: int
+    # B3 兼容期收尾：见 SupplierCell 顶部注释，同一条 id/submission_id 规则。
+    id: int
     submission_id: int | None = None
     total: float
     avg_deviation: float | None = None   # null when quoted_count=0 or no baseline

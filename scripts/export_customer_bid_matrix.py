@@ -318,8 +318,10 @@ def build_sheet1(ws, matrix: dict, anchors: dict[str, dict], quotes: dict[int, d
     for ri, row in enumerate(rows, 2):
         seq      = str(row.get("anchor_seq", ""))
         anchor   = anchors.get(seq, {})
-        sup_map  = {c["supplier_id"]: c for c in row["suppliers"]}
-        cells    = [sup_map.get(s["id"], {"supplier_id": s["id"], "cell_status": None,
+        # B3 兼容期收尾：SupplierCell 的旧 supplier_id 键已删，改用通用列身份键
+        # id（submission 模式下退回 submission_id 与 suppliers[].id 对齐）。
+        sup_map  = {(c.get("submission_id") or c["id"]): c for c in row["suppliers"]}
+        cells    = [sup_map.get(s["id"], {"id": s["id"], "cell_status": None,
                                            "price": None, "is_lowest": False,
                                            "flags": None, "evidence": None,
                                            "source_quote_id": None})
@@ -526,7 +528,7 @@ def build_sheet2(ws, matrix: dict, pid: int, category: str, proj: dict) -> None:
             count = sum(
                 1 for r in rows
                 for c in r["suppliers"]
-                if c.get("supplier_id") == s["id"]
+                if (c.get("submission_id") or c.get("id")) == s["id"]
                 and c.get("cell_status") in statuses
                 and (statuses != (None,) or c.get("price") is None)
             )
@@ -561,7 +563,7 @@ def build_sheet3(ws, matrix: dict, anchors: dict, quotes: dict) -> None:
             qid      = cell.get("source_quote_id")
             qdet     = quotes.get(qid) if qid else None
             sup_name = next((s.get("name", "") for s in matrix["suppliers"]
-                             if s["id"] == cell.get("supplier_id")), "")
+                             if s["id"] == (cell.get("submission_id") or cell.get("id"))), "")
 
             if _has_flag(flags, "valve_type_conflict") or "canonical_conflict" in flags:
                 action = "建议排除"
@@ -620,7 +622,7 @@ def build_sheet4(ws, matrix: dict, anchors: dict, quotes: dict) -> None:
             qid      = cell.get("source_quote_id")
             qdet     = quotes.get(qid) if qid else None
             sup_name = next((s.get("name", "") for s in matrix["suppliers"]
-                             if s["id"] == cell.get("supplier_id")), "")
+                             if s["id"] == (cell.get("submission_id") or cell.get("id"))), "")
 
             data = [
                 int(seq) if seq.isdigit() else seq,
@@ -677,7 +679,7 @@ def build_sheet5(ws, matrix: dict, anchors: dict, quotes: dict) -> None:
             qid      = cell.get("source_quote_id")
             qdet     = quotes.get(qid) if qid else None
             sup_name = next((s.get("name", "") for s in matrix["suppliers"]
-                             if s["id"] == cell.get("supplier_id")), "")
+                             if s["id"] == (cell.get("submission_id") or cell.get("id"))), "")
 
             risk_parts: list[str] = []
             for f in flags:

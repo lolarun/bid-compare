@@ -481,7 +481,7 @@ def export_bid_matrix(
 
     # Totals row (quoted-only — same as backend); leading blanks match col_offset
     totals_data = (["汇总", "", "", "", "", "", ""] if is_anchor else ["汇总", "", "", ""])
-    totals_map = {t["supplier_id"]: t for t in result["totals"]}
+    totals_map = {t["id"]: t for t in result["totals"]}
     for s in suppliers:
         t = totals_map.get(s["id"])
         totals_data.append(f"¥{t['total']:,.0f}" if t else "")

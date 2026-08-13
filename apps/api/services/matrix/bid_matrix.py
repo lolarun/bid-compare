@@ -314,7 +314,7 @@ def _build_cell_for_supplier(
     excluded_items = [i for i in items if i.action == "exclude"]
 
     base = {
-        "supplier_id": sid,
+        "id": sid,
         "price": None,
         "total": None,
         "deviation_pct": None,
@@ -534,7 +534,7 @@ def build_anchor_matrix(
             actual_sid = sub_actual_sids.get(col_id, col_id) if use_submission_mode else col_id
             if group is None:
                 cell = {
-                    "supplier_id": col_id, "price": None, "total": None,
+                    "id": col_id, "price": None, "total": None,
                     "deviation_pct": None, "alert_level": "normal", "is_lowest": False,
                     "cell_status": CELL_MISSING, "item_id": None, "confidence": None,
                     "source_quote_id": None, "bid_quote_line_id": None, "pending_note": None,
@@ -544,8 +544,7 @@ def build_anchor_matrix(
             else:
                 col_items = _items_for_col(group.items, col_id, actual_sid)
                 cell = _build_cell_for_supplier(db, col_items, col_id)
-            # B3：col_id 是列身份，submission 模式下实际是 submission_id，"supplier_id"
-            # 这个键名不准确（兼容期内保留原值不变）。新增同义的 submission_id 键。
+            # B3 兼容期收尾：col_id 是列身份，submission 模式下实际是 submission_id。
             cell["submission_id"] = col_id if use_submission_mode else None
 
             # 同规格偏差 + 评标资格（评标金额 = 招标数量 × 含税单价）
@@ -575,7 +574,7 @@ def build_anchor_matrix(
             for cid, p, _ in prices_this_row:
                 if p == min_p:
                     for c in supplier_cells:
-                        if c["supplier_id"] == cid:
+                        if c["id"] == cid:
                             c["is_lowest"] = True
                     break
         min_deviation = min((d for _, _, d in prices_this_row if d is not None), default=None)
@@ -623,8 +622,8 @@ def build_anchor_matrix(
         checksum_status = cs.get("status", "unknown")
         checksum_by_col[col_id] = checksum_status
         totals.append({
-            "supplier_id": col_id,
-            "submission_id": col_id if use_submission_mode else None,  # B3：同义正名键
+            "id": col_id,
+            "submission_id": col_id if use_submission_mode else None,
             "total": round(data["total"], 2),   # 含税评标总价（招标数量×含税单价，确认行）
             "avg_deviation": avg_dev,
             "quoted_count": data["quoted"],
@@ -639,9 +638,9 @@ def build_anchor_matrix(
         rows, col_ids, supplier_labels, total_anchors, checksum_by_col, policy,
         use_submission_mode=use_submission_mode,
     )
-    eval_by = {s["supplier_id"]: s for s in rec["supplier_evaluation"]}
+    eval_by = {s["id"]: s for s in rec["supplier_evaluation"]}
     for t in totals:
-        se = eval_by.get(t["supplier_id"], {})
+        se = eval_by.get(t["id"], {})
         t["evaluated_total"] = se.get("evaluated_total")
         t["confirmed_lines"] = se.get("confirmed_lines")
         t["qty_conflict_lines"] = se.get("qty_conflict_lines")
@@ -980,7 +979,7 @@ def build_anchor_review_matrix(
         {
             "suppliers": [
                 {
-                    "supplier_id": col_id,
+                    "id": col_id,
                     "cell_status": row["cells"].get(str(col_id), {}).get("cell_status", CELL_MISSING),
                     "price": row["cells"].get(str(col_id), {}).get("unit_price"),
                 }
