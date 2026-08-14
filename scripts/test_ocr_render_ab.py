@@ -6,7 +6,7 @@ see whether the bump from 2.0/2400 → 3.0/3600 actually recovers 橡胶瓣/闸�
 
 Usage:
     python scripts/test_ocr_render_ab.py
-    python scripts/test_ocr_render_ab.py --pdf docs/test/凯硕新正投标文件.pdf --pages 5,6,7
+    python scripts/test_ocr_render_ab.py --pdf tests/fixtures/documents/bid/凯硕新正投标文件.pdf --pages 5,6,7
     python scripts/test_ocr_render_ab.py --configs 2.0:2400,3.0:3600
 
 Needs DASHSCOPE_API_KEY (read from apps/api/.env).
@@ -94,7 +94,7 @@ def count_terms(html: str) -> dict[str, int]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pdf", default="docs/test/凯硕新正投标文件.pdf")
+    ap.add_argument("--pdf", default="tests/fixtures/documents/bid/凯硕新正投标文件.pdf")
     ap.add_argument("--pages", default="5,6,7", help="1-based page numbers")
     ap.add_argument("--configs", default="2.0:2400,3.0:3600",
                     help="comma list of scale:max_edge")

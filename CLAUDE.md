@@ -45,7 +45,7 @@ apps/api/            FastAPI backend (Python >=3.11), app object: apps.api.main:
 apps/www/            Frontend: Vue 3 + Vite + Pinia + Ant Design Vue + ECharts
 docs/design/         Design docs / rationale (authoritative; numbered)
 docs/data/           Governed historical-price data (raw/ and curated/)
-docs/test/           E2E fixtures (tender PDFs + Excel golden + bid PDFs)
+tests/fixtures/documents/  E2E fixtures (tender/tender_list/bid/bid_list PDFs+Excel, see MANIFEST.md)
 scripts/             One-off / batch / audit scripts (must be parameterized — see rules)
 .claude/rules/       Path-scoped rules, auto-loaded when matching files are edited
 ```

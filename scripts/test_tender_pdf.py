@@ -3,8 +3,8 @@
 用法：
     python scripts/test_tender_pdf.py [pdf_path [xlsx_path]]
 
-pdf_path  默认: docs/test/金桥地体上盖招标文件.pdf
-xlsx_path 默认: docs/test/金桥地铁上盖J9A-03地块（浦发上城科创智谷）研发及商业项目（阀门）招标清单.xlsx
+pdf_path  默认: tests/fixtures/documents/tender/金桥地体上盖招标文件.pdf
+xlsx_path 默认: tests/fixtures/documents/tender_list/金桥地体上盖招标文件.xlsx
 
 输出：
   - 完整诊断报告（标准输出）
@@ -16,9 +16,9 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
-PDF  = sys.argv[1] if len(sys.argv) > 1 else str(REPO / "docs/test/金桥地体上盖招标文件.pdf")
+PDF  = sys.argv[1] if len(sys.argv) > 1 else str(REPO / "tests/fixtures/documents/tender/金桥地体上盖招标文件.pdf")
 XLSX = sys.argv[2] if len(sys.argv) > 2 else str(
-    REPO / "docs/test/金桥地铁上盖J9A-03地块（浦发上城科创智谷）研发及商业项目（阀门）招标清单.xlsx"
+    REPO / "tests/fixtures/documents/tender_list/金桥地体上盖招标文件.xlsx"
 )
 
 

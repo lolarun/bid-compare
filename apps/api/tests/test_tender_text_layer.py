@@ -22,9 +22,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).parent.parent.parent.parent
-TENDER_PDF = REPO / "docs" / "test" / "金桥地体上盖招标文件.pdf"
-SCANNED_BID_PDF = REPO / "docs" / "test" / "泰科龙投标文件.pdf"          # 纯扫描件，无文字层
-TEXT_LAYER_NO_TABLE_PDF = REPO / "docs" / "test1" / "prj2" / "附件三：合同文本固定样式.pdf"
+TENDER_PDF = REPO / "tests" / "fixtures" / "documents" / "tender" / "金桥地体上盖招标文件.pdf"
+SCANNED_BID_PDF = REPO / "tests" / "fixtures" / "documents" / "bid" / "泰科龙投标文件.pdf"          # 纯扫描件，无文字层
+TEXT_LAYER_NO_TABLE_PDF = REPO / "docs" / "test1" / "prj2" / "附件三：合同文本固定样式.pdf"  # design/28 §6：未迁移文件
 
 BRAND_REQ = [
     {"brand_en": "KITZ", "brand_cn": "开滋"},
@@ -54,7 +54,7 @@ def test_has_usable_text_layer_false_on_scan():
 
 def test_has_usable_text_layer_missing_file_returns_false_not_raise():
     from apps.api.intelligence.tender_text_layer import has_usable_text_layer
-    assert has_usable_text_layer(str(REPO / "docs" / "test" / "不存在.pdf")) is False
+    assert has_usable_text_layer(str(REPO / "tests" / "fixtures" / "documents" / "tender" / "不存在.pdf")) is False
 
 
 # ─── §2 采购清单表：跨页续表 + 两级表头拍平 ────────────────────────────────────

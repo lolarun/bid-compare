@@ -14,9 +14,9 @@
 
 用法：
     python scripts/api_e2e_compare.py \
-        --tender  docs/test1/prj2/附件一：....xlsx \
-        --bid     docs/test1/prj1/....-上海浦东.pdf \
-        --bid     docs/test1/prj1/....-亨通.pdf \
+        --tender  tests/fixtures/documents/tender_list/prj2_附件一_电缆清单.xlsx \
+        --bid     tests/fixtures/documents/bid/prj1_上海浦东.pdf \
+        --bid     tests/fixtures/documents/bid/prj1_亨通.pdf \
         --category 电缆 \
         --project-name "华泾镇D5B-1电缆"
 

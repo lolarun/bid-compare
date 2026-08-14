@@ -26,8 +26,8 @@ from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json, r
 from apps.api.services.tender.source_reconcile import reconcile_anchors
 
 REPO = Path(__file__).parent.parent.parent.parent
-TENDER_PDF = REPO / "docs" / "test" / "金桥地体上盖招标文件.pdf"
-TENDER_XLSX = REPO / "docs" / "test" / "金桥地体上盖招标文件.xlsx"
+TENDER_PDF = REPO / "tests" / "fixtures" / "documents" / "tender" / "金桥地体上盖招标文件.pdf"
+TENDER_XLSX = REPO / "tests" / "fixtures" / "documents" / "tender_list" / "金桥地体上盖招标文件.xlsx"
 
 BRAND_REQ = [
     {"brand_en": "KITZ", "brand_cn": "开滋"},

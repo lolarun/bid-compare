@@ -1,4 +1,4 @@
-"""Test Qwen-VL-OCR table_parsing on docs/test PDFs.
+"""Test Qwen-VL-OCR table_parsing on tests/fixtures/documents PDFs.
 
 Two-stage pipeline prototype:
   Stage 1: Qwen-VL-OCR (table_parsing) -> HTML tables per page
@@ -35,12 +35,13 @@ RENDER_SCALE = 2.0
 MAX_EDGE_PX = 2400
 CONCURRENCY = 8
 
-TEST_DIR = ROOT / "docs" / "test"
+TEST_DIR = ROOT / "tests" / "fixtures" / "documents" / "bid"
+TEST_DIR_OTHER = ROOT / "docs" / "test"  # design/28 不迁移的其他材料类别夹具
 PDFS = [
     TEST_DIR / "泰科龙投标文件.pdf",
     TEST_DIR / "凯硕新正投标文件.pdf",
     TEST_DIR / "上海绵存投标文件.pdf",
-    TEST_DIR / "徐汇区华泾镇D5B一期桥架上海浩财实业有限公司桥架报价清单9页.pdf",
+    TEST_DIR_OTHER / "徐汇区华泾镇D5B一期桥架上海浩财实业有限公司桥架报价清单9页.pdf",
 ]
 
 OUT_DIR = ROOT / "data" / "ocr_test"

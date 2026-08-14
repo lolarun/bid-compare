@@ -19,11 +19,12 @@
 
 ## 供应商配对：为什么是凯硕+绵存，不是电缆那四份
 
-`docs/test1/prj1` 的四份电缆投标（浦东/亨通/宏胜/远东）实测过 `missing_total`
+`tests/fixtures/documents/bid`（design/28 起从 `docs/test1/prj1` 搬迁至此）
+的四份电缆投标（浦东/亨通/宏胜/远东）实测过 `missing_total`
 行数分别是 20/10/0/34（design/26 §6 P2a/P2b）——"原文无合价"门是单行即阻断
 （quote_confirmation_service.py 的既定策略，亨通历史上就是这类错位造成过
 约 2000 万误差，试点期不接受占比阈值）。四份里只有宏胜是 0，凑不出第二份
-干净的搭档。`docs/test` 的凯硕/绵存/泰科龙对同一招标，实测 missing_total 分别
+干净的搭档。同目录下（design/28 起从 `docs/test` 搬迁至此）的凯硕/绵存/泰科龙对同一招标，实测 missing_total 分别
 是 0/1/9——凯硕干净，绵存只有 1 行，用 `overrides` 模拟人工修正这一行
 （真实工作流本来就是这样：疑点收件箱里改完再点"校对入库"，不是绕过这道门）。
 """
@@ -57,7 +58,7 @@ class _UnusedTenderOnlyProvider(LLMProvider):
 
 REPO = Path(__file__).resolve().parents[3]
 GOLDEN_DIR = REPO / "data" / "golden"
-PDF_DIR = REPO / "docs" / "test"
+PDF_DIR = REPO / "tests" / "fixtures" / "documents" / "bid"
 
 CATEGORY = "阀门"
 # (供应商名关键字, 快照 slug, 预期识别行数)。

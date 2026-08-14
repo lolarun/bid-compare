@@ -31,7 +31,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-DOCS = REPO / "docs" / "test"
+DOCS = REPO / "tests" / "fixtures" / "documents" / "bid_list"
 OUT_DIR = REPO / "outputs" / "golden_audit"
 
 # 算术一致性容差：绝对 ≤0.05 元 或 相对 ≤0.5% 视为一致

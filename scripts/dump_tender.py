@@ -8,12 +8,12 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TEST = ROOT / "docs" / "test"
+DOCS = ROOT / "tests" / "fixtures" / "documents"
 OUT = ROOT / "outputs" / "tender_reconcile"
 OUT.mkdir(parents=True, exist_ok=True)
 
-XLSX = TEST / "金桥地铁上盖J9A-03地块（浦发上城科创智谷）研发及商业项目（阀门）招标清单.xlsx"
-PDF = TEST / "金桥地体上盖招标文件.pdf"
+XLSX = DOCS / "tender_list" / "金桥地体上盖招标文件.xlsx"
+PDF = DOCS / "tender" / "金桥地体上盖招标文件.pdf"
 
 # ---- 1. dump Excel ----
 import openpyxl

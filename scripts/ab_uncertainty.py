@@ -42,13 +42,13 @@ from apps.api.intelligence import vl_quote as vd                 # noqa: E402
 from apps.api.services.ingestion.draft_integrity import find_duplicate_rows  # noqa: E402
 
 DOCS = {
-    "上海浦东": ("docs/test1/prj1", 20629762.68),
-    "亨通": ("docs/test1/prj1", 20966959.43),
-    "宏胜": ("docs/test1/prj1", 20597048.33),
-    "远东": ("docs/test1/prj1", 20014715.08),
-    "凯硕新正": ("docs/test", 932154.0),
-    "上海绵存": ("docs/test", 1667051.0),
-    "泰科龙": ("docs/test", 1067616.41),
+    "上海浦东": ("tests/fixtures/documents/bid", 20629762.68),
+    "亨通": ("tests/fixtures/documents/bid", 20966959.43),
+    "宏胜": ("tests/fixtures/documents/bid", 20597048.33),
+    "远东": ("tests/fixtures/documents/bid", 20014715.08),
+    "凯硕新正": ("tests/fixtures/documents/bid", 932154.0),
+    "上海绵存": ("tests/fixtures/documents/bid", 1667051.0),
+    "泰科龙": ("tests/fixtures/documents/bid", 1067616.41),
 }
 
 # 固定旋转表。取自 2026-08-10 那次判定（该次 copy2 金额差 0.012%，是已知最好的一次）。

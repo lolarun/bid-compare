@@ -30,9 +30,9 @@ from apps.api.intelligence.vl_quote import (                    # noqa: E402
 )
 
 DOCS = {
-    "上海浦东": "docs/test1/prj1", "亨通": "docs/test1/prj1",
-    "宏胜": "docs/test1/prj1", "远东": "docs/test1/prj1",
-    "凯硕新正": "docs/test", "上海绵存": "docs/test", "泰科龙": "docs/test",
+    "上海浦东": "tests/fixtures/documents/bid", "亨通": "tests/fixtures/documents/bid",
+    "宏胜": "tests/fixtures/documents/bid", "远东": "tests/fixtures/documents/bid",
+    "凯硕新正": "tests/fixtures/documents/bid", "上海绵存": "tests/fixtures/documents/bid", "泰科龙": "tests/fixtures/documents/bid",
 }
 
 

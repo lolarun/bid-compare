@@ -25,7 +25,7 @@ import apps.api.intelligence.pipeline as pipeline_mod
 GLM_API_KEY  = "ec621804c60d48209b8d5fd7d7340f68.mIun53WisL2y7alG"
 GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
-PDF = ROOT / "docs" / "test" / "泰科龙投标文件.pdf"
+PDF = ROOT / "tests" / "fixtures" / "documents" / "bid" / "泰科龙投标文件.pdf"
 
 MODELS = [
     ("glm-4.6v",        6),

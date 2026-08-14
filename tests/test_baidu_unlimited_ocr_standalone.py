@@ -29,12 +29,12 @@ from urllib.request import Request, urlopen
 REPO = Path(__file__).resolve().parents[1]
 ENV_PATH = REPO / "apps" / "api" / ".env"
 OUTPUT_DIR = REPO / "outputs" / "baidu_unlimited_ocr"
-DOCS = REPO / "docs" / "test"
+DOCS = REPO / "tests" / "fixtures" / "documents"
 DOCUMENTS = [
-    ("tender_jinqiao", DOCS / "金桥地体上盖招标文件.pdf", 18),
-    ("quote_miancun", DOCS / "上海绵存投标文件.pdf", 31),
-    ("quote_taikelong", DOCS / "泰科龙投标文件.pdf", 53),
-    ("quote_kaishuo", DOCS / "凯硕新正投标文件.pdf", 19),
+    ("tender_jinqiao", DOCS / "tender" / "金桥地体上盖招标文件.pdf", 18),
+    ("quote_miancun", DOCS / "bid" / "上海绵存投标文件.pdf", 31),
+    ("quote_taikelong", DOCS / "bid" / "泰科龙投标文件.pdf", 53),
+    ("quote_kaishuo", DOCS / "bid" / "凯硕新正投标文件.pdf", 19),
 ]
 TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
 TASK_URL = "https://aip.baidubce.com/rest/2.0/brain/online/v2/unlimited-ocr-parser/task"

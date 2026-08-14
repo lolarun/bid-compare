@@ -13,13 +13,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-DOCS = REPO / "docs" / "test"
+DOCS = REPO / "tests" / "fixtures" / "documents"
 GOLDEN_DIR = REPO / "data" / "golden"
 
 FIXTURES = [
     {
         "name": "quote_taikelong",
-        "xlsx": DOCS / "泰科龙投标清单.xlsx",
+        "xlsx": DOCS / "bid_list" / "泰科龙投标清单.xlsx",
         "doc_type": "quote",
         "declared_total": 1_067_616.41,
     },
@@ -41,7 +41,7 @@ def create_taikelong_fixture():
     """泰科龙投标清单.xlsx → data/golden/quote_taikelong.json"""
     import openpyxl
 
-    src_path = DOCS / "泰科龙投标清单.xlsx"
+    src_path = DOCS / "bid_list" / "泰科龙投标清单.xlsx"
     if not src_path.exists():
         print(f"[skip] {src_path} 不存在")
         return
@@ -126,7 +126,7 @@ def create_tender_jingqiao_fixture():
         print("[skip] parse_tender_xlsx import failed — add repo to sys.path")
         return
 
-    src_path = DOCS / "金桥地体上盖招标文件.xlsx"
+    src_path = DOCS / "tender_list" / "金桥地体上盖招标文件.xlsx"
     if not src_path.exists():
         print(f"[skip] {src_path} 不存在")
         return

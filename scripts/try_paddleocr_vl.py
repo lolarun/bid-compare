@@ -42,8 +42,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 REPO = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO / "apps" / "api" / ".env"
 OUT_DIR = REPO / "outputs" / "baidu_paddleocr_vl"
-PRJ1 = REPO / "docs/test1/prj1"
-TEST = REPO / "docs/test"
+PRJ1 = REPO / "tests/fixtures/documents/bid"
+TEST = REPO / "tests/fixtures/documents/bid"
+TENDER = REPO / "tests/fixtures/documents/tender"
 
 
 def _sha256(path: Path) -> str:
@@ -62,15 +63,15 @@ DOCS = {
     "kaishuo": (TEST / "凯硕新正投标文件.pdf", REPO / "data/golden/quote_kaishuo.json"),
     "taikelong": (TEST / "泰科龙投标文件.pdf", REPO / "data/golden/quote_taikelong.json"),
     "miancun": (TEST / "上海绵存投标文件.pdf", REPO / "data/golden/quote_miancun.json"),
-    "pudong": (PRJ1 / "徐汇区华泾镇综合机电分包工程投标文件-上海浦东.pdf",
+    "pudong": (PRJ1 / "prj1_上海浦东.pdf",
                REPO / "data/golden/quote_cable_pudong.json"),
-    "hengtong": (PRJ1 / "徐汇区华泾镇综合机电分包工程投标文件-亨通.pdf",
+    "hengtong": (PRJ1 / "prj1_亨通.pdf",
                  REPO / "data/golden/quote_cable_hengtong.json"),
-    "hongsheng": (PRJ1 / "徐汇区华泾镇综合机电分包工程投标文件-宏胜.pdf",
+    "hongsheng": (PRJ1 / "prj1_宏胜.pdf",
                   REPO / "data/golden/quote_cable_hongsheng.json"),
-    "yuandong": (PRJ1 / "徐汇区华泾镇综合机电分包工程投标文件-远东.pdf",
+    "yuandong": (PRJ1 / "prj1_远东.pdf",
                  REPO / "data/golden/quote_cable_yuandong.json"),
-    "jinqiao": (TEST / "金桥地体上盖招标文件.pdf", None),  # 招标文件，无 quote golden
+    "jinqiao": (TENDER / "金桥地体上盖招标文件.pdf", None),  # 招标文件，无 quote golden
 }
 SEVEN_QUOTE_DOCS = ["kaishuo", "taikelong", "miancun", "pudong", "hengtong", "hongsheng", "yuandong"]
 

@@ -1,6 +1,6 @@
 """End-to-end test: PDF upload → OCR → import → alignment suggest → apply → bid matrix.
 
-Uses the 3 test PDFs in docs/test/ that bid on the same tender:
+Uses the 3 test PDFs in tests/fixtures/documents/bid/ that bid on the same tender:
   - 上海绵存投标文件.pdf
   - 凯硕新正投标文件.pdf
   - 泰科龙投标文件.pdf

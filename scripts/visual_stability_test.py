@@ -21,12 +21,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-DOCS = REPO / "docs" / "test"
+DOCS = REPO / "tests" / "fixtures" / "documents"
 PDF_MAP = {
-    "taikelong": (DOCS / "泰科龙投标文件.pdf", "quote"),
-    "miancun":   (DOCS / "上海绵存投标文件.pdf", "quote"),
-    "kaishuo":   (DOCS / "凯硕新正投标文件.pdf", "quote"),
-    "jingqiao":  (DOCS / "金桥地体上盖招标文件.pdf", "tender"),
+    "taikelong": (DOCS / "bid" / "泰科龙投标文件.pdf", "quote"),
+    "miancun":   (DOCS / "bid" / "上海绵存投标文件.pdf", "quote"),
+    "kaishuo":   (DOCS / "bid" / "凯硕新正投标文件.pdf", "quote"),
+    "jingqiao":  (DOCS / "tender" / "金桥地体上盖招标文件.pdf", "tender"),
 }
 
 

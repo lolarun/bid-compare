@@ -49,11 +49,11 @@ from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider  
 from e2e_diff import diff_doc                                              # noqa: E402
 
 DOCS = {
-    "kaishuo": {"pdf": "docs/test/凯硕新正投标文件.pdf",
+    "kaishuo": {"pdf": "tests/fixtures/documents/bid/凯硕新正投标文件.pdf",
                 "golden": "data/golden/quote_kaishuo.json", "name": "凯硕新正"},
-    "taikelong": {"pdf": "docs/test/泰科龙投标文件.pdf",
+    "taikelong": {"pdf": "tests/fixtures/documents/bid/泰科龙投标文件.pdf",
                   "golden": "data/golden/quote_taikelong.json", "name": "泰科龙"},
-    "miancun": {"pdf": "docs/test/上海绵存投标文件.pdf",
+    "miancun": {"pdf": "tests/fixtures/documents/bid/上海绵存投标文件.pdf",
                 "golden": "data/golden/quote_miancun.json", "name": "上海绵存"},
 }
 

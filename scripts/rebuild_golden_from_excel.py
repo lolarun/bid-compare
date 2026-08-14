@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-DOCS = REPO / "docs" / "test"
+DOCS = REPO / "tests" / "fixtures" / "documents" / "bid_list"
 GOLDEN_DIR = REPO / "data" / "golden"
 
 _ABS_TOL = 0.05

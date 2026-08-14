@@ -6,7 +6,7 @@
 7/7 崩。Python 侧只看得到一个 OSError，无从定位，所以这里用测试把"必须串行"
 钉死，而不是靠调并发数碰运气。
 
-夹具用临时生成的 PDF，不依赖 docs/test 下的真实投标文件。
+夹具用临时生成的 PDF，不依赖 tests/fixtures/documents 下的真实投标文件。
 """
 from __future__ import annotations
 
