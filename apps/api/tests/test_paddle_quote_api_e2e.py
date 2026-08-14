@@ -99,6 +99,16 @@ def api(temp_db, tmp_path, monkeypatch):
     replay = PaddleSnapshotReplay.from_slugs({name: slug for name, slug, _c in SUPPLIERS})
     monkeypatch.setattr(paddle_ocr, "submit_and_parse", replay.submit_and_parse)
 
+    # design/27 §7.1 补的封面 meta 抽取（text_call）如果不在这里挡住，会在测试
+    # 环境配了真实 DASHSCOPE_API_KEY 时悄悄打一次真实网络调用——这份测试的
+    # 名字和一直以来的定位都是"不打 API、零费用、可入 CI"（回放测试，不是
+    # fresh E2E，两者不得互相冒充，`.claude/rules/tests.md`）。返回全空跟
+    # "未配置抽取客户端"时的降级行为等价，只是这里额外走一遍新增的抽取代码
+    # 路径本身（确认它不报错），不引入真实数据去跟本测试固定的 golden 走查。
+    import apps.api.intelligence.paddle_doc_meta as paddle_doc_meta_mod
+    monkeypatch.setattr(paddle_doc_meta_mod, "get_text_client_call",
+                        lambda: (lambda prompt: ""))
+
     # **不能用 `MockProvider`**：`extract_quote` 显式识别 `MockProvider` 作为
     # 测试替身、直接走它的 canned CSV（服务另外 35 个只关心下游入库/对齐逻辑
     # 的集成测试），会绕过这里真正要验证的 Paddle 路径。provider 只服务招标侧，

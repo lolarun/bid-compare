@@ -9,6 +9,7 @@ from __future__ import annotations
 from apps.api.intelligence.paddle_doc_meta import (
     DEFAULT_QUOTE_REQUIREMENTS,
     extract_meta_from_text,
+    extract_quote_meta_from_text,
     extract_requirements_from_text,
 )
 from apps.api.intelligence.vl_tender import DEFAULT_TENDER_REQUIREMENTS
@@ -80,3 +81,43 @@ def test_extract_requirements_from_text_prompt_includes_context_and_declared_tit
 def test_default_quote_requirements_has_price_included_key():
     keys = {r.key for r in DEFAULT_QUOTE_REQUIREMENTS}
     assert "price_included" in keys
+
+
+# ─── 报价封面元信息（design/27 §7.1）────────────────────────────────────────
+
+def test_extract_quote_meta_from_text_parses_key_value_response():
+    calls = []
+
+    def fake_call(prompt: str) -> str:
+        calls.append(prompt)
+        return (
+            "supplier_name: 凯硕新正（上海）机电设备科技发展有限公司\n"
+            "bid_total: 1234567.89\n"
+            "bid_total_basis: tax_included\n"
+            "tax_rate: 0.13"
+        )
+
+    meta = extract_quote_meta_from_text(["封面文字内容"], fake_call)
+    assert meta["supplier_name"] == "凯硕新正（上海）机电设备科技发展有限公司"
+    assert meta["bid_total"] == 1234567.89
+    assert meta["bid_total_basis"] == "tax_included"
+    assert meta["tax_rate"] == 0.13
+    assert len(calls) == 1
+    assert "封面文字内容" in calls[0]
+
+
+def test_extract_quote_meta_from_text_empty_pages_returns_blank_without_calling():
+    calls = []
+    meta = extract_quote_meta_from_text([], lambda p: calls.append(p) or "")
+    assert meta == {"supplier_name": "", "bid_total": None,
+                    "bid_total_basis": "unknown", "tax_rate": None}
+    assert calls == []
+
+
+def test_extract_quote_meta_from_text_exception_does_not_propagate():
+    def boom(prompt: str) -> str:
+        raise RuntimeError("network down")
+
+    meta = extract_quote_meta_from_text(["文字"], boom)
+    assert meta == {"supplier_name": "", "bid_total": None,
+                    "bid_total_basis": "unknown", "tax_rate": None}

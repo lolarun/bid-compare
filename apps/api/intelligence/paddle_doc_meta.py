@@ -45,6 +45,7 @@ from apps.api.intelligence.vl_tender import (
     parse_requirements,
     parse_tender_meta,
 )
+from apps.api.intelligence.vl_quote import parse_quote_meta
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +103,46 @@ def extract_meta_from_text(page_texts: Sequence[str], text_call: TextCall) -> di
     except Exception:                                              # noqa: BLE001
         log.warning("封面元信息抽取失败（Paddle 文字层路径），四个标量留空", exc_info=True)
         return {k: "" for k in _META_KEYS}
+
+
+# ─── 报价封面元信息（design/27 §7.1）───────────────────────────────────────
+#
+# qwen 时代 `vl_quote.extract_quote_meta` 靠视觉模型读封面页图像抽
+# supplier_name/bid_total/bid_total_basis/tax_rate 四项，喂声明总价核对门
+# （quote_confirmation_service._build_checksum）和副本去重（_dedupe_copies）。
+# Paddle 切换（design/26 P4）把这条视觉调用整体换成表格识别，四项字段从此
+# 没有输入——checksum 门因此一直是 unknown/不阻断，是切换时遗留的静默缺口
+# （design/27 §7.1 记录，这里补上）。解析逻辑（parse_quote_meta）跟来源
+# 无关，直接复用 vl_quote 的实现，不重写一份。
+PROMPT_QUOTE_META_TEXT = """以下是这份投标文件首页/汇总页经过 OCR 识别出的文字内容（可能有轻微识别噪声）。
+请从中提取下面四项，每行一个，格式 key: value：
+
+supplier_name      投标单位/报价单位全称
+bid_total          投标总价（只要数字，不要货币符号和单位）
+bid_total_basis    该总价是否含税：tax_included / tax_excluded / unknown
+tax_rate           税率，小数形式（如 13% 写 0.13）
+
+文字内容里没有的就留空，不要推测。只返回这四行，不要其他说明。
+
+=== 文字内容 ===
+"""
+
+
+def extract_quote_meta_from_text(page_texts: Sequence[str], text_call: TextCall) -> dict:
+    """封面 1-2 页文字 → 声明总价等四项。失败不抛异常——清单才是主线，不该
+    让整份识别因为封面读不出而失败（跟 `vl_quote.extract_quote_meta` 同一个
+    约定，只是输入从图片换成 Paddle 已经 OCR 出来的文字）。"""
+    empty = parse_quote_meta("")
+    if not page_texts:
+        return empty
+    try:
+        context = "\n\n---\n\n".join(t for t in page_texts if t)
+        if not context.strip():
+            return empty
+        return parse_quote_meta(text_call(PROMPT_QUOTE_META_TEXT + context))
+    except Exception:                                              # noqa: BLE001
+        log.warning("报价封面元信息抽取失败（Paddle 文字层路径），四项留空", exc_info=True)
+        return empty
 
 
 def extract_requirements_from_text(

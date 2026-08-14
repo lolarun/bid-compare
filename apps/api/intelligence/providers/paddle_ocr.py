@@ -104,7 +104,8 @@ def _access_token(api_key: str, secret_key: str) -> str:
 
 
 def submit_and_parse(file_path: str, *, merge_tables: bool = True,
-                     recognize_seal: bool = True) -> dict:
+                     recognize_seal: bool = True, page_count: int | None = None,
+                     progress_cb=None) -> dict:
     """整份 PDF → 提交 → 轮询 → 下载结构化解析结果。
 
     `merge_tables=True`：跨页表格自动合并（凯硕/泰科龙等清单横跨多页时依赖
@@ -112,6 +113,15 @@ def submit_and_parse(file_path: str, *, merge_tables: bool = True,
     逻辑就没有意义了）。`recognize_seal=True`：投标文件封面常见红章，识别
     出来至少不会污染表格内容。两者都是 try_paddleocr_vl.py 探索期验证过的
     默认值，不是本模块新拍的板。
+
+    `page_count`/`progress_cb`（design/27 §6 补）：轮询期间是唯一能报进度的
+    地方——百度轮询响应只有一个状态字段，没有逐页细分（§9 已核实，不是
+    "还没接线"，是这条 API 本来就没有更细的信号）。`progress_cb(elapsed_s,
+    expected_s)` 每次轮询后调用一次，`expected_s` 按 `page_count` 线性估算
+    （`domain_config.PADDLE_EXPECTED_SECONDS_PER_PAGE`）；不传 `page_count`
+    时 `expected_s=None`，调用方按"只有已耗时、没有预计耗时"降级展示。本函数
+    本身不管进度条怎么显示、封顶多少——那是调用方（`paddle_vl.py`/
+    `paddle_tender.py`）的职责，这里只负责把"轮询了多久"如实报出去。
     """
     s = get_settings()
     api_key = s.BAIDU_UNLIMITED_OCR_API_KEY
@@ -133,13 +143,19 @@ def submit_and_parse(file_path: str, *, merge_tables: bool = True,
     if not task_id:
         raise ProviderError(f"Paddle 提交响应没有 task_id：{submitted}")
 
-    deadline = time.monotonic() + _POLL_TIMEOUT_S
+    from apps.api.core.domain_config import PADDLE_EXPECTED_SECONDS_PER_PAGE
+    expected_s = (PADDLE_EXPECTED_SECONDS_PER_PAGE * page_count) if page_count else None
+    poll_start = time.monotonic()
+
+    deadline = poll_start + _POLL_TIMEOUT_S
     result: dict = {}
     while time.monotonic() < deadline:
         queried = _post_json(f"{_QUERY_URL}?access_token={token}", {"task_id": task_id},
                              op="查询任务")
         result = queried.get("result") or {}
         status = result.get("status")
+        if progress_cb:
+            progress_cb(time.monotonic() - poll_start, expected_s)
         if status == "success":
             break
         if status == "failed":

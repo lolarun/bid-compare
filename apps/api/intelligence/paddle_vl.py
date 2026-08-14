@@ -576,7 +576,10 @@ def build_quote_csv(doc_json: dict) -> str | None:
 
 # ─── 生产入口（provider 编排，§P1）──────────────────────────────────────────
 # 提交/轮询逻辑本身可注入，测试不需要网络（跟 vl_quote.py 的 VLCall 同一约定）。
-SubmitAndParse = Callable[[str], dict]
+# design/27 §6 补：轮询期间需要报进度（page_count/progress_cb），签名放宽成
+# Any-arity（跟 pipeline.py 的 ProgressCallback 同一个理由：关键字参数按需
+# 传，不强行把每个调用点的类型标注都写死）。
+SubmitAndParse = Callable[..., dict]
 
 
 def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
@@ -599,31 +602,70 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
     文字，不需要再发一次 vision 调用——见 `paddle_doc_meta.py`。`text_call` 为
     None（未配置文字抽取客户端）时要求整体留空，不阻断报价清单——清单才是
     主线。
-    """
-    def _notify(stage: str, pct: int) -> None:
-        if progress_cb:
-            progress_cb(stage, pct)
 
-    _notify("提交 PaddleOCR-VL 识别", 20)
-    doc_json = submit_and_parse(file_path)
+    阶段命名遵循 design/27 §6：不带引擎术语（"提交 PaddleOCR-VL 识别"这类
+    名字被禁），四段用户可读命名里本函数负责后三段——①上传由前端字节进度
+    覆盖，不在这里。"识别内容"是唯一的长阶段（20-90s 量级），没有逐页信号，
+    只能靠"已耗时÷预计耗时"估算，估算封顶
+    `domain_config.PADDLE_PROGRESS_ESTIMATE_CAP`（不能在真正完成前显示100%）。
+    """
+    from apps.api.core.domain_config import (
+        PADDLE_EXPECTED_SECONDS_PER_PAGE, PADDLE_PROGRESS_ESTIMATE_CAP,
+    )
+
+    def _notify(stage: str, pct: int, *, stage_current: int | None = None,
+               stage_total: int | None = None) -> None:
+        if progress_cb:
+            progress_cb(stage, pct, stage_current=stage_current, stage_total=stage_total)
+
+    expected_s = PADDLE_EXPECTED_SECONDS_PER_PAGE * page_count if page_count else None
+
+    def _poll_progress(elapsed_s: float, poll_expected_s: float | None) -> None:
+        # `poll_expected_s` 是 submit_and_parse 自己算的（它也拿到了 page_count），
+        # 跟这里的 expected_s 应该是同一个值——用它而不是外层闭包变量，保持
+        # "谁计算、谁负责传出来"，不要求两处常量引用刚好同步。
+        if poll_expected_s:
+            frac = min(elapsed_s / poll_expected_s, PADDLE_PROGRESS_ESTIMATE_CAP)
+            pct = 20 + int(70 * frac)
+        else:
+            # 没有页数估算基准（page_count 未传）：只有已耗时可报，没有比例，
+            # 百分比给个不上不下的居中值，不假装能算出更精确的数。
+            pct = 55
+        _notify("识别内容", pct, stage_current=int(elapsed_s),
+               stage_total=int(poll_expected_s) if poll_expected_s else None)
+
+    _notify("识别内容", 20, stage_current=0,
+           stage_total=int(expected_s) if expected_s else None)
+    doc_json = submit_and_parse(file_path, page_count=page_count, progress_cb=_poll_progress)
 
     if text_call is not None:
-        _notify("读取投标文件要求", 60)
         from apps.api.intelligence.paddle_doc_meta import (
-            DEFAULT_QUOTE_REQUIREMENTS, extract_requirements_from_text,
+            DEFAULT_QUOTE_REQUIREMENTS, extract_quote_meta_from_text,
+            extract_requirements_from_text,
         )
+        from apps.api.intelligence.vl_quote import QUOTE_META_PAGES
+
         pages = doc_json.get("pages") or []
         page_text_by_num = {
             p.get("page_num"): (p.get("text") or "")
             for p in pages if isinstance(p.get("page_num"), int)
         }
         all_texts = [page_text_by_num[n] for n in sorted(page_text_by_num)]
+
+        # 报价封面元信息（design/27 §7.1）：supplier_name/declared_total 等四项。
+        # Paddle 切换后从没被抽过，声明总价核对门因此一直是 unknown/不阻断——
+        # 这里补上，跟招标侧 parse_tender_document_paddle 同一个模式（复用同一次
+        # submit_and_parse 结果的页文字，不重新调用 Paddle）。
+        _notify("提取信息", 92)
+        quote_meta = extract_quote_meta_from_text(all_texts[:QUOTE_META_PAGES], text_call)
+
         reqs = requirements if requirements is not None else DEFAULT_QUOTE_REQUIREMENTS
         quote_requirements = extract_requirements_from_text(all_texts, text_call, reqs) if reqs else {}
     else:
+        quote_meta = None
         quote_requirements = {}
 
-    _notify("解析报价清单", 70)
+    _notify("整理完成", 97)
     csv_text = build_quote_csv(doc_json)
     if csv_text is None:
         # 没有任何一张报价表——按 CLAUDE.md §4 BLOCKED（无有效报价）处理，
@@ -631,12 +673,21 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
         # 提前抛异常吞掉诊断信息。
         csv_text = "row_type," + ",".join(_CANONICAL_SLOTS) + ",copy_no,page\n"
 
-    _notify("整理结果", 90)
     processed_pages = list(range(1, page_count + 1))
+    # 抽取到的封面 meta 优先于调用方传入的 supplier_name/declared_total
+    # （调用方目前从不传，默认空——跟 vl_quote.py 顶层编排 `meta.get(...) or
+    # supplier_name` 同一个优先级：文档自己的事实优先，参数只是保留的兜底位）。
+    effective_supplier_name = (quote_meta or {}).get("supplier_name") or supplier_name
+    effective_declared_total = (quote_meta or {}).get("bid_total")
+    if effective_declared_total is None:
+        effective_declared_total = declared_total
     draft = build_draft(csv_text, file_path=file_path, page_count=page_count,
                         processed_pages=processed_pages,
-                        supplier_name=supplier_name, declared_total=declared_total,
+                        supplier_name=effective_supplier_name,
+                        declared_total=effective_declared_total,
                         parser_mode=PARSER_MODE)
+    if quote_meta:
+        draft.meta["quote_meta"] = quote_meta
     if quote_requirements:
         draft.meta["quote_requirements"] = quote_requirements
     return draft

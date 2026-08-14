@@ -282,7 +282,7 @@ def test_recognize_quote_paddle_without_text_call_skips_requirements():
     rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
     doc = _doc([(0, [_table(_HEADER, rows)])])
     draft = recognize_quote_paddle(
-        "x.pdf", submit_and_parse=lambda fp: doc, page_count=1)
+        "x.pdf", submit_and_parse=lambda fp, **_kw: doc, page_count=1)
     assert "quote_requirements" not in draft.meta
 
 
@@ -297,10 +297,74 @@ def test_recognize_quote_paddle_with_text_call_populates_requirements():
 
     def fake_text_call(prompt: str) -> str:
         calls.append(prompt)
-        return "### 是否包含投标价格\n是，报出了总价 22.60 元"
+        # 一次 text_call 现在服务两个独立抽取（封面 meta + 声明式要求，各一次
+        # 调用）——按提示词里含不含"是否包含投标价格"区分该次问的是哪个。
+        if "是否包含投标价格" in prompt:
+            return "### 是否包含投标价格\n是，报出了总价 22.60 元"
+        return "supplier_name: \nbid_total: \nbid_total_basis: unknown\ntax_rate: "
 
     draft = recognize_quote_paddle(
-        "x.pdf", submit_and_parse=lambda fp: doc, page_count=1, text_call=fake_text_call)
-    assert len(calls) == 1
-    assert "投标文件正文" in calls[0]
+        "x.pdf", submit_and_parse=lambda fp, **_kw: doc, page_count=1, text_call=fake_text_call)
+    assert len(calls) == 2
+    assert any("投标文件正文" in c for c in calls)
     assert draft.meta["quote_requirements"]["price_included"] == "是，报出了总价 22.60 元"
+
+
+# ─── §7.1 报价封面元信息（design/27）：supplier_name/declared_total 补齐 ────
+
+def test_recognize_quote_paddle_without_text_call_skips_quote_meta():
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
+    rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
+    doc = _doc([(0, [_table(_HEADER, rows)])])
+    draft = recognize_quote_paddle(
+        "x.pdf", submit_and_parse=lambda fp, **_kw: doc, page_count=1)
+    assert "quote_meta" not in draft.meta
+
+
+def test_recognize_quote_paddle_with_text_call_populates_quote_meta_and_checksum_fields():
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
+    rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
+    table = _table(_HEADER, rows)
+    doc = {"pages": [{"page_num": 0, "tables": [table], "text": "凯硕新正 投标总价 22.60 元"}]}
+
+    def fake_text_call(prompt: str) -> str:
+        if "是否包含投标价格" in prompt:
+            return ""
+        return ("supplier_name: 凯硕新正\nbid_total: 22.60\n"
+                "bid_total_basis: tax_included\ntax_rate: 0.13")
+
+    draft = recognize_quote_paddle(
+        "x.pdf", submit_and_parse=lambda fp, **_kw: doc, page_count=1, text_call=fake_text_call)
+    assert draft.meta["quote_meta"]["supplier_name"] == "凯硕新正"
+    assert draft.meta["quote_meta"]["bid_total"] == 22.60
+    assert draft.meta["quote_meta"]["tax_rate"] == 0.13
+    # 抽到的 meta 要落进 build_draft 的 supplier_name/declared_total——两个真实
+    # 落点：draft.meta["supplier_name"]（build_draft 自己的 meta dict）和
+    # draft.quality.declared_total（compute_quality 的一致性判据）；声明总价
+    # 核对门本身读的是 draft.meta["quote_meta"]["bid_total"]（上面已断言），
+    # 三处都要对得上，不能只喂对了核对门那一处。
+    assert draft.meta["supplier_name"] == "凯硕新正"
+    assert draft.quality.declared_total == 22.60
+
+
+def test_recognize_quote_paddle_supplier_name_param_is_fallback_when_meta_empty():
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
+    rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
+    table = _table(_HEADER, rows)
+    doc = {"pages": [{"page_num": 0, "tables": [table], "text": "……"}]}
+
+    # 抽取失败/留空时，调用方显式传入的 supplier_name/declared_total 仍然生效
+    # （兜底位不丢）。
+    def fake_text_call(prompt: str) -> str:
+        return ""
+
+    draft = recognize_quote_paddle(
+        "x.pdf", submit_and_parse=lambda fp, **_kw: doc, page_count=1,
+        text_call=fake_text_call, supplier_name="调用方传入的供应商名",
+        declared_total=999.0)
+    assert draft.meta["quote_meta"]["supplier_name"] == ""  # 抽取本身留空
+    assert draft.meta["supplier_name"] == "调用方传入的供应商名"  # 兜底值生效
+    assert draft.quality.declared_total == 999.0  # 抽取留空(None)时兜底值生效

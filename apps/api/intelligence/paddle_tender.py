@@ -286,6 +286,9 @@ def parse_tender_document_paddle(
     清单——清单才是主线，跟 vision 路径 `extract_tender_meta`/
     `extract_tender_requirements` 失败不拖垮清单同一个约定。
     """
+    from apps.api.core.domain_config import (
+        PADDLE_EXPECTED_SECONDS_PER_PAGE, PADDLE_PROGRESS_ESTIMATE_CAP,
+    )
     from apps.api.intelligence.paddle_doc_meta import (
         extract_meta_from_text, extract_requirements_from_text,
     )
@@ -293,12 +296,27 @@ def parse_tender_document_paddle(
         DEFAULT_TENDER_REQUIREMENTS, META_PAGES, TenderParseResult, _META_KEYS,
     )
 
-    def _notify(stage: str, pct: int) -> None:
+    # 阶段命名/进度估算跟 paddle_vl.recognize_quote_paddle 同一套（design/27
+    # §6），两处独立实现是因为分属不同模块、不同调用契约，逻辑本身不重复设计。
+    def _notify(stage: str, pct: int, *, stage_current: int | None = None,
+               stage_total: int | None = None) -> None:
         if progress_cb:
-            progress_cb(stage, pct)
+            progress_cb(stage, pct, stage_current=stage_current, stage_total=stage_total)
 
-    _notify("提交 PaddleOCR-VL 识别", 20)
-    doc_json = submit_and_parse(file_path)
+    expected_s = PADDLE_EXPECTED_SECONDS_PER_PAGE * page_count if page_count else None
+
+    def _poll_progress(elapsed_s: float, poll_expected_s: float | None) -> None:
+        if poll_expected_s:
+            frac = min(elapsed_s / poll_expected_s, PADDLE_PROGRESS_ESTIMATE_CAP)
+            pct = 20 + int(70 * frac)
+        else:
+            pct = 55
+        _notify("识别内容", pct, stage_current=int(elapsed_s),
+               stage_total=int(poll_expected_s) if poll_expected_s else None)
+
+    _notify("识别内容", 20, stage_current=0,
+           stage_total=int(expected_s) if expected_s else None)
+    doc_json = submit_and_parse(file_path, page_count=page_count, progress_cb=_poll_progress)
     pages = doc_json.get("pages") or []
     page_text_by_num = {
         p.get("page_num"): (p.get("text") or "") for p in pages if isinstance(p.get("page_num"), int)
@@ -307,25 +325,22 @@ def parse_tender_document_paddle(
     all_texts = [page_text_by_num[n] for n in sorted(page_text_by_num)]
     meta_texts = all_texts[:META_PAGES]
 
-    _notify("识别采购清单", 55)
+    if text_call is None:
+        meta = {k: "" for k in _META_KEYS}
+        req_out: dict = {}
+    else:
+        _notify("提取信息", 92)
+        meta = extract_meta_from_text(meta_texts, text_call) if with_meta else {k: "" for k in _META_KEYS}
+        reqs = requirements if requirements is not None else DEFAULT_TENDER_REQUIREMENTS
+        req_out = extract_requirements_from_text(all_texts, text_call, reqs) if reqs else {}
+
+    _notify("整理完成", 97)
     csv_text = build_tender_csv(doc_json)
     if csv_text is None:
         csv_text = "row_type," + ",".join(_CANONICAL_SLOTS) + ",copy_no,page\n"
     processed_pages = list(range(1, page_count + 1))
     draft = build_tender_draft(csv_text, file_path=file_path, page_count=page_count,
                                processed_pages=processed_pages, parser_mode=PARSER_MODE)
-
-    if text_call is None:
-        meta = {k: "" for k in _META_KEYS}
-        req_out: dict = {}
-    else:
-        _notify("读取封面信息", 75)
-        meta = extract_meta_from_text(meta_texts, text_call) if with_meta else {k: "" for k in _META_KEYS}
-        _notify("读取招标要求", 85)
-        reqs = requirements if requirements is not None else DEFAULT_TENDER_REQUIREMENTS
-        req_out = extract_requirements_from_text(all_texts, text_call, reqs) if reqs else {}
-
-    _notify("整理结果", 95)
     draft.meta["tender_meta"] = meta
     draft.meta["tender_requirements"] = req_out
     return TenderParseResult(draft=draft, meta=meta, requirements=req_out,

@@ -3,8 +3,9 @@
 design/24 B2 原本假设 Paddle 能报"已转录 N 行"这类逐行/逐页粒度的进度（跟 qwen
 流式一样），P4 接线时核实过 Baidu 的轮询响应只有一个状态字段
 （running/success/failed），没有逐页细分——那个假设是错的，改成验证
-`recognize_quote_paddle` 实际会报的三段粗粒度进度（提交/解析/整理）确实被
-转发到外层 progress_cb，不是接了参数没接线。
+`recognize_quote_paddle` 实际会报的三段粗粒度进度确实被转发到外层
+progress_cb，不是接了参数没接线。阶段命名跟 design/27 §6 对齐（"识别内容/
+提取信息/整理完成"，不带引擎术语）。
 """
 from __future__ import annotations
 
@@ -60,6 +61,10 @@ def test_extract_quote_forwards_paddle_stage_progress_to_outer_callback(monkeypa
     assert resp.data is not None
 
     stages = [c[0] for c in calls]
-    assert "提交 PaddleOCR-VL 识别" in stages, f"提交阶段进度未转发，收到={calls}"
-    assert "解析报价清单" in stages, f"解析阶段进度未转发，收到={calls}"
-    assert "整理结果" in stages, f"整理阶段进度未转发，收到={calls}"
+    assert "识别内容" in stages, f"识别阶段进度未转发，收到={calls}"
+    assert "整理完成" in stages, f"整理阶段进度未转发，收到={calls}"
+
+    # 识别内容阶段的首次通知要带 stage_current/stage_total（design/27 §6：
+    # 没有页数就没有预计耗时，但已耗时=0 这个起点必须报出去，不能整段哑火）。
+    first_recognize = next(c for c in calls if c[0] == "识别内容")
+    assert first_recognize[2] == 0, f"识别内容阶段首次通知应带 stage_current=0，收到={first_recognize}"
