@@ -71,6 +71,11 @@ const allSuppliers = ref<Supplier[]>([])
 // ─── Step 1: Procurement list preview ────────────────────────────────────
 const tenderFile = ref<File | null>(null)
 const tenderPreview = ref<TenderPreviewResult | null>(null)
+// Excel 解析中——**不能**跟 tenderPreviewing（PDF 识别中，30~90秒）共用一个
+// 标志：两者是完全独立的后端调用（/tender-list/preview 同步快返 vs
+// /intake/upload 异步任务轮询），共用会让"正在识别 PDF"这段长窗口顺带把
+// Excel 拖拽框也禁用掉——用户拖 Excel 进去时框是灰的，看起来像"不能传Excel"。
+const excelPreviewing = ref(false)
 const tenderPreviewing = ref(false)
 const tenderCategory = ref('')
 const confirmedCategories = ref<string[]>([])   // 已确认的品类(多品类拆分后驱动切换器)
@@ -121,7 +126,7 @@ function stopTenderPoll() {
 // design/24 B1：sheet 有值 = 用户在切换器里改选了 Sheet，重新预览同一份文件——
 // 这时只是换一屏数据，不是换文件，不能把 PDF 补充/对账状态一起清空。
 async function previewTenderList(file: File, sheet?: string) {
-  tenderPreviewing.value = true
+  excelPreviewing.value = true
   if (!sheet) tenderPreview.value = null
   tenderJobError.value = ''
   try {
@@ -151,7 +156,7 @@ async function previewTenderList(file: File, sheet?: string) {
     tenderJobError.value = `预览失败：${detail}`
     message.error(tenderJobError.value)
   } finally {
-    tenderPreviewing.value = false
+    excelPreviewing.value = false
   }
 }
 
@@ -1364,7 +1369,7 @@ async function runMatrix() {
           <a-upload-dragger
             accept=".xlsx,.xls"
             :show-upload-list="false"
-            :disabled="tenderPreviewing"
+            :disabled="excelPreviewing"
             :before-upload="(f: File) => { previewTenderList(f); return false; }"
             style="margin-bottom:10px"
           >
@@ -1372,7 +1377,7 @@ async function runMatrix() {
             <p class="ant-upload-text" style="font-size:13px">点击或拖入采购清单 Excel</p>
             <p class="ant-upload-hint">支持 .xlsx / .xls · 上传后自动与 PDF 主清单对账</p>
           </a-upload-dragger>
-          <div v-if="tenderPreviewing" style="padding:8px 0;text-align:center;color:#666;font-size:12px">
+          <div v-if="excelPreviewing" style="padding:8px 0;text-align:center;color:#666;font-size:12px">
             <LoadingOutlined spin style="margin-right:6px" />解析中...
           </div>
         </div>
@@ -1392,7 +1397,7 @@ async function runMatrix() {
               :value="tenderPreview.selected_sheet"
               size="small"
               style="width:160px"
-              :disabled="tenderPreviewing"
+              :disabled="excelPreviewing"
               @change="(v: string) => tenderFile && previewTenderList(tenderFile, v)"
             >
               <a-select-option v-for="s in tenderPreview.sheets" :key="s.name" :value="s.name">
