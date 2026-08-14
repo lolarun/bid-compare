@@ -62,30 +62,45 @@ class ExtractionPipeline:
         t_start = time.time()
 
         # 招标（比价）与邀标对**招标文件解析能力的要求是一致的**：都要采购清单，
-        # 也都要封面四标量。故两个入口共用 `parse_tender_document`，只在输出映射上
-        # 不同——本方法映射成 TENDER_SCHEMA，`extract_tender_bidlist` 映射成
-        # TenderAnchor。给两条流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
-        # vl_extract_csv 现在是 LLMProvider 的 @abstractmethod（评审 N3），任何
-        # 合法子类必有此方法——这条 hasattr 因此是防御性守卫（防 self.provider
-        # 不是真正 LLMProvider 子类的意外情况），不再是"探测能力后决定走哪条路"。
-        if not hasattr(self.provider, "vl_extract_csv"):
-            raise RuntimeError(
-                f"ExtractionPipeline.extract_tender 需要具备 vl_extract_csv 的 "
-                f"provider，收到 {type(self.provider).__name__}。legacy 逐页批量"
-                f"识别链已于 2026-08-11 删除（最佳实践评审 F1：两个生产 provider "
-                f"均实现 vl_extract_csv，该分支在生产从未可达）。"
+        # 也都要封面四标量。故两个入口共用同一份解析结果（`parse_tender_document`/
+        # `parse_tender_document_paddle`），只在输出映射上不同——本方法映射成
+        # TENDER_SCHEMA，`extract_tender_bidlist` 映射成 TenderAnchor。给两条
+        # 流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
+        from apps.api.intelligence.providers.mock import MockProvider
+
+        if isinstance(self.provider, MockProvider):
+            # MockProvider 是命名的测试替身（见 extract_quote 同款分支的完整
+            # 理由），招标侧同样有既有集成测试依赖它的 canned 招标 CSV/meta
+            # （`test_invite_integration.py` 等）——继续走旧的 vision-shaped
+            # 调用契约，不切 Paddle。
+            from apps.api.intelligence.vl_tender import parse_tender_document
+
+            s = get_settings()
+            parsed = parse_tender_document(
+                file_path,
+                vl_call=lambda imgs, prompt: self.provider.vl_extract_csv(
+                    imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
+                orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
+                    [b for _t, b in parts], prompt,
+                    model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+                progress_cb=progress_cb,
             )
+            return self._tender_draft_to_response(parsed, t_start)
 
-        from apps.api.intelligence.vl_tender import parse_tender_document
+        # 招标识别 = PaddleOCR-VL（design/26 P4 补，招标侧，2026-08-13）。首轮
+        # P4 只切了报价侧，把招标侧落成了未完成项——design/26 的确定方案
+        # （`a1738c4`/`1953a80`，早于本轮 P4 就定稿）是"Paddle 是所有扫描件
+        # 唯一引擎，招标报价一视同仁"，这里补上。整份招标 PDF 只提交一次给
+        # Paddle：`build_tender_csv`（表格 → 采购清单）与 `paddle_doc_meta`
+        # （每页文字 → 封面标量/招标要求）共用同一次调用结果，不重复识别。
+        from apps.api.intelligence.paddle_doc_meta import get_text_client_call
+        from apps.api.intelligence.paddle_tender import parse_tender_document_paddle
+        from apps.api.intelligence.providers import paddle_ocr
 
-        s = get_settings()
-        parsed = parse_tender_document(
-            file_path,
-            vl_call=lambda imgs, prompt: self.provider.vl_extract_csv(
-                imgs, prompt, model=s.DASHSCOPE_QUOTE_VL_MODEL),
-            orient_call=lambda parts, prompt: self.provider.vl_extract_csv(
-                [b for _t, b in parts], prompt,
-                model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
+        page_count = _tender_page_count(file_path)
+        parsed = parse_tender_document_paddle(
+            file_path, submit_and_parse=paddle_ocr.submit_and_parse,
+            text_call=get_text_client_call(), page_count=page_count,
             progress_cb=progress_cb,
         )
         return self._tender_draft_to_response(parsed, t_start)
@@ -113,6 +128,10 @@ class ExtractionPipeline:
             for r in draft.rows if r.row_type == DETAIL_ROW_TYPE
         ]
         data = {**parsed.meta, "items": items}
+        # 识别来源诚实标注（design/26 §9）：从行本身携带的 parser_mode 读，
+        # 不硬编码——Paddle 路径落 "paddle_vl"，MockProvider/qwen 路径落
+        # "vl_direct"，不冒充彼此（`.claude/rules/recognition.md`）。
+        recognizer = (draft.rows[0].fields.get("parser_mode") if draft.rows else None) or "vl_direct"
         resp = ExtractionResponse(
             data=self._postprocess_tender(data),
             raw_text="", confidence=1.0, tokens_used=0,
@@ -120,7 +139,7 @@ class ExtractionPipeline:
             duration_ms=int((time.time() - t_start) * 1000),
             metadata={
                 "doc_type": "tender",
-                "recognizer": "vl_direct",
+                "recognizer": recognizer,
                 "quality_status": draft.quality.status,
                 "quality_blocking_reasons": list(draft.quality.blocking_reasons or []),
                 "row_ledger": draft.ledger.to_dict() if draft.ledger else None,
@@ -198,21 +217,9 @@ class ExtractionPipeline:
                 processed_pages=list(range(1, page_count + 1)), parser_mode="mock")
             return self._draft_to_quote_response(draft, context or {}, t_start)
 
-        # 报价识别 = PaddleOCR-VL（design/26 P4 cutover，2026-08-13）。整份 PDF
-        # 提交给百度云，结构化 JSON → CSV → ExtractionDraft，走的是跟
-        # `apps.api.intelligence.paddle_vl.build_quote_csv` 完全一样的
-        # `build_draft()` 出口，字段级校验/质量分级零改动继承。
-        #
-        # 不再走 `self.provider.vl_extract_csv`——Paddle 的原生 API（整份文件
-        # 提交 + 异步轮询 + 结构化 JSON）跟 `LLMProvider.vl_extract_csv`
-        # （per-page 图像 + 自由文本指令 → CSV 文本）形状完全不同，从 P1
-        # 阶段就已经确认过（design/26 §5），不是能力探测就能兼容的差异。
-        # 报价识别现在**只有** Paddle 一条真实生产路，`self.provider`（qwen/
-        # DashScope）继续只服务招标（`extract_tender`/`extract_tender_bidlist`）
-        # ——招标侧还没有 Paddle 适配器、也从未在 design/26 的 P1/P2 里被评测过
-        # （那 7 份验收文档全部是报价文档），在有证据之前不能把它也切过来
-        # （design/26 §9 的既定条件："`vl_tender.py` 只在 Paddle 适配器覆盖了
-        # 扫描招标件之后才退场"，条件目前不成立）。
+        # 非 MockProvider（真实生产路）：走 Paddle，理由同上（评审时误留了一份
+        # 重复的说明段落在这，已删——上面那段注释就是这里的完整依据，不重复贴）。
+        from apps.api.intelligence.paddle_doc_meta import get_text_client_call
         from apps.api.intelligence.paddle_vl import recognize_quote_paddle
         from apps.api.intelligence.providers import paddle_ocr
 
@@ -221,6 +228,7 @@ class ExtractionPipeline:
             file_path,
             submit_and_parse=paddle_ocr.submit_and_parse,
             page_count=page_count,
+            text_call=get_text_client_call(),
             progress_cb=progress_cb,
         )
         return self._draft_to_quote_response(draft, context or {}, t_start)
@@ -283,6 +291,10 @@ class ExtractionPipeline:
         # 此前 VL 路径从不产出这个键——门本身逻辑是对的，只是从未接到过输入，
         # 生产上对任何 PDF 报价都判 unknown、不阻断（docs/design/21 §2.2/§2.3）。
         quote_meta = (draft.meta or {}).get("quote_meta")
+        # 投标文件声明式要求（design/26 P4 补：跟招标文件同一个模式，见
+        # `paddle_doc_meta.DEFAULT_QUOTE_REQUIREMENTS`）——可选字段，不填不影响
+        # 既有消费方，跟上面 `doc_meta` 同一个"有才加键"的约定。
+        quote_requirements = (draft.meta or {}).get("quote_requirements")
         resp = ExtractionResponse(
             data=processed,
             metadata={
@@ -295,6 +307,7 @@ class ExtractionPipeline:
                 # 否则调用方拿到的 200 无法区分"这份文档只有这些行"和"我们丢了行"。
                 "row_ledger": draft.ledger.to_dict() if draft.ledger else None,
                 **({"doc_meta": quote_meta} if quote_meta else {}),
+                **({"requirements": quote_requirements} if quote_requirements else {}),
             },
             tokens_used=0,
             duration_ms=int((_time.time() - t_start) * 1000),
@@ -481,3 +494,8 @@ def _notify(
     if progress_cb:
         progress_cb(stage, max(0, min(100, pct)),
                     stage_current=stage_current, stage_total=stage_total)
+
+
+def _tender_page_count(file_path: str) -> int:
+    from apps.api.intelligence.document_loader import DocumentLoader
+    return DocumentLoader.get_page_count(file_path)

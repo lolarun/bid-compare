@@ -156,17 +156,14 @@ def extract_bidlist(
         default_category: 强制品类（本类招标文件单品类，默认阀门）。
         xlsx_path: 可选 Excel 清单路径；传入时自动运行 source reconciliation。
     """
-    # VL-direct 是唯一路径。招标侧与报价侧共用同一套解析与结构门，差异只在列表与
-    # 字段（apps/api/intelligence/vl_tender.py）。
-    #
-    # **Excel 不是降级理由。** 先前把 `xlsx_path` 作为落回 legacy 的条件是错的：
-    # excel_reconcile 只吃 DraftRow，与识别器无关，VL 的行同样能对账。而且
-    # 有些招标文件的 PDF 里**根本没有采购清单**，清单以 Excel 附件形式给出——
-    # 那时 Excel 是唯一来源而非交叉校验，更不该因为它的存在而降级 PDF 识别。
-    #
-    # vl_extract_csv 是 LLMProvider 的 @abstractmethod（评审 N3），这里是防御性
-    # 守卫，不是能力探测。
-    if not hasattr(provider, "vl_extract_csv"):
+    # 招标扫描件 VL-direct = PaddleOCR-VL（design/26 P4 补，2026-08-13）。
+    # MockProvider 是命名的测试替身（`pipeline.py::extract_quote`/`extract_
+    # tender` 同款分支的完整理由），继续走旧的 vision-shaped 调用契约——现有
+    # 集成测试（`test_invite_integration.py` 等）依赖它的 canned 招标 CSV/meta。
+    from apps.api.intelligence.providers.mock import MockProvider
+
+    is_mock = isinstance(provider, MockProvider)
+    if not is_mock and not hasattr(provider, "vl_extract_csv"):
         raise RuntimeError(
             "tender_pdf.extract_bidlist 需要具备 vl_extract_csv 的 provider。"
             "legacy OCR→HTML 识别链已于 2026-08-11 删除（最佳实践评审 F1：两个"
@@ -175,7 +172,6 @@ def extract_bidlist(
         )
 
     from apps.api.core.config import get_settings
-    from apps.api.intelligence.vl_tender import parse_tender_document
 
     s = get_settings()
 
@@ -188,6 +184,14 @@ def extract_bidlist(
     # 是文档级的二选一。手动指定过 bidlist_pages/brand_page 时不尝试这条路：
     # 用户手动修正意味着已经在用 VL 路径的页面/品牌页覆盖机制排查问题，此时
     # 悄悄换一条抽取路径会让"修正"失去对象。
+    #
+    # 遗留缺口（design/26 P4 补，尚未完成）：轨A命中时，采购清单走确定性文字层
+    # 抽取（不碰模型），但招标要求（品牌等）仍然走 `_vl_call`（qwen 视觉调用）
+    # ——`tender_text_layer.py` 还没切到 `paddle_doc_meta` 的纯文字抽取路径。
+    # 这意味着 qwen 暂时还不能整体删除：轨A命中的原生 PDF 招标要求这一小段
+    # 调用仍然依赖它。留作下一轮：把 `parse_tender_document_text_layer` 的
+    # 要求抽取也换成喂 pdfplumber 原生文字给 `paddle_doc_meta.
+    # extract_requirements_from_text`，跟本模块 VL-direct 分支这里同一个模式。
     parsed = None
     if bidlist_pages is None and brand_page is None:
         from apps.api.intelligence.tender_text_layer import (
@@ -203,7 +207,8 @@ def extract_bidlist(
             if parsed is not None:
                 log.info("tender_pdf.extract_bidlist: 文字层直抽命中，跳过 VL-direct")
 
-    if parsed is None:
+    if parsed is None and is_mock:
+        from apps.api.intelligence.vl_tender import parse_tender_document
         parsed = parse_tender_document(
             file_path,
             vl_call=_vl_call,
@@ -212,6 +217,24 @@ def extract_bidlist(
                 model=s.DASHSCOPE_QUOTE_ORIENT_MODEL, labels=[t for t, _b in parts]),
             progress_cb=progress_cb,
             target_pages=bidlist_pages or None,
+        )
+    elif parsed is None:
+        # 扫描招标件（没有可用文字层，或用户手动指定了页范围）：Paddle 是
+        # 唯一路径，不再经过 `provider`/`LLMProvider`（理由同
+        # `pipeline.py::extract_quote`）。手动指定的 bidlist_pages/brand_page
+        # 目前对 Paddle 路径不生效——Paddle 走整份文档结构化识别，没有
+        # "只送这几页"的概念；沿用整份识别结果，跟 VL-direct 手动指定页范围
+        # 时"仍然整份渲染、只是清单只认这几页"的既有行为不冲突。
+        from apps.api.intelligence.document_loader import DocumentLoader
+        from apps.api.intelligence.paddle_doc_meta import get_text_client_call
+        from apps.api.intelligence.paddle_tender import parse_tender_document_paddle
+        from apps.api.intelligence.providers import paddle_ocr
+
+        page_count = DocumentLoader.get_page_count(file_path)
+        parsed = parse_tender_document_paddle(
+            file_path, submit_and_parse=paddle_ocr.submit_and_parse,
+            text_call=get_text_client_call(), page_count=page_count,
+            progress_cb=progress_cb,
         )
     draft = parsed.draft
     # Excel 对账：与识别器无关（只吃 DraftRow）。失败只记录不抛——对账是校验，

@@ -23,8 +23,17 @@ paths:
   `isinstance` 分支是唯一例外，且只服务测试替身（35 个既有集成测试依赖
   `MockProvider.vl_extract_csv` 产出报价数据）——按类名识别一个自我声明的测试
   桩，不是探测真实生产引擎的能力后静默降级，两者不可混同。**招标侧**（tender）
-  仍走 `intelligence/vl_tender.py`，经 `LLMProvider.vl_extract_csv`（DashScope/qwen）
-  ——design/26 全程只评估了报价侧，招标侧未验证 Paddle 前不得下线或改写这条路径。
+  VL-direct 分支同样已切 PaddleOCR-VL（`intelligence/paddle_tender.py`，design/26
+  P4 补，2026-08-13）：`pipeline.py::extract_tender`/`tender_pdf.py::extract_bidlist`
+  的 VL-direct 回落分支直接调用 `paddle_ocr.submit_and_parse`，`cells` 矩阵拼装成
+  招标专用 CSV 后复用 `vl_tender.build_tender_draft()`；封面标量/招标要求（品牌等）
+  走 Paddle 每页自带的 `text`/`markdown` 纯文本二次抽取（`paddle_doc_meta.py`，
+  doc-type-agnostic，报价侧同样在用——`recognize_quote_paddle` 的
+  `text_call`/`requirements` 参数），不需要视觉调用。同样有 `MockProvider`
+  `isinstance` 分支（两处调用点都有）保留既有集成测试可用。**qwen 尚未整体
+  删除**：`tender_text_layer.py`（轨A，见下条）的招标要求抽取仍然调用
+  `provider.vl_extract_csv`（qwen 视觉），还没切到 `paddle_doc_meta` 的纯文本
+  路径——这是唯一还依赖 qwen 视觉调用的生产分支，删除 qwen 前必须先补上。
   `provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
   （`pipeline.py` 的 `hasattr` 检查是防御性守卫，不是路径选择）。
 - 招标文件另有**文档级**文字层直抽（`tender_text_layer.py`，docs/design/25 轨A）：

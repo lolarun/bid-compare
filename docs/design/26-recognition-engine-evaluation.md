@@ -279,11 +279,79 @@ qwen's calibration risks systematic false pass/fail on the new path.
 - Paddle BLOCKED/untrusted → the document stays BLOCKED per the existing
   quality-tier semantics, visible in the doubt inbox; recourse is the
   existing manual/Excel path. No second engine is invoked.
-- `.claude/rules/recognition.md` first bullet amended — DONE: quote-side sole
-  engine is PaddleOCR-VL (`paddle_vl.py` + `providers/paddle_ocr.py`,
-  bypassing `LLMProvider`); tender-side is unchanged (`vl_tender.py`,
-  DashScope/qwen) since Paddle was never evaluated there — the rule now
-  states both explicitly instead of describing a single unified path.
+- `.claude/rules/recognition.md` first bullet amended — **quote-side DONE,
+  tender-side landed this round (2026-08-13), qwen deletion still pending**.
+  A first P4 pass wrongly left `vl_tender.py`/qwen serving tender documents
+  unconditionally, contradicting this doc's own confirmed scope
+  ("PaddleOCR-VL for ALL scanned PDFs, tender and bid alike") and §10's
+  explicit instruction to resolve `vl_tender.py`'s fate during P4, not leave
+  it ambiguous — caught by the user during manual testing, not by me.
+  Corrected same round:
+  - **`paddle_tender.py`** (new): Paddle `cells` → tender-slotted CSV →
+    `vl_tender.build_tender_draft()`. Structurally mirrors `paddle_vl.py`
+    but with real, non-trivial differences found via zero-cost offline
+    validation against a cached real document
+    (`outputs/baidu_unlimited_ocr/tender_jinqiao.json`, same PaddleOCR-VL
+    response shape, gitignored — not a new API call): a **3-row header**
+    (title row + 2-level parent/child, vs. quote's 2-row) requiring a new
+    title-row-strip step; parent/child merge uses `_` as separator
+    (`材质_阀体`, matching `TENDER_SLOTS`/`tender_text_layer._flatten_
+    anchor_header`'s existing convention) vs. quote's no-separator merge —
+    `paddle_vl._merge_header_rows`/`_split_header_and_rows` were generalized
+    with `sep`/`slots` params (default-preserving, quote's own 28 tests
+    still pass unchanged) rather than duplicated; a **table-header false
+    positive** (the tender's separate 品牌要求/supplier-brand-requirement
+    table also contains "序号" and a "技术规格书" substring match on
+    "规格" — loose keyword hints wrongly absorbed it as a bidlist
+    continuation) — fixed by requiring a quantity-column signal, the one
+    structural feature a real bidlist has that a requirements table
+    doesn't; and the **same known Paddle defect** documented in
+    `paddle_vl.py` (an empty cell in a multi-subcolumn block gets silently
+    dropped instead of padded) reproduced here in the 材质 block instead of
+    the price columns — 32/89 anchor rows lost `qty` in the offline test
+    before the fix, zero after, using the same tax-rate-"NN%"-shape
+    per-row-anchor trick generalized from the header rather than
+    hardcoded offsets (materials sub-column count varies per document).
+  - **`paddle_doc_meta.py`** (new, doc-type-agnostic): cover-page scalars
+    (project name/number/date/deadline) and N declared "requirements"
+    (`vl_tender.TenderRequirement`'s existing key/title/hint/shape
+    declaration, unchanged) extracted from Paddle's own per-page OCR text
+    (`page["text"]`/`page["markdown"]`, verified non-garbled against the
+    same jinqiao snapshot) via a **text-only** LLM call — not vision. User
+    explicitly corrected the scope mid-round: this capability is generic
+    across tender AND quote documents ("招标、投标的一些功能是通用的"),
+    not tender-only — `DEFAULT_QUOTE_REQUIREMENTS` (new: `price_included`,
+    "是否包含投标价格") is the quote-side declaration set, wired into
+    `recognize_quote_paddle` via an optional `text_call` param, surfaced
+    additively as `metadata.requirements` (mirrors the existing
+    `metadata.doc_meta` optional-key convention, zero risk to existing
+    consumers). The text LLM reuses `services.llm_provider.
+    get_dashscope_client()`/`DASHSCOPE_LLM_MODEL` — **not** a reintroduced
+    qwen vision dependency: that client already serves `enhance.py`'s
+    text-only AI post-processing (categorize/standardize/pre-align),
+    unrelated to and untouched by the vision-engine deletion in §10; the
+    input here is Paddle's already-OCR'd text, never an image.
+  - **Wired into `pipeline.py`** (`extract_tender`, mirroring
+    `extract_quote`'s `MockProvider`-bypass pattern so the 35+ existing
+    MockProvider-based tests keep working) and `tender_pdf.py::
+    extract_bidlist` (Track A / text-layer routing unchanged and tried
+    first; the VL-direct fallback — genuinely scanned tenders — now calls
+    Paddle instead of qwen; manual `bidlist_pages`/`brand_page` overrides
+    still route through the MockProvider/qwen branch, since Paddle has no
+    "only these pages" concept — full-document identification either way).
+  - **NOT done this round**: (1) Track A's own requirements extraction
+    (`tender_text_layer.parse_tender_document_text_layer`) still calls
+    `provider.vl_extract_csv` (qwen vision) for brand/requirement text on
+    native-text-layer tenders — the SAME text-based approach as above would
+    work (pdfplumber's native text instead of Paddle's OCR text, identical
+    `paddle_doc_meta` call), just not yet rewired; this is why qwen is not
+    yet fully deletable. (2) No real-API acceptance run (P2-equivalent) for
+    the new tender adapters — only offline-validated against one cached
+    document; row-level accuracy against a live Paddle call is unverified.
+    (3) `.claude/rules/recognition.md` still says tender-side is "landed
+    this round, qwen deletion pending" rather than a fully closed single
+    engine statement — accurate as of writing, update again once (1)/(2)
+    close.
 - design/24 B2 progress: the "已转录 N 行" counter is qwen-streaming-specific
   and gone with it (checked, not assumed: Baidu's poll response is a single
   status field — `running`/`success`/`failed` — with no per-page breakdown,

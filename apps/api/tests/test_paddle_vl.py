@@ -271,3 +271,36 @@ def test_build_quote_csv_far_page_not_absorbed_as_continuation():
     assert "DN" not in csv_text.split("\n")[0]  # 表头没被这张无关表污染
     lines = [l for l in csv_text.splitlines()[1:] if l.strip()]
     assert len(lines) == 1  # 只有阀门A那一行，无关表的行没混进来
+
+
+# ─── §8 recognize_quote_paddle 的 text_call/requirements（design/26 P4 补：
+#     投标文件同样支持声明式要求抽取）────────────────────────────────────────
+
+def test_recognize_quote_paddle_without_text_call_skips_requirements():
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
+    rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
+    doc = _doc([(0, [_table(_HEADER, rows)])])
+    draft = recognize_quote_paddle(
+        "x.pdf", submit_and_parse=lambda fp: doc, page_count=1)
+    assert "quote_requirements" not in draft.meta
+
+
+def test_recognize_quote_paddle_with_text_call_populates_requirements():
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
+    rows = [["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"]]
+    table = _table(_HEADER, rows)
+    doc = {"pages": [{"page_num": 0, "tables": [table], "text": "投标文件正文……总价 22.60 元"}]}
+
+    calls = []
+
+    def fake_text_call(prompt: str) -> str:
+        calls.append(prompt)
+        return "### 是否包含投标价格\n是，报出了总价 22.60 元"
+
+    draft = recognize_quote_paddle(
+        "x.pdf", submit_and_parse=lambda fp: doc, page_count=1, text_call=fake_text_call)
+    assert len(calls) == 1
+    assert "投标文件正文" in calls[0]
+    assert draft.meta["quote_requirements"]["price_included"] == "是，报出了总价 22.60 元"

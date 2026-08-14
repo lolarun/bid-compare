@@ -1158,13 +1158,13 @@ async function runMatrix() {
       <!-- A1: 未上传 -->
       <div v-if="!pdfSupplement && !tenderPreviewing">
         <a-upload-dragger
-          accept=".pdf"
+          accept=".pdf,.png,.jpg,.jpeg"
           :show-upload-list="false"
           :before-upload="(f: File) => { uploadTenderPdf(f); return false; }"
           style="margin-bottom:12px"
         >
           <p class="ant-upload-drag-icon"><FilePdfOutlined style="color:#cf1322;font-size:36px" /></p>
-          <p class="ant-upload-text">点击或拖入招标文件 PDF</p>
+          <p class="ant-upload-text">点击或拖入招标文件（PDF / 图片）</p>
           <p class="ant-upload-hint">自动识别投标清单页与品牌要求表，通常 30~90 秒完成</p>
         </a-upload-dragger>
         <a-alert v-if="tenderJobError" type="error" show-icon :message="tenderJobError" />

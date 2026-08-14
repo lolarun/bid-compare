@@ -112,34 +112,46 @@ def _looks_numeric_row(row: list[str], positions: list[int]) -> bool:
     return sum(1 for v in vals if _looks_numeric(v)) >= max(1, len(vals) // 2)
 
 
-def _merge_header_rows(row0: list[str], row1: list[str]) -> list[str]:
+def _merge_header_rows(row0: list[str], row1: list[str], *, sep: str = "") -> list[str]:
     """两级表头（粗类目 + 细分类）拼成一行。凯硕的"材质"列在 row0 是同一个粗标签
     重复五次（阀体/阀芯/阀板/阀杆/密封圈这五个细分类共用一个粗类目），row1 才是
     真正区分列身份的文字——同类拼接手法见 `tender_text_layer._flatten_anchor_header`
-    （轨A 招标清单也是同一种两级表头）。"""
+    （轨A 招标清单也是同一种两级表头）。
+
+    `sep`：报价侧无分隔符拼接（"单价"+"含税"→"单价含税"）；招标侧用下划线
+    （"材质"+"阀体"→"材质_阀体"，`paddle_tender.py` 传入），跟 `TENDER_SLOTS`
+    的材质收集逻辑（按下划线切分父子列名）和轨A `_flatten_anchor_header`
+    的既有约定保持一致——两处独立实现，同一个约定，不是巧合。"""
     out = []
     for i in range(max(len(row0), len(row1))):
         a = (row0[i] if i < len(row0) else "").strip()
         b = (row1[i] if i < len(row1) else "").strip()
         if a and b and a != b:
-            out.append(f"{a}{b}")
+            out.append(f"{a}{sep}{b}")
         else:
             out.append(b or a)
     return out
 
 
-def _split_header_and_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]:
-    """判断这张表是单行表头还是两行表头（粗类目+细分类），返回 (表头, 数据行)。"""
+def _split_header_and_rows(
+    grid: list[list[str]], *, slots: dict | None = None, sep: str = "",
+) -> tuple[list[str], list[list[str]]]:
+    """判断这张表是单行表头还是两行表头（粗类目+细分类），返回 (表头, 数据行)。
+
+    `slots`/`sep`：默认走报价侧槽位表与无分隔符拼接；`paddle_tender.py` 传
+    `TENDER_SLOTS`/`sep="_"` 复用同一套判断逻辑，不重写一遍（差异只在"用哪张
+    槽位表识别数量列、父子列怎么拼"，两边约定必须一致才不会漂移）。"""
     if not grid:
         return [], []
     header0 = grid[0]
     if len(grid) < 2:
         return header0, []
-    cmap0 = map_columns(header0)
+    cmap0 = map_columns(header0, slots=slots)
     idx_of0 = {h: i for i, h in enumerate(header0)}
-    positions = [idx_of0[cmap0[s]] for s in _NUMERIC_HINT_SLOTS if s in cmap0 and cmap0[s] in idx_of0]
+    hint_slots = _NUMERIC_HINT_SLOTS if slots is None else ("qty",)
+    positions = [idx_of0[cmap0[s]] for s in hint_slots if s in cmap0 and cmap0[s] in idx_of0]
     if positions and not _looks_numeric_row(grid[1], positions):
-        return _merge_header_rows(header0, grid[1]), grid[2:]
+        return _merge_header_rows(header0, grid[1], sep=sep), grid[2:]
     return header0, grid[1:]
 
 
@@ -570,16 +582,23 @@ SubmitAndParse = Callable[[str], dict]
 def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
                            page_count: int, supplier_name: str = "",
                            declared_total: float | None = None,
+                           text_call=None, requirements=None,
                            progress_cb=None) -> ExtractionDraft:
     """生产入口：整份 PDF → Paddle 结构化 JSON → 规范 CSV → ExtractionDraft。
 
     `submit_and_parse` 是 Paddle 提交/轮询/下载解析结果的完整实现（生产侧用
     `scripts/try_paddleocr_vl.py` 同款百度云调用，见该脚本 `run_one` 的实现），
     这里不重复内嵌网络调用——保持本模块可离线单测（`.claude/rules/recognition.md`
-    可测试性要求）。封面声明总价等标量暂不解析（Paddle 走结构化表格识别，不是
-    自由文本问答，`vl_quote.extract_quote_meta` 那套提示词在这里不适用——
-    declared_total 检验门在没有这个输入时按 unknown 处理，不阻断，跟轨A的
-    `parse_tender_document_text_layer` 对封面 meta 缺失时的处理是同一个先例）。
+    可测试性要求）。封面声明总价（`declared_total`）走表格识别管不到——那是
+    自由文本问答，不是结构化表格；declared_total 检验门在没有这个输入时按
+    unknown 处理，不阻断，跟轨A的 `parse_tender_document_text_layer` 对封面
+    meta 缺失时的处理是同一个先例。
+
+    `text_call`/`requirements`（design/26 P4 补，2026-08-13）：投标文件跟招标
+    文件一样支持声明式要求抽取（用户明确要求），喂 Paddle 已经 OCR 出来的每页
+    文字，不需要再发一次 vision 调用——见 `paddle_doc_meta.py`。`text_call` 为
+    None（未配置文字抽取客户端）时要求整体留空，不阻断报价清单——清单才是
+    主线。
     """
     def _notify(stage: str, pct: int) -> None:
         if progress_cb:
@@ -587,6 +606,22 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
 
     _notify("提交 PaddleOCR-VL 识别", 20)
     doc_json = submit_and_parse(file_path)
+
+    if text_call is not None:
+        _notify("读取投标文件要求", 60)
+        from apps.api.intelligence.paddle_doc_meta import (
+            DEFAULT_QUOTE_REQUIREMENTS, extract_requirements_from_text,
+        )
+        pages = doc_json.get("pages") or []
+        page_text_by_num = {
+            p.get("page_num"): (p.get("text") or "")
+            for p in pages if isinstance(p.get("page_num"), int)
+        }
+        all_texts = [page_text_by_num[n] for n in sorted(page_text_by_num)]
+        reqs = requirements if requirements is not None else DEFAULT_QUOTE_REQUIREMENTS
+        quote_requirements = extract_requirements_from_text(all_texts, text_call, reqs) if reqs else {}
+    else:
+        quote_requirements = {}
 
     _notify("解析报价清单", 70)
     csv_text = build_quote_csv(doc_json)
@@ -602,4 +637,6 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
                         processed_pages=processed_pages,
                         supplier_name=supplier_name, declared_total=declared_total,
                         parser_mode=PARSER_MODE)
+    if quote_requirements:
+        draft.meta["quote_requirements"] = quote_requirements
     return draft
