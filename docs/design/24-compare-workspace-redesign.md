@@ -1,10 +1,21 @@
 # 24 — Compare Workspace Redesign (three-stage flow + unified doubt inbox)
 
-> **Status: CONFIRMED — all design decisions resolved with the user 2026-08-12,
-> ready for implementation (not yet started). Amended same day after an
-> independent review (Fable): B0 added, B2/B3 re-sized from small to medium
-> (§4), implementation order revised (§8) — all review claims re-verified
-> against source before adoption.**
+> **Status: FRONTEND PORTIONS SUPERSEDED by
+> [design/27](27-compare-workspace-ui-redesign.md) (2026-08-13).**
+> Backend items B0-B4 all shipped and remain authoritative (copy dedup,
+> multi-sheet, dry-run collector + cache, stage-progress fields) — design/27
+> consumes them unchanged. The three-stage flow + standalone doubt-inbox
+> UI described below was implemented only through step 4 (composables built,
+> never mounted) before the user's 2026-08-13 verdict redirected to a
+> supplier-axis, prototype-first redesign; the inbox concept survives in
+> design/27 §4 as tab badges + gate-time listings, not a stage. Do not
+> implement §2/§5's stage components from this document.
+>
+> *(Original banner follows for history.)*
+> Status: CONFIRMED — all design decisions resolved with the user 2026-08-12.
+> Amended same day after an independent review (Fable): B0 added, B2/B3
+> re-sized from small to medium (§4), implementation order revised (§8) —
+> all review claims re-verified against source before adoption.
 > Trigger: user's 2026-08-12 manual-test feedback (8 issues + 1 addendum), recorded
 > verbatim in `docs/项目资料/用户反馈/2026-08-12/招标比价手工测试问题.md`. Issue #8
 > ("the flow is fundamentally wrong — redesign it") is the driver; #1–#7 are mostly
