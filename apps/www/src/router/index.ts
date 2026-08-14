@@ -121,6 +121,14 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/exception/403.vue'),
     meta: { title: '无权限', public: true },
   },
+  // design/27 §5/§10 步骤2 —— Univer 选型验证台，临时路由，验证通过/不通过
+  // 后删除（连同 views/_verify/ 整个目录），不进产品导航。
+  {
+    path: '/_verify/univer',
+    name: 'VerifyUniver',
+    component: () => import('@/views/_verify/UniverVerify.vue'),
+    meta: { title: 'Univer验证', public: true },
+  },
   {
     path: '/',
     name: 'Layout',

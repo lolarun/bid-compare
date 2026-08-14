@@ -14,6 +14,10 @@
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
     "@tanstack/vue-virtual": "^3.13.25",
+    "@univerjs/preset-sheets-core": "^0.25.1",
+    "@univerjs/presets": "^0.25.1",
+    "@univerjs/sheets-note": "^0.25.1",
+    "@univerjs/sheets-note-ui": "^0.25.1",
     "ant-design-vue": "^4.2.6",
     "axios": "^1.16.1",
     "dayjs": "^1.11.20",
