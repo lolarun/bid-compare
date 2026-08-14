@@ -17,12 +17,13 @@ import {
   CloudUploadOutlined, FilePdfOutlined, FileExcelOutlined, LoadingOutlined,
   HistoryOutlined, DownloadOutlined, SolutionOutlined,
 } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi, intakeApi } from '@/api'
-import type { Supplier, TenderBidlistResult, BidMatrixResult } from '@/api/client'
+import { projectApi, supplierApi, analysisApi } from '@/api'
+import type { Supplier, TenderBidlistResult, BidMatrixResult, ExtractionJob } from '@/api/client'
 import { useSupplierUpload } from '@/composables/useSupplierUpload'
 import { useDoubtInbox } from '@/composables/useDoubtInbox'
 import QuoteGrid from '@/components/QuoteGrid.vue'
 import BidMatrix from './components/BidMatrix.vue'
+import IntakeUploader from '@/components/IntakeUploader.vue'
 import type { QuoteGridColumn, DoubtMark } from '@/univer/quoteGridController'
 
 const route = useRoute()
@@ -73,6 +74,11 @@ onMounted(async () => {
       projectName.value = data.name
       projectCode.value = data.code
     } catch { /* 项目不存在时留空，用户可重新新建 */ }
+  } else {
+    // 立即建项目（不等第一次上传才建）：URL 马上带上 projectId，刷新页面
+    // 不丢工作台状态；上传组件（IntakeUploader）需要 project_id 才能把
+    // context 传给后端，等到"选完文件才建项目"会让第一次上传多等一轮网络。
+    await ensureProject()
   }
   const { data: suppliers } = await supplierApi.list({ page: 1, page_size: 500 })
   allSuppliers.value = suppliers.items
@@ -105,63 +111,31 @@ async function onDropBidFiles(file: File) {
   handleBatchFile(file)
 }
 
-// ─── 招标文件 + Excel 清单（materials strip 折叠卡片，非 IndexView 的完整
-//     招标识别 UI——完整的三件套分区卡是步骤4 的范围，这里只要"识别完成/
-//     未识别"两态可用） ──────────────────────────────────────────────────
-const tenderFile = ref<File | null>(null)
+// ─── 招标文件（materials strip）：复用 IntakeUploader（上传+轮询+进度+失败
+//     重试都是它已经处理好的，不再手写第二份轮询逻辑——跟约束3"复用
+//     useSupplierUpload、不重写"同一个精神，扩展到这个组件）。IntakeUploader
+//     原本的文案只分 tender/其余两档，这里给 'tender_bidlist' 补了同款文案
+//     （components/IntakeUploader.vue 的小扩展，不是另起一份组件）。────────
 const tenderResult = ref<TenderBidlistResult | null>(null)
-const tenderUploading = ref(false)
+const tenderJob = ref<ExtractionJob | null>(null)
 const tenderError = ref('')
-let tenderPollTimer: ReturnType<typeof setInterval> | null = null
+const uploaderContext = computed(() => ({ project_id: projectId.value ?? undefined }))
 
-async function uploadTender(file: File) {
-  const pid = await ensureProject()
-  tenderFile.value = file
-  tenderUploading.value = true
+function onTenderExtracted(job: ExtractionJob) {
+  tenderJob.value = job
   tenderError.value = ''
-  const form = new FormData()
-  form.append('file', file)
-  form.append('type', 'tender_bidlist')
-  form.append('project_id', String(pid))
-  try {
-    const { data } = await intakeApi.upload(form)
-    if (data.status === 'done') onTenderDone(data.result as unknown as TenderBidlistResult)
-    else if (data.status === 'failed') { tenderUploading.value = false; tenderError.value = data.error || '识别失败' }
-    else pollTender(data.id)
-  } catch (e: unknown) {
-    tenderUploading.value = false
-    tenderError.value = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '上传失败'
-  }
+  onTenderDone(job.result as unknown as TenderBidlistResult)
 }
-
-function pollTender(jobId: string) {
-  if (tenderPollTimer) clearInterval(tenderPollTimer)
-  let failures = 0
-  tenderPollTimer = setInterval(async () => {
-    try {
-      const { data } = await intakeApi.getJob(jobId)
-      failures = 0
-      if (data.status === 'done') {
-        if (tenderPollTimer) clearInterval(tenderPollTimer)
-        onTenderDone(data.result as unknown as TenderBidlistResult)
-      } else if (data.status === 'failed') {
-        if (tenderPollTimer) clearInterval(tenderPollTimer)
-        tenderUploading.value = false
-        tenderError.value = data.error || '识别失败'
-      }
-    } catch {
-      failures++
-      if (failures >= 5) {
-        if (tenderPollTimer) clearInterval(tenderPollTimer)
-        tenderUploading.value = false
-        tenderError.value = '轮询超时，请重试'
-      }
-    }
-  }, 2000)
+function onTenderFailed(err: string) {
+  tenderError.value = err
+}
+function resetTender() {
+  tenderJob.value = null
+  tenderResult.value = null
+  tenderError.value = ''
 }
 
 function onTenderDone(result: TenderBidlistResult) {
-  tenderUploading.value = false
   tenderResult.value = result
   if (result.detected_category && !category.value) category.value = result.detected_category
   // 项目回填（约束1）：只在用户没手动改过时覆盖，覆盖的是"识别到的值"，
@@ -361,16 +335,16 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           v-model:value="projectName"
           placeholder="比价项目名称（拖入招标文件后自动识别，可编辑）"
           :bordered="false"
-          style="font-size:18px;font-weight:600;padding:0"
+          class="workspace-header__name-input"
           @change="onProjectNameInput"
         />
         <div class="workspace-header__meta">
           <a-input
             v-model:value="projectCode"
-            placeholder="编号（未识别，可填写）"
+            placeholder="编号未识别，点击填写"
             :bordered="false"
             size="small"
-            style="width:160px;color:rgba(0,0,0,0.55)"
+            style="width:160px"
             @change="onProjectCodeInput"
           />
           <span v-if="category">· {{ category }}</span>
@@ -388,63 +362,78 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 
     <!-- Materials strip -->
     <div class="materials-strip">
-      <div class="materials-strip__card materials-strip__card--tender">
-        <div style="display:flex;align-items:center;gap:6px">
-          <FilePdfOutlined style="color:#cf1322" />
-          <span v-if="!tenderResult && tenderUploading"><LoadingOutlined spin /> 识别中…</span>
-          <a-upload v-else-if="!tenderResult" :show-upload-list="false" accept=".pdf,.png,.jpg,.jpeg"
-            :before-upload="(f: File) => { uploadTender(f); return false }">
-            <a-button size="small" type="dashed">上传招标文件</a-button>
-          </a-upload>
-          <template v-else>
-            招标文件
-            <a-button size="small" type="text" @click="() => { tenderFile = null; tenderResult = null; tenderError = '' }">重新上传</a-button>
-          </template>
-        </div>
-        <a-alert v-if="tenderError" type="error" :message="tenderError" show-icon banner style="padding:2px 8px" />
-
-        <!-- design/27 §3.1 feedback #2：三产物各自独立呈现，不用"识别结果为空"
-             这种笼统态盖过去——采购清单/封面信息/品牌要求各有各的有无，互不
-             代表彼此。 -->
-        <div v-if="tenderResult" class="tender-artifacts">
-          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': tenderResult.row_count === 0 }">
-            <span class="tender-artifacts__label">采购清单</span>
-            <span v-if="tenderResult.row_count > 0">✓ {{ tenderResult.row_count }} 项</span>
-            <span v-else>正文无清单，请上传 Excel 附件 →</span>
+      <div class="material-card">
+        <template v-if="!tenderResult">
+          <IntakeUploader
+            type="tender_bidlist"
+            :context="uploaderContext"
+            hint="自动识别采购清单、封面信息与品牌要求，通常 20-90 秒完成"
+            @extracted="onTenderExtracted"
+            @failed="onTenderFailed"
+          />
+        </template>
+        <template v-else>
+          <div class="material-card__header">
+            <FilePdfOutlined style="color:#cf1322" />
+            <span>招标文件</span>
+            <a-button size="small" type="text" @click="resetTender">重新上传</a-button>
           </div>
-          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderCoverInfoPresent }">
-            <span class="tender-artifacts__label">封面信息</span>
-            <span v-if="tenderCoverInfoPresent">
-              ✓
-              <template v-if="tenderResult.project_name">项目名</template>
-              <template v-if="tenderResult.project_code"> · 编号</template>
-              <template v-if="tenderResult.deadline"> · 截止时间</template>
-              已识别
-            </span>
-            <span v-else>封面未识别到项目名/编号/日期，可手动填写</span>
+          <!-- design/27 §3.1 feedback #2：三产物各自独立呈现，不用"识别结果为空"
+               这种笼统态盖过去——采购清单/封面信息/品牌要求各有各的有无，互不
+               代表彼此。 -->
+          <div class="tender-artifacts">
+            <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': tenderResult.row_count === 0 }">
+              <span class="tender-artifacts__label">采购清单</span>
+              <span v-if="tenderResult.row_count > 0">✓ {{ tenderResult.row_count }} 项</span>
+              <span v-else>正文无清单，请上传 Excel 附件 →</span>
+            </div>
+            <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderCoverInfoPresent }">
+              <span class="tender-artifacts__label">封面信息</span>
+              <span v-if="tenderCoverInfoPresent">
+                ✓
+                <template v-if="tenderResult.project_name">项目名</template>
+                <template v-if="tenderResult.project_code"> · 编号</template>
+                <template v-if="tenderResult.deadline"> · 截止时间</template>
+                已识别
+              </span>
+              <span v-else>封面未识别到项目名/编号/日期，可手动填写</span>
+            </div>
+            <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderBrandInfoPresent }">
+              <span class="tender-artifacts__label">品牌要求</span>
+              <span v-if="tenderBrandInfoPresent">✓ {{ tenderResult.brand_requirement.length }} 项业主品牌 · {{ tenderResult.supplier_brands.length }} 家参与品牌</span>
+              <span v-else>未识别到品牌要求（可能原文本就没有）</span>
+            </div>
           </div>
-          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderBrandInfoPresent }">
-            <span class="tender-artifacts__label">品牌要求</span>
-            <span v-if="tenderBrandInfoPresent">✓ {{ tenderResult.brand_requirement.length }} 项业主品牌 · {{ tenderResult.supplier_brands.length }} 家参与品牌</span>
-            <span v-else>未识别到品牌要求（可能原文本就没有）</span>
-          </div>
-        </div>
+        </template>
+        <a-alert v-if="tenderError" type="error" :message="tenderError" show-icon banner style="margin-top:8px;padding:4px 8px" />
       </div>
 
-      <div class="materials-strip__card" :class="{ 'materials-strip__card--highlight': tenderResult && tenderResult.row_count === 0 && !excelFile }">
-        <FileExcelOutlined style="color:#52c41a" />
-        <span v-if="excelFile">采购清单 Excel ✓</span>
-        <span v-else-if="excelPreviewing"><LoadingOutlined spin /> 解析中…</span>
-        <a-upload v-else :show-upload-list="false" accept=".xlsx,.xls"
-          :before-upload="(f: File) => { uploadExcel(f); return false }">
-          <a-button size="small" type="dashed">上传采购清单 Excel</a-button>
-        </a-upload>
+      <div class="material-card" :class="{ 'material-card--highlight': tenderResult && tenderResult.row_count === 0 && !excelFile }">
+        <template v-if="excelFile">
+          <div class="material-card__header">
+            <FileExcelOutlined style="color:#52c41a" />
+            <span>采购清单 Excel ✓</span>
+            <a-button size="small" type="text" @click="() => { excelFile = null }">重新上传</a-button>
+          </div>
+        </template>
+        <a-upload-dragger v-else :show-upload-list="false" accept=".xlsx,.xls" :disabled="excelPreviewing"
+          :before-upload="(f: File) => { uploadExcel(f); return false }" class="material-card__dragger">
+          <p class="ant-upload-drag-icon"><FileExcelOutlined style="color:#52c41a;font-size:28px" /></p>
+          <p class="ant-upload-text" style="font-size:13px">
+            <LoadingOutlined v-if="excelPreviewing" spin /> {{ excelPreviewing ? '解析中…' : '上传采购清单 Excel' }}
+          </p>
+          <p class="ant-upload-hint" style="font-size:12px">正文没有清单表时的对照来源，可选</p>
+        </a-upload-dragger>
       </div>
 
-      <a-upload :show-upload-list="false" :multiple="true" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv"
-        :before-upload="(f: File) => { onDropBidFiles(f); return false }">
-        <a-button type="dashed"><CloudUploadOutlined /> 拖入投标文件</a-button>
-      </a-upload>
+      <div class="material-card">
+        <a-upload-dragger :show-upload-list="false" :multiple="true" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv"
+          :before-upload="(f: File) => { onDropBidFiles(f); return false }" class="material-card__dragger">
+          <p class="ant-upload-drag-icon"><CloudUploadOutlined style="font-size:28px" /></p>
+          <p class="ant-upload-text" style="font-size:13px">拖入所有投标文件</p>
+          <p class="ant-upload-hint" style="font-size:12px">PDF / 图片 / Excel，可多选</p>
+        </a-upload-dragger>
+      </div>
     </div>
 
     <!-- Tabs -->
@@ -514,18 +503,33 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 
 <style scoped>
 .workspace-view { padding: 16px 24px; max-width: 1400px; margin: 0 auto; }
-.workspace-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+
+/* Header */
+.workspace-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }
 .workspace-header__title { flex: 1; min-width: 0; }
+.workspace-header__name-input { font-size: 20px; font-weight: 600; padding: 0; }
+/* 空态占位符跟已填内容视觉上要分得开——不然读起来像"这一行本来就该是灰的"，
+   而不是"这是一个等你填的提示"。placeholder 单独调浅、加斜体，输入框本身
+   聚焦时才显示底边框，平时跟纯文本一样不突兀。 */
+.workspace-header__name-input :deep(.ant-input)::placeholder { color: rgba(0,0,0,0.3); font-style: italic; font-weight: 400; }
 .workspace-header__meta { display: flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(0,0,0,0.45); margin-top: 4px; }
+.workspace-header__meta :deep(.ant-input)::placeholder { color: rgba(0,0,0,0.3); font-style: italic; }
 .workspace-header__actions { display: flex; gap: 8px; flex-shrink: 0; }
-.materials-strip { display: flex; align-items: flex-start; gap: 16px; padding: 12px 16px; background: #fafafa; border-radius: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-.materials-strip__card { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.materials-strip__card--tender { flex-direction: column; align-items: stretch; gap: 6px; min-width: 260px; }
-.materials-strip__card--highlight { outline: 2px solid #52c41a; outline-offset: 2px; border-radius: 4px; padding: 2px 6px; }
-.tender-artifacts { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: rgba(0,0,0,0.65); padding-left: 22px; }
+
+/* Materials strip：三张等宽卡片，不是三个内联按钮——每张卡片自己决定内容
+   （上传态用 dragger，完成态用摘要），卡片本身的边框/圆角/内边距统一。 */
+.materials-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.material-card { border: 1px solid #e8e8e8; border-radius: 8px; padding: 12px; background: #fff; min-height: 96px; }
+.material-card--highlight { border-color: #52c41a; box-shadow: 0 0 0 1px #52c41a; }
+.material-card__header { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.material-card__dragger { padding: 4px 0; }
+.material-card__dragger :deep(.ant-upload-drag-icon) { margin-bottom: 4px; }
+.material-card :deep(.intake-uploader__dragger) { padding: 4px 0; }
+.tender-artifacts { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: rgba(0,0,0,0.65); }
 .tender-artifacts__item { display: flex; align-items: center; gap: 6px; }
 .tender-artifacts__item--empty { color: rgba(0,0,0,0.4); }
 .tender-artifacts__label { flex-shrink: 0; min-width: 56px; color: rgba(0,0,0,0.45); }
+
 .workspace-tabs { background: #fff; }
 .supplier-tab-content { padding: 8px 0; }
 .supplier-tab-content__progress { padding: 24px; text-align: center; color: rgba(0,0,0,0.55); }

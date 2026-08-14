@@ -208,9 +208,11 @@ defineExpose({ retry, currentJob })
   <div class="intake-uploader">
     <Upload.Dragger v-bind="draggerProps" class="intake-uploader__dragger">
       <p class="ant-upload-drag-icon">
-        <component :is="type === 'tender' ? InboxOutlined : ScanOutlined" />
+        <component :is="type === 'tender' || type === 'tender_bidlist' ? InboxOutlined : ScanOutlined" />
       </p>
-      <p class="ant-upload-text">{{ type === 'tender' ? '上传招标文件' : '上传供应商报价单' }}</p>
+      <p class="ant-upload-text">
+        {{ type === 'tender' || type === 'tender_bidlist' ? '上传招标文件' : '上传供应商报价单' }}
+      </p>
       <p class="ant-upload-hint">
         {{ hint || '支持 PDF / PNG / JPG；上传后自动识别为结构化数据' }}
       </p>
