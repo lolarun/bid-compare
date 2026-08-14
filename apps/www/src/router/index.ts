@@ -147,6 +147,15 @@ const routes: RouteRecordRaw[] = [
         // 手段。
         meta: { title: '招标比价分析', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
       },
+      // design/27 §10 步骤3 —— 供应商主轴工作台新路由，跟旧向导（上面那条
+      // CompareDeep）并存，互不影响。退役旧向导+重定向是步骤5 的范围，现在
+      // 不动 CompareDeep，也不进侧边菜单（还没到可以替代旧入口的阶段）。
+      {
+        path: '/workspace/:projectId?',
+        name: 'CompareWorkspace',
+        component: () => import('@/views/compare/WorkspaceView.vue'),
+        meta: { title: '比价工作台', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
+      },
       // Legacy path redirects — inside layout so auth guard runs before redirect
       { path: '/quotes', redirect: '/analysis' },
       { path: '/history', redirect: '/analysis' },

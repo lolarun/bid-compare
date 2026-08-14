@@ -449,6 +449,13 @@ export interface TenderBidlistResult {
   source_type: string
   quality_metrics?: PdfQualityMetrics | null
   page_diagnostics?: PageDiagnostic[] | null
+  // design/27 §7.3：封面标量，_tender_draft_to_response 把 parsed.meta 展开进
+  // 顶层响应（pipeline.py），后端早就在返回，这里之前没声明——类型跟实际
+  // 响应脱节，不是新增字段。抽不到时是空字符串，不是字段缺失。
+  project_name?: string
+  project_code?: string
+  tender_date?: string
+  deadline?: string
 }
 
 // Excel vs PDF 对账结果
