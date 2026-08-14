@@ -651,6 +651,34 @@ export interface BatchConfirmIssue {
   [key: string]: unknown
 }
 
+// design/27 §10 步骤4：quote_confirmation_service._integrity_row 的行级疑点
+// 形状——`index` 是提交给 batch-confirm 的 items 数组里的 0-based 位置
+// （不是识别产物的 document_row_index），`column` 是该判据认定的疑点列
+// （没有更具体列时落 "material" 当锚点，不是"这一列一定有问题"）。
+export interface IntegrityWarningRow {
+  index: number
+  material: string
+  spec: string
+  qty: number | null
+  unit_price: number | null
+  total_price: number | null
+  flags: string[]
+  reason: string
+  column: string
+}
+
+export interface IntegrityGateResult {
+  duplicate_verdict: string
+  duplicate_rows: number
+  duplicate_amount_ratio: number
+  column_shift_rows: number
+  // REVIEW 级、不阻断的逐行疑点（重复/算术/截断）——放行的行，用于表格标色。
+  // 阻断级的同形状数据在 issues[].review_rows 里（structural_integrity_
+  // requires_review 命中时），两处字段名故意保持一致，前端合并处理不用分叉。
+  warnings: IntegrityWarningRow[]
+  blocking_issue: BatchConfirmIssue | null
+}
+
 export interface BatchConfirmResult {
   status: string
   submission_id: number
@@ -669,6 +697,8 @@ export interface BatchConfirmResult {
   dry_run?: boolean
   would_succeed?: boolean
   issues?: BatchConfirmIssue[]
+  // dry_run=true 时始终返回（结构完整性门的完整计算结果，不只是阻断态）。
+  integrity?: IntegrityGateResult
 }
 
 export interface SavedInvitation {

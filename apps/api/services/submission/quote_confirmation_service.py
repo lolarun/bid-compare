@@ -184,7 +184,7 @@ def _build_checksum(job, line_total_sum: float, line_count: int) -> dict:
             "status": status}
 
 
-def _integrity_row(items: list[dict], i: int, flags: list[str]) -> dict:
+def _integrity_row(items: list[dict], i: int, flags: list[str], column: str | None = None) -> dict:
     it = items[i]
     return {
         "index": i,
@@ -195,6 +195,11 @@ def _integrity_row(items: list[dict], i: int, flags: list[str]) -> dict:
         "total_price": it.get("total_price"),
         "flags": flags,
         "reason": _INTEGRITY_REASONS.get(flags[0], "结构完整性存疑") if flags else "",
+        # design/27 §4/§10 步骤4：前端逐格标色需要知道"哪一列"，不只是"哪一行"。
+        # 缺省落 material——没有更具体列信息时，用身份列做锚点总比不给列强
+        # （column_shift 这类整行性问题就是这种情况：错位牵连所有列，没有
+        # "唯一正确列"这个概念，选身份列纯粹是给前端一个可点的锚点）。
+        "column": column or "material",
     }
 
 
@@ -254,6 +259,32 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
     arith_rows = set(arith.mismatch_indices)
     trunc_rows = trunc.suspect_row_indices if trunc else set()
 
+    # 逐行"该标哪一列"（design/27 §4/§10 步骤4）：三个判据各自天然带着列信息，
+    # 这里只是把已经算出来的东西收拢成 row_index -> column 查表，不新增判据。
+    # 一行可能命中多种判据，取值时按 flags 优先级（跟 _INTEGRITY_REASONS 的
+    # flags[0] 取法一致）由调用方决定用哪个，这里只负责把每种判据自己的列
+    # 算对。
+    arith_column: dict[int, str] = {}
+    for i in arith_rows:
+        basis = arith.results[i].basis  # "unit_price_excl_tax|total_price_excl_tax"
+        if basis and "|" in basis:
+            arith_column[i] = basis.split("|", 1)[1]   # 合价那一侧，不是单价——
+            # 算术门比的是"合价对不对"，出问题时该看的是合价这一列。
+    trunc_column: dict[int, str] = {}
+    if trunc:
+        for s in trunc.suspects:
+            trunc_column.setdefault(s.row_index, s.column)  # 一行多个疑似列时取第一个
+
+    def _column_for(i: int, flags: list[str]) -> str | None:
+        for f in flags:
+            if f == ARITHMETIC_FLAG and i in arith_column:
+                return arith_column[i]
+            if f == TRUNCATION_FLAG and i in trunc_column:
+                return trunc_column[i]
+            if f == DUPLICATE_FLAG:
+                return "material"
+        return None
+
     # 只标注、放行的那部分：写进 validation_flags，下游据此知道这行被怀疑过
     warn: dict[int, list[str]] = {}
     if dup.verdict == REVIEW:
@@ -271,7 +302,7 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
     for i, flags in sorted(warn.items()):
         existing = list(items[i].get("validation_flags") or [])
         items[i]["validation_flags"] = existing + [f for f in flags if f not in existing]
-        warn_rows.append(_integrity_row(items, i, flags))
+        warn_rows.append(_integrity_row(items, i, flags, _column_for(i, flags)))
 
     blocking_dup = dup_rows if dup.verdict == BLOCKED else set()
     blocking_arith = arith_rows if arith.verdict == BLOCKED else set()
@@ -279,7 +310,10 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
         _integrity_row(items, i,
                        ([COLUMN_SHIFT_FLAG] if i in shifted else [])
                        + ([DUPLICATE_FLAG] if i in blocking_dup else [])
-                       + ([ARITHMETIC_FLAG] if i in blocking_arith else []))
+                       + ([ARITHMETIC_FLAG] if i in blocking_arith else []),
+                       _column_for(i, ([COLUMN_SHIFT_FLAG] if i in shifted else [])
+                                  + ([DUPLICATE_FLAG] if i in blocking_dup else [])
+                                  + ([ARITHMETIC_FLAG] if i in blocking_arith else [])))
         for i in sorted(shifted | blocking_dup | blocking_arith)
         if not items[i].get("integrity_ack")
     ]

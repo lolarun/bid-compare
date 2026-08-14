@@ -192,7 +192,7 @@ async function uploadExcel(file: File) {
 }
 
 // ─── 疑点收件箱（约束2：tab 徽标只读这里，不另起计数） ─────────────────────
-const { dryRunByFile, refreshDryRun } = useDoubtInbox({
+const { dryRunByFile, dryRunLoading, refreshDryRun } = useDoubtInbox({
   batchFiles,
   taskConfig,
   reconcileResult: ref(null),
@@ -236,13 +236,71 @@ const gridColumns: QuoteGridColumn[] = [
   { key: 'remark', title: '备注' },
 ]
 
+// design/27 §10 步骤4 —— dry-run 行索引 → Univer 网格行号的映射（复核意见
+// 明确点名的"关键接缝"，逐字写清楚，不能假设两者相等）：
+//
+// 后端 issue/warning 里的 `index` 是**提交给 batch-confirm 的 items 数组里
+// 的 0-based 位置**（quote_confirmation_service.py 的 `for idx, item in
+// enumerate(items)`），不是识别产物自己的 document_row_index——如果这份
+// 文档识别时有副本被去重过滤掉，items 数组从一开始就已经是去重后的顺序，
+// index 天然对齐的是"去重之后"的位置，不需要额外处理副本这一层。
+//
+// Univer 网格里，第 0 行是表头（quoteGridController.ts::toGrid 的
+// `[header, ...body]`），所以数据第 k 行（0-based）落在网格第 k+1 行。
+//
+// 这个映射成立的前提是：dry-run 请求提交时的 items 数组，跟当前 QuoteGrid
+// 绑定的 f.items **顺序和行数一致**——useDoubtInbox.refreshDryRun 提交的
+// overrides 就是 f.items 本身（同一个引用），QuoteGrid 目前只支持逐格编辑
+// 不支持增删行，所以顺序/行数在两次调用之间不会变，映射不会跑偏。若未来
+// QuoteGrid 支持增删行，这个前提要重新核实，不能想当然继续 +1。
+const GRID_ROW_OFFSET = 1
+
+// 判据 flags → 表格标色 severity。BLOCKING 级问题（阻断入库）统一标红——
+// 不管具体是哪种 flag，红色传达的是"现在就要处理"，跟 REVIEW 级的
+// 黄/橙区分开；REVIEW 级按 flag 类型分色（design/27 §4 的三色判据）。
+// duplicate_row 目前没有专属颜色（§4 只定义了三种），落黄——"值得看但没那么
+// 紧急"，比强行发明第四种颜色更简单，等产品明确要单独视觉区分再加。
+function severityForFlags(flags: string[], blocking: boolean): DoubtMark['severity'] {
+  if (blocking) return 'missing'
+  if (flags.includes('value_truncated')) return 'truncation'
+  return 'arithmetic'   // arithmetic_mismatch / duplicate_row 都落这里
+}
+
 function doubtMarksFor(fileId: string): DoubtMark[] {
   const dr = dryRunByFile[fileId]
-  if (!dr?.issues?.length) return []
-  // dry-run 的四道门是整份文件级别的问题（结构完整性/无合价等），暂时没有
-  // 逐行逐列坐标——先落一条整体提示在第一行首列，逐格定位是步骤4 的范围
-  // （那边有 doubtCopy.ts 的完整翻译表可用）。
-  return [{ row: 0, columnKey: 'material', severity: 'missing', hoverText: dr.issues.map((i) => i.message).join('\n') }]
+  if (!dr) return []
+  const marks: DoubtMark[] = []
+
+  for (const issue of dr.issues ?? []) {
+    if (issue.error === 'missing_total_requires_review') {
+      const rows = (issue.review_rows as Array<{ index: number; reason?: string; derived_total_candidate?: number }> | undefined) ?? []
+      for (const r of rows) {
+        marks.push({
+          row: r.index + GRID_ROW_OFFSET, columnKey: 'total_price', severity: 'missing',
+          hoverText: r.reason || '原文无合价，请核对原文后补写',
+        })
+      }
+    } else if (issue.error === 'structural_integrity_requires_review') {
+      const rows = (issue.review_rows as Array<{ index: number; flags: string[]; reason: string; column: string }> | undefined) ?? []
+      for (const r of rows) {
+        marks.push({
+          row: r.index + GRID_ROW_OFFSET, columnKey: r.column, severity: severityForFlags(r.flags, true),
+          hoverText: r.reason,
+        })
+      }
+    }
+  }
+
+  // integrity.warnings：非阻断的 REVIEW 级疑点（重复/算术/截断），入库门不拦
+  // 但表格里仍然要看得见——跟 blocking 的 review_rows 同一份 index 语义。
+  for (const w of dr.integrity?.warnings ?? []) {
+    marks.push({
+      row: w.index + GRID_ROW_OFFSET, columnKey: w.column, severity: severityForFlags(w.flags, false),
+      hoverText: w.reason,
+    })
+  }
+
+  return marks
 }
 
 // ─── Step 4「结果」：复用 BidMatrix.vue ────────────────────────────────────
@@ -367,6 +425,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                 @select="(_v: string, opt: { id?: number }) => { f.matchedSupplierId = opt.id ?? null }"
                 style="width:220px"
               />
+              <a-button :loading="dryRunLoading[f.id]" @click="refreshDryRun(f)">重新核对</a-button>
               <a-button type="primary" :loading="f.confirming" @click="confirmBatchEntry(f)">确认入库</a-button>
               <a-button danger @click="removeBatchEntry(f)">移除</a-button>
             </div>
