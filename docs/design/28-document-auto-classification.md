@@ -199,8 +199,18 @@ from engine defects.
 
 ## 9. Open items
 
-- Residual rate after Tiers 0/1 — unknown until cut 3; determines whether
-  cut 6 is built.
+- **Residual rate after Tiers 0/1 — measured 2026-08-14, cut 6 not built.**
+  Full available real corpus: Tier 0 on 5 xlsx (4 definitive/strong + 1
+  correctly `uncertain` — the deliberate 金桥 acceptance sample, §2); Tier 1
+  on 7 real post-recognition results (4 quote + 3 tender, all `strong`, zero
+  disagreement with ground truth). Measured unintended residue = 0. The one
+  `uncertain` case is not "residue Tier 2 would resolve" — §2 already
+  characterizes it as genuinely ambiguous even to a human reader, so an LLM
+  call would likely land on the same shrug, not a confident correct answer.
+  Per §7's own conditional ("only if residue justifies it; may be dropped"),
+  cut 6 is skipped — this is a recorded decision from real measurement, not
+  a silent omission. Revisit if a future corpus addition shows real
+  Tier-0/1 disagreement.
 - Whether a bid PDF *without* an embedded quote list occurs in the corpus
   (the table above marks it "occurs in practice" but no sample is present) —
   if none, that branch stays untested until a real one appears; record it as
