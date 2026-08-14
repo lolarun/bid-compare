@@ -42,8 +42,15 @@ async function ensureProject(): Promise<number> {
   if (projectId.value) return projectId.value
   bootstrapping.value = true
   try {
+    // projects 表对 (name, code) 有唯一约束（业务规则：不允许字面重名项目）。
+    // 用户还没输入名字时的占位名必须带上区分后缀——固定字面量"新比价项目"
+    // 在多次新建空工作台后必然撞车（第二次点"新建"就 500）。这个占位名从不
+    // 显示在输入框里（projectName 这个 ref 仍是空串，input 走 placeholder
+    // 文案），后续自动回填或用户手动输入都会用 persistProjectMeta() 覆盖掉，
+    // 所以后缀不会被用户看见。
+    const placeholderName = projectName.value || `新比价项目-${Date.now()}`
     const { data } = await projectApi.create({
-      name: projectName.value || '新比价项目', code: projectCode.value, location: '', status: 'active', remark: '',
+      name: placeholderName, code: projectCode.value, location: '', status: 'active', remark: '',
     })
     projectId.value = data.id
     router.replace(`/workspace/${data.id}`)
@@ -80,7 +87,10 @@ onMounted(async () => {
     // context 传给后端，等到"选完文件才建项目"会让第一次上传多等一轮网络。
     await ensureProject()
   }
-  const { data: suppliers } = await supplierApi.list({ page: 1, page_size: 500 })
+  // 后端 page_size 上限 100（Query(..., le=100)）；500 会直接 422，导致这个
+  // "取全量供应商列表"的调用每次都失败，静默地把 allSuppliers 留空。跟
+  // history/IndexView.vue 同一用途的调用保持一致改成 100。
+  const { data: suppliers } = await supplierApi.list({ page: 1, page_size: 100 })
   allSuppliers.value = suppliers.items
 })
 
@@ -156,18 +166,24 @@ const tenderBrandInfoPresent = computed(() =>
 
 const excelFile = ref<File | null>(null)
 const excelPreviewing = ref(false)
+const excelError = ref('')
 async function uploadExcel(file: File) {
   await ensureProject()
-  excelFile.value = file
   excelPreviewing.value = true
+  excelError.value = ''
   try {
     const form = new FormData()
     form.append('file', file)
     const { data } = await analysisApi.tenderListPreview(form)
+    // 预览成功才落 excelFile——之前预览失败时也会把卡片标成"✓ 已上传"（只有
+    // 一条转瞬即逝的 toast 报错，卡片本身撒谎说成功了），是"看起来没出错"
+    // 这类静默缺口的一个真实实例，不是假设出来的。
+    excelFile.value = file
     if (data.detected_category && !category.value) category.value = data.detected_category
     message.success(`采购清单已预览：${data.total} 条`)
   } catch (e: unknown) {
-    message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '预览失败')
+    excelError.value = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '预览失败'
+    message.error(excelError.value)
   } finally {
     excelPreviewing.value = false
   }
@@ -423,6 +439,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
             <LoadingOutlined v-if="excelPreviewing" spin /> {{ excelPreviewing ? '解析中…' : '上传采购清单 Excel' }}
           </p>
           <p class="ant-upload-hint" style="font-size:12px">正文没有清单表时的对照来源，可选</p>
+          <a-alert v-if="excelError" type="error" :message="excelError" show-icon banner style="margin-top:8px;padding:4px 8px;text-align:left" />
         </a-upload-dragger>
       </div>
 

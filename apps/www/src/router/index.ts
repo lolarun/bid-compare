@@ -32,12 +32,10 @@ const appRoutes: RouteRecordRaw[] = [
     component: () => import('@/views/invite/IndexView.vue'),
     meta: { title: '邀标建议', icon: 'SolutionOutlined', group: '业务功能', roles: ['管理员', '比价员'] as Role[] },
   },
-  {
-    path: '/compare',
-    name: 'Compare',
-    component: () => import('@/views/compare/IndexView.vue'),
-    meta: { title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能', roles: ['管理员', '比价员'] as Role[] },
-  },
+  // design/27 §10 步骤5 —— 旧 5 步向导退役，此处不再放 appRoutes 条目；
+  // 新工作台（下方 CompareWorkspace）是唯一的"招标比价分析"入口。旧路径
+  // /compare、/compare/:projectId/:step? 保留为纯跳转（见下方 layout
+  // children），不进侧边栏，只为旧书签/深链兜底。
   // ─── 数据管理 ──────────────────────────────────────────────────────────
   {
     path: '/materials',
@@ -121,14 +119,6 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/exception/403.vue'),
     meta: { title: '无权限', public: true },
   },
-  // design/27 §5/§10 步骤2 —— Univer 选型验证台，临时路由，验证通过/不通过
-  // 后删除（连同 views/_verify/ 整个目录），不进产品导航。
-  {
-    path: '/_verify/univer',
-    name: 'VerifyUniver',
-    component: () => import('@/views/_verify/UniverVerify.vue'),
-    meta: { title: 'Univer验证', public: true },
-  },
   {
     path: '/',
     name: 'Layout',
@@ -136,32 +126,22 @@ const routes: RouteRecordRaw[] = [
     redirect: '/dashboard',
     children: [
       ...appRoutes,
-      // 比价向导深链：/compare/:projectId/:step? —— 刷新可恢复（不进侧边菜单，复用同组件）。
+      // design/27 §10 步骤5 —— 供应商主轴工作台是唯一的"招标比价分析"入口。
+      // 旧向导（views/compare/IndexView.vue，5 步向导 + 8 芯片条 + 批量卡片流）
+      // 已删除；下面两条旧路径改纯跳转，只为旧书签/深链兜底，不再挂组件。
+      // 退役前置条件（2026-08-14）：真实 prj1/prj2 数据跑通"确认入库→
+      // match→对齐核查→矩阵→导出"整条链路（含 checksum_ack、
+      // missing_total_requires_review 两类阻断门禁的正确行为），见回归记录。
       {
         path: '/compare/:projectId/:step?',
-        name: 'CompareDeep',
-        component: () => import('@/views/compare/IndexView.vue'),
-        // R1 止血：注释一直说"不进侧边菜单"，但漏了 group 只是让 SiderMenu 把它
-        // 归进兜底的"其他"组显示出来，不是真正隐藏——菜单里"招标比价分析"重复
-        // 两次正是这个原因。SiderMenu 已有 meta.hideInMenu 这个专门机制，用错了
-        // 手段。
-        meta: { title: '招标比价分析', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
+        redirect: (to) => ({ path: `/workspace/${to.params.projectId ?? ''}` }),
       },
-      // design/27 §10 步骤3 —— 供应商主轴工作台新路由，跟旧向导（上面那条
-      // CompareDeep）并存，互不影响。
-      //
-      // 步骤5 顺序调整（2026-08-14 复核意见）：prj2 端到端人工验证从"步骤5
-      // 的收尾动作"改成"步骤5 的准入条件"——新工作台此前从未被真人端到端
-      // 点过（每轮浏览器验证都卡在登录态），撤旧向导之前必须先证明新的能
-      // 走通"确认入库→矩阵→导出"整条链路，不能假设它能走通。这里先给个
-      // 侧边栏入口方便人工验证，标"（新版）"跟旧入口临时并存——两个入口
-      // 共存是可接受的过渡态，因为它有明确终点（验证通过就收敛成一个）。
       {
         path: '/workspace/:projectId?',
         name: 'CompareWorkspace',
         component: () => import('@/views/compare/WorkspaceView.vue'),
         meta: {
-          title: '招标比价（新版）', icon: 'AppstoreOutlined', group: '业务功能',
+          title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能',
           public: false, roles: ['管理员', '比价员'] as Role[],
         },
       },
@@ -175,6 +155,7 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '对齐核查', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
       },
       // Legacy path redirects — inside layout so auth guard runs before redirect
+      { path: '/compare', redirect: '/workspace' },
       { path: '/quotes', redirect: '/analysis' },
       { path: '/history', redirect: '/analysis' },
       { path: '/settings', redirect: '/system/settings' },

@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
@@ -47,7 +48,15 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
     proj = Project(**body.model_dump())
     db.add(proj)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # projects 表 (name, code) 唯一约束——真实触发场景：design/27 工作台
+        # 打开空白页即建占位项目，重名会撞 uq_project_name_code。之前这里没
+        # 捕获，直接把裸的 IntegrityError 500 甩给前端，报"服务器错误"，用户
+        # 无从判断是不是自己的操作有问题；现在给出可读的 409。
+        db.rollback()
+        raise HTTPException(409, f"项目名称「{proj.name}」+ 编号「{proj.code}」已存在，请修改后重试")
     db.refresh(proj)
     return proj
 
