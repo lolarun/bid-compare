@@ -129,6 +129,25 @@ P1-1 抽了 confirm/export/finalize 等 7 个服务，**唯独漏了 match 和 l
 - [ ] **比价基准 + 推荐重构**（同规格基准 / checksum 语义 / 三态门禁 / 确定性主供 / AI 只解释，4 规则）实施收尾确认（memory `project_baseline_recommendation_redesign`）。
 - [ ] **sub18/sub19 数据修复未验收**：sub18 仅 124k vs 已知 1.07M，source_ref 仅 page 无 row（memory `project_sub1819_audit`）。属数据 / 识别缺口，非本轮架构债。
 
+- [ ] **qwen 去留：删除，还是保留为第三层像素重读兜底？——挂起，手工测试后讨论**（2026-08-13）
+
+  **背景**：design/26 决策 #3 当前写的是"直接替换、无运行时兜底、同轮删除 qwen"，依据是用户 2026-08-13 的"我不需要兜底，太麻烦了，直接替换"。同日手测中用户澄清本意可能是三层链路（"PDF 不是走文字-Paddle-qwen 么"），该决策**现处于待复议状态，不得当作已确认前提执行删除**。
+
+  **两个候选形态**：
+  - A（现文档）：文字层 → Paddle → BLOCKED 即诚实终止（疑点收件箱 + Excel/重扫人工出路），qwen 全删，DashScope 依赖一并移除。
+  - B（用户澄清）：文字层 → Paddle → **qwen 像素层重读** → 仍 BLOCKED 才终止。
+
+  **若选 B，三条约束必须同时写死**（否则会退化成本仓库实测有害的形态，HANDOFF:301「LLM 文本复核会改坏真值」——模型把官方声明总价改成了抽错的值，闭环从此永远通过、缺口永久隐藏）：
+  1. 触发条件是**确定性门的判定结果**（BLOCKED / 关键字段大面积缺失），不是"让 LLM 看看对不对"；
+  2. qwen 的输入必须是**原始图像**，绝不能把 Paddle 抽好的 CSV 喂给它去"校正"；
+  3. 换路必须有 `parser_mode` 标签，文档级二选一，不静默。
+
+  **决策依赖的证据**：手测中 Paddle 判 BLOCKED 的实际发生率与形态。若极少发生 → A 更省（少一条链路、少一套依赖）；若常发生且 qwen 能救回 → B 划算。
+
+  **牵连项**（选 A 才需要清；选 B 则不再是债）：
+  - 轨A（`tender_text_layer.py`）的招标要求抽取仍调 `provider.vl_extract_csv`（qwen 视觉），见 `services/tender/tender_pdf.py:188-194`——qwen 目前唯一的生产调用点；
+  - design/26 §10（qwen 删除计划整节）、`.claude/rules/recognition.md` 相应条目需跟着改。
+
 ---
 
 ## 5. 已知非阻断现象

@@ -1,8 +1,10 @@
 # 26 — Recognition Engine Replacement (PaddleOCR-VL for all scanned PDFs)
 
-> **Status — CONFIRMED, 2026-08-13. Ready for implementation (not started).**
+> **Status — P1/P2/P4 implemented and in manual testing, 2026-08-13.
+> Decisions 1-2 CONFIRMED; decision 3 (qwen deletion) REOPENED and suspended —
+> see below and `TODO.md` §4.**
 > Originally scoped as "candidate evaluation, scanned bid PDFs only"; re-scoped
-> and finalized after two user decisions (2026-08-13):
+> after user decisions (2026-08-13):
 >
 > 1. **PaddleOCR-VL becomes the sole visual recognition engine for ALL scanned
 >    PDFs — tender and bid alike.** Routing is by actual PDF characteristics,
@@ -14,12 +16,25 @@
 >    offline dual-engine comparison batch (§7); the four acceptance gaps in §6
 >    (field-level accuracy, duplicate copies, mixed orientation, run-to-run
 >    stability) are the go/no-go itself and are NOT compressible.
-> 3. **Direct replacement — no runtime qwen fallback, no engine config flag,
->    no dormancy period** ("直接替换", 2026-08-13). Paddle-BLOCKED documents
->    dead-stop honestly into the doubt inbox with the existing manual/Excel
->    recourse; qwen and its DashScope dependency are deleted in the same
->    round as the cutover. The project is pre-launch on a dedicated branch —
->    git is the rollback mechanism, dead code kept "just in case" is not.
+> 3. ~~**Direct replacement — no runtime qwen fallback, no engine config flag,
+>    no dormancy period**~~ — **⚠ REOPENED 2026-08-13, do NOT execute the qwen
+>    deletion on this decision.** The original wording ("直接替换", no fallback,
+>    qwen + DashScope deleted in the cutover round) came from the user's
+>    "我不需要兜底，太麻烦了，直接替换". Later the same day, during manual
+>    testing, the user clarified the intent may have been a three-tier chain
+>    ("PDF 不是走文字-Paddle-qwen 么") — i.e. qwen retained as a **pixel-level
+>    re-read** tier after Paddle BLOCKED, not deleted. **Suspended pending the
+>    manual-test round**; the decision needs the observed Paddle-BLOCKED rate
+>    as evidence. Full option comparison, the three constraints that any
+>    fallback form must satisfy (trigger = deterministic gate verdict; input =
+>    original images, never Paddle's extracted CSV — see HANDOFF:301 "LLM 文本
+>    复核会改坏真值"; labeled `parser_mode`, never silent), and the knock-on
+>    items are recorded in `TODO.md` §4. Until that decision lands, **§10's
+>    deletion plan below is on hold** and the engine flag / no-fallback
+>    statements elsewhere in this document describe option A only, not a
+>    settled position.
+>
+>    Decisions 1 and 2 above are unaffected and remain CONFIRMED.
 >
 > Track A (tender text-layer direct extraction, design/25) is **kept in front
 > of** the new engine — it is deterministic parsing, not a recognition model,
@@ -379,7 +394,13 @@ qwen's calibration risks systematic false pass/fail on the new path.
   `apps/api/tests/test_quality_gate_qty_missing.py` (missing-qty fires,
   `not_quoted` doesn't, all-present doesn't) and a `doubtCopy.test.ts` case.
 
-## 10. qwen deletion (same round as cutover)
+## 10. qwen deletion (same round as cutover) — ⚠ ON HOLD
+
+> **This section describes option A only and must not be executed while
+> decision 3 is reopened** (see the status banner and `TODO.md` §4). If the
+> post-manual-test decision keeps qwen as a pixel-level re-read tier, this
+> entire section is superseded rather than merely deferred. The paragraph
+> below is preserved verbatim as the option-A plan of record.
 
 P4 deletes the qwen path outright — `vl_quote.py`'s VL-direct recognizer, the
 3-vote orientation pre-check, `dashscope_ocr.py`'s quote-side surface
