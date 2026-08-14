@@ -172,6 +172,14 @@ function onTenderDone(result: TenderBidlistResult) {
   if (projectId.value) persistProjectMeta()
 }
 
+// design/27 §3.1 feedback #2：三产物各自独立呈现——封面/品牌要求的"有没有"
+// 跟采购清单的"有没有"是三件独立的事，不能因为其中一个空就整体报"识别
+// 结果为空"（那正是这轮要修的笼统态）。
+const tenderCoverInfoPresent = computed(() =>
+  !!(tenderResult.value?.project_name || tenderResult.value?.project_code || tenderResult.value?.deadline))
+const tenderBrandInfoPresent = computed(() =>
+  !!(tenderResult.value?.brand_requirement.length || tenderResult.value?.supplier_brands.length))
+
 const excelFile = ref<File | null>(null)
 const excelPreviewing = ref(false)
 async function uploadExcel(file: File) {
@@ -380,18 +388,50 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 
     <!-- Materials strip -->
     <div class="materials-strip">
-      <div class="materials-strip__card">
-        <FilePdfOutlined style="color:#cf1322" />
-        <span v-if="tenderResult">招标文件 ✓ {{ tenderResult.row_count }} 项</span>
-        <span v-else-if="tenderUploading"><LoadingOutlined spin /> 识别中…</span>
-        <a-upload v-else :show-upload-list="false" accept=".pdf,.png,.jpg,.jpeg"
-          :before-upload="(f: File) => { uploadTender(f); return false }">
-          <a-button size="small" type="dashed">上传招标文件</a-button>
-        </a-upload>
+      <div class="materials-strip__card materials-strip__card--tender">
+        <div style="display:flex;align-items:center;gap:6px">
+          <FilePdfOutlined style="color:#cf1322" />
+          <span v-if="!tenderResult && tenderUploading"><LoadingOutlined spin /> 识别中…</span>
+          <a-upload v-else-if="!tenderResult" :show-upload-list="false" accept=".pdf,.png,.jpg,.jpeg"
+            :before-upload="(f: File) => { uploadTender(f); return false }">
+            <a-button size="small" type="dashed">上传招标文件</a-button>
+          </a-upload>
+          <template v-else>
+            招标文件
+            <a-button size="small" type="text" @click="() => { tenderFile = null; tenderResult = null; tenderError = '' }">重新上传</a-button>
+          </template>
+        </div>
         <a-alert v-if="tenderError" type="error" :message="tenderError" show-icon banner style="padding:2px 8px" />
+
+        <!-- design/27 §3.1 feedback #2：三产物各自独立呈现，不用"识别结果为空"
+             这种笼统态盖过去——采购清单/封面信息/品牌要求各有各的有无，互不
+             代表彼此。 -->
+        <div v-if="tenderResult" class="tender-artifacts">
+          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': tenderResult.row_count === 0 }">
+            <span class="tender-artifacts__label">采购清单</span>
+            <span v-if="tenderResult.row_count > 0">✓ {{ tenderResult.row_count }} 项</span>
+            <span v-else>正文无清单，请上传 Excel 附件 →</span>
+          </div>
+          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderCoverInfoPresent }">
+            <span class="tender-artifacts__label">封面信息</span>
+            <span v-if="tenderCoverInfoPresent">
+              ✓
+              <template v-if="tenderResult.project_name">项目名</template>
+              <template v-if="tenderResult.project_code"> · 编号</template>
+              <template v-if="tenderResult.deadline"> · 截止时间</template>
+              已识别
+            </span>
+            <span v-else>封面未识别到项目名/编号/日期，可手动填写</span>
+          </div>
+          <div class="tender-artifacts__item" :class="{ 'tender-artifacts__item--empty': !tenderBrandInfoPresent }">
+            <span class="tender-artifacts__label">品牌要求</span>
+            <span v-if="tenderBrandInfoPresent">✓ {{ tenderResult.brand_requirement.length }} 项业主品牌 · {{ tenderResult.supplier_brands.length }} 家参与品牌</span>
+            <span v-else>未识别到品牌要求（可能原文本就没有）</span>
+          </div>
+        </div>
       </div>
 
-      <div class="materials-strip__card">
+      <div class="materials-strip__card" :class="{ 'materials-strip__card--highlight': tenderResult && tenderResult.row_count === 0 && !excelFile }">
         <FileExcelOutlined style="color:#52c41a" />
         <span v-if="excelFile">采购清单 Excel ✓</span>
         <span v-else-if="excelPreviewing"><LoadingOutlined spin /> 解析中…</span>
@@ -478,8 +518,14 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .workspace-header__title { flex: 1; min-width: 0; }
 .workspace-header__meta { display: flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(0,0,0,0.45); margin-top: 4px; }
 .workspace-header__actions { display: flex; gap: 8px; flex-shrink: 0; }
-.materials-strip { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #fafafa; border-radius: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.materials-strip { display: flex; align-items: flex-start; gap: 16px; padding: 12px 16px; background: #fafafa; border-radius: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .materials-strip__card { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.materials-strip__card--tender { flex-direction: column; align-items: stretch; gap: 6px; min-width: 260px; }
+.materials-strip__card--highlight { outline: 2px solid #52c41a; outline-offset: 2px; border-radius: 4px; padding: 2px 6px; }
+.tender-artifacts { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: rgba(0,0,0,0.65); padding-left: 22px; }
+.tender-artifacts__item { display: flex; align-items: center; gap: 6px; }
+.tender-artifacts__item--empty { color: rgba(0,0,0,0.4); }
+.tender-artifacts__label { flex-shrink: 0; min-width: 56px; color: rgba(0,0,0,0.45); }
 .workspace-tabs { background: #fff; }
 .supplier-tab-content { padding: 8px 0; }
 .supplier-tab-content__progress { padding: 24px; text-align: center; color: rgba(0,0,0,0.55); }
