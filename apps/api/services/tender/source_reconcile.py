@@ -122,3 +122,38 @@ def reconcile_anchors(
         "field_mismatches":    field_mismatches,
         "recommended_source":  "both_consistent" if is_consistent else "excel",
     }
+
+
+def reconcile_quote_items(xlsx_items: list[dict], pdf_items: list[dict]) -> dict:
+    """design/28 §4.1 同供应商 PDF+Excel 双投边界情况——Excel 主、PDF 校核。
+
+    只是一层字段名适配，**不重写对账逻辑**（§4.1 原话："source_reconcile
+    already implements that check; reuse it, do not write a second one"）：
+    招标侧锚点用 name/qty，报价侧规范条目（无论来自 tabular_ingestion 还是
+    paddle_vl OCR，两条路径产出的 shape 本来就统一）用 material/qty——差
+    的只是 material vs name 这一个字段名，qty/spec/unit 本来就同名。
+
+    报价条目没有真实的"序号"列（tabular_ingestion 的列探测表里没有 seq
+    模式，OCR 侧也不落这个字段），用 `document_row_index`（缺省退化为原始
+    列表位置）合成一个 1-based 序号，作为 reconcile_anchors 需要的对齐键
+    ——这是行位置对齐，不是"猜出真实序号"，跟真正的招标锚点序号语义不同，
+    调用方展示这份报告时不应该把这个 seq 当成原始单据上的编号来读。
+    """
+    def _as_anchor_shape(items: list[dict]) -> list[dict]:
+        out = []
+        for i, it in enumerate(items):
+            seq = it.get("document_row_index")
+            seq = (seq + 1) if isinstance(seq, int) else (i + 1)
+            out.append({
+                "seq": str(seq),
+                "name": it.get("material") or it.get("name") or "",
+                "spec": it.get("spec", ""),
+                "unit": it.get("unit", ""),
+                "qty": it.get("qty", ""),
+            })
+        return out
+
+    return reconcile_anchors(
+        _as_anchor_shape(xlsx_items), _as_anchor_shape(pdf_items),
+        source_type="excel_primary",
+    )
