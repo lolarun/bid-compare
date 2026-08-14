@@ -500,6 +500,26 @@ export interface ExtractionJob {
   updated_at: string | null
 }
 
+// design/28 §3 Tier 0 分类结果——apps/api/schemas/intake.py::ClassifyTier0Response
+// 字段名/含义须与后端保持一致（verdict 三选一含 uncertain 是合法答案，不是
+// TS 这边额外造一个"分类失败"状态）。
+export type ClassifyTier0Kind = 'excel' | 'pdf' | 'unsupported'
+export type ClassifyTier0Verdict = 'tender_list' | 'bid_list' | 'uncertain' | 'document' | 'unsupported'
+export type ClassifyTier0Confidence = 'definitive' | 'strong' | 'ambiguous' | ''
+export type ClassifyTier0TextLayer = 'native' | 'scanned' | ''
+
+export interface ClassifyTier0Result {
+  filename: string
+  kind: ClassifyTier0Kind
+  verdict: ClassifyTier0Verdict
+  confidence: ClassifyTier0Confidence
+  text_layer: ClassifyTier0TextLayer
+  price_columns: string[]
+  fill_rate: number | null
+  row_count: number
+  reason: string
+}
+
 // 前端评审 R2（第1块）：quality_status/quality_blocking_reasons/row_ledger/
 // orientation_unresolved 此前在 document_ingestion.py 就被丢弃，从未到达
 // job.result。后端已修复（_merge_quality_metadata，写入 job.result._quality），

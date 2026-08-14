@@ -12,7 +12,7 @@ import type {
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
-  CompareStateResult,
+  CompareStateResult, ClassifyTier0Result,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -142,6 +142,10 @@ export const intakeApi = {
     api.get<{ items: ExtractionJob[]; total: number }>('/intake/jobs', { params }),
   enhance: (data: { job_id?: string; project_id?: number | null; items?: Array<Record<string, unknown>> }) =>
     api.post<EnhanceResponse>('/intake/enhance', data, { timeout: 180_000 }),
+  // design/28 §3 Tier 0——瞬时判定，不建 job，cut 5 拖拽确认屏用它给每份
+  // 刚拖进来的文件一个初步判定，不等真正上传/识别。
+  classifyTier0: (form: FormData) =>
+    api.post<ClassifyTier0Result>('/intake/classify-tier0', form, { timeout: 30_000 }),
 }
 
 // ─── Analysis ───────────────────────────────────────────────────────────────

@@ -15,9 +15,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   CloudUploadOutlined, FilePdfOutlined, FileExcelOutlined, LoadingOutlined,
-  HistoryOutlined, DownloadOutlined, SolutionOutlined,
+  HistoryOutlined, DownloadOutlined, SolutionOutlined, InboxOutlined,
 } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi } from '@/api'
+import { projectApi, supplierApi, analysisApi, intakeApi } from '@/api'
 import type { Supplier, TenderBidlistResult, BidMatrixResult, ExtractionJob } from '@/api/client'
 import { useSupplierUpload } from '@/composables/useSupplierUpload'
 import { useDoubtInbox } from '@/composables/useDoubtInbox'
@@ -187,6 +187,76 @@ async function uploadExcel(file: File) {
   } finally {
     excelPreviewing.value = false
   }
+}
+
+// ─── design/28 cut 5：拖一堆文件进来自动分类 ───────────────────────────────
+// Tier 0（瞬时、零模型调用，document_classify.py）能确定性判定的只有
+// Excel——无价格列→采购清单，价格列几乎填满→报价清单，两者之间→不确定。
+// PDF 结构性地判不出招标/投标（那要 Tier 1，识别跑完之后才有信号，design/28
+// §3），这里退而求其次：用文字层（native/scanned）当弱启发式——真实语料里
+// 招标 PDF 常是原生文字层（业主方电子排版），投标 PDF 常是纯扫描件（供应商
+// 打印后扫描提交），MANIFEST.md 记录的 9 份真实样本这条经验规律没有反例，
+// 但这终究是弱信号，不是判据，所以：
+//   · 只在"招标位还空着"时才把 native PDF 猜成招标——招标位已经有文件时，
+//     不会把后续 PDF 重新猜成招标去顶替，默认全部按投标处理。
+//   · 每一份的路由结果都用 message 提示出来（design/28 §5 red line 1"结果
+//     必须可见"），猜错了用户能立刻看见并改用下方对应区域重新上传——不是
+//     悄悄路由、错了也不告诉你。
+// 不确定的 Excel / 无法处理的类型，明确提示改走下面对应卡片，不强行路由。
+const classifyingCount = ref(0)
+
+async function classifyAndRouteFile(file: File) {
+  classifyingCount.value++
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    let result
+    try {
+      const { data } = await intakeApi.classifyTier0(form)
+      result = data
+    } catch {
+      message.error(`「${file.name}」分类失败，请改用下方对应区域手动上传`)
+      return
+    }
+
+    if (result.kind === 'excel') {
+      if (result.verdict === 'tender_list') {
+        message.info(`「${file.name}」识别为采购清单（无价格列），按此处理`)
+        await uploadExcel(file)
+      } else if (result.verdict === 'bid_list') {
+        message.info(`「${file.name}」识别为报价清单（价格列填充率 ${((result.fill_rate ?? 0) * 100).toFixed(0)}%），按投标文件处理`)
+        await onDropBidFiles(file)
+      } else {
+        message.warning(`「${file.name}」是清单还是报价单不确定（${result.reason}），请改用下方对应区域手动上传`)
+      }
+      return
+    }
+
+    if (result.kind === 'pdf') {
+      const guessTender = result.text_layer === 'native' && !tenderResult.value
+      if (guessTender) {
+        message.info(`「${file.name}」原生文字层，按招标文件处理——如果不对，请用下方「投标文件」区域重新上传`)
+        // IntakeUploader 自己接管上传+轮询，这里只能通过它的 dragger 触发；
+        // 工作台目前没有"程序化调用 IntakeUploader"的接口，所以招标位的猜测
+        // 只做提示，真正的文件仍需要用户确认后从招标卡片里选——避免为了
+        // "自动"而绕开 IntakeUploader 已经做好的上传态/失败重试处理。
+        message.warning(`请把「${file.name}」拖进上方「招标文件」卡片完成上传`)
+      } else {
+        message.info(`「${file.name}」${result.text_layer === 'scanned' ? '扫描件' : '文档'}，按投标文件处理`)
+        await onDropBidFiles(file)
+      }
+      return
+    }
+
+    message.warning(`「${file.name}」${result.reason || '不支持的文件类型'}`)
+  } finally {
+    classifyingCount.value--
+  }
+}
+
+async function onDropAnyFiles(file: File) {
+  classifyAndRouteFile(file)
+  return false
 }
 
 // ─── 疑点收件箱（约束2：tab 徽标只读这里，不另起计数） ─────────────────────
@@ -376,6 +446,22 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </div>
     </div>
 
+    <!-- design/28 cut 5：拖一堆文件进来自动分类——Excel 是确定性判据（无价格
+         列→采购清单，填满→报价清单），PDF 用文字层弱启发式猜招标/投标，猜
+         错了会用 message 提示、下方对应卡片仍可手动重新上传纠正。 -->
+    <a-upload-dragger
+      :show-upload-list="false" :multiple="true"
+      accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
+      :before-upload="onDropAnyFiles"
+      class="auto-classify-dragger"
+    >
+      <p class="ant-upload-drag-icon"><InboxOutlined style="font-size:32px;color:#1677ff" /></p>
+      <p class="ant-upload-text" style="font-size:14px">拖入任意招标/投标文件，自动识别归类</p>
+      <p class="ant-upload-hint" style="font-size:12px">
+        <LoadingOutlined v-if="classifyingCount > 0" spin /> {{ classifyingCount > 0 ? '识别中…' : '不确定的文件会提示改用下方对应区域手动上传' }}
+      </p>
+    </a-upload-dragger>
+
     <!-- Materials strip -->
     <div class="materials-strip">
       <div class="material-card">
@@ -532,6 +618,11 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .workspace-header__meta { display: flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(0,0,0,0.45); margin-top: 4px; }
 .workspace-header__meta :deep(.ant-input)::placeholder { color: rgba(0,0,0,0.3); font-style: italic; }
 .workspace-header__actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* design/28 cut 5 自动分类拖拽区——视觉上比下方三张精确卡片更突出（更高、
+   更亮的强调色），暗示"这是首选入口，下面三张是需要手动指定类型时的备选"。 */
+.auto-classify-dragger { margin-bottom: 12px; border-color: #91caff; background: #f0f7ff; }
+.auto-classify-dragger :deep(.ant-upload-drag-icon) { margin-bottom: 6px; }
 
 /* Materials strip：三张等宽卡片，不是三个内联按钮——每张卡片自己决定内容
    （上传态用 dragger，完成态用摘要），卡片本身的边框/圆角/内边距统一。 */
