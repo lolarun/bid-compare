@@ -192,6 +192,20 @@ async function uploadExcel(file: File) {
 }
 
 // ─── 疑点收件箱（约束2：tab 徽标只读这里，不另起计数） ─────────────────────
+// design/27 §10 步骤4：对齐核查独立视图需要 category + submission_ids
+// （AnchorReviewMatrix 的必需 props）——工作台已经知道这些值，通过 query
+// 带过去，不用让用户在核查页里重新选一遍。
+function goToAlignment() {
+  if (!projectId.value) return
+  router.push({
+    path: `/workspace/${projectId.value}/align`,
+    query: {
+      category: category.value,
+      submission_ids: confirmedSubmissionIds.value.join(',') || undefined,
+    },
+  })
+}
+
 const { dryRunByFile, dryRunLoading, refreshDryRun } = useDoubtInbox({
   batchFiles,
   taskConfig,
@@ -200,7 +214,7 @@ const { dryRunByFile, dryRunLoading, refreshDryRun } = useDoubtInbox({
   anchorReviewResult: ref(null),
   onGoToFile: (fileId: string) => { activeTab.value = fileId },
   onGoToReconcile: () => {},
-  onGoToAlignment: () => { if (projectId.value) router.push(`/compare/${projectId.value}/align`) },
+  onGoToAlignment: goToAlignment,
 })
 
 function badgeCount(fileId: string): number {
@@ -356,7 +370,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         </div>
       </div>
       <div class="workspace-header__actions">
-        <a-button @click="() => { if (projectId) router.push(`/compare/${projectId}/align`) }">
+        <a-button @click="goToAlignment">
           <SolutionOutlined />对齐核查
         </a-button>
         <a-button><HistoryOutlined />历史</a-button>

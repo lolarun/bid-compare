@@ -156,6 +156,15 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/compare/WorkspaceView.vue'),
         meta: { title: '比价工作台', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
       },
+      // design/27 §10 步骤4 —— 对齐核查独立视图（user decision D1），从工作台
+      // 头部按钮进入，query 带 category/submission_ids（AnchorReviewMatrix 的
+      // 必需 props，工作台已知这些值，不用再让用户选一遍）。
+      {
+        path: '/workspace/:projectId/align',
+        name: 'CompareWorkspaceAlign',
+        component: () => import('@/views/compare/AlignmentReviewView.vue'),
+        meta: { title: '对齐核查', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
+      },
       // Legacy path redirects — inside layout so auth guard runs before redirect
       { path: '/quotes', redirect: '/analysis' },
       { path: '/history', redirect: '/analysis' },
