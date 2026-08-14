@@ -148,13 +148,22 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '招标比价分析', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
       },
       // design/27 §10 步骤3 —— 供应商主轴工作台新路由，跟旧向导（上面那条
-      // CompareDeep）并存，互不影响。退役旧向导+重定向是步骤5 的范围，现在
-      // 不动 CompareDeep，也不进侧边菜单（还没到可以替代旧入口的阶段）。
+      // CompareDeep）并存，互不影响。
+      //
+      // 步骤5 顺序调整（2026-08-14 复核意见）：prj2 端到端人工验证从"步骤5
+      // 的收尾动作"改成"步骤5 的准入条件"——新工作台此前从未被真人端到端
+      // 点过（每轮浏览器验证都卡在登录态），撤旧向导之前必须先证明新的能
+      // 走通"确认入库→矩阵→导出"整条链路，不能假设它能走通。这里先给个
+      // 侧边栏入口方便人工验证，标"（新版）"跟旧入口临时并存——两个入口
+      // 共存是可接受的过渡态，因为它有明确终点（验证通过就收敛成一个）。
       {
         path: '/workspace/:projectId?',
         name: 'CompareWorkspace',
         component: () => import('@/views/compare/WorkspaceView.vue'),
-        meta: { title: '比价工作台', public: false, hideInMenu: true, roles: ['管理员', '比价员'] as Role[] },
+        meta: {
+          title: '招标比价（新版）', icon: 'AppstoreOutlined', group: '业务功能',
+          public: false, roles: ['管理员', '比价员'] as Role[],
+        },
       },
       // design/27 §10 步骤4 —— 对齐核查独立视图（user decision D1），从工作台
       // 头部按钮进入，query 带 category/submission_ids（AnchorReviewMatrix 的
