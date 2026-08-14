@@ -95,8 +95,15 @@ export function useSupplierUpload(deps: {
   confirmedCategories: Ref<string[]>
   categoryExplicitlySelected: Ref<boolean>
   allSuppliers: Ref<Supplier[]>
+  // 桥接（2026-08-13）：missing_total 复核弹窗的"去核对这些行"按钮——调用方
+  // 据此展开/滚动到对应文件的行级编辑器。不传时退化为纯提示，见
+  // batchConfirmError.ts::handleBatchConfirmError 的 onViewDetails 参数。
+  onMissingTotalDetails?: (fileId: string | number) => void
 }) {
-  const { taskConfig, tenderCategory, confirmedCategories, categoryExplicitlySelected, allSuppliers } = deps
+  const {
+    taskConfig, tenderCategory, confirmedCategories, categoryExplicitlySelected, allSuppliers,
+    onMissingTotalDetails,
+  } = deps
 
   // Per-supplier upload state for Step 2 (legacy slot mode)
   const supplierUploads = reactive<Record<number, {
@@ -222,6 +229,8 @@ export function useSupplierUpload(deps: {
       slot.batch_id = result.batch_id
       message.success(`已入库 ${result.line_count} 条报价${copyDedupNote(result.copy_dedup)}`)
     } catch (e) {
+      // legacy 单供应商 tab 模式：ExtractionEditor 本来就常驻展示（不像批量卡片
+      // 需要展开），missing_total 的"去核对"没有额外跳转目标，不传 onViewDetails。
       if (await handleBatchConfirmError(e, message)) {
         confirmingSuppliers.value[supplierId] = false  // 重试前先解锁，避免被自己的守卫挡住
         await confirmSupplier(supplierId, true)
@@ -539,7 +548,7 @@ export function useSupplierUpload(deps: {
       // 注：后端 confirm_batch 从未产出过 "supplier_alias_conflict" 这个错误形状
       // （供应商同名合并走 /suppliers 的另一条独立解析路径），此前这里有一段处理
       // 它的 window.confirm 分支是永远走不到的死代码，一并清掉。
-      if (await handleBatchConfirmError(e, message)) {
+      if (await handleBatchConfirmError(e, message, () => onMissingTotalDetails?.(entry.id))) {
         entry.confirming = false
         await confirmBatchEntry(entry, true)  // 用户核对差异后确认强制入库
       }

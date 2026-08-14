@@ -39,6 +39,11 @@ import { extractErrMsg } from '@/utils/errors'
 // 校对入库/移除/跨项目清空/刷新恢复）迁到这个 composable，IndexView.vue 只留
 // 编排（导航、跟 Step1/Step4 的耦合点），不再直接持有那段状态和函数体。
 import { useSupplierUpload, BATCH_PROGRESS_STEPS } from '@/composables/useSupplierUpload'
+// design/24 §2/§5 桥接：dry-run 预检 + 结构化疑点已经建好但从未挂载到这个
+// 批量卡片流程（2026-08-13 手测发现，见 docs/项目资料/用户反馈/2026-08-13/）——
+// 这里只接线，判据/阻断逻辑不变。
+import { useDoubtInbox } from '@/composables/useDoubtInbox'
+import { issueMeta } from '@/utils/doubtCopy'
 
 // Steps: 0=config, 1=procurement list, 2=supplier quotes, 3=alignment review, 4=matrix
 const STEP_RESULTS = 4
@@ -584,7 +589,29 @@ const {
   confirmedCategories,
   categoryExplicitlySelected,
   allSuppliers,
+  onMissingTotalDetails: (fileId) => expandCard(String(fileId)),
 })
+
+// 桥接：批量卡片的行级查看/编辑展开状态（纯 UI，不进 useSupplierUpload——那
+// 个 composable 是状态/网络逻辑，展开与否跟后端无关）。
+const expandedCards = ref<Set<string>>(new Set())
+function toggleCardExpanded(id: string) {
+  const next = new Set(expandedCards.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedCards.value = next
+}
+function expandCard(id: string) {
+  if (!expandedCards.value.has(id)) toggleCardExpanded(id)
+  requestAnimationFrame(() => {
+    document.getElementById(`batch-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
+
+// 已经跑过一次 dry-run 预检的卡片——识别刚完成时自动预检一次即可，避免用户
+// 编辑名称/行内容时每次改动都打后端（useDoubtInbox.ts 自己的注释就是这条
+// 边界：刷新只在"进入时/编辑保存后/手动重新核对"，不做深度 watch 自动重跑）。
+const dryRunAutoChecked = new Set<string>()
 
 // Bid matrix result (Step 4)
 const matrixResult = ref<BidMatrixResult | null>(null)
@@ -775,6 +802,30 @@ const tenderMatchSummary = ref<AnchorMatchSummary | null>(null)
 const tenderUploading = ref(false)
 const anchorReviewResult = ref<AnchorReviewResult | null>(null)
 const anchorReviewLoading = ref(false)
+
+// 桥接：dry-run 预检已建好（B3），接上批量卡片流程——识别完成后自动跑一次，
+// 让结构性疑点（missing_total 等）在点「校对入库」之前就可见，不再是"提交
+// 才被 422 拦下"。跳转目标是"展开对应卡片"，不是独立 Inbox 页（那是 design/24
+// §8 步骤 5 的范围，这里只做半天桥接）。
+const { dryRunByFile, dryRunLoading, refreshDryRun } = useDoubtInbox({
+  batchFiles,
+  taskConfig,
+  reconcileResult,
+  reconcileConfirmed,
+  anchorReviewResult,
+  onGoToFile: (fileId: string) => expandCard(fileId),
+  onGoToReconcile: () => { showExcelPanel.value = true },
+  onGoToAlignment: () => { currentStep.value = 3 },  // 对齐核查（同现有导航惯例，见 :1048 等处的字面量用法）
+})
+
+watch(batchFiles, (files) => {
+  for (const f of files) {
+    if (f.status === 'done' && !f.confirmed && f.finalSupplierName.trim() && !dryRunAutoChecked.has(f.id)) {
+      dryRunAutoChecked.add(f.id)
+      refreshDryRun(f)
+    }
+  }
+}, { deep: true })
 
 // Run tender list matching (called when entering Step 3)
 async function runTenderMatch(): Promise<boolean> {
@@ -1540,7 +1591,7 @@ async function runMatrix() {
           </a-popconfirm>
         </div>
         <div v-if="batchFiles.length > 0" class="batch-list">
-          <div v-for="f in batchFiles" :key="f.id" class="batch-card" :class="{ 'batch-card--done': f.confirmed }">
+          <div v-for="f in batchFiles" :key="f.id" :id="`batch-card-${f.id}`" class="batch-card" :class="{ 'batch-card--done': f.confirmed }">
             <div class="batch-card__head">
               <LoadingOutlined v-if="f.status === 'uploading' || f.status === 'processing'" spin style="color:#1890ff" />
               <CheckOutlined v-else-if="f.confirmed" style="color:#52c41a" />
@@ -1635,6 +1686,27 @@ async function runMatrix() {
                   （{{ f.quality!.row_ledger!.short_pages.length }} 页产出不足）</span
                 >
               </div>
+
+              <!-- 桥接：dry-run 预检的结构性疑点（design/24 B3，2026-08-13 接线）——
+                   识别完成后自动跑一次；这里提前显示，不用等点「校对入库」被 422 拦下。 -->
+              <a-alert
+                v-if="dryRunByFile[f.id]?.issues?.length"
+                :type="dryRunByFile[f.id]!.issues!.some(i => issueMeta(i.error).severity === 'block') ? 'error' : 'warning'"
+                show-icon
+                style="margin-bottom:8px"
+                message="校对预检：发现待处理项"
+              >
+                <template #description>
+                  <ul style="margin:4px 0 0;padding-left:18px;font-size:12px">
+                    <li v-for="(iss, i) in dryRunByFile[f.id]!.issues" :key="i">
+                      <a-tag :color="issueMeta(iss.error).severity === 'block' ? 'red' : 'orange'" style="margin-right:4px">
+                        {{ issueMeta(iss.error).shortLabel }}
+                      </a-tag>{{ iss.message }}
+                    </li>
+                  </ul>
+                </template>
+              </a-alert>
+
               <div class="batch-card__supplier-row">
                 <span style="font-size:12px;color:rgba(0,0,0,0.55)">识别供应商：</span>
                 <a-auto-complete
@@ -1653,7 +1725,25 @@ async function runMatrix() {
                 />
                 <a-tag v-if="f.matchedSupplierId" color="blue" style="margin-left:4px;font-size:11px">已关联</a-tag>
                 <a-tag v-else style="margin-left:4px;font-size:11px">陌生</a-tag>
+                <a-button size="small" @click="toggleCardExpanded(f.id)">
+                  {{ expandedCards.has(f.id) ? '收起明细' : '查看/编辑明细' }}（{{ f.items.length }} 项）
+                </a-button>
+                <a-button size="small" :loading="dryRunLoading[f.id]" @click="dryRunAutoChecked.add(f.id); refreshDryRun(f)">
+                  重新核对
+                </a-button>
                 <a-button type="primary" size="small" :loading="f.confirming" @click="confirmBatchEntry(f)">校对入库</a-button>
+              </div>
+
+              <!-- 桥接：行级查看/编辑（design/24 §5，2026-08-13 从"Legacy mode"分支接到
+                   批量卡片流程——之前只有单供应商 tab 模式能用，批量模式点「校对入库」
+                   撞见 missing_total 时"返回表格"无表可返，就是缺这块。 -->
+              <div v-if="expandedCards.has(f.id)" style="margin-top:10px">
+                <ExtractionEditor
+                  schema="quote"
+                  :model-value="f.items as unknown[] as any"
+                  :show-actions="false"
+                  @update:model-value="(v: any) => { f.items = v }"
+                />
               </div>
             </div>
           </div>
