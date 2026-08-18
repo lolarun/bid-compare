@@ -1,0 +1,46 @@
+# MEMPAS — 与 pixel-lora 共宿主 ECS（106.14.113.209）的部署 compose 文件。
+# 见 docs/DEPLOY.md §三。跟 docker-compose.yml（本地 build、独占 80 端口，
+# 单机部署用）并存，互不影响——两个文件各自服务不同的部署场景。
+#
+# 跟 docker-compose.yml 的关键区别：
+#   - image: 拉 ACR 镜像，不在 ECS 上 build
+#   - 没有 frontend 服务——静态文件由 scripts/deploy.sh 提取到共享 nginx
+#     读的目录，不是常驻容器
+#   - backend 端口发布到 pixel-lora 共享 nginx 所在 bridge 网络的网关地址
+#     （172.18.0.1，非 0.0.0.0），不对公网暴露
+#
+# 用法： docker compose -f docker-compose.prod.yml pull backend
+#        docker compose -f docker-compose.prod.yml up -d --remove-orphans
+services:
+  backend:
+    image: ${ACR_REGISTRY}/bidcom/mempas-api:${TAG:-latest}
+    container_name: mempas-api
+    restart: unless-stopped
+    env_file:
+      # 密钥（DASHSCOPE_API_KEY 等）——不 commit，见 apps/api/.env.example
+      - apps/api/.env
+    environment:
+      UPLOAD_DIR: /app/data/uploads
+      EXTRACTION_MODE: thread
+      EXTRACTION_THREAD_POOL_SIZE: "8"
+    volumes:
+      - ./data:/app/data
+    ports:
+      # 绑 pixel-lora 共享 nginx 所在 bridge 网络（infra_default）的网关
+      # 地址——不是 0.0.0.0，从监听地址层面排除公网可达，不依赖 ufw/iptables
+      # 规则对不对。172.18.0.1 是 2026-08-18 实测值，如果 infra_default
+      # 被完整重建过（docker compose down 而不只是 up -d），先用
+      # `docker network inspect infra_default --format '{{json .IPAM.Config}}'`
+      # 重新核实网关有没有变，再改这里 + 对应改 pixel-lora nginx.conf 里的
+      # proxy_pass（docs/DEPLOY.md §3.4）。
+      - "172.18.0.1:8100:8000"
+    deploy:
+      resources:
+        limits:
+          # 与 pixel-lora 共宿主的 ECS 是 8C16G，留给 bid-compare 的预算见
+          # docs/DEPLOY.md §一
+          cpus: "1.5"
+          memory: 2.5G
+        reservations:
+          cpus: "0.5"
+          memory: 512M

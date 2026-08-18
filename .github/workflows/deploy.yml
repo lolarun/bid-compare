@@ -1,0 +1,77 @@
+name: build-and-deploy
+
+# push 到 main 时构建两个镜像 → 推阿里云 ACR（复用 pixel-lora 的实例，
+# 命名空间 bidcom） → ssh ECS 跑 scripts/deploy.sh（pull + 重启 + 提取前端
+# 静态文件 + reload 共享 nginx）。结构参照 pixel-lora 的
+# .github/workflows/deploy.yml，去掉了它的 path-filter 矩阵——bid-compare
+# 只有 2 个镜像，没必要那么复杂，每次 push main 都构建两个就够。见
+# docs/DEPLOY.md §3.1。
+#
+# 需要的 GitHub Secrets（bid-compare 仓库自己的 Settings → Secrets，见
+# docs/DEPLOY.md §3.1 表格）：
+#   ACR_REGISTRY   与 pixel-lora 复用同一个 ACR 实例地址
+#   ACR_USERNAME   ACR 访问凭证用户名（与 pixel-lora 复用）
+#   ACR_PASSWORD   ACR 访问凭证密码（与 pixel-lora 复用）
+#   ECS_HOST       106.14.113.209
+#   ECS_SSH_KEY    ssh 私钥，PEM 格式
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mempas-api
+            dockerfile: apps/api/Dockerfile
+          - image: mempas-web
+            dockerfile: apps/www/Dockerfile.builder
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ secrets.ACR_REGISTRY }}/bidcom/${{ matrix.image }}:latest
+            ${{ secrets.ACR_REGISTRY }}/bidcom/${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy on ECS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: root
+          key: ${{ secrets.ECS_SSH_KEY }}
+          script: |
+            cd /opt/mempas
+            git fetch origin main
+            git reset --hard origin/main
+            bash scripts/deploy.sh
