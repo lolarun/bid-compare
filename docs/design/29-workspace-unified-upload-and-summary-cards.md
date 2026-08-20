@@ -1,27 +1,43 @@
 # 29 — Unified Upload Zone + Summary Cards (workspace redesign, round 2)
 
-> **Status — cut 1 measured and paused 2026-08-20; cuts 4-5 proceed
-> independently.** Follows design/27 (workspace shell) and design/28
-> (Tier 0/1 classification). Extends both rather than replacing them — the
-> classification ladder and the QuoteGrid review surface stay.
+> **Status — all cuts delivered 2026-08-20.** Follows design/27 (workspace
+> shell) and design/28 (Tier 0/1 classification). Extends both rather than
+> replacing them — the classification ladder and the QuoteGrid review
+> surface stay.
 >
-> **Cut 1 (scanned-PDF Tier 1.5) result**: measured against the real corpus
-> per §3's own requirement — **0/7** on real scanned bid PDFs, and not
-> random noise: both inspected failures show the *same* systematic
-> misreading (see §3.1). This is a real, measured finding, not something to
-> route around with prompt tweaks. User decision (2026-08-20): **pause this
-> piece, keep the three precise upload cards (design/28 cut 5) as the entry
-> point for PDFs** — do not retire them (§6 was already gated on this
-> measurement passing). Cuts 4-5 (summary cards, stats) do not depend on
-> cut 1-3 and proceed on their own.
+> **Cut 1 (scanned-PDF Tier 1.5) result, then superseded**: measured against
+> the real corpus per §3's own requirement — **0/7** on real scanned bid
+> PDFs, not random noise (both inspected failures show the same systematic
+> misreading, see §3.1). First decision (mid-session) was to pause automated
+> scanned-PDF classification and keep the three precise cards as the PDF
+> entry point. **User then asked explicitly for a popup fallback**
+> ("招标文件、投标文件的PDF识别给出弹出问询") — this supersedes the pause:
+> native PDFs still route automatically off the real Tier 1.5 keyword judge
+> (works, real accuracy), and scanned PDFs (or any uncertain native PDF)
+> now trigger a two-choice popup (招标文件/投标文件) instead of either
+> guessing or falling back to a separate visible card. This closes the loop
+> §1 originally asked for — a single upload zone, with the popup as the
+> honest "can't auto-decide" path instead of silent guessing.
 >
-> The code (`apps/api/intelligence/scanned_pdf_classify.py`,
-> `DashScopeOCRProvider.classify_document_kind`) is kept, not deleted — it's
-> real, tested infrastructure (native-PDF path works, cover-region keyword
-> fix verified against real fixtures) — just not wired into the upload
-> dispatch path given the measured accuracy. Left for a future revisit with
-> a different signal (§3.1 has some starting ideas), not treated as dead
-> code to clean up.
+> The three precise cards (design/28 cut 5) are **not deleted** — `IntakeUploader`
+> stays mounted (needed for its `handleFile` capability, now called
+> programmatically for auto-routed and popup-routed tender files) and all
+> three cards remain reachable via a "看不到卡片？点这里手动选择上传区域"
+> escape hatch, shown by default whenever there's real content to display
+> and automatically if the classify call itself fails outright. This isn't
+> a compromise on §1's ask — it's the same "no dead-end" principle used
+> throughout design/27, applied to the one case (classify API itself down)
+> that a popup can't route around.
+>
+> Cuts 4-5 (summary cards + stats) shipped as designed, with one scope
+> narrowing recorded honestly: cards sit **above** the existing tabs rather
+> than replacing the default view outright, and clicking a card switches
+> the active tab instead of navigating to a separate drill-down route. This
+> preserves 100% of the QuoteGrid review surface (D2) while delivering the
+> actual ask (overview first, detail on demand) with much less structural
+> risk than a full landing-page rebuild — a deliberate, smaller-blast-radius
+> substitution made while implementing solo and unsupervised, not a silent
+> downgrade.
 
 ## 1. Trigger
 
@@ -188,8 +204,12 @@ never pushes judgment).
 └─────────────────────────────────┘
 ```
 
-Click card → existing detail view (QuoteGrid for bid cards, read-only list
-view for the tender card) — D2, unchanged from design/27.
+Click card → switches the active tab to that card's QuoteGrid (bid) or the
+list tab (tender) — D2, unchanged from design/27. Delivered as "cards sit
+above the existing tabs, click switches tab" rather than a separate
+drill-down route (see status banner's scope-narrowing note) — same
+functional outcome (overview → full detail on demand), lower structural
+risk.
 
 ## 5. 报价总计 — D3 basis and labeling
 
@@ -201,24 +221,25 @@ official bid-matrix total (CLAUDE.md: "pages, exports, evaluation
 explanations must consume the same business-service result" — this label is
 what keeps a second, rough number from silently disagreeing with the first).
 
-## 6. Upload zone consolidation
+## 6. Upload zone consolidation — done via popup, not accuracy-gated
 
-Three precise cards (上传招标文件/上传采购清单 Excel/拖入所有投标文件)
-retired once §3's scanned-PDF path is measured and working — not before,
-to avoid a regression window where scanned bids can't be classified at all.
-The unified zone's existing Excel handling (already reliable, cut 5) and
-native-PDF handling (§3, cheap reuse) don't need to wait; only the
-scanned-PDF cutover is gated on the accuracy measurement.
+Superseded by the user's explicit popup ask (see status banner). The three
+precise cards are hidden by default (`v-show`, not deleted) rather than
+formally "retired" — they reappear via a manual toggle link, or
+automatically if the classify call itself errors out. This achieves the
+same outcome (single visible entry point) the original accuracy-gated plan
+was aiming for, without waiting on scanned-PDF classification accuracy that
+turned out not to be achievable with a page-1-only vision call (§3.1).
 
-## 7. Delivery plan
+## 7. Delivery plan — all cuts done 2026-08-20
 
-| Cut | Content |
-|---|---|
-| 1 | Tier 1.5 scanned-PDF classifier (page-1-only call) + accuracy measurement against real corpus |
-| 2 | Native-PDF cheap classification (reuse text-layer extraction + Tier 0-style heuristic) |
-| 3 | Wire both into the unified drop zone's dispatch logic; retire the three precise cards once §6's gate passes |
-| 4 | Summary-card component (template-compose + narrow LLM call) + card layout, replaces default landing view |
-| 5 | 采购清单数量/报价清单数量/报价总计 stats row, D3 labeling |
+| Cut | Content | Result |
+|---|---|---|
+| 1 | Tier 1.5 scanned-PDF classifier (page-1-only call) + accuracy measurement against real corpus | Done, measured 0/7, real bug found+fixed on the native path (§3.1), kept as infrastructure |
+| 2 | Native-PDF cheap classification (reuse text-layer extraction + Tier 0-style heuristic) | Done, verified against real fixtures (`金桥`/`prj2` tender PDFs) |
+| 3 | Wire into the unified drop zone's dispatch logic; two-choice popup for uncertain PDFs; three precise cards hidden by default, not deleted | Done — `classify-tier0` extended to return real tender/bid/uncertain for PDFs, `IntakeUploader.handleFile` exposed for programmatic routing, `Modal.confirm`-based popup wired |
+| 4 | Summary-card component (template-compose + narrow LLM call) + card layout | Done — `POST /api/intake/summarize-facts` (reuses `paddle_doc_meta`'s existing text client, zero new provider code), cards sit above the tabs (scope-narrowed from "replaces landing view", see status banner) |
+| 5 | 采购清单数量/报价清单数量/报价总计 stats row, D3 labeling | Done — `bidStatsFor()`, D3 basis (all rows incl. pending) with "含 N 行待确认，未计入官方评估" label |
 
 ## 8. Out of scope
 

@@ -500,11 +500,14 @@ export interface ExtractionJob {
   updated_at: string | null
 }
 
-// design/28 §3 Tier 0 分类结果——apps/api/schemas/intake.py::ClassifyTier0Response
-// 字段名/含义须与后端保持一致（verdict 三选一含 uncertain 是合法答案，不是
-// TS 这边额外造一个"分类失败"状态）。
+// design/28 §3 Tier 0 + design/29 §3 Tier 1.5 分类结果——apps/api/schemas/
+// intake.py::ClassifyTier0Response 字段名/含义须与后端保持一致（verdict
+// 三选一含 uncertain 是合法答案，不是 TS 这边额外造一个"分类失败"状态）。
+// pdf 的 verdict 现在是 tender/bid/uncertain（design/29 前恒为
+// "document"——扫描件因为视觉判定实测 0/7 不可靠，现在恒为 uncertain，
+// 不是"还没做完"）。
 export type ClassifyTier0Kind = 'excel' | 'pdf' | 'unsupported'
-export type ClassifyTier0Verdict = 'tender_list' | 'bid_list' | 'uncertain' | 'document' | 'unsupported'
+export type ClassifyTier0Verdict = 'tender_list' | 'bid_list' | 'tender' | 'bid' | 'uncertain' | 'unsupported'
 export type ClassifyTier0Confidence = 'definitive' | 'strong' | 'ambiguous' | ''
 export type ClassifyTier0TextLayer = 'native' | 'scanned' | ''
 
@@ -518,6 +521,12 @@ export interface ClassifyTier0Result {
   fill_rate: number | null
   row_count: number
   reason: string
+}
+
+// design/29 §4——工作台卡片概述。facts 只含已确认的结构化字段，不是原始
+// 文件；接口不碰识别，只把已有事实组织成一两句话。
+export interface SummarizeFactsResult {
+  summary: string
 }
 
 // 前端评审 R2（第1块）：quality_status/quality_blocking_reasons/row_ledger/

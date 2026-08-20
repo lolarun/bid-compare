@@ -40,19 +40,37 @@ class JobListResponse(BaseModel):
     total: int
 
 
+class SummarizeFactsRequest(BaseModel):
+    """design/29 §4——工作台卡片概述。facts 是**已经抽取、已经确认过**的
+    结构化字段（project_name/row_count 这些），不是原始文件——这个接口
+    不碰识别，只把已有事实组织成一两句话。"""
+
+    kind: str          # "tender" | "bid"
+    facts: dict[str, Any] = Field(default_factory=dict)
+
+
+class SummarizeFactsResponse(BaseModel):
+    summary: str
+
+
 class ClassifyTier0Response(BaseModel):
-    """design/28 §3 Tier 0——瞬时、零模型调用的文件分类结果。
+    """design/28 §3 Tier 0 + design/29 §3 Tier 1.5 的合并判定结果。
 
     xlsx/xls → verdict 是 tender_list/bid_list/uncertain 三选一（uncertain
-    是合法答案，不是"分类失败"）。pdf → verdict 恒为 "document"，附带
-    text_layer 信号；招标/投标要等 Tier 1（识别跑完之后）才判得出，这个
-    字段不含糊——前端看到 "document" 就该知道还没分类完。
+    是合法答案，不是"分类失败"）。
+
+    pdf → verdict 是 tender/bid/uncertain 三选一（design/29 前是恒为
+    "document"，现在 Tier 1.5 接进来了）：原生文字层 PDF 走零模型调用的
+    封面关键词判据，能给出真实判定；扫描件**不调用**视觉模型（design/29
+    §3.1 实测 0/7，证明这条路径不可靠，调用它只会给一个比不猜还差的偏向
+    性错误答案）——扫描件恒为 uncertain，前端看到 uncertain 就该弹"这是
+    招标文件还是投标文件？"两选一，不是等它自己判出来。
     """
 
     filename: str
     kind: str            # "excel" | "pdf" | "unsupported"
-    verdict: str          # xlsx: tender_list/bid_list/uncertain；pdf: document；其他: unsupported
-    confidence: str = ""  # xlsx: definitive/strong/ambiguous；pdf 留空（Tier 0 对 pdf 不产出置信度）
+    verdict: str          # xlsx: tender_list/bid_list/uncertain；pdf: tender/bid/uncertain；其他: unsupported
+    confidence: str = ""  # xlsx: definitive/strong/ambiguous；pdf 留空（Tier 1.5 对 pdf 不产出置信度分档，只有能判/不能判两种）
     text_layer: str = ""  # pdf 专属：native/scanned
     price_columns: list[str] = Field(default_factory=list)
     fill_rate: float | None = None

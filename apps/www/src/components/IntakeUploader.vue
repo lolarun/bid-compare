@@ -201,7 +201,10 @@ onBeforeUnmount(() => {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
 })
 
-defineExpose({ retry, currentJob })
+// handleFile 暴露给外部程序化触发用（design/29 §3 统一拖拽区：分类判出
+// "招标"后不用再让用户手动把文件拖进这张卡片一次——直接调这个方法复用
+// 同一套上传/轮询/失败重试逻辑，不用重写）。
+defineExpose({ retry, currentJob, handleFile })
 </script>
 
 <template>

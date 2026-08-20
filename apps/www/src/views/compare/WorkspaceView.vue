@@ -12,7 +12,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import {
   CloudUploadOutlined, FilePdfOutlined, FileExcelOutlined, LoadingOutlined,
   HistoryOutlined, DownloadOutlined, SolutionOutlined, InboxOutlined,
@@ -20,6 +20,7 @@ import {
 import { projectApi, supplierApi, analysisApi, intakeApi } from '@/api'
 import type { Supplier, TenderBidlistResult, BidMatrixResult, ExtractionJob } from '@/api/client'
 import { useSupplierUpload } from '@/composables/useSupplierUpload'
+import type { BatchFileEntry } from '@/composables/useSupplierUpload'
 import { useDoubtInbox } from '@/composables/useDoubtInbox'
 import QuoteGrid from '@/components/QuoteGrid.vue'
 import BidMatrix from './components/BidMatrix.vue'
@@ -130,14 +131,27 @@ const tenderResult = ref<TenderBidlistResult | null>(null)
 const tenderJob = ref<ExtractionJob | null>(null)
 const tenderError = ref('')
 const uploaderContext = computed(() => ({ project_id: projectId.value ?? undefined }))
+// design/29 §3/§6：统一拖拽区是唯一入口，招标文件的实际上传/轮询逻辑还是
+// IntakeUploader（约束3同一个精神：复用，不重写）——程序化触发它，不再手写
+// 第二份上传逻辑。这个 ref 只在"自动路由到招标"和"轮询期间不想露出手动
+// 卡片"这段窗口期为 true，跟 IntakeUploader 内部状态解耦，不依赖跨组件读
+// exposed ref 的响应性细节。
+const tenderUploaderRef = ref<InstanceType<typeof IntakeUploader> | null>(null)
+const tenderAutoRouting = ref(false)
 
 function onTenderExtracted(job: ExtractionJob) {
   tenderJob.value = job
   tenderError.value = ''
+  tenderAutoRouting.value = false
   onTenderDone(job.result as unknown as TenderBidlistResult)
 }
 function onTenderFailed(err: string) {
   tenderError.value = err
+  tenderAutoRouting.value = false
+  // 自动路由触发的上传失败了——不能让用户对着一个隐藏的卡片手足无措，
+  // 露出手动区域兜底（design/29 §6 的"不阻塞其余进度"原则同样适用于这里：
+  // 自动化这条路走不通，人工路径必须还在）。
+  showManualCards.value = true
 }
 function resetTender() {
   tenderJob.value = null
@@ -189,21 +203,53 @@ async function uploadExcel(file: File) {
   }
 }
 
-// ─── design/28 cut 5：拖一堆文件进来自动分类 ───────────────────────────────
-// Tier 0（瞬时、零模型调用，document_classify.py）能确定性判定的只有
-// Excel——无价格列→采购清单，价格列几乎填满→报价清单，两者之间→不确定。
-// PDF 结构性地判不出招标/投标（那要 Tier 1，识别跑完之后才有信号，design/28
-// §3），这里退而求其次：用文字层（native/scanned）当弱启发式——真实语料里
-// 招标 PDF 常是原生文字层（业主方电子排版），投标 PDF 常是纯扫描件（供应商
-// 打印后扫描提交），MANIFEST.md 记录的 9 份真实样本这条经验规律没有反例，
-// 但这终究是弱信号，不是判据，所以：
-//   · 只在"招标位还空着"时才把 native PDF 猜成招标——招标位已经有文件时，
-//     不会把后续 PDF 重新猜成招标去顶替，默认全部按投标处理。
-//   · 每一份的路由结果都用 message 提示出来（design/28 §5 red line 1"结果
-//     必须可见"），猜错了用户能立刻看见并改用下方对应区域重新上传——不是
-//     悄悄路由、错了也不告诉你。
-// 不确定的 Excel / 无法处理的类型，明确提示改走下面对应卡片，不强行路由。
+// ─── design/28 cut 5 + design/29 §3：拖一堆文件进来自动分类 ────────────────
+// Tier 0（瞬时、零模型调用，document_classify.py）对 Excel 是确定性判据
+// ——无价格列→采购清单，价格列几乎填满→报价清单，两者之间→不确定。
+// PDF 现在也有真实判据（design/29 Tier 1.5，scanned_pdf_classify.py）：
+// 原生文字层走零模型调用的封面关键词判据；扫描件因为视觉判定实测 0/7
+// 不可靠（design/29 §3.1），恒为 uncertain，不调用模型硬猜。
+// 每一份的路由结果都用 message 提示出来（design/28 §5 red line 1"结果必须
+// 可见"）；uncertain（Excel 判不出/PDF 扫描件/PDF 判据不够明确）一律弹窗
+// 二选一（askTenderOrBid），不是让用户自己去猜该走哪个手动区域。分类接口
+// 本身失败（网络/500）才露出手动卡片——不是"猜不出来就露卡片"，是"自动化
+// 这条路彻底走不通才需要人工兜底"。design/29 §1：三张精确卡片不再是默认
+// 可见的入口，但没删，见下方 showManualCards。
 const classifyingCount = ref(0)
+const showManualCards = ref(false)
+
+// 真正把文件送进对应上传管线——招标走 IntakeUploader.handleFile（唯一持有
+// 上传+轮询+失败重试逻辑的地方，不重写），投标/清单走已有的
+// onDropBidFiles/uploadExcel（同样不重写）。
+async function routeToTender(file: File) {
+  tenderAutoRouting.value = true
+  if (!tenderUploaderRef.value) {
+    // IntakeUploader 只在 !tenderResult 时挂载（见模板）；正常情况下走到
+    // 这里时它必然已挂载，这个分支是防御性的，不该在真实交互中触发。
+    tenderAutoRouting.value = false
+    showManualCards.value = true
+    message.error(`「${file.name}」招标上传组件未就绪，请手动上传`)
+    return
+  }
+  await tenderUploaderRef.value.handleFile(file)
+}
+
+async function routeToBid(file: File) {
+  await onDropBidFiles(file)
+}
+
+// design/29 附加要求（2026-08-20）：PDF 判不出招标/投标时弹窗二选一，不再
+// 是"提示一下、让用户自己去对应卡片重新拖"——那个台阶已经去掉了。
+function askTenderOrBid(file: File, reasonHint: string) {
+  Modal.confirm({
+    title: `「${file.name}」看不出是招标文件还是投标文件`,
+    content: reasonHint,
+    okText: '招标文件',
+    cancelText: '投标文件',
+    onOk: () => routeToTender(file),
+    onCancel: () => routeToBid(file),
+  })
+}
 
 async function classifyAndRouteFile(file: File) {
   classifyingCount.value++
@@ -215,7 +261,8 @@ async function classifyAndRouteFile(file: File) {
       const { data } = await intakeApi.classifyTier0(form)
       result = data
     } catch {
-      message.error(`「${file.name}」分类失败，请改用下方对应区域手动上传`)
+      message.error(`「${file.name}」分类接口异常，请直接使用下方区域手动上传`)
+      showManualCards.value = true
       return
     }
 
@@ -227,23 +274,25 @@ async function classifyAndRouteFile(file: File) {
         message.info(`「${file.name}」识别为报价清单（价格列填充率 ${((result.fill_rate ?? 0) * 100).toFixed(0)}%），按投标文件处理`)
         await onDropBidFiles(file)
       } else {
-        message.warning(`「${file.name}」是清单还是报价单不确定（${result.reason}），请改用下方对应区域手动上传`)
+        askTenderOrBid(file, `Excel 是清单还是报价单不确定（${result.reason}），这份文件本身是招标方还是投标方提供的？`)
       }
       return
     }
 
     if (result.kind === 'pdf') {
-      const guessTender = result.text_layer === 'native' && !tenderResult.value
-      if (guessTender) {
-        message.info(`「${file.name}」原生文字层，按招标文件处理——如果不对，请用下方「投标文件」区域重新上传`)
-        // IntakeUploader 自己接管上传+轮询，这里只能通过它的 dragger 触发；
-        // 工作台目前没有"程序化调用 IntakeUploader"的接口，所以招标位的猜测
-        // 只做提示，真正的文件仍需要用户确认后从招标卡片里选——避免为了
-        // "自动"而绕开 IntakeUploader 已经做好的上传态/失败重试处理。
-        message.warning(`请把「${file.name}」拖进上方「招标文件」卡片完成上传`)
+      // design/29 §3 Tier 1.5：原生 PDF 有真实判据（零模型调用），直接
+      // 路由，不用户确认——扫描件恒为 uncertain（§3.1 实测视觉判定 0/7，
+      // 不调用，见后端 classify-tier0），弹窗二选一。
+      if (result.verdict === 'tender') {
+        message.info(`「${file.name}」识别为招标文件（${result.reason}）`)
+        await routeToTender(file)
+      } else if (result.verdict === 'bid') {
+        message.info(`「${file.name}」识别为投标文件（${result.reason}）`)
+        await routeToBid(file)
       } else {
-        message.info(`「${file.name}」${result.text_layer === 'scanned' ? '扫描件' : '文档'}，按投标文件处理`)
-        await onDropBidFiles(file)
+        askTenderOrBid(file, result.text_layer === 'scanned'
+          ? '扫描件当前无法自动判定招投标类型，请人工确认。'
+          : `文字层判据不够明确（${result.reason || '招投标关键词均未命中，或两侧都命中'}），请人工确认。`)
       }
       return
     }
@@ -385,6 +434,68 @@ function doubtMarksFor(fileId: string): DoubtMark[] {
   return marks
 }
 
+// ─── design/29 §4/§5：概述卡片 + 统计 ───────────────────────────────────────
+// 概述是"锦上添花"，不是阻断项——拿不到（未配置文本客户端/网络异常）时卡片
+// 照常可用，只是没有那一两句话，不影响任何数据流转（跟 design/27 红线1
+// "系统只陈述已知事实"一致：拿不到就不陈述，不是拿假数据凑一句）。
+const tenderSummary = ref('')
+const tenderSummaryLoading = ref(false)
+const supplierSummaries = reactive<Record<string, string>>({})
+const supplierSummaryLoading = reactive<Record<string, boolean>>({})
+
+watch(tenderResult, async (result) => {
+  if (!result) { tenderSummary.value = ''; return }
+  tenderSummaryLoading.value = true
+  try {
+    const { data } = await intakeApi.summarizeFacts('tender', {
+      project_name: result.project_name || projectName.value,
+      category: category.value,
+      row_count: result.row_count,
+      deadline: result.deadline,
+    })
+    tenderSummary.value = data.summary
+  } catch {
+    tenderSummary.value = ''
+  } finally {
+    tenderSummaryLoading.value = false
+  }
+})
+
+async function fetchSupplierSummary(f: BatchFileEntry) {
+  if (supplierSummaries[f.id] !== undefined || supplierSummaryLoading[f.id]) return
+  supplierSummaryLoading[f.id] = true
+  try {
+    const { data } = await intakeApi.summarizeFacts('bid', {
+      supplier_name: f.finalSupplierName || f.detectedSupplierName,
+      row_count: f.items.length,
+      category: category.value,
+    })
+    supplierSummaries[f.id] = data.summary
+  } catch {
+    // 静默失败——概述拿不到不阻断任何操作，见上方注释。
+  } finally {
+    supplierSummaryLoading[f.id] = false
+  }
+}
+
+watch(batchFiles, (files) => {
+  for (const f of files) {
+    if (f.status === 'done') fetchSupplierSummary(f)
+  }
+}, { deep: true })
+
+// design/29 §5 D3：报价总计口径——全部行都算（含待确认），标注待确认行数，
+// 不是官方评估总价（那是比价矩阵/评估服务算的，两边不共用一套算法，避免
+// "同一个业务结果两处算出两个数"——CLAUDE.md"必须消费同一个业务服务结果"）。
+function bidStatsFor(f: BatchFileEntry) {
+  const total = f.items.reduce((sum, item) => {
+    const v = Number((item as unknown as Record<string, unknown>).total_price)
+    return sum + (Number.isFinite(v) ? v : 0)
+  }, 0)
+  const pendingRows = new Set(doubtMarksFor(f.id).map((m) => m.row))
+  return { count: f.items.length, total, pendingCount: pendingRows.size }
+}
+
 // ─── Step 4「结果」：复用 BidMatrix.vue ────────────────────────────────────
 const matrixResult = ref<BidMatrixResult | null>(null)
 const analyzing = ref(false)
@@ -446,9 +557,10 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </div>
     </div>
 
-    <!-- design/28 cut 5：拖一堆文件进来自动分类——Excel 是确定性判据（无价格
-         列→采购清单，填满→报价清单），PDF 用文字层弱启发式猜招标/投标，猜
-         错了会用 message 提示、下方对应卡片仍可手动重新上传纠正。 -->
+    <!-- design/28 cut 5 + design/29 §1/§3：拖一堆文件进来自动分类，是唯一
+         上传入口——Excel 是确定性判据（无价格列→采购清单，填满→报价清单），
+         PDF 原生文字层有真实判据可直接路由，扫描件/判不出来的一律弹窗二选一
+         （不再是"提示一下让你自己去对应卡片重新拖"）。 -->
     <a-upload-dragger
       :show-upload-list="false" :multiple="true"
       accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
@@ -456,17 +568,21 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       class="auto-classify-dragger"
     >
       <p class="ant-upload-drag-icon"><InboxOutlined style="font-size:32px;color:#1677ff" /></p>
-      <p class="ant-upload-text" style="font-size:14px">拖入任意招标/投标文件，自动识别归类</p>
+      <p class="ant-upload-text" style="font-size:14px">拖入招标文件（PDF）、投标文件（PDF）或采购清单（Excel）、报价清单（Excel）</p>
       <p class="ant-upload-hint" style="font-size:12px">
-        <LoadingOutlined v-if="classifyingCount > 0" spin /> {{ classifyingCount > 0 ? '识别中…' : '不确定的文件会提示改用下方对应区域手动上传' }}
+        <LoadingOutlined v-if="classifyingCount > 0" spin /> {{ classifyingCount > 0 ? '识别中…' : '自动识别归类；判不出来时会弹窗让你确认一下' }}
       </p>
     </a-upload-dragger>
 
-    <!-- Materials strip -->
+    <!-- Materials strip：design/29 §1/§6——不再是默认可见的上传入口，只在
+         有真实内容/自动路由失败兜底时才显示（showManualCards/tenderResult/
+         tenderAutoRouting/excelFile 任一为真）。IntakeUploader 本身依然
+         挂载在这里（不是删掉），供上方统一拖拽区通过 ref 程序化调用。 -->
     <div class="materials-strip">
-      <div class="material-card">
+      <div class="material-card" v-show="showManualCards || tenderResult || tenderAutoRouting">
         <template v-if="!tenderResult">
           <IntakeUploader
+            ref="tenderUploaderRef"
             type="tender_bidlist"
             :context="uploaderContext"
             hint="自动识别采购清单、封面信息与品牌要求，通常 20-90 秒完成"
@@ -510,7 +626,9 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         <a-alert v-if="tenderError" type="error" :message="tenderError" show-icon banner style="margin-top:8px;padding:4px 8px" />
       </div>
 
-      <div class="material-card" :class="{ 'material-card--highlight': tenderResult && tenderResult.row_count === 0 && !excelFile }">
+      <div class="material-card"
+           v-show="showManualCards || excelFile || excelPreviewing || (tenderResult && tenderResult.row_count === 0)"
+           :class="{ 'material-card--highlight': tenderResult && tenderResult.row_count === 0 && !excelFile }">
         <template v-if="excelFile">
           <div class="material-card__header">
             <FileExcelOutlined style="color:#52c41a" />
@@ -529,13 +647,53 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         </a-upload-dragger>
       </div>
 
-      <div class="material-card">
+      <div class="material-card" v-show="showManualCards">
         <a-upload-dragger :show-upload-list="false" :multiple="true" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv"
           :before-upload="(f: File) => { onDropBidFiles(f); return false }" class="material-card__dragger">
           <p class="ant-upload-drag-icon"><CloudUploadOutlined style="font-size:28px" /></p>
           <p class="ant-upload-text" style="font-size:13px">拖入所有投标文件</p>
           <p class="ant-upload-hint" style="font-size:12px">PDF / 图片 / Excel，可多选</p>
         </a-upload-dragger>
+      </div>
+    </div>
+
+    <div v-if="!showManualCards && !tenderResult && !excelFile && !excelPreviewing" class="materials-strip__manual-toggle">
+      <a-button size="small" type="link" @click="showManualCards = true">看不到卡片？点这里手动选择上传区域</a-button>
+    </div>
+
+    <!-- design/29 §2/§4/§5：概述卡片——默认落地视图从"直接看明细表"改成先看
+         一眼卡片（招标 + 每家供应商），点卡片切到对应 tab 再看完整
+         QuoteGrid（D2：明细审校能力不变，只是不再是第一屏）。 -->
+    <div v-if="tenderResult || batchFiles.length > 0" class="summary-cards">
+      <div v-if="tenderResult" class="summary-card summary-card--tender" @click="activeTab = 'list'">
+        <div class="summary-card__badge summary-card__badge--tender">招标</div>
+        <div class="summary-card__body">
+          <a-spin :spinning="tenderSummaryLoading" size="small">
+            <div class="summary-card__text">{{ tenderSummary || (tenderSummaryLoading ? '' : (tenderResult.project_name || '招标文件')) }}</div>
+          </a-spin>
+          <div class="summary-card__stats">采购清单 {{ tenderResult.row_count }} 项</div>
+        </div>
+      </div>
+
+      <div v-for="f in batchFiles" :key="f.id" class="summary-card summary-card--bid" @click="activeTab = f.id">
+        <div class="summary-card__badge summary-card__badge--bid">投标</div>
+        <div class="summary-card__body">
+          <template v-if="f.status === 'done'">
+            <a-spin :spinning="!!supplierSummaryLoading[f.id]" size="small">
+              <div class="summary-card__text">{{ supplierSummaries[f.id] || (f.finalSupplierName || f.filename) }}</div>
+            </a-spin>
+            <div class="summary-card__stats">
+              报价清单 {{ bidStatsFor(f).count }} 行 · 报价总计 ¥{{ bidStatsFor(f).total.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}
+              <span v-if="bidStatsFor(f).pendingCount > 0" class="summary-card__stats-pending">
+                （含 {{ bidStatsFor(f).pendingCount }} 行待确认，未计入官方评估）
+              </span>
+            </div>
+          </template>
+          <template v-else>
+            <div class="summary-card__text">{{ f.finalSupplierName || f.filename }}</div>
+            <div class="summary-card__stats">{{ f.status === 'failed' ? '识别失败' : `识别中…${f.progressPct}%` }}</div>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -570,6 +728,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                 :options="allSuppliers.map(s => ({ value: s.name, label: s.name, id: s.id }))"
                 @select="(_v: string, opt: { id?: number }) => { f.matchedSupplierId = opt.id ?? null }"
                 style="width:220px"
+                autocomplete="off"
               />
               <a-button :loading="dryRunLoading[f.id]" @click="refreshDryRun(f)">重新核对</a-button>
               <a-button type="primary" :loading="f.confirming" @click="confirmBatchEntry(f)">确认入库</a-button>
@@ -627,6 +786,29 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 /* Materials strip：三张等宽卡片，不是三个内联按钮——每张卡片自己决定内容
    （上传态用 dragger，完成态用摘要），卡片本身的边框/圆角/内边距统一。 */
 .materials-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.materials-strip__manual-toggle { text-align: center; margin: -12px 0 20px; }
+
+.summary-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.summary-card {
+  flex: 1 1 260px; max-width: 340px;
+  border: 1px solid #e8e8e8; border-radius: 8px; padding: 12px;
+  background: #fff; cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s;
+  display: flex; gap: 10px;
+}
+.summary-card:hover { border-color: #1677ff; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.summary-card__badge {
+  flex-shrink: 0; align-self: flex-start;
+  font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 4px;
+}
+.summary-card__badge--tender { background: #fff1f0; color: #cf1322; }
+.summary-card__badge--bid { background: #e6f4ff; color: #1677ff; }
+.summary-card__body { flex: 1; min-width: 0; }
+.summary-card__text {
+  font-size: 13px; color: rgba(0,0,0,0.85); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.summary-card__stats { font-size: 12px; color: rgba(0,0,0,0.45); margin-top: 6px; }
+.summary-card__stats-pending { color: #d46b08; }
 .material-card { border: 1px solid #e8e8e8; border-radius: 8px; padding: 12px; background: #fff; min-height: 96px; }
 .material-card--highlight { border-color: #52c41a; box-shadow: 0 0 0 1px #52c41a; }
 .material-card__header { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; margin-bottom: 8px; }

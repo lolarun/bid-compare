@@ -31,6 +31,7 @@ from apps.api.schemas.intake import (
     ClassifyTier0Response,
     JobListResponse, JobResponse,
     EnhanceRequest, EnhanceResponse,
+    SummarizeFactsRequest, SummarizeFactsResponse,
 )
 from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
@@ -110,10 +111,11 @@ async def upload_document(
 
 @router.post("/classify-tier0", response_model=ClassifyTier0Response)
 async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Response:
-    """design/28 §3 Tier 0——拖进来的文件是招标/投标/清单哪一种，瞬时判定，
-    不建 ExtractionJob、不进识别队列、零模型调用。cut 5 拖拽确认屏的第一
-    级判据来源；xlsx 判不出来时（uncertain）或者 pdf（Tier 0 结构性地判
-    不出招标/投标）都是合法答案，不是接口异常。
+    """design/28 §3 Tier 0 + design/29 §3 Tier 1.5——拖进来的文件是招标/
+    投标/清单哪一种，瞬时判定，不建 ExtractionJob、不进识别队列。cut 5
+    拖拽确认屏的第一级判据来源；xlsx/pdf 判不出来时都是合法答案，不是
+    接口异常——pdf 扫描件恒为 uncertain（design/29 §3.1：视觉判定实测
+    0/7，不调用，直接留给前端弹窗二选一），不是"这个接口还没做完"。
     """
     import tempfile
     from pathlib import Path as _Path
@@ -121,6 +123,7 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
     from apps.api.intelligence.document_classify import (
         ExcelClassification, PdfClassification, classify_tier0,
     )
+    from apps.api.intelligence.scanned_pdf_classify import classify_pdf_for_dispatch
 
     content = await file.read()
     if not content:
@@ -134,6 +137,8 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
         tmp_path = tmp.name
     try:
         result = classify_tier0(tmp_path)
+        pdf_kind = (classify_pdf_for_dispatch(tmp_path, call=None)
+                    if isinstance(result, PdfClassification) else None)
     finally:
         _Path(tmp_path).unlink(missing_ok=True)
 
@@ -146,13 +151,27 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
         )
     if isinstance(result, PdfClassification):
         return ClassifyTier0Response(
-            filename=filename, kind="pdf", verdict="document",
-            text_layer=result.text_layer, reason=result.reason,
+            filename=filename, kind="pdf", verdict=pdf_kind.verdict,
+            text_layer=result.text_layer, reason=pdf_kind.reason or result.reason,
         )
     return ClassifyTier0Response(
         filename=filename, kind="unsupported", verdict="unsupported",
         reason=f"不支持的文件类型：{suffix or '(无扩展名)'}",
     )
+
+
+@router.post("/summarize-facts", response_model=SummarizeFactsResponse)
+async def summarize_facts(body: SummarizeFactsRequest) -> SummarizeFactsResponse:
+    """design/29 §4——工作台卡片概述。只读已确认事实，不碰识别、不新增
+    模型调用成本量级（沿用 paddle_doc_meta 已在用的纯文本客户端）。"""
+    from apps.api.intelligence.document_summary import compose_summary
+    from apps.api.intelligence.paddle_doc_meta import get_text_client_call
+
+    if body.kind not in ("tender", "bid"):
+        raise HTTPException(status_code=400, detail=f"kind 必须是 tender 或 bid，收到：{body.kind}")
+
+    summary = compose_summary(body.kind, body.facts, get_text_client_call())
+    return SummarizeFactsResponse(summary=summary)
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)

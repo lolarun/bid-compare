@@ -65,6 +65,8 @@ def test_classify_ambiguous_excel_returns_uncertain_not_error(client):
 
 
 def test_classify_native_pdf(client):
+    """design/29 §3 Tier 1.5 接入后：原生招标 PDF 应该判出真实 verdict
+    （tender），不再是笼统的 "document"。"""
     path = DOCS / "tender/金桥地体上盖招标文件.pdf"
     _skip_if_missing(path)
     with path.open("rb") as fh:
@@ -72,11 +74,14 @@ def test_classify_native_pdf(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["kind"] == "pdf"
-    assert body["verdict"] == "document"
+    assert body["verdict"] == "tender"
     assert body["text_layer"] == "native"
 
 
 def test_classify_scanned_pdf(client):
+    """design/29 §3.1：扫描件视觉判定实测 0/7 不可靠，接口对扫描件恒答
+    uncertain（不调用视觉模型），前端据此弹二选一——这个 uncertain 是
+    设计行为，不是"还没做完"。"""
     path = DOCS / "bid/上海绵存投标文件.pdf"
     _skip_if_missing(path)
     with path.open("rb") as fh:
@@ -84,6 +89,7 @@ def test_classify_scanned_pdf(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["text_layer"] == "scanned"
+    assert body["verdict"] == "uncertain"
 
 
 def test_classify_unsupported_extension(client):

@@ -12,7 +12,7 @@ import type {
   EnhanceResponse,
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
-  CompareStateResult, ClassifyTier0Result,
+  CompareStateResult, ClassifyTier0Result, SummarizeFactsResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -146,6 +146,9 @@ export const intakeApi = {
   // 刚拖进来的文件一个初步判定，不等真正上传/识别。
   classifyTier0: (form: FormData) =>
     api.post<ClassifyTier0Result>('/intake/classify-tier0', form, { timeout: 30_000 }),
+  // design/29 §4——工作台卡片概述。facts 只传已确认的结构化字段。
+  summarizeFacts: (kind: 'tender' | 'bid', facts: Record<string, unknown>) =>
+    api.post<SummarizeFactsResult>('/intake/summarize-facts', { kind, facts }, { timeout: 15_000 }),
 }
 
 // ─── Analysis ───────────────────────────────────────────────────────────────
