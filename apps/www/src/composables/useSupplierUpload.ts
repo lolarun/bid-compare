@@ -274,7 +274,12 @@ export function useSupplierUpload(deps: {
       uploadPct: 1,
       jobId: null,
       detectedSupplierName: '',
-      finalSupplierName: '',
+      // 上传当下就用文件名猜一个供应商名占位（可编辑，识别完成后如果拿到
+      // 真实抽取名称会覆盖它）——不然用户要对着空输入框从零打字，还会撞见
+      // a-auto-complete 拿全量 allSuppliers 当选项、输入几个字就弹一屏不相关
+      // 候选的问题。识别结果回来时（下方 detectedSupplierName 赋值处）如果
+      // 有真实供应商名，仍然按原逻辑覆盖这个猜测值。
+      finalSupplierName: _extractSupplierHintFromFilename(file.name),
       matchedSupplierId: null,
       nameConflictHints: [],
       items: [],
@@ -502,9 +507,13 @@ export function useSupplierUpload(deps: {
       tenderCategory.value || taskConfig.category ||
       (categories.length === 1 ? categories[0] : '')
     if (!effectiveCategory) {
+      // 2026-08-21 手测反馈修正：旧文案"请返回采购清单步骤"是 design/27
+      // 退役旧向导之前的措辞——新工作台已经没有分步骤这回事了，指一个不
+      // 存在的"步骤"只会让用户找不到路。改成直接说需要什么、上传区域就在
+      // 同一屏（工作台顶部拖拽区/招标卡片），不引用任何具体页面结构。
       message.error(categories.length > 1
         ? '采购清单包含多个品类，请先选择本报价所属品类'
-        : '未恢复采购清单品类，请返回采购清单步骤重新确认')
+        : '还没有确定品类——请先上传/确认招标文件或采购清单，取得品类信息后再确认入库')
       return
     }
     if (categories.length > 1 && !categoryExplicitlySelected.value) {

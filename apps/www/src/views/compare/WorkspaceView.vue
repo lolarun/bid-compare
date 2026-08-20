@@ -356,6 +356,18 @@ watch(batchFiles, (files) => {
   if (activeTab.value === 'list' && files.length === 1) activeTab.value = files[0].id
 }, { deep: true })
 
+// 手测反馈（2026-08-21）：明细表格（QuoteGrid，每个是一整个 Univer 引擎实例）
+// 默认页面就卡顿——AntD a-tabs 默认全量挂载所有 pane，4 家供应商 = 4 个并发
+// Univer 实例。改成"概述先行、明细是下一步"：默认只显示卡片，点卡片才进
+// detail 模式显示 tabs+QuoteGrid+确认入库；即使进了 detail 模式，QuoteGrid
+// 本身也只挂载 activeTab 对应的那一个（见模板里 QuoteGrid 外层的 v-if），
+// 切 tab 时旧的先卸载——两层防护，不是只解决"默认页面卡"这一半。
+const viewMode = ref<'overview' | 'detail'>('overview')
+function openDetail(tabKey: string) {
+  activeTab.value = tabKey
+  viewMode.value = 'detail'
+}
+
 const gridColumns: QuoteGridColumn[] = [
   { key: 'material', title: '材料/设备名称' },
   { key: 'spec', title: '规格型号' },
@@ -661,11 +673,12 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       <a-button size="small" type="link" @click="showManualCards = true">看不到卡片？点这里手动选择上传区域</a-button>
     </div>
 
-    <!-- design/29 §2/§4/§5：概述卡片——默认落地视图从"直接看明细表"改成先看
-         一眼卡片（招标 + 每家供应商），点卡片切到对应 tab 再看完整
-         QuoteGrid（D2：明细审校能力不变，只是不再是第一屏）。 -->
+    <!-- design/29 §2/§4/§5，手测反馈修正（2026-08-21）：概述卡片是默认唯一
+         视图——招投标概述 + 清单/报价情况，纵向 100% 宽（不横排）。明细表格
+         （含"确认入库"）是点卡片之后的下一步，不在这一屏——见下方
+         viewMode==='detail' 那块。 -->
     <div v-if="tenderResult || batchFiles.length > 0" class="summary-cards">
-      <div v-if="tenderResult" class="summary-card summary-card--tender" @click="activeTab = 'list'">
+      <div v-if="tenderResult" class="summary-card summary-card--tender" @click="openDetail('list')">
         <div class="summary-card__badge summary-card__badge--tender">招标</div>
         <div class="summary-card__body">
           <a-spin :spinning="tenderSummaryLoading" size="small">
@@ -675,7 +688,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         </div>
       </div>
 
-      <div v-for="f in batchFiles" :key="f.id" class="summary-card summary-card--bid" @click="activeTab = f.id">
+      <div v-for="f in batchFiles" :key="f.id" class="summary-card summary-card--bid" @click="openDetail(f.id)">
         <div class="summary-card__badge summary-card__badge--bid">投标</div>
         <div class="summary-card__body">
           <template v-if="f.status === 'done'">
@@ -697,53 +710,61 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </div>
     </div>
 
-    <!-- Tabs -->
-    <a-tabs v-model:active-key="activeTab" class="workspace-tabs">
-      <a-tab-pane key="list">
-        <template #tab>清单{{ tenderResult ? ` · ${tenderResult.row_count}` : '' }}</template>
-        <div style="padding:12px;color:rgba(0,0,0,0.45);font-size:13px">
-          采购清单只读（对齐核查页处理逐行裁决，清单本身如有误请「重新上传」）——
-          步骤4 接入完整清单表格视图。
-        </div>
-      </a-tab-pane>
-      <a-tab-pane v-for="f in batchFiles" :key="f.id">
-        <template #tab>
-          {{ f.finalSupplierName || f.filename }}
-          <a-badge v-if="badgeCount(f.id) > 0" :count="badgeCount(f.id)" :offset="[4, -2]" />
-        </template>
-        <div class="supplier-tab-content">
-          <div v-if="f.status !== 'done' || f.confirmed === false" class="supplier-tab-content__progress">
-            <template v-if="f.status === 'uploading' || f.status === 'processing'">
-              <LoadingOutlined spin /> {{ f.stage }}<span v-if="f.stageDetail">（{{ f.stageDetail }}）</span> · {{ f.progressPct }}%
-            </template>
-            <template v-else-if="f.status === 'failed'">
-              <span style="color:#ff4d4f">{{ f.error || '识别失败' }}</span>
+    <!-- 明细 + 确认入库——下一步，默认不显示（点卡片才进来，见 openDetail）。 -->
+    <template v-if="viewMode === 'detail'">
+      <a-button size="small" class="detail-back" @click="viewMode = 'overview'">← 返回概述</a-button>
+      <a-tabs v-model:active-key="activeTab" class="workspace-tabs">
+        <a-tab-pane key="list">
+          <template #tab>清单{{ tenderResult ? ` · ${tenderResult.row_count}` : '' }}</template>
+          <div style="padding:12px;color:rgba(0,0,0,0.45);font-size:13px">
+            采购清单只读（对齐核查页处理逐行裁决，清单本身如有误请「重新上传」）——
+            步骤4 接入完整清单表格视图。
+          </div>
+        </a-tab-pane>
+        <a-tab-pane v-for="f in batchFiles" :key="f.id">
+          <template #tab>
+            {{ f.finalSupplierName || f.filename }}
+            <a-badge v-if="badgeCount(f.id) > 0" :count="badgeCount(f.id)" :offset="[4, -2]" />
+          </template>
+          <div class="supplier-tab-content">
+            <div v-if="f.status !== 'done' || f.confirmed === false" class="supplier-tab-content__progress">
+              <template v-if="f.status === 'uploading' || f.status === 'processing'">
+                <LoadingOutlined spin /> {{ f.stage }}<span v-if="f.stageDetail">（{{ f.stageDetail }}）</span> · {{ f.progressPct }}%
+              </template>
+              <template v-else-if="f.status === 'failed'">
+                <span style="color:#ff4d4f">{{ f.error || '识别失败' }}</span>
+              </template>
+            </div>
+            <template v-if="f.status === 'done'">
+              <div class="supplier-tab-content__meta">
+                <a-auto-complete
+                  v-model:value="f.finalSupplierName"
+                  placeholder="供应商名称"
+                  :options="allSuppliers.map(s => ({ value: s.name, label: s.name, id: s.id }))"
+                  @select="(_v: string, opt: { id?: number }) => { f.matchedSupplierId = opt.id ?? null }"
+                  style="width:220px"
+                  autocomplete="off"
+                />
+                <a-button :loading="dryRunLoading[f.id]" @click="refreshDryRun(f)">重新核对</a-button>
+                <a-button type="primary" :loading="f.confirming" @click="confirmBatchEntry(f)">确认入库</a-button>
+                <a-button danger @click="removeBatchEntry(f)">移除</a-button>
+              </div>
+              <!-- 只挂载当前激活 tab 的 QuoteGrid（每个都是一整个 Univer 引擎
+                   实例）——AntD a-tabs 默认全量挂载所有 pane，不加这层 v-if
+                   会导致 N 家供应商 = N 个并发 Univer 实例，这正是页面卡顿
+                   的根因（2026-08-21 手测反馈）。 -->
+              <QuoteGrid
+                v-if="activeTab === f.id"
+                :model-value="f.items as unknown as Record<string, unknown>[]"
+                :columns="gridColumns"
+                :doubt-marks="doubtMarksFor(f.id)"
+                @update:model-value="(v) => { f.items = v as any }"
+              />
             </template>
           </div>
-          <template v-if="f.status === 'done'">
-            <div class="supplier-tab-content__meta">
-              <a-auto-complete
-                v-model:value="f.finalSupplierName"
-                placeholder="供应商名称"
-                :options="allSuppliers.map(s => ({ value: s.name, label: s.name, id: s.id }))"
-                @select="(_v: string, opt: { id?: number }) => { f.matchedSupplierId = opt.id ?? null }"
-                style="width:220px"
-                autocomplete="off"
-              />
-              <a-button :loading="dryRunLoading[f.id]" @click="refreshDryRun(f)">重新核对</a-button>
-              <a-button type="primary" :loading="f.confirming" @click="confirmBatchEntry(f)">确认入库</a-button>
-              <a-button danger @click="removeBatchEntry(f)">移除</a-button>
-            </div>
-            <QuoteGrid
-              :model-value="f.items as unknown as Record<string, unknown>[]"
-              :columns="gridColumns"
-              :doubt-marks="doubtMarksFor(f.id)"
-              @update:model-value="(v) => { f.items = v as any }"
-            />
-          </template>
-        </div>
-      </a-tab-pane>
-    </a-tabs>
+        </a-tab-pane>
+      </a-tabs>
+    </template>
 
     <!-- Result section -->
     <div class="result-section">
@@ -788,9 +809,11 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .materials-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
 .materials-strip__manual-toggle { text-align: center; margin: -12px 0 20px; }
 
-.summary-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+/* 2026-08-21 手测反馈：卡片改纵向、100% 宽，不再横排（原来 flex-wrap 横排
+   在窄屏/多供应商时挤成一团，也不是"先看概述"该有的阅读顺序）。 */
+.summary-cards { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
 .summary-card {
-  flex: 1 1 260px; max-width: 340px;
+  width: 100%;
   border: 1px solid #e8e8e8; border-radius: 8px; padding: 12px;
   background: #fff; cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s;
   display: flex; gap: 10px;
@@ -820,6 +843,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .tender-artifacts__item--empty { color: rgba(0,0,0,0.4); }
 .tender-artifacts__label { flex-shrink: 0; min-width: 56px; color: rgba(0,0,0,0.45); }
 
+.detail-back { margin-bottom: 12px; }
 .workspace-tabs { background: #fff; }
 .supplier-tab-content { padding: 8px 0; }
 .supplier-tab-content__progress { padding: 24px; text-align: center; color: rgba(0,0,0,0.55); }
