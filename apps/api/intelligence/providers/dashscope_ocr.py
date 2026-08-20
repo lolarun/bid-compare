@@ -167,6 +167,26 @@ _VISUAL_PROMPT_VERSION = "v4"   # bump when prompt/roles change → cache invali
 _VISUAL_THUMB_MAX_PX: int = 2_000_000   # thumbnail pixel budget for Flash batch calls
 _VISUAL_TEMPERATURE: float = 0.0        # must be 0 for deterministic cache-safe results
 
+# design/29 §3 Tier 1.5：扫描件招标/投标粗判定，只送第一页。跟页面角色分类
+# 判据方向相反——那边刻意不看供应商名/项目名，这里恰恰要看，示例用虚构占位符
+# （.claude/rules/recognition.md："生产 prompt 禁止出现真实供应商、项目、
+# 文件名"）。
+_CLASSIFY_DOC_KIND_PROMPT = """这是一份机电材料招投标文档的第一页图片。请判断这份文档整体是"招标文件"
+（采购方发布，通常含"招标编号""招标人""采购清单""投标须知"等字样）还是
+"投标文件"（供应商提交的报价文件，通常含"投标单位""投标人""报价函""法定
+代表人"等字样，会出现具体供应商公司名）。
+
+只看第一页能看到的封面/首页信息判断，不要假设、不要根据文件名猜测（你也
+看不到文件名）。看不出来时诚实答"uncertain"，不要为了给出答案而猜。
+
+举例（虚构，仅示意格式，不代表任何真实项目）：
+- 封面写"XX工程招标文件""招标编号：ZB-2026-001" → doc_type=tender
+- 封面写"投标文件""投标人：某某机电设备有限公司" → doc_type=bid
+- 封面信息不足以判断，或图片模糊/不是封面页 → doc_type=uncertain
+
+严格只返回 JSON（不要解释、不要 markdown 围栏）：
+{"doc_type": "tender"或"bid"或"uncertain", "project_name_hint": "看到的项目名，没有则空字符串", "supplier_name_hint": "看到的投标单位/供应商名，没有则空字符串", "evidence": ["简短依据1", "依据2"]}"""
+
 _VISUAL_VALID_ROLES = (
     "cover bid_letter tender_table_header tender_table_continuation "
     "quote_table_header quote_table_continuation subtotal_or_summary "
@@ -684,6 +704,40 @@ class DashScopeOCRProvider(LLMProvider):
             fallback = dict(flash_result)
             fallback["source"] = "plus_failed"
             return fallback
+
+    def classify_document_kind(self, page_image: bytes, *, model: str | None = None) -> dict:
+        """design/29 §3 Tier 1.5——扫描件招标/投标判定，只送第一页缩略图，
+        用便宜的 flash 模型（跟 classify_pages_visual 同一档，不是逐行抽取
+        用的 plus）。这是"这份文档整体是什么"的粗判断，不是页面角色分类
+        （`classify_pages_visual`）——不复用那条 prompt，那条刻意"不得依赖
+        供应商名称做判断"，这里恰恰要读封面上的招标编号/投标单位这些内容
+        信号，两者判据方向相反，不能共用一份 prompt。
+
+        Returns 原始解析后的 dict：{"doc_type": "tender"|"bid"|"uncertain",
+        "project_name_hint": str, "supplier_name_hint": str, "evidence": [...]}
+        ——解析失败或调用异常时返回 doc_type="uncertain"，不抛异常（design/28
+        Tier 0/1 同一条"失败不拖垮主线"约定，判不出来诚实答不确定）。"""
+        mdl = model or _VISUAL_FLASH_MODEL
+        content = [
+            self._img_part(page_image, max_pixels=_VISUAL_THUMB_MAX_PX),
+            {"text": _CLASSIFY_DOC_KIND_PROMPT},
+        ]
+        try:
+            raw = self._mm_call(content, mdl, temperature=_VISUAL_TEMPERATURE)
+            data = json.loads(self._clean_json_text(raw))
+            doc_type = data.get("doc_type")
+            if doc_type not in ("tender", "bid", "uncertain"):
+                doc_type = "uncertain"
+            return {
+                "doc_type": doc_type,
+                "project_name_hint": (data.get("project_name_hint") or "").strip(),
+                "supplier_name_hint": (data.get("supplier_name_hint") or "").strip(),
+                "evidence": data.get("evidence") or [],
+            }
+        except Exception as e:
+            log.warning("classify_document_kind failed: %s", e)
+            return {"doc_type": "uncertain", "project_name_hint": "", "supplier_name_hint": "",
+                    "evidence": [f"调用/解析失败：{e}"]}
 
     def vl_extract_csv(
         self,
