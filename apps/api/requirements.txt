@@ -31,7 +31,9 @@ certifi==2026.4.22
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 charset-normalizer==3.4.7
-    # via requests
+    # via
+    #   pdfminer-six
+    #   requests
 click==8.4.0
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -41,7 +43,9 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   typer
     #   uvicorn
 cryptography==49.0.0
-    # via dashscope
+    # via
+    #   dashscope
+    #   pdfminer-six
 dashscope==1.25.23
     # via bid-compare
 distro==1.9.0
@@ -96,8 +100,14 @@ openpyxl==3.1.5
     # via bid-compare
 pandas==3.0.3
     # via bid-compare
-pillow==12.2.0
+pdfminer-six==20260107
+    # via pdfplumber
+pdfplumber==0.11.10
     # via bid-compare
+pillow==12.2.0
+    # via
+    #   bid-compare
+    #   pdfplumber
 propcache==0.5.2
     # via
     #   aiohttp
@@ -116,8 +126,12 @@ pydantic-settings==2.14.1
     # via bid-compare
 pygments==2.20.0
     # via rich
-pypdfium2==5.8.0
+pyjwt==2.13.0
     # via bid-compare
+pypdfium2==5.13.0
+    # via
+    #   bid-compare
+    #   pdfplumber
 python-dateutil==2.9.0.post0
     # via pandas
 python-dotenv==1.2.2
