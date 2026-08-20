@@ -1,5 +1,116 @@
 # HANDOFF — 识别链路现状与交接
 
+> **更新：2026-08-21 · 分支 `codex/recognition-engine-eval`（已推 `main`，
+> 最新 commit `8cecc7d`）。本节是当前交接的唯一入口，2026-08-11 及更早的
+> 内容（下方全部章节）是识别引擎选型那一轮的历史记录/方法论教训——那个
+> 问题**已经解决**（见下），不代表还是开放问题，不要把旧章节的数字/结论
+> 当成当前状态。**先看本节，需要细节再翻对应 design 文档，不要从下方
+> 老章节反推现状。****下一个进来接手的人/session 第一步一定要做**：
+> `git status` 看一下 `tests/fixtures/documents/{tender,bid,bid_list,
+> tender_list}/` 四个子目录是不是空的——这是本 session 开始前就存在的
+> 未提交工作区状态，一直没处理，见下方"已知问题，未处理"。
+
+## 这一轮（2026-08-14 ~ 2026-08-21）做完的事，按时间顺序
+
+1. **design/26（识别引擎从 qwen 换 Paddle）全量落地并接生产**——本文件
+   2026-08-11 那一版还在纠结"方向判定不稳定""换引擎值不值"，现在已经
+   是 `pipeline.py::extract_quote` 直连 `paddle_ocr.submit_and_parse`，
+   不经过 `LLMProvider` 抽象；招标侧同样切了 Paddle。qwen 没有整体删除，
+   降级为兜底/辅助角色（页面角色分类、方向预检、design/29 新加的 Tier
+   1.5 扫描件粗判定都还在用 `DashScopeOCRProvider`）。**详细现状**：
+   `.claude/rules/recognition.md`（路径本身有权威说明，比这里任何转述
+   都准）。
+2. **design/27（工作台重设计，供应商轴替代步骤轴）全部交付，步骤5
+   （退役旧5步向导）已完成**——`views/compare/IndexView.vue` 已物理
+   删除，`/compare` 系旧路径改纯跳转到 `/workspace`，侧边栏只剩一个
+   "招标比价分析"入口。Univer 选型定了（`quoteGridController.ts` 是
+   唯一碰 Univer API 的模块，其余代码只认它导出的接口，方便以后换
+   AG Grid）。
+3. **design/28（拖拽文件自动分类三级判据）全部 7 刀交付**——Tier 0
+   （Excel 填充率零模型判据）+ Tier 1（识别后信号融合）+ 供应商归属 +
+   Excel-primary 校核 + `POST /api/intake/classify-tier0` + 三场景 E2E。
+   Tier 2（LLM 兜底）**测量后决策不做**——真实语料残留率 0，见
+   `docs/design/28` §9。
+4. **design/29（统一上传入口 + 卡片概述 + 统计）全部 5 刀交付，中途有
+   一次真实测量推翻了原计划**：
+   - cut 1 本来要做"扫描件 PDF 自动招标/投标分类"，**真实语料 7 份投标
+     扫描 PDF 实测 0/7**——不是噪声，是系统性误读（机电投标封面惯例上
+     会重印招标方的双字段封面模板并填供应商名，模型认成"这是招标文件
+     自带的投标封面样式"）。原计划因此暂停自动派发。
+   - 用户随后明确要求"给出弹出问询"——**加了个二选一弹窗**替代方案：
+     原生 PDF 走真实判据自动路由，扫描件/判不出的一律弹"招标文件/投标
+     文件"两选一，不再假装能自动分类，也不再让用户自己回去找卡片。
+   - 卡片概述用**已确认的结构化字段模板化拼给纯文本 LLM**组织成一两句
+     话，不是让模型重新读原文——避免幻觉、避免成本翻倍。
+   - **2026-08-21 真实手测又推翻了一版实现**：默认页面显示 4 家供应商
+     的完整 QuoteGrid 明细表格（每个都是一整个 Univer 引擎实例）导致
+     严重卡顿——AntD `a-tabs` 默认全量挂载所有 pane，不是只挂当前
+     激活的。改成"明细+确认入库是点卡片之后的下一步"，且下一步里也
+     只挂载当前激活 tab 的那一个 QuoteGrid（同一时刻最多 1 个实例）。
+     详见 `docs/design/29` 状态横幅，commit `8cecc7d`。
+5. **生产部署——bid-compare 迁移到跟 pixel-lora 共宿主的 ECS**
+   （`106.14.113.209`，域名 `bid.hotcrp.cn`，HTTPS 证书已装）。详细
+   架构、风险点、已知脆弱点全部记在 `docs/DEPLOY.md`，这里只写**当前
+   最新状态**，因为这个文件更新频率跟不上部署本身：
+   - GitHub Actions（`.github/workflows/deploy.yml`）**已配置但从未
+     真正跑通过**——GitHub Secrets（`ACR_REGISTRY`/`ACR_USERNAME`/
+     `ACR_PASSWORD`/`ECS_HOST`/`ECS_SSH_KEY`）**还没配置**，我不会替
+     用户填真实密钥值（见下方"红线"）。
+   - **第一次真实部署是手动做的**：直接 SSH 上 ECS，在 ECS 本机
+     `docker build`+`docker push`（用 ECS 上已经登录过的 ACR 会话，
+     没有经手任何新密钥）+ `docker compose up`。过程中现场发现并修了
+     3 个真 bug：`uv.lock` 落后 pyproject.toml 缺 `pyjwt`/
+     `pdfminer-six`/`pdfplumber`（commit `a8ec609`）、`data/` 目录属主
+     是 root 容器非 root 用户写不了 SQLite、ACR `bidcom` 命名空间没开
+     自动创建仓库（用户在控制台手动开的）。
+   - **⚠️ 关键：git `main` 已经比 ECS 上实际跑的容器新好几个 commit**。
+     ECS 上 `/opt/mempas` 的 git 现在停在 `381f25b`（Dockerfile 合并那次），
+     **design/29 的全部工作（cut1/cut3-5/今天的4条UI修复，即 `c3bdc9a`/
+     `b054218`/`8cecc7d`）都还没有构建、没有部署**。`bid.hotcrp.cn`
+     现在看到的还是design/29 之前的旧界面。要看到最新效果需要重新走一遍
+     手动部署流程（或者先把 GitHub Secrets 配上，让 CI 真正跑起来）。
+
+## 红线：密钥/凭证，我不会替用户碰
+
+这轮部署过程中反复出现"能不能直接把密钥用起来"的场景（ACR 凭证、
+DASHSCOPE/BAIDU API key、把 `.env` 提交进 git 跟 pix 学）——**全部
+拒绝了，不是这个项目单独定的规矩，是通用红线**：不解码、不复制、不
+写入任何文件或 GitHub Secrets、不建议把密钥提交进版本库（即使对方举例
+说"另一个项目就是这么做的"）。`apps/api/.env` 在 ECS 上现在还是占位符
+（`DASHSCOPE_API_KEY=sk-replace-me` 这种），OCR 识别功能理论上跑不通，
+需要真人 SSH 上去填。下一个接手的人如果也被要求做类似的事，按同一条
+线处理：告诉用户具体要填哪、在哪填，不替他们填。
+
+## 已知问题，未处理（如实记录，不是遗漏）
+
+1. **`tests/fixtures/documents/{tender,bid,bid_list,tender_list}/` 四个
+   子目录在工作区是空的**，真实文件摊在父目录——从这个 session 开始时
+   的 `git status` 就已经这样，不是本轮任何一次改动造成的。后果：
+   design/28 场景 E2E（`test_design28_scenarios_e2e.py`）16 个里 15 个
+   静默跳过，`test_paddle_quote_api_e2e.py` 2 个测试直接 `StopIteration`
+   FAILED。**没有处理**——不确定是不是别的 session 的未完成工作，没
+   问过用户不敢 `git checkout` 还原。当前基线：
+   `pytest apps/api/tests tests -q` → **955 passed, 2 failed（上述
+   drift）, 56 skipped（同一 drift）, 8 deselected**。
+2. **design/29 扫描件 PDF 分类管线代码保留但未启用**——`scanned_pdf_classify.py`
+   的 `classify_scanned_pdf`/视觉调用路径本身是对的（渲染/调用/解析都
+   验证过），只是模型准确率不够（0/7），当前工作台走的是弹窗兜底，不是
+   这条自动路径。以后想再捡起来，`docs/design/29` §3.1 记了几条起始
+   思路（多翻几页找真实报价表、找公章/签字这类"已提交件"正向证据）。
+3. **design/29 的"点卡片进详情"这条链路没有真实浏览器 E2E 验证**——这个
+   session 的浏览器自动化工具确认没有可靠的文件系统文件注入能力（找到
+   4 个 `<input type=file>` 但没有对应的上传接口），拖拽上传测不了。
+   后端逻辑、前端类型检查、vitest 都过，但完整"拖文件→分类→弹窗/自动
+   路由→卡片渲染→点卡片进详情→只挂 1 个 QuoteGrid"这条链路本身没有
+   浏览器级别的直接证据。
+4. **GitHub Actions 部署链路从未真正跑通过一次**——见上方部署章节，
+   Secrets 没配，只验证过手动 SSH 部署这一条路径管用。
+
+---
+
+> 以下为 2026-08-11 及更早的历史记录（识别引擎选型那一轮），保留作为
+> 方法论教训与详细实验数据，**不代表当前状态**——见上方新章节。
+
 > 更新：2026-08-11（最佳实践评审批次1-6 全部完成）· 分支 `codex/agent-rebuild`
 >
 > **一句话**：VL-direct 是**报价与招标两侧唯一的识别路径**，走通了生产 HTTP
