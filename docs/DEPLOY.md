@@ -57,7 +57,7 @@
                      │    ├─ server: mng.aiguozhanbijin.com.cn  → pixora-mng dist
                      │    ├─ server: api.aiguozhanbijin.com.cn  → pixora-api:8000
                      │    ├─ server: m.aiguozhanbijin.com.cn    → pixora-h5 dist
-                     │    └─ server: bid.hotcrp.cn (HTTP-only)   → mempas-web dist
+                     │    └─ server: bid.hotcrp.cn (HTTP-only)   → mempas-www dist
                      │                                    │
                      │                          proxy /api/ ▼
                      │                          172.18.0.1:8100 (bridge-gateway-only)
@@ -79,16 +79,18 @@
 
 ### 2.2 为什么 bid-compare 不能保留自己的 nginx 容器
 
-`apps/www/Dockerfile`（现有）是完整的 nginx 运行时镜像，`docker-compose.yml`（现有）里 frontend 服务发布 `80:80`。这在**独占一台 ECS**时没问题；共宿主后 80/443 已经被 pixel-lora 的 nginx 占用，两个 nginx 容器不能同时监听同一宿主端口。
+`docker-compose.yml`（独立单机部署方案）里 frontend 服务发布 `80:80`，这在**独占一台 ECS**时没问题；共宿主后 80/443 已经被 pixel-lora 的 nginx 占用，两个 nginx 容器不能同时监听同一宿主端口。
 
-方案：仿照 pixel-lora 的 `www.Dockerfile`/`mng.Dockerfile` 模式——前端镜像只做"builder"，`CMD` 把 `dist/` 拷到挂载的 `/out`（宿主机目录），不再自带 nginx 运行时；静态文件由**共享 nginx** 读取。见 §3.2。
+方案：仿照 pixel-lora 的 `www.Dockerfile`/`mng.Dockerfile` 模式——前端镜像只做"builder"，`CMD` 把 `dist/` 拷到挂载的 `/out`（宿主机目录），不再自带 nginx 运行时；静态文件由**共享 nginx** 读取。
+
+**2026-08-20 决策**：不单独维护一个 `Dockerfile.builder` 文件——直接改 `apps/www/Dockerfile` 本身，把原来的"Stage 2：nginx 运行时"注释掉（不是删掉），默认产物就是 builder-only 镜像。哪天 MEMPAS 脱离共宿主、重新独占一台 ECS，取消注释即可恢复。**代价**：这次改动之后 `docker-compose.yml`（独立单机方案，见附录）暂时用不了——它期望这个 Dockerfile 产出常驻监听 80 的 nginx 容器，现在默认产出的是构建完就退出的一次性 builder，两者不兼容。真要用回独立单机方案时，记得先取消注释 Stage 2。
 
 ### 2.3 命名空间与镜像
 
 | bid-compare 镜像 | ACR 路径 |
 |---|---|
 | 后端 | `<ACR_REGISTRY>/bidcom/mempas-api:latest` / `:<sha>` |
-| 前端（builder，产出 dist） | `<ACR_REGISTRY>/bidcom/mempas-web:latest` / `:<sha>` |
+| 前端（builder，产出 dist） | `<ACR_REGISTRY>/bidcom/mempas-www:latest` / `:<sha>` |
 
 `<ACR_REGISTRY>` 复用 pixel-lora 用的同一个实例地址（VPC 内网域名版本用于 ECS 拉镜像，公网版本用于 GitHub Actions 推镜像——具体两个地址值需要从 pixel-lora 的 GitHub Secrets `ACR_REGISTRY` 里取，我这边看不到实际值，只看到 workflow 里怎么引用它）。
 
@@ -119,8 +121,8 @@ jobs:
         include:
           - image: mempas-api
             dockerfile: apps/api/Dockerfile
-          - image: mempas-web
-            dockerfile: apps/www/Dockerfile.builder   # 见 §3.2，新建
+          - image: mempas-www
+            dockerfile: apps/www/Dockerfile   # Stage 2 已注释掉，默认产出 builder-only 镜像，见 §2.2
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -165,11 +167,11 @@ jobs:
 | `ECS_HOST` | `106.14.113.209` | ✅ |
 | `ECS_SSH_KEY` | SSH 私钥 | ⚠️ 可以复用 pixel-lora 的 `infra/ssh/pixora_deploy`，也可以新开一把专属 bid-compare 的 deploy key（更小权限面，推荐但非必须） |
 
-### 3.2 `apps/www/Dockerfile.builder`（新建）
+### 3.2 `apps/www/Dockerfile`（修改，不新建独立文件）
+
+2026-08-20 决策：不单独维护一个 `Dockerfile.builder`——直接改现有的 `apps/www/Dockerfile`，把"Stage 2：nginx 运行时"整段注释掉（保留在文件里，不删），默认 `docker build -f apps/www/Dockerfile .` 产出的就是 builder-only 镜像（Stage 1 加了一行 `CMD`，把 `dist/` 拷到挂载的 `/out`）：
 
 ```dockerfile
-# MEMPAS 前端 —— builder-only 镜像，配合共享 nginx 使用（不含 nginx 运行时）
-# 用法： docker run --rm -v /opt/pixora/infra/nginx/html/mempas:/out <image>
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY apps/www/package.json apps/www/package-lock.json* ./
@@ -177,10 +179,18 @@ RUN npm config set registry https://registry.npmmirror.com && \
     npm ci --prefer-offline --no-audit --no-fund
 COPY apps/www/ ./
 RUN npm run build
-CMD ["sh", "-c", "rm -rf /out/* && cp -r /app/dist/. /out/ && echo 'mempas-web dist copied to /out'"]
+CMD ["sh", "-c", "rm -rf /out/* && cp -r /app/dist/. /out/ && echo 'mempas-www dist copied to /out'"]
+
+# ─── Stage 2: nginx runtime（已注释，独立单机部署时取消注释用）───────────
+# FROM nginx:1.27-alpine AS runtime
+# COPY --from=build /app/dist /usr/share/nginx/html
+# COPY apps/www/nginx.conf /etc/nginx/conf.d/default.conf
+# HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+#     CMD wget -q --spider http://127.0.0.1/ || exit 1
+# EXPOSE 80
 ```
 
-`apps/www/Dockerfile`（现有，完整 nginx 运行时）**保留不删**——本地单机 `docker-compose.yml`（现有，见附录）仍然用得到，作为"共享 ECS 出问题时独立回退"的备用路径。
+**代价**（§2.2 已提过一次）：`docker-compose.yml`（独立单机部署方案，见附录）现在**用不了**——它期望这个文件产出常驻监听 80 的 nginx 容器，现在默认产出的是构建完就退出的 builder。真要切回独立单机方案，先取消注释 Stage 2。
 
 ### 3.3 `docker-compose.prod.yml`（新建，bid-compare 仓库根目录）
 
@@ -270,7 +280,7 @@ server {
 3. **DNS**：确认 `bid.hotcrp.cn` 的 A 记录指向 `106.14.113.209`（§3.4 遗留待办第一条）——**这一步需要你在域名服务商那边操作，我这边看不到 DNS 控制台**。
 4. **【一次性】在 pixel-lora 仓库**新增/修改（这是唯一需要碰对方仓库的地方，见 §1"两个项目独立到什么程度"；改一次之后，bid-compare 之后所有发布都不会再触发这个仓库的任何改动）：
    - `infra/nginx/nginx.conf`：新增 §3.4 给出的 `bid.hotcrp.cn` server block（`proxy_pass http://172.18.0.1:8100/api/;`，已用实测网关 IP，不用再改）。需要在 `docker-compose.prod.yml` 的 nginx 服务 `volumes` 里加一行 `./nginx/html/mempas:/usr/share/nginx/html/mempas:ro` 挂载。
-   - `scripts/deploy.sh`：加一段跟 www/mng/h5 一样的"pull mempas-web builder 镜像 → 提取 dist → nginx reload"逻辑——但这段其实应该放在 **bid-compare 自己的** `scripts/deploy.sh`（§4 步骤 6 新建）里更合理，因为 mempas 的发布节奏跟 pixora 的发布节奏是独立的，不应该耦合进 pixora 的部署脚本触发。**建议**：bid-compare 自己的 deploy.sh 提取 dist 到 `/opt/pixora/infra/nginx/html/mempas`（写到 pixora 的目录里）+ `docker exec` pixora 的 nginx 容器 reload——这样两边部署互相独立触发，只共享"nginx 读哪个目录"这一份配置。
+   - `scripts/deploy.sh`：加一段跟 www/mng/h5 一样的"pull mempas-www builder 镜像 → 提取 dist → nginx reload"逻辑——但这段其实应该放在 **bid-compare 自己的** `scripts/deploy.sh`（§4 步骤 6 新建）里更合理，因为 mempas 的发布节奏跟 pixora 的发布节奏是独立的，不应该耦合进 pixora 的部署脚本触发。**建议**：bid-compare 自己的 deploy.sh 提取 dist 到 `/opt/pixora/infra/nginx/html/mempas`（写到 pixora 的目录里）+ `docker exec` pixora 的 nginx 容器 reload——这样两边部署互相独立触发，只共享"nginx 读哪个目录"这一份配置。
 5. 在 GitHub 仓库 Settings 配置 §3.1 表格里的 4 个 Secrets。
 6. **新建 `scripts/deploy.sh`**（bid-compare 仓库）：
 
@@ -291,9 +301,9 @@ server {
    docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
    echo "=== pull + extract frontend dist ==="
-   docker pull "${ACR_REGISTRY}/bidcom/mempas-web:${TAG:-latest}"
+   docker pull "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
    docker run --rm -v /opt/pixora/infra/nginx/html/mempas:/out \
-     "${ACR_REGISTRY}/bidcom/mempas-web:${TAG:-latest}"
+     "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
 
    echo "=== reload shared nginx (pixora 容器) ==="
    docker exec infra-nginx-1 nginx -s reload   # 实测确认的真实容器名（compose 项目名取自目录 infra/，不是仓库名 pixora）

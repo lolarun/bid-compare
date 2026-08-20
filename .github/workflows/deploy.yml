@@ -33,8 +33,8 @@ jobs:
         include:
           - image: mempas-api
             dockerfile: apps/api/Dockerfile
-          - image: mempas-web
-            dockerfile: apps/www/Dockerfile.builder
+          - image: mempas-www
+            dockerfile: apps/www/Dockerfile
 
     steps:
       - uses: actions/checkout@v4
