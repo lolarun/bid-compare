@@ -5,9 +5,15 @@ design/28 的 Tier 0（`document_classify.py`）对 PDF 只能判"原生文字�
 调用地读前两页纯文字（跟 `tender_text_layer.has_usable_text_layer` 同一套
 pypdfium2 读法，本模块自己实现，那个模块本身只负责表格结构抽取）+ 关键词
 判据（跟 Tier 0 对 Excel 用的思路一样，见 `classify_native_pdf`）；扫描件
-没有文字层，唯一办法是花一次很小的视觉调用——只送第一页缩略图，不是整份
-文档识别（那是识别管线本身要做的事，这里只是"先看一眼封面，决定该走哪条
-识别管线"）。
+没有文字层，唯一办法是花一次不大的视觉调用——送前几页原生分辨率图（不是
+整份文档识别，那是识别管线本身要做的事，这里只是"先看一眼封面+投标函，
+决定该走哪条识别管线"）。
+
+**2026-08-21 实测修正**：最初版本只送第一页缩略图，7 份真实投标扫描 PDF
+实测 **0/7**——不是模型读不懂，是给的信息量不够（详见
+`DashScopeOCRProvider.classify_document_kind` 的方法文档）。改成送前
+`SCANNED_CLASSIFY_PAGES` 张原生分辨率图 + 点破常见易错点的提示词，同一批
+语料复测 **8/8**（7 份投标 + 1 份招标全对）。
 
 这一级判定发生在**识别之前**，用于决定该走 `paddle_tender.py` 还是
 `paddle_vl.py`（招标/报价两条管线的提取 schema 不同，不能识别完再选）——
@@ -47,9 +53,15 @@ class Tier15Result:
     reason: str = ""
 
 
-# 扫描件路径的注入点——(单页图片字节) -> 原始解析结果 dict。跟项目里
+# 扫描件路径的注入点——(多页图片字节列表) -> 原始解析结果 dict。跟项目里
 # TextCall/VLCall 同一个"可注入、不内嵌网络调用"约定，方便单测不用真的发请求。
-ScannedClassifyCall = Callable[[bytes], dict]
+ScannedClassifyCall = Callable[[list[bytes]], dict]
+
+# 送几页给视觉分类——2026-08-21 实测：1 页（缩略图）0/7，3 页（原生分辨率）
+# 8/8。招标封面被投标方原样重印是最初失败的根因（见模块 docstring），投标函/
+# 授权书这类只会出现在投标文件里的页面通常在第 2-3 页，多送这几页能让模型
+# 看到不会跟招标模板混淆的内容。
+SCANNED_CLASSIFY_PAGES = 3
 
 
 def get_scanned_classify_call() -> ScannedClassifyCall | None:
@@ -123,21 +135,24 @@ def classify_native_pdf(file_path: str) -> Tier15Result:
 
 
 def classify_scanned_pdf(file_path: str, call: ScannedClassifyCall | None) -> Tier15Result:
-    """扫描件 PDF：只送第一页缩略图给 `call`。`call=None`（未配置视觉客户端）
-    时直接判 uncertain，不假装判断过。"""
+    """扫描件 PDF：送前 `SCANNED_CLASSIFY_PAGES` 页原生分辨率图给 `call`
+    （不是缩略图——2026-08-21 实测缩略图+单页是 0/7 的根因之一）。
+    `call=None`（未配置视觉客户端）时直接判 uncertain，不假装判断过。"""
     if call is None:
         return Tier15Result("uncertain", "scanned_vl", reason="未配置视觉分类客户端。")
-    thumbs = DocumentLoader.to_thumbnails(file_path, max_pages=1)
-    if not thumbs:
-        return Tier15Result("uncertain", "scanned_vl", reason="无法渲染第一页。")
-    data = call(thumbs[0])
+    pages = DocumentLoader.to_images(file_path, max_pages=SCANNED_CLASSIFY_PAGES)
+    if not pages:
+        return Tier15Result("uncertain", "scanned_vl", reason="无法渲染页面。")
+    data = call(pages)
+    n = len(pages)
     return Tier15Result(
         verdict=data.get("doc_type", "uncertain"),
         method="scanned_vl",
         project_name_hint=data.get("project_name_hint", ""),
         supplier_name_hint=data.get("supplier_name_hint", ""),
         evidence=data.get("evidence", []),
-        reason="视觉分类第一页：" + "；".join(data.get("evidence", [])) if data.get("evidence") else "视觉分类第一页。",
+        reason=(f"视觉分类前{n}页：" + "；".join(data.get("evidence", []))
+                if data.get("evidence") else f"视觉分类前{n}页。"),
     )
 
 

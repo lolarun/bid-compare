@@ -5,19 +5,30 @@
 > replacing them — the classification ladder and the QuoteGrid review
 > surface stay.
 >
-> **Cut 1 (scanned-PDF Tier 1.5) result, then superseded**: measured against
-> the real corpus per §3's own requirement — **0/7** on real scanned bid
-> PDFs, not random noise (both inspected failures show the same systematic
-> misreading, see §3.1). First decision (mid-session) was to pause automated
-> scanned-PDF classification and keep the three precise cards as the PDF
-> entry point. **User then asked explicitly for a popup fallback**
-> ("招标文件、投标文件的PDF识别给出弹出问询") — this supersedes the pause:
-> native PDFs still route automatically off the real Tier 1.5 keyword judge
-> (works, real accuracy), and scanned PDFs (or any uncertain native PDF)
-> now trigger a two-choice popup (招标文件/投标文件) instead of either
-> guessing or falling back to a separate visible card. This closes the loop
-> §1 originally asked for — a single upload zone, with the popup as the
-> honest "can't auto-decide" path instead of silent guessing.
+> **Cut 1 (scanned-PDF Tier 1.5) — three findings in sequence, latest one
+> is current**:
+> 1. First measurement against the real corpus per §3's own requirement:
+>    **0/7** on real scanned bid PDFs (page-1-thumbnail-only input), not
+>    random noise — both inspected failures showed the same systematic
+>    misreading (§3.1). Decision at the time: pause automated scanned-PDF
+>    classification, keep the three precise cards as the PDF entry point.
+> 2. User then asked explicitly for a popup fallback ("招标文件、投标文件
+>    的PDF识别给出弹出问询"), superseding the pause: native PDFs route
+>    automatically off the real keyword judge; scanned/uncertain PDFs
+>    trigger a two-choice popup instead of guessing or falling back to a
+>    visible card.
+> 3. **2026-08-21, user pushed back on accepting 0/7 as final** ("是不是
+>    没有利用好LLM" — asking whether the LLM was under-used, not whether
+>    it's capable). Correct call: the 0/7 test sent only page 1 as a
+>    low-res thumbnail — a genuinely minimal input, not "the LLM tried and
+>    failed." Re-tested with 3 pages at native resolution + a prompt that
+>    names the exact failure mode (bidders reprint the tender issuer's own
+>    cover template, which legitimately carries both "招标单位" and
+>    "投标单位" fields) — same corpus, same flash-tier model, **8/8**. See
+>    §3.1's updated result. Scanned-PDF auto-classification is **live**,
+>    not paused — the popup now fires only on genuine `uncertain`, matching
+>    what §1 originally asked for without the fallback carrying the whole
+>    load.
 >
 > The three precise cards (design/28 cut 5) are **not deleted** — `IntakeUploader`
 > stays mounted (needed for its `handleFile` capability, now called
@@ -121,50 +132,75 @@ only) ahead of the existing full-document call. Given the existing full
 pipeline already costs far more (multi-page OCR + extraction), this is a
 marginal addition, not a new cost tier.
 
-### 3.1 Measured result (2026-08-20) — 0/7, paused
+### 3.1 Measured result — first 0/7 (2026-08-20), then 8/8 after fixing the actual problem (2026-08-21)
 
-Ran the page-1-only vision classifier (`classify_document_kind`) against all
-7 real scanned bid PDFs in the corpus (泰科龙/绵存/凯硕 + prj1 浦东/亨通/
-宏胜/远东). **0/7 correct.** Native-PDF path (`classify_native_pdf`,
-zero-model-call keyword judge) works correctly on both real native tender
-PDFs once fixed to scan only the cover region before the table-of-contents
-marker (an earlier version scanning the whole first 2 pages hit both
-tender/bid keyword sets — tender documents' own table of contents lists
-chapters like "第四章 投标须知", which legitimately contain "投标" without
-the document itself being a bid — verified against real 目录 marker
-position, consistently ~211-221 chars in, in both real tender fixtures).
+**First measurement (2026-08-20), page-1-thumbnail-only input**: ran
+`classify_document_kind` against all 7 real scanned bid PDFs in the corpus
+(泰科龙/绵存/凯硕 + prj1 浦东/亨通/宏胜/远东). **0/7 correct.** Native-PDF
+path (`classify_native_pdf`, zero-model-call keyword judge) worked correctly
+on both real native tender PDFs once fixed to scan only the cover region
+before the table-of-contents marker (an earlier version scanning the whole
+first 2 pages hit both tender/bid keyword sets — tender documents' own
+table of contents lists chapters like "第四章 投标须知", which legitimately
+contain "投标" without the document itself being a bid — verified against
+real 目录 marker position, consistently ~211-221 chars in, in both real
+tender fixtures).
 
 **Why the scanned-PDF path failed, not just underperformed**: both
-inspected failures show the same reasoning pattern, not random noise. These
-真实 documents' cover pages follow an industry convention — the bidder
-reprints the tender issuer's own cover-page template (which legitimately
-carries both "招标单位" and "投标单位" fields, plus the label "投标文件")
-and fills in their own company name. The model, seeing both labels and the
-tender issuer's name printed first, reasoned this must be "the tender's own
-blank format specification for what a bid cover should look like" rather
-than recognizing it as an actual completed, submitted bid — a plausible
-sounding but wrong inference, and it happened on both inspected cases, not
-once. A single page's visual content doesn't carry enough signal to resolve
-this — it's not a prompt-wording problem.
+inspected failures showed the same reasoning pattern, not random noise.
+These 真实 documents' cover pages follow an industry convention — the
+bidder reprints the tender issuer's own cover-page template (which
+legitimately carries both "招标单位" and "投标单位" fields, plus the label
+"投标文件") and fills in their own company name. The model, seeing both
+labels and the tender issuer's name printed first, reasoned this must be
+"the tender's own blank format specification for what a bid cover should
+look like" rather than recognizing it as an actual completed, submitted
+bid — a plausible sounding but wrong inference, and it happened on both
+inspected cases, not once.
 
-**Also found, not the root cause**: `_mm_call` at `temperature=0` was not
-fully deterministic in this test — the same document returned differently
-shaped raw responses across calls, once triggering a JSON parse failure
-("Extra data"). Worth hardening the parser's robustness independently, but
-fixing it would not have changed the 0/7 result — both inspected failures
-parsed fine and were still wrong.
+**2026-08-21 — user pushed back rather than accepting 0/7 as final**:
+asked directly whether the LLM was under-used, not whether it was
+fundamentally incapable. Correct call — the 0/7 test sent exactly **one
+page**, compressed to a **2-megapixel thumbnail**, in a **single shot**,
+which is a minimal/cheap probe, not "the model tried its best and failed."
+Re-tested with the two changes the failure analysis itself pointed at
+(first two "starting ideas" below): **3 pages at native render resolution
+(6-megapixel budget, no thumbnail compression) + a prompt that names the
+exact failure mode found above** (explicitly: seeing "招标单位" printed
+does not by itself mean tender — check whether "投标单位" is filled with a
+real company name, and whether later pages carry 投标函/授权书 content that
+only exists in submitted bids). Same corpus, same `qwen3-vl-flash` tier
+(no model upgrade) — **8/8** (7 bids + 1 tender, all correct). Verified at
+two levels: a standalone repro script, and — separately — the actual
+production call path (`scanned_pdf_classify.classify_pdf_for_dispatch`)
+against the same files, both giving 8/8. Permanent regression coverage:
+`test_scanned_pdf_classify.py::TestScannedPdfRealAccuracy`
+(`@pytest.mark.e2e`, needs a real `DASHSCOPE_API_KEY`, skipped by default
+matching this project's fresh-E2E convention).
 
-**Starting ideas for a future revisit** (not attempted, no fake confidence
-either way):
-- Look past page 1 — a genuine completed bid has real pricing tables later
-  in the document; a blank format-sample page doesn't. More cost (multi-page
-  call) but resolves the exact ambiguity found here.
-- Look for a company seal/signature/stamp image on the cover as a positive
-  "this is a completed, submitted copy" signal, distinct from which company
-  name is printed where.
-- Simply accept lower confidence and route "uncertain"/low-confidence
-  results to the same manual 2-choice fallback that §3's "方案 B" already
-  described — a hybrid, not purely automated or purely manual.
+**Consequence**: scanned-PDF auto-classification is now **live** in
+`classify_document_kind`/`classify_scanned_pdf`/the `/classify-tier0`
+route — not paused, not routed unconditionally to the popup. The popup
+(§3, "方案 B") still exists and still fires on genuine `uncertain`
+verdicts (including when no vision client is configured at all), which is
+exactly the "honest can't-decide path" §1 asked for — it's no longer
+carrying 100% of scanned-PDF traffic by design.
+
+**Also found along the way, not the root cause of either result**:
+`_mm_call` at `temperature=0` was not fully deterministic in the first
+test — the same document returned differently shaped raw responses across
+calls, once triggering a JSON parse failure ("Extra data"). Did not recur
+in the 8/8 re-test; still worth hardening the parser's robustness
+independently at some point, but it did not explain either the 0/7 or the
+8/8 result — the first test's inspected failures parsed fine and were
+still wrong on content, not on format.
+
+**Remaining idea not yet needed**: looking for a company seal/signature/
+stamp image on the cover as a positive "this is a completed, submitted
+copy" signal was on the original list of things to try — turned out
+unnecessary once the template-reprint ambiguity was named explicitly in
+the prompt and later pages were in view. Not implemented; note kept in
+case a future corpus reintroduces cases the current approach still misses.
 
 ## 4. Summary cards
 

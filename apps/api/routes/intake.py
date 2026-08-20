@@ -114,8 +114,13 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
     """design/28 §3 Tier 0 + design/29 §3 Tier 1.5——拖进来的文件是招标/
     投标/清单哪一种，瞬时判定，不建 ExtractionJob、不进识别队列。cut 5
     拖拽确认屏的第一级判据来源；xlsx/pdf 判不出来时都是合法答案，不是
-    接口异常——pdf 扫描件恒为 uncertain（design/29 §3.1：视觉判定实测
-    0/7，不调用，直接留给前端弹窗二选一），不是"这个接口还没做完"。
+    接口异常。
+
+    2026-08-21 修正：pdf 扫描件此前恒为 uncertain（design/29 §3.1 最初
+    实测视觉判定 0/7，接口层直接不调用）——那版判据只送第一页缩略图，
+    改成送前几页原生分辨率图 + 修正提示词后同批语料复测 8/8，接口这里
+    也改成真的调用（`get_scanned_classify_call()` 未配置 API key 时仍然
+    优雅退化成 uncertain，不是新增了一个失败点）。
     """
     import tempfile
     from pathlib import Path as _Path
@@ -123,7 +128,9 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
     from apps.api.intelligence.document_classify import (
         ExcelClassification, PdfClassification, classify_tier0,
     )
-    from apps.api.intelligence.scanned_pdf_classify import classify_pdf_for_dispatch
+    from apps.api.intelligence.scanned_pdf_classify import (
+        classify_pdf_for_dispatch, get_scanned_classify_call,
+    )
 
     content = await file.read()
     if not content:
@@ -137,7 +144,7 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
         tmp_path = tmp.name
     try:
         result = classify_tier0(tmp_path)
-        pdf_kind = (classify_pdf_for_dispatch(tmp_path, call=None)
+        pdf_kind = (classify_pdf_for_dispatch(tmp_path, call=get_scanned_classify_call())
                     if isinstance(result, PdfClassification) else None)
     finally:
         _Path(tmp_path).unlink(missing_ok=True)

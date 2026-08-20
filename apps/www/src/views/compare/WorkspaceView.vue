@@ -280,9 +280,11 @@ async function classifyAndRouteFile(file: File) {
     }
 
     if (result.kind === 'pdf') {
-      // design/29 §3 Tier 1.5：原生 PDF 有真实判据（零模型调用），直接
-      // 路由，不用户确认——扫描件恒为 uncertain（§3.1 实测视觉判定 0/7，
-      // 不调用，见后端 classify-tier0），弹窗二选一。
+      // design/29 §3 Tier 1.5：原生 PDF 走零模型调用的关键词判据，扫描件
+      // 走视觉判定（2026-08-21 从"仅第一页缩略图"改成"前几页原生分辨率图
+      // + 修正提示词"后，真实语料复测 0/7→8/8，接口现在两条路径都会给出
+      // 真实判定，不再对扫描件恒答 uncertain）——两条路径给同一套 verdict
+      // 语义，这里不用关心具体走的哪条，判不出来（真的 uncertain）时才弹窗。
       if (result.verdict === 'tender') {
         message.info(`「${file.name}」识别为招标文件（${result.reason}）`)
         await routeToTender(file)
@@ -291,7 +293,7 @@ async function classifyAndRouteFile(file: File) {
         await routeToBid(file)
       } else {
         askTenderOrBid(file, result.text_layer === 'scanned'
-          ? '扫描件当前无法自动判定招投标类型，请人工确认。'
+          ? `视觉判定信息不足以确定招投标类型（${result.reason || '未配置视觉客户端或识别信息不够'}），请人工确认。`
           : `文字层判据不够明确（${result.reason || '招投标关键词均未命中，或两侧都命中'}），请人工确认。`)
       }
       return

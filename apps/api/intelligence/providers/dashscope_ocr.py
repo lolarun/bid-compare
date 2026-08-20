@@ -167,22 +167,35 @@ _VISUAL_PROMPT_VERSION = "v4"   # bump when prompt/roles change → cache invali
 _VISUAL_THUMB_MAX_PX: int = 2_000_000   # thumbnail pixel budget for Flash batch calls
 _VISUAL_TEMPERATURE: float = 0.0        # must be 0 for deterministic cache-safe results
 
-# design/29 §3 Tier 1.5：扫描件招标/投标粗判定，只送第一页。跟页面角色分类
-# 判据方向相反——那边刻意不看供应商名/项目名，这里恰恰要看，示例用虚构占位符
-# （.claude/rules/recognition.md："生产 prompt 禁止出现真实供应商、项目、
-# 文件名"）。
-_CLASSIFY_DOC_KIND_PROMPT = """这是一份机电材料招投标文档的第一页图片。请判断这份文档整体是"招标文件"
-（采购方发布，通常含"招标编号""招标人""采购清单""投标须知"等字样）还是
-"投标文件"（供应商提交的报价文件，通常含"投标单位""投标人""报价函""法定
-代表人"等字样，会出现具体供应商公司名）。
+# design/29 §3 Tier 1.5：扫描件招标/投标粗判定。2026-08-21 从"只送第一页
+# 缩略图"改成"送前几页原生分辨率图"，页数/分辨率由调用方（scanned_pdf_classify.py）
+# 决定送几张，这里只定分辨率预算。跟页面角色分类判据方向相反——那边刻意不看
+# 供应商名/项目名，这里恰恰要看，示例用虚构占位符（.claude/rules/recognition.md：
+# "生产 prompt 禁止出现真实供应商、项目、文件名"）。
+_CLASSIFY_DOC_KIND_MAX_PX: int = 6_000_000   # 高于页面角色分类的缩略图预算——
+                                              # 缩略图版实测 0/7，分辨率不够看清是原因之一
+_CLASSIFY_DOC_KIND_PROMPT = """这是一份机电材料招投标文档的前几页图片（按顺序，可能含封面、投标函、
+授权书等）。请判断这份文档整体是"招标文件"（采购方发布）还是"投标文件"
+（供应商提交的报价文件）。
 
-只看第一页能看到的封面/首页信息判断，不要假设、不要根据文件名猜测（你也
-看不到文件名）。看不出来时诚实答"uncertain"，不要为了给出答案而猜。
+**重要提醒（实测发现的常见易错点）**：投标文件的封面经常沿用招标方发的
+封面模板，模板上会同时印着"招标单位"和"投标单位"两个字段——这不代表
+文档是招标文件。判断关键看：
+- "投标单位"/"投标人"字段是否填了一个具体的公司名（填了→这是投标文件）
+- 文档标题/水印是否明确写"投标文件"/"投标函"/"报价文件"
+- 后续页面（投标函、法定代表人授权书、报价说明）只会出现在投标文件里，
+  招标文件不会有这些内容
+只有"招标单位"字段被填、"投标单位"字段空白或未出现具体公司名时，才判
+tender。
+
+只看给出的这几页能看到的信息判断，不要假设、不要根据文件名猜测（你也看
+不到文件名）。信息真的不够判断时诚实答"uncertain"，不要为了给出答案而猜。
 
 举例（虚构，仅示意格式，不代表任何真实项目）：
-- 封面写"XX工程招标文件""招标编号：ZB-2026-001" → doc_type=tender
-- 封面写"投标文件""投标人：某某机电设备有限公司" → doc_type=bid
-- 封面信息不足以判断，或图片模糊/不是封面页 → doc_type=uncertain
+- 封面模板印"招标单位：____ 投标单位：某某机电设备有限公司"，标题写
+  "投标文件" → doc_type=bid（不要因为看到"招标单位"字样就判成 tender）
+- 封面写"XX工程招标文件""招标编号：ZB-2026-001"，没有具体投标单位名 → doc_type=tender
+- 信息不足以判断 → doc_type=uncertain
 
 严格只返回 JSON（不要解释、不要 markdown 围栏）：
 {"doc_type": "tender"或"bid"或"uncertain", "project_name_hint": "看到的项目名，没有则空字符串", "supplier_name_hint": "看到的投标单位/供应商名，没有则空字符串", "evidence": ["简短依据1", "依据2"]}"""
@@ -705,23 +718,29 @@ class DashScopeOCRProvider(LLMProvider):
             fallback["source"] = "plus_failed"
             return fallback
 
-    def classify_document_kind(self, page_image: bytes, *, model: str | None = None) -> dict:
-        """design/29 §3 Tier 1.5——扫描件招标/投标判定，只送第一页缩略图，
-        用便宜的 flash 模型（跟 classify_pages_visual 同一档，不是逐行抽取
-        用的 plus）。这是"这份文档整体是什么"的粗判断，不是页面角色分类
-        （`classify_pages_visual`）——不复用那条 prompt，那条刻意"不得依赖
-        供应商名称做判断"，这里恰恰要读封面上的招标编号/投标单位这些内容
-        信号，两者判据方向相反，不能共用一份 prompt。
+    def classify_document_kind(self, page_images: list[bytes], *, model: str | None = None) -> dict:
+        """design/29 §3 Tier 1.5——扫描件招标/投标判定，用便宜的 flash 模型
+        （跟 classify_pages_visual 同一档，不是逐行抽取用的 plus）。这是
+        "这份文档整体是什么"的粗判断，不是页面角色分类（`classify_pages_visual`）
+        ——不复用那条 prompt，那条刻意"不得依赖供应商名称做判断"，这里恰恰
+        要读封面/投标函上的招标编号/投标单位这些内容信号，两者判据方向相反，
+        不能共用一份 prompt。
+
+        2026-08-21 实测修正：只送第一页缩略图（2M 像素预算）实测 0/7——不是
+        模型不会读，是这一版给的信息量不够。机电投标封面惯例上会原样重印
+        招标方自己的封面模板（同时印"招标单位"和"投标单位"两个字段），模型
+        只看得到封面时，容易把"看到招标单位字样"误判成"这是招标文件"，看不
+        到后面"投标函""授权书"这些不会跟模板混淆的内容来纠正。改成送前
+        `page_images` 张原生分辨率页图（不再用缩略图压缩）+ 直接点破这个坑
+        的提示词，同一批真实语料复测 **8/8**（7 份投标 + 1 份招标全对）。
 
         Returns 原始解析后的 dict：{"doc_type": "tender"|"bid"|"uncertain",
         "project_name_hint": str, "supplier_name_hint": str, "evidence": [...]}
         ——解析失败或调用异常时返回 doc_type="uncertain"，不抛异常（design/28
         Tier 0/1 同一条"失败不拖垮主线"约定，判不出来诚实答不确定）。"""
         mdl = model or _VISUAL_FLASH_MODEL
-        content = [
-            self._img_part(page_image, max_pixels=_VISUAL_THUMB_MAX_PX),
-            {"text": _CLASSIFY_DOC_KIND_PROMPT},
-        ]
+        content = [self._img_part(img, max_pixels=_CLASSIFY_DOC_KIND_MAX_PX) for img in page_images]
+        content.append({"text": _CLASSIFY_DOC_KIND_PROMPT})
         try:
             raw = self._mm_call(content, mdl, temperature=_VISUAL_TEMPERATURE)
             data = json.loads(self._clean_json_text(raw))

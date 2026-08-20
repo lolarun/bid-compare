@@ -78,10 +78,20 @@ def test_classify_native_pdf(client):
     assert body["text_layer"] == "native"
 
 
-def test_classify_scanned_pdf(client):
-    """design/29 §3.1：扫描件视觉判定实测 0/7 不可靠，接口对扫描件恒答
-    uncertain（不调用视觉模型），前端据此弹二选一——这个 uncertain 是
-    设计行为，不是"还没做完"。"""
+def test_classify_scanned_pdf_without_vision_client_returns_uncertain(client, monkeypatch):
+    """2026-08-21 修正：扫描件此前恒为 uncertain（design/29 §3.1 最初版本
+    视觉判定 0/7），改进后（送前几页原生分辨率图 + 修正提示词）复测 8/8，
+    接口现在会真的调用视觉分类器——但离线测试不能依赖环境里有没有配置
+    真实 DASHSCOPE_API_KEY（跟本项目"offline 测试不吃真实网络"的既有教训
+    一致，见 test_paddle_quote_api_e2e.py 的 text_call mock 先例）。这里
+    显式把 get_scanned_classify_call 打成 None，测的是"没配视觉客户端时
+    优雅退化成 uncertain，不崩"这个契约，不是"扫描件恒为 uncertain"这个
+    已经不成立的旧设计。真实视觉判定准确率见
+    test_scanned_pdf_classify.py::TestScannedPdfRealAccuracy（fresh e2e）。"""
+    monkeypatch.setattr(
+        "apps.api.intelligence.scanned_pdf_classify.get_scanned_classify_call",
+        lambda: None,
+    )
     path = DOCS / "bid/上海绵存投标文件.pdf"
     _skip_if_missing(path)
     with path.open("rb") as fh:
