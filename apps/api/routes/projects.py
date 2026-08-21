@@ -12,6 +12,17 @@ from apps.api.schemas import ProjectCreate, ProjectUpdate, ProjectOut
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
+def _duplicate_project_409(name: str, code: str) -> HTTPException:
+    """projects 表 (name, code) 唯一约束 uq_project_name_code 的统一出口。
+
+    创建和更新走同一条文案：裸的 IntegrityError 会以 500 + 堆栈的形式甩给
+    前端，用户只看到"服务器错误"，无从判断是不是自己的操作有问题。
+    """
+    return HTTPException(
+        409, f"项目名称「{name}」+ 编号「{code}」已存在，请修改名称或编号后重试"
+    )
+
+
 @router.get("", response_model=dict)
 def list_projects(
     page: int = Query(1, ge=1),
@@ -51,12 +62,11 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
     try:
         db.commit()
     except IntegrityError:
-        # projects 表 (name, code) 唯一约束——真实触发场景：design/27 工作台
-        # 打开空白页即建占位项目，重名会撞 uq_project_name_code。之前这里没
-        # 捕获，直接把裸的 IntegrityError 500 甩给前端，报"服务器错误"，用户
-        # 无从判断是不是自己的操作有问题；现在给出可读的 409。
+        # 真实触发场景：design/27 工作台打开空白页即建占位项目，重名会撞
+        # uq_project_name_code。
+        name, code = proj.name, proj.code
         db.rollback()
-        raise HTTPException(409, f"项目名称「{proj.name}」+ 编号「{proj.code}」已存在，请修改后重试")
+        raise _duplicate_project_409(name, code)
     db.refresh(proj)
     return proj
 
@@ -70,7 +80,19 @@ def update_project(project_id: int, body: ProjectUpdate, db: Session = Depends(g
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(proj, field, value)
 
-    db.commit()
+    # rollback 会把 proj 上的字段还原成库里的旧值，所以先留一份"用户想改成
+    # 什么"用于报错文案。
+    attempted_name, attempted_code = proj.name, proj.code
+    try:
+        db.commit()
+    except IntegrityError:
+        # 真实触发场景（2026-08-21 服务端日志）：两个工作台各自识别同一份招标
+        # 文件，WorkspaceView 回填出同样的项目名后各写一次 PUT，第二次撞
+        # uq_project_name_code。重开一次比价、上传失败后重试都会走到这里，是
+        # 正常用户路径，不是异常操作。原来这个 commit 没有任何保护，直接 500
+        # + 裸堆栈，且前端没有 catch，用户既看不到报错也不知道名字没存上。
+        db.rollback()
+        raise _duplicate_project_409(attempted_name, attempted_code)
     db.refresh(proj)
     return proj
 

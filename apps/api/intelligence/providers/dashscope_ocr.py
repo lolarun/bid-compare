@@ -61,6 +61,25 @@ def _retry_wait(attempt: int) -> float:
 # 这是所有 OCR 调用（批量识别/切片/方向探测）的硬上限。env 可调；注意 Qwen 账号本身
 # 有 QPS/并发限额，调太高会触发 429（有退避重试，但会拖慢）。多 key 时总并发 = 本值 × key数。
 _PER_KEY_CONCURRENCY = max(1, int(os.getenv("OCR_PER_KEY_CONCURRENCY", "6")))
+
+# 信号量登记表放在**模块作用域**、按 api_key 共享，不是实例属性——provider
+# 有多个构造点：main.py 启动时建一份长驻的（识别任务走 ThreadPoolExecutor
+# 共用它），而 scanned_pdf_classify.get_scanned_classify_call() 是**每次
+# HTTP 请求新建一个**。实例私有的信号量意味着这两类调用各持一份配额、彼此
+# 不排队，`_PER_KEY_CONCURRENCY` 对同一个 key 的真实并发就不再是硬上限
+# （每请求一份 = 限流形同虚设）。按 key 共享后，同一 key 无论由谁发起，
+# 进程内总并发都受这一个闸门约束。多 key 时总并发仍是 本值 × key数。
+_KEY_SEMAPHORES: dict[str, threading.Semaphore] = {}
+_KEY_SEMAPHORES_LOCK = threading.Lock()
+
+
+def _shared_key_semaphore(key: str) -> threading.Semaphore:
+    """取（必要时创建）某个 api_key 的进程级并发闸门。"""
+    with _KEY_SEMAPHORES_LOCK:
+        sem = _KEY_SEMAPHORES.get(key)
+        if sem is None:
+            sem = _KEY_SEMAPHORES[key] = threading.Semaphore(_PER_KEY_CONCURRENCY)
+        return sem
 # ── Stage 2 prompts (OCR HTML → structured JSON) ────────────────────────
 _TENDER_S2_PROMPT = """你是机电材料招投标助理。下面是OCR识别出的HTML表格内容。
 请从中提取采购材料清单，返回严格的JSON格式。
@@ -348,8 +367,9 @@ class DashScopeOCRProvider(LLMProvider):
         self._keys = keys
         self._key_cycle = itertools.cycle(keys)
         self._key_lock = threading.Lock()
+        # 进程级共享（见 _shared_key_semaphore）——不要改回 per-instance。
         self._per_key_sem: dict[str, threading.Semaphore] = {
-            k: threading.Semaphore(_PER_KEY_CONCURRENCY) for k in keys
+            k: _shared_key_semaphore(k) for k in keys
         }
         self._llm_clients: dict[str, OpenAI] = {}
         self._client_lock = threading.Lock()
