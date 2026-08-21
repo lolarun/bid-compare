@@ -285,3 +285,426 @@ turned out not to be achievable with a page-1-only vision call (§3.1).
   computation (§5's total is a separate, clearly-labeled rough number).
 - PDF without any embedded list — still an untested path per design/28 §9,
   unchanged by this round.
+
+---
+
+## 9. Round-3 UI feedback (2026-08-21) — one card per file
+
+The user hand-tested the delivered round-2 UI and gave seven numbered
+requirements. Six are UI changes (implemented, §10); the seventh is an
+investigation (§11). Recorded verbatim in intent, not paraphrased away:
+
+1. Dropping N files must show how many files are being processed — i.e. N
+   cards appear below.
+2. A card whose file type is not yet determined shows a **分析中** badge.
+3. Card badges have exactly four categories: 招标文件 / 采购清单 /
+   投标文件 / 报价清单.
+4. After the badge, show the **unit name** — 招标单位 for a tender
+   document, 投标单位 for a bid — in a larger font, and *only* the unit
+   name.
+5. There must be a tender/bid summary (LLM, as a by-product of
+   classification); a quote total is desirable so the reader can
+   cross-check it against the parsed detail below.
+6. 采购清单 / 报价清单 counts must be stated in **项**, never **行**,
+   whether they came from Excel or from a parsed PDF.
+7. 凯硕新正 recognizes with no 单价 and no 合计 — an earlier test passed.
+
+### Why round 2 did not already satisfy 1–4
+
+Round 2 had no card *model*. Cards were three ad-hoc template branches:
+the tender card existed only once `tenderResult` was non-null, the
+采购清单 Excel had **no card at all** (it set `excelFile` and showed a
+toast), and a file still being classified had nothing on screen — only a
+"已上传 N 个文件" counter line that did not correspond to anything
+visible. Badges covered two of the four categories, and the unit name was
+buried inside the LLM summary sentence rather than being its own field.
+
+## 10. Design: cards are a projection, not a fourth state machine
+
+One dropped file = one card, from the moment it lands to the moment
+recognition finishes. The badge changes (分析中 → one of the four
+categories); the card itself never disappears and is never re-created.
+
+**Cards hold no state of their own.** `utils/docCards.ts` projects four
+existing state sources into a `DocCard[]`:
+
+| Source | Owns | Produces |
+|---|---|---|
+| `pendingClassify` (new, WorkspaceView) | files between drop and verdict | `analyzing` cards |
+| `IntakeUploader` (tender) via `@progress`/`@extracted` | tender upload + polling | the `tender` card |
+| Excel preview (`uploadExcel`) | 采购清单 preview | the `tender_list` card |
+| `batchFiles` (`useSupplierUpload`) | bid upload/recognition/confirm | `bid` / `bid_list` cards |
+
+Keeping a separate card state would guarantee drift between what the card
+says and what the pipeline is actually doing — which is the exact class of
+bug this round is fixing. The projection functions are pure and unit-tested
+(`__tests__/docCards.test.ts`), so each of req1–req6 has a direct assertion
+instead of resting on a manual-test retelling.
+
+Three consequences worth stating explicitly:
+
+- **req3 needs a label on the bid entry.** Excel/CSV 报价清单 and PDF
+  投标文件 go through the *same* upload/recognition/confirm pipeline —
+  the distinction is presentational only, so `BatchFileEntry` carries a
+  `docKind` tag (from the classify verdict, falling back to the file
+  extension) rather than forking the pipeline.
+- **req4 needed a new extracted field.** The tender side had no
+  "who issued this document" scalar at all — only project name/code/dates.
+  `tenderer` is now part of `vl_tender._META_KEYS` and both cover-scalar
+  prompts (vision and Paddle text-layer). Project name is *not* used as a
+  stand-in: a project name is not a unit name, and substituting it would
+  make the card state something the document never said (design/27 red
+  line 1). "Still recognizing" and "recognized, but the document does not
+  say" are rendered differently, never collapsed.
+- **req5 keeps two totals apart.** 明细合计 (sum of the extracted rows)
+  and 文件声明总价 (`_doc_meta.bid_total`, what the document itself
+  declares) are separate facts on the card and separate lines in the
+  summary facts. They are never merged into one "总价": a disagreement
+  between them is precisely the signal a human is being asked to check
+  (same reasoning as the checksum gate).
+
+## 11. req7 — 凯硕新正 missing 单价/合计
+
+Investigation, not a UI change. **Nothing was lost in recognition — the grid
+reads the wrong key.**
+
+### 11.1 Measured (Paddle snapshot replay, `quote_kaishuo.json`, zero API cost)
+
+Detail rows recognized from `金桥地体上盖项目-凯硕新正投标文件.pdf`: 90.
+
+| field | 凯硕 filled | 绵存 filled |
+|---|---|---|
+| `unit_price` (generic) | **0 / 90** | 87 / 87 |
+| `total_price` (generic) | **0 / 90** | 86 / 87 |
+| `unit_price_excl_tax` | 89 / 90 | 0 / 87 |
+| `total_price_excl_tax` | 89 / 90 | 0 / 87 |
+| `unit_price_incl_tax` | 82 / 90 | 0 / 87 |
+| `total_price_incl_tax` | 87 / 90 | 0 / 87 |
+| `tax_rate` / `tax_amount` | 89 / 90 | 0 / 87 |
+
+凯硕's quote table labels **every** price column with 含税/不含税
+(`单价(不含税)` / `合计(不含税)` / `税率` / `税额` / `单价(含税)` /
+`合价(含税)`). `vl_quote._SLOTS` routes those into the tax-qualified slots
+and the generic `unit_price`/`total_price` slots deliberately reject
+tax-labelled columns — that rejection *is* the A2 fix (a generic slot
+swallowing 含税单价 made `derive_price_basis` report `excl_tax` and
+undercharged the whole comparison by one tax rate). So `unit_price = None`
+on 凯硕 is the correct, intended output; 绵存's plain `单价`/`合价` table is
+the case where the generic slots are the right home.
+
+`WorkspaceView.gridColumns` renders exactly two price columns, keyed
+`unit_price` and `total_price`. For any supplier that separates tax basis,
+both render empty.
+
+**Why the earlier test still passed:** `test_paddle_quote_api_e2e` asserts
+row counts and a successful confirm, and its review-row resolver accepts
+`total_price` **or** `total_price_incl_tax` **or** `total_price_excl_tax`.
+No test ever asserted which key the grid displays. Both statements are
+true at once: recognition passes, display is blank.
+
+**Fix (not yet applied — needs a decision):** the grid should render the
+口径-resolved price. `pipeline._postprocess_quote` already attaches
+`price_basis` / `effective_unit_price` / `effective_total_price` per row
+(凯硕 row 1 → `dual`, 71.0, 71.0). Options: (a) render
+`effective_unit_price`/`effective_total_price` with the basis shown as a
+column caption, or (b) render 含税/不含税 as separate column pairs when
+`price_basis === 'dual'`. (a) is one column set for every document shape;
+(b) shows more but makes the column count document-dependent. Either way
+the raw values stay untouched — this is a display mapping, not a data
+change.
+
+**Second, separate gap found while measuring:** the Excel/CSV quote path
+(`tabular_ingestion._TABULAR_COLUMN_PATTERNS`) is a *different* column
+table from `vl_quote._SLOTS` and has no `tax_rate` / `tax_amount` /
+`total_price_excl_tax` roles at all. Running 凯硕's own `.xlsx` through it
+drops 税率/税额/合计(不含税); 泰科龙's `.xlsx` comes out with
+`unit_price = None` because `单价(不含税)` is claimed by the excl slot and
+the file has no other 单价 column. Same supplier, PDF vs Excel, different
+field set. Tracked in design/30.
+
+---
+
+## 12. Round-4 feedback (2026-08-21) — remove the manual upload cards
+
+Hand-test of §10. Two reports:
+
+> 左上角的这个没有必要，后面的两个也没有必要，容易造成困惑
+
+The three manual-upload surfaces (`IntakeUploader`'s own dragger + progress
+block, 上传采购清单 Excel, 拖入所有投标文件) are now a **second entry point
+for the same thing**. Once every dropped file gets a card that shows its
+own badge and progress, the tender uploader draws the same progress twice
+and the two Excel/bid draggers duplicate the unified drop zone. All three
+are removed.
+
+`IntakeUploader` is still mounted (in a `display:none` wrapper) — it is the
+only holder of the tender upload/poll/retry logic and the unified drop zone
+calls it through a ref. What is gone is its *visible* UI, not the component.
+The 招标三产物明细 card (采购清单 / 封面信息 / 品牌要求) stays: it carries
+real content and is not an upload entry.
+
+Consequence: the "classification failed → show the manual cards" fallback no
+longer has anywhere to point. It now falls through to the **same two-choice
+popup** as "verdict uncertain", so the file keeps moving instead of dying on
+an error card. `showManualCards` is deleted.
+
+### 12.1 The 泰科龙 "分类接口异常" — a client timeout, not a backend error
+
+> 金桥地体上盖项目-泰科龙投标文件的异常是什么情况
+
+Measured, not inferred:
+
+- Backend log for that session: **six** `POST /api/intake/classify-tier0
+  → 200 OK`, and **zero** errors on that route. The server answered every
+  call successfully.
+- Real classification cost, one file at a time (production
+  `classify_pdf_for_dispatch` + real vision call): 泰科龙 **6.5 s**,
+  凯硕新正 **8.9 s**, 上海绵存 **6.8 s** — all three `verdict = bid`,
+  correct.
+- Client timeout was **30 s** (`api/index.ts`).
+
+All four files were dropped at once and `onDropAnyFiles` fired one classify
+request per file with no concurrency cap. Scanned-PDF classification renders
+the first `SCANNED_CLASSIFY_PAGES` pages, and every pdfium render entry point
+must serialize through `document_loader._PDF_LOCK`
+(`.claude/rules/recognition.md`) — while the tender PDF's own recognition was
+holding that lock. So the requests queued server-side; 泰科龙 was last in
+line and the browser gave up at 30 s while the backend was still working.
+The card then said "分类接口异常", which was wrong twice over: the interface
+did not error, and the file was not broken.
+
+Two changes:
+
+1. **Client-side serialization.** Classify requests are queued and sent one
+   at a time. Firing N at once cannot go faster than the render lock allows;
+   its only effect is to push every request toward the timeout together.
+   Queued files say 排队中 on their card instead of pretending to be 判定中.
+2. **Timeout 30 s → 90 s**, as headroom, not as the fix. A timeout is now
+   also reported honestly ("自动判定超时") and routes into the two-choice
+   popup rather than a dead end.
+
+### 12.2 Separate defect observed in the same logs (not fixed)
+
+`PUT /api/projects/{id}` returned 500 twice:
+`sqlite3.IntegrityError: UNIQUE constraint failed: projects.name,
+projects.code` from `routes/projects.py:73`. Cause: two workspaces
+(`id=101`, `id=102`) both auto-filled their name from the same recognized
+tender, and `persistProjectMeta()` writes it straight through — the second
+one collides with `uq_project_name_code`. Uncaught, so it surfaces as a 500
+rather than a usable message. Out of scope for this round; recorded so it is
+not rediscovered as new.
+
+---
+
+## 13. Round-5 feedback (2026-08-21)
+
+Three items, all from hand-testing §12.
+
+### 13.1 招标解析信息 card removed too
+
+> 招标文件解析信息我也不想要了
+
+The 招标三产物明细 card (采购清单 N 项 / 封面信息 / 品牌要求) is gone as
+well, so the `materials-strip` region no longer exists in any form. The
+招标 summary card already states 采购清单 N 项 and the recognized 招标单位;
+the extra card restated it in a second visual language right above.
+
+Consequence: there is no longer a "重新上传" button for the tender. Replacing
+it is done the same way as uploading it — drop the new tender PDF into the
+unified zone; `routeToTender` calls the same `IntakeUploader` and
+`onTenderExtracted` overwrites `tenderResult`. One entry point, same
+reasoning as §12. `routeToTender` now also clears `tenderError` so a stale
+failure does not ride along on the new card.
+
+### 13.2 Classification concurrency: 1 → 4 (measured, not guessed)
+
+> 现在对上传文件的解析式同步进行的么…可以将同步处理的任务数增大么
+
+§12.1 serialized classification to stop the 30 s timeout. That over-corrected.
+Splitting the per-file cost:
+
+| file | pages | pdfium render of first 3 pages (holds `_PDF_LOCK`) | total classify |
+|---|---|---|---|
+| 泰科龙 | 53 | 1.64 s | 6.5 s |
+| 凯硕新正 | 19 | 1.18 s | 8.9 s |
+| 上海绵存 | 31 | 1.36 s | 6.8 s |
+
+Only ~1.2–1.6 s of each call is the serialized render; the remaining 5–7 s is
+the vision call, which parallelizes freely. So `CLASSIFY_CONCURRENCY = 4`:
+worst case ≈ 4 × 1.5 s of render queueing + one vision call ≈ 12 s, far under
+the 90 s client timeout, and four files finish in ~13 s instead of ~30 s
+serial. The cap exists because the render segment genuinely cannot
+parallelize — queueing more requests only moves the wait server-side. Files
+beyond the cap say 排队中 on their card rather than pretending to be 判定中.
+
+Note this is the *classification* stage only. Recognition already runs on the
+process-wide `EXTRACTION_THREAD_POOL_SIZE` pool (default 8, `core/runtime.py`)
+and was never the bottleneck being described.
+
+### 13.3 Classification toast: one line, evidence moved to the badge
+
+> 不需要这么长的 Message，直接提示：已完成某文件初步解析....识别为..... 即可
+
+The toast was `「file」识别为投标文件（<the model's full multi-clause
+reason>）` — a screenful nobody finishes reading. Now:
+`已完成「file」初步解析，识别为投标文件`.
+
+The reason is **not discarded** — it is stored per filename and rendered as
+the card badge's hover tooltip. Deleting it would leave a verdict with no
+stated basis, which design/27 red line 1 does not allow; burying it in a
+toast that scrolls away was the actual problem.
+
+### 13.4 明细合计 ¥0 on tax-split quotes — fixed as part of req5
+
+Visible in the same screenshot: 凯硕新正 and 泰科龙 cards read
+`明细合计 ¥0 · 文件声明总价 ¥932,154`. Same root cause as §11.1 —
+`bidStatsFor` summed `total_price`, which is correctly empty when the
+document splits 含税/不含税. It now sums `effective_total_price ?? total_price`
+(the 口径-resolved value `derive_price_basis` already produces per row). This
+changes which key the card reads; it does not touch any stored value and does
+no cross-basis conversion. The grid columns themselves are still the open
+decision in §11.1.
+
+---
+
+## 14. Round-6 (2026-08-21) — classify concurrency = 8, and why not unbounded
+
+> 是否可以改为上传多少文件，即有多少个并行
+
+Raised 4 → **8**. For the everyday case (dropping 4–8 files) that *is*
+"one parallel slot per file". A cap still exists, for two reasons that are
+measured rather than assumed:
+
+1. **Downstream is 8 anyway.** Classification hands straight off to
+   recognition, which runs on the process-wide pool
+   `EXTRACTION_THREAD_POOL_SIZE` (default 8, `core/runtime.py:49`).
+   Classifying 20 files at once only makes 20 jobs queue on 8 threads.
+2. **The server-side rate guard does not actually bind on this path.**
+   `DashScopeOCRProvider` keeps a per-API-key `Semaphore(_PER_KEY_CONCURRENCY)`
+   (default 6) — but it is an **instance** attribute, and
+   `routes/intake.py::classify_tier0_upload` calls
+   `get_scanned_classify_call()` per request, constructing a **fresh
+   provider, with a fresh semaphore, every time**. So concurrent classify
+   requests never contend on it. Until that is fixed, the client-side cap is
+   the only thing standing between "drop 30 files" and 30 simultaneous
+   vision calls hitting provider rate limits — and a 429 storm is a worse
+   user experience than waiting, because it surfaces as failed
+   classifications rather than as a queue.
+
+The tail cost stays modest either way: concurrency N ≈ N × 1.5 s of
+serialized pdfium rendering + one vision call, so 8 files ≈ 12 s + 7 s ≈ 19 s,
+well under the 90 s client timeout.
+
+### 14.1 Defect recorded, not fixed
+
+The per-key semaphore being per-instance (above) makes
+`OCR_PER_KEY_CONCURRENCY` a no-op for `classify-tier0`, and for any other
+path that builds a provider per request. Fixing it means caching the
+provider (or hoisting the semaphore to module scope keyed by API key), which
+touches provider construction shared with the recognition path — out of
+scope for this round, recorded so it is not rediscovered as new.
+
+
+## 15. Defect — duplicate project name from tender back-fill (fixed 2026-08-21)
+
+Found in real server logs, not in a test. Two workspaces (project 101 and
+102) each recognized the **same** tender document; `onTenderDone()` back-fills
+`projectName` from the recognition result and `persistProjectMeta()` writes it
+straight through with `PUT /api/projects/{id}`. The second write collided with
+`uq_project_name_code` on `projects (name, code)` and raised an uncaught
+`sqlalchemy.exc.IntegrityError`, which surfaced as **500 with a raw stack
+trace**. `create_project` already handled the same constraint; `update_project`
+did not.
+
+This is an ordinary user path, not misuse: re-running a comparison, or a second
+attempt after a failed upload, both recognize the same tender twice.
+
+**Decision: fail loudly with a 409, do not auto-disambiguate.** The project
+name is user-facing identity — silently rewriting it to "…(2)" would make two
+workspaces for the same tender indistinguishable in the project list, and the
+back-fill's whole point is that the recognized name is the *right* name.
+Auto-fill-only-when-placeholder was rejected for the same reason: it would keep
+the placeholder `新比价项目-<timestamp>` on the second workspace, which is
+strictly worse than telling the user to pick a name.
+
+| Layer | Change |
+|---|---|
+| `apps/api/routes/projects.py` | `update_project` catches `IntegrityError` → 409 with a readable detail; `create_project` reuses the same `_duplicate_project_409()` helper so both paths share one message |
+| `apps/www/.../WorkspaceView.vue` | `persistProjectMeta()` catches the failure and shows it: a **persistent** inline error under the name input (a toast is not enough — the input still displays the unsaved value, so without a standing marker "not saved" is invisible until reload), plus a toast on the auto-fill path where the user isn't looking at the field. Per-keystroke manual edits get the inline marker only, no toast spam. |
+| `apps/api/tests/test_project_routes.py` | New: 409 on create and update, row unchanged after rollback, session still usable, and same-name-on-same-row is not a collision |
+
+Not changed: `views/projects/IndexView.vue` already surfaces `detail` from the
+response, so the new 409 reaches the user there without edits.
+
+## 16. 「轮询超时」不是超时（2026-08-21 手测）
+
+**现象**：四份文件同拖，上海绵存（31 页扫描件）的卡片显示"轮询超时"，
+另外三份正常。
+
+**测量**：服务端日志里 `GET /api/intake/jobs/{id}` **每一次都返回 200**，
+零错误。失败发生在客户端。
+
+**根因**：两层判断都错了。
+
+1. axios 全局超时 15s，`getJob` 没有覆盖。多份扫描件同时识别时，识别线程
+   占着 GIL 和 pdfium 的 `_PDF_LOCK`，一次主键读也要排很久才轮得到 —— 请求
+   最终被服务好了（日志里的 200），但客户端早已放弃。
+2. 前端把"连续失败 5 次"当成终态失败。2 秒一次 → **10 秒就判死刑**，而且
+   把"查不到状态"直接写成"识别失败"。识别任务当时还在正常跑。
+
+第 2 条比第 1 条更糟：它让用户以为要重新上传，而重新上传会白花一次真实
+OCR 的钱，还丢掉后台已经算出来的结果。
+
+**修法**：
+
+- `getJob` 单独给 60s 超时。它是一次主键读，超时给宽不花任何代价。
+- 放弃判据从"失败次数"改成"连续失败时长"（3 分钟）。忍耐期内卡片如实显示
+  "连接不稳定，重试中（已 N 秒）"，**不说"失败"** —— 两者对用户的含义完全
+  不同（要不要重新上传）。
+- 真的放弃后给「重试」按钮，且**重试是重新挂轮询，不是重新识别**：放弃的
+  常见原因就是查询超时，那个 job 多半已经跑完了。服务端明确判 failed 的
+  卡片不给这个按钮 —— 重试也是同样的结果，给个点了没用的按钮比不给更糟。
+
+**没做的**：没有降低识别侧的并发或给 pdfium 锁减压。这次的表现是客户端误判，
+不是服务端真的扛不住；真要动并发得先量清楚服务端在多大压力下开始退化，
+现在没有那个数据。
+
+## 17. Vision-call concurrency on the classify path (2026-08-20)
+
+`DashScopeOCRProvider` bounds concurrent calls per API key with
+`_PER_KEY_CONCURRENCY` (`OCR_PER_KEY_CONCURRENCY`, default 6). That semaphore
+dict used to be an **instance** attribute, which made the bound ineffective
+across the provider's two construction sites:
+
+- `main.py::_build_pipeline` builds **one** long-lived provider at startup;
+  extraction jobs share it through the `ThreadPoolExecutor`, so they do
+  contend on its semaphore.
+- `scanned_pdf_classify.get_scanned_classify_call()` builds a **new** provider
+  on every `POST /api/intake/classify-tier0` request (§3), so each request got
+  a fresh, full quota — never contending with the other classify requests, nor
+  with the extraction pipeline using the same key.
+
+**Fixed**: the semaphore registry is now module-scoped and keyed by api_key
+(`_shared_key_semaphore` in `providers/dashscope_ocr.py`), so the limit is
+process-wide per key regardless of how many provider instances exist. Key
+rotation (`_next_key`) is unchanged, distinct keys keep independent quotas, and
+`OCR_PER_KEY_CONCURRENCY` remains the tunable. Regression test:
+`apps/api/tests/test_ocr_provider_concurrency.py` (asserts two separately
+constructed providers with the same key share one gate, and that filling the
+quota through one instance blocks the other).
+
+**Not a client-side cap.** There is no frontend concurrency limit on this path
+to relax: `WorkspaceView.onDropAnyFiles` calls `classifyAndRouteFile` per
+dropped file without awaiting or pooling. Whether that should gain a cap is a
+separate UI question, not something this backend fix enables or removes.
+
+**Still open — the route blocks the event loop.** `routes/intake.py::classify_tier0_upload`
+is `async def` but does all its real work synchronously (`classify_tier0`,
+`classify_pdf_for_dispatch`, and the vision call inside it). FastAPI runs
+`async def` endpoints on the event loop, so concurrent classify uploads
+currently serialize at 1 in flight — and they stall every other request on the
+loop while a vision call is outstanding. The per-key semaphore is therefore the
+correct bound but not yet the *binding* one for this route. Moving the blocking
+work off the loop (plain `def`, or `run_in_executor`) is the follow-up; it is
+deliberately **not** bundled here, because it changes the latency profile of
+the whole API surface and deserves its own measurement.

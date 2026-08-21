@@ -21,7 +21,7 @@ import type {
   CopyDedupInfo,
   Supplier,
 } from '@/api/client'
-import { asQuoteShape, asQualityMeta } from '@/utils/extraction'
+import { asQuoteShape, asQualityMeta, asDeclaredTotal } from '@/utils/extraction'
 import { handleBatchConfirmError } from '@/utils/batchConfirmError'
 import { extractErrMsg } from '@/utils/errors'
 
@@ -42,9 +42,24 @@ export interface UploadTaskConfig {
   bidStatus: string
 }
 
+// design/29 §10 req3：卡片徽标的四个类别里，投标侧占两个——「投标文件」
+// （整份 PDF 投标文件）与「报价清单」（Excel/CSV 报价明细表）。两者走的是
+// 同一条上传/识别/入库管线（这里不分叉），差别只在卡片上怎么称呼它，所以
+// 只是随行带一个标签，不是两套状态机。
+export type BidDocKind = 'bid' | 'bid_list'
+
+/** 扩展名兜底判定：分类接口没给结论（刷新恢复、手动卡片直传）时用它。
+ *  只认扩展名这一个字面事实，不猜内容——猜错会让徽标撒谎。 */
+export function inferBidDocKind(filename: string): BidDocKind {
+  return /\.(xlsx?|csv)$/i.test(filename) ? 'bid_list' : 'bid'
+}
+
 export interface BatchFileEntry {
   id: string           // unique key
   filename: string
+  // 卡片徽标用的文档类别（design/29 §10 req3）——优先取分类接口的判定，
+  // 拿不到时按扩展名兜底。
+  docKind: BidDocKind
   status: 'uploading' | 'processing' | 'done' | 'failed'
   stage: string
   // design/24 B2：阶段内进度的人话摘要（"已转录 320 行" / "3/8 页"），跟 stage
@@ -62,6 +77,9 @@ export interface BatchFileEntry {
   nameConflictHints: string[]
   items: QuoteExtractionItem[]
   quality: QualityMeta | null   // 评审 R2：BLOCKED/REVIEW 横幅 + 台账，job.result._quality
+  // design/29 §10 req5：文件自己声明的投标总价（job.result._doc_meta.bid_total）。
+  // 跟明细逐行相加的合计分开存、分开显示——两者不一致正是要人工核对的信号。
+  declaredTotal: number | null
   confirmedSupplierId: number | null    // null for unknown suppliers
   confirmedSubmissionId: number | null  // always set on confirm success
   confirmed: boolean
@@ -227,7 +245,7 @@ export function useSupplierUpload(deps: {
       const result = data as BatchConfirmResult
       slot.confirmed = true
       slot.batch_id = result.batch_id
-      message.success(`已入库 ${result.line_count} 条报价${copyDedupNote(result.copy_dedup)}`)
+      message.success(`已入库 ${result.line_count} 项报价${copyDedupNote(result.copy_dedup)}`)
     } catch (e) {
       // legacy 单供应商 tab 模式：ExtractionEditor 本来就常驻展示（不像批量卡片
       // 需要展开），missing_total 的"去核对"没有额外跳转目标，不传 onViewDetails。
@@ -257,7 +275,7 @@ export function useSupplierUpload(deps: {
   // has been removed.  quoteApi.import / import_service are still used by the
   // materials-library import screen; this compare flow no longer forks to them.
 
-  function handleBatchFile(file: File) {
+  function handleBatchFile(file: File, docKind?: BidDocKind) {
     if (!file) return
     const duplicatePending = batchFiles.value.some(
       (entry) => entry.filename === file.name && !entry.confirmed,
@@ -267,6 +285,7 @@ export function useSupplierUpload(deps: {
     const entry: BatchFileEntry = {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       filename: file.name,
+      docKind: docKind ?? inferBidDocKind(file.name),
       status: 'uploading',
       stage: '准备上传',
       stageDetail: '',
@@ -284,6 +303,7 @@ export function useSupplierUpload(deps: {
       nameConflictHints: [],
       items: [],
       quality: null,
+      declaredTotal: null,
       confirmedSupplierId: null,
       confirmedSubmissionId: null,
       confirmed: false,
@@ -381,37 +401,80 @@ export function useSupplierUpload(deps: {
     return 'pending'
   }
 
-  function startBatchPolling(entry: BatchFileEntry) {
+  /**
+   * 连续查不到状态多久之后才放弃（毫秒）。
+   *
+   * design/29 §16：原来是"连续失败 5 次就判失败"，2 秒一次 → 10 秒就放弃。
+   * 但**查不到状态不等于识别失败**——实测那次服务端每一次都返回了 200，是
+   * 客户端 15s 超时先放弃的（多份扫描件同时识别时，识别线程占着 GIL 和
+   * pdfium 锁，一次主键读也要排很久）。识别任务当时还在正常跑。
+   *
+   * 所以判据从"失败次数"改成"连续失败了多长时间"，并且给得很宽：查询本身
+   * 是幂等的、几乎不花钱，多等一会儿的代价远小于把一个正在跑的任务标成失败
+   * ——后者会让用户以为要重新上传，白花一次真实 OCR 的钱。
+   */
+  const POLL_GIVE_UP_MS = 3 * 60 * 1000
+
+  function stopPolling(entry: BatchFileEntry) {
     if (entry.pollTimer) clearInterval(entry.pollTimer)
-    let failures = 0
+    entry.pollTimer = null
+  }
+
+  function startBatchPolling(entry: BatchFileEntry) {
+    stopPolling(entry)
+    let firstFailureAt = 0
     entry.pollTimer = setInterval(async () => {
       if (!entry.jobId) return
       try {
         const { data } = await intakeApi.getJob(entry.jobId)
-        failures = 0
+        if (firstFailureAt) {
+          // 恢复了就把话收回去，别让"连接不稳定"一直挂在卡片上。
+          firstFailureAt = 0
+          entry.stageDetail = ''
+        }
         syncBatchProgress(entry, data)
         if (data.status === 'done') {
-          if (entry.pollTimer) clearInterval(entry.pollTimer)
-          entry.pollTimer = null
+          stopPolling(entry)
           onBatchJobDone(entry, data)
         } else if (data.status === 'failed') {
-          if (entry.pollTimer) clearInterval(entry.pollTimer)
-          entry.pollTimer = null
+          stopPolling(entry)
           entry.status = 'failed'
           entry.stage = '失败'
           entry.error = data.error || '识别失败'
         }
       } catch {
-        failures++
-        if (failures >= 5) {
-          if (entry.pollTimer) clearInterval(entry.pollTimer)
-          entry.pollTimer = null
-          entry.status = 'failed'
-          entry.stage = '失败'
-          entry.error = '轮询超时'
+        const now = Date.now()
+        if (!firstFailureAt) firstFailureAt = now
+        const waited = now - firstFailureAt
+        if (waited < POLL_GIVE_UP_MS) {
+          // 还在忍耐期：如实说"连不上"，不说"失败"——两者对用户的含义
+          // 完全不同（要不要重新上传）。
+          entry.stageDetail = `连接不稳定，重试中（已 ${Math.round(waited / 1000)} 秒）`
+          return
         }
+        stopPolling(entry)
+        entry.status = 'failed'
+        entry.stage = '失败'
+        entry.error = '连接中断，读不到识别状态（识别可能仍在后台进行，可点重试）'
       }
     }, 2000)
+  }
+
+  /**
+   * 重试：**先重新挂上轮询，而不是重新识别**。
+   *
+   * 放弃轮询的常见原因是查询超时，这时后台那个 job 多半已经跑完了——重新
+   * 上传会再花一次真实 OCR 的钱，还把已经算好的结果丢掉。只有 job 本身报
+   * failed（服务端明确说失败）时重新上传才是对的，那条路径由用户重新拖文件
+   * 走，这里不替他决定。
+   */
+  function retryBatchFile(entry: BatchFileEntry) {
+    if (!entry.jobId) return
+    entry.status = 'processing'
+    entry.stage = '重新查询识别状态'
+    entry.stageDetail = ''
+    entry.error = ''
+    startBatchPolling(entry)
   }
 
   function onBatchJobDone(entry: BatchFileEntry, job: ExtractionJob) {
@@ -421,6 +484,7 @@ export function useSupplierUpload(deps: {
     const shape = asQuoteShape(job.result)
     entry.items = shape.items
     entry.quality = asQualityMeta(job.result)
+    entry.declaredTotal = asDeclaredTotal(job.result)
     entry.detectedSupplierName = shape.supplier_name || ''
     // Auto-match against known suppliers; initialize finalSupplierName from OCR
     if (entry.detectedSupplierName) {
@@ -452,7 +516,9 @@ export function useSupplierUpload(deps: {
       restored.push({
         id: `restored-sub-${s.submission_id}`,
         filename: s.filename || `已入库报价 #${s.submission_id}`,
-        status: 'done', stage: `已入库 ${s.line_count} 条`, stageDetail: '',
+        // 刷新恢复拿不到当初的分类判定，按扩展名兜底（见 inferBidDocKind）。
+        docKind: inferBidDocKind(s.filename || ''),
+        status: 'done', stage: `已入库 ${s.line_count} 项`, stageDetail: '',
         progressPct: 100, uploadPct: 100,
         jobId: s.job_id,
         detectedSupplierName: s.supplier_raw_name,
@@ -461,6 +527,7 @@ export function useSupplierUpload(deps: {
         nameConflictHints: [],
         items: [],
         quality: null,
+        declaredTotal: null,
         confirmedSupplierId: s.supplier_id,
         confirmedSubmissionId: s.submission_id,
         confirmed: true, confirming: false, error: '', pollTimer: null,
@@ -470,6 +537,7 @@ export function useSupplierUpload(deps: {
       restored.push({
         id: `restored-job-${j.job_id}`,
         filename: j.filename || '报价文件',
+        docKind: inferBidDocKind(j.filename || ''),
         status: j.status === 'failed' ? 'failed' : 'processing',
         stage: j.progress_stage || (j.status === 'done' ? '已识别' : '识别中'),
         stageDetail: formatStageDetail(j.stage_current, j.stage_total),
@@ -479,6 +547,7 @@ export function useSupplierUpload(deps: {
         nameConflictHints: [],
         items: [],
         quality: null,
+        declaredTotal: null,
         confirmedSupplierId: null, confirmedSubmissionId: null,
         confirmed: false, confirming: false, error: '', pollTimer: null,
       })
@@ -552,7 +621,7 @@ export function useSupplierUpload(deps: {
       entry.confirmedSupplierId = data.supplier_id ?? null
       entry.confirmedSubmissionId = data.submission_id ?? null
       const unknownNote = supplierId ? '' : '（陌生供应商，仅用于本次比价）'
-      message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 条报价${copyDedupNote(data.copy_dedup)}`)
+      message.success(`${supplierName}${unknownNote}：已入库 ${data.line_count} 项报价${copyDedupNote(data.copy_dedup)}`)
     } catch (e: unknown) {
       // 注：后端 confirm_batch 从未产出过 "supplier_alias_conflict" 这个错误形状
       // （供应商同名合并走 /suppliers 的另一条独立解析路径），此前这里有一段处理
@@ -667,6 +736,7 @@ export function useSupplierUpload(deps: {
   return {
     supplierUploads,
     batchFiles,
+    retryBatchFile,
     useBatchMode,
     batchProgress,
     canProceedFromUpload,

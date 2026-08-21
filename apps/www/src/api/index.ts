@@ -5,7 +5,7 @@ import type {
   DashboardSummary, PriceCompareResult, SupplierScore,
   StandardizeResult, ExtendedAttrSchema, ImportResult,
   QuoteStats, CategoryDetailStats, MultiCompareResult,
-  BidMatrixResult, BidInsight, BrandTier, User, LogEntry,
+  BidMatrixResult, BidMatrixPreviewResult, BidInsight, BrandTier, User, LogEntry,
   ExtractionJob, RecommendResponse, BatchConfirmResult,
   SaveInvitationsResponse,
   DashboardHeatmapData, DashboardBubbleData,
@@ -136,16 +136,24 @@ export const intakeApi = {
       timeout: 60000,
       ...config,
     }),
+  // 全局默认 15s 对这个接口太紧：它本身只是一次主键读，但多份扫描件同时识别
+  // 时，识别线程占着 GIL 和 pdfium 锁，这次读要排很久才轮得到 —— 实测服务端
+  // 每一次都返回了 200，是客户端先放弃的（design/29 §16）。读一行数据而已，
+  // 超时给宽一点不花任何代价。
   getJob: (jobId: string) =>
-    api.get<ExtractionJob>(`/intake/jobs/${jobId}`),
+    api.get<ExtractionJob>(`/intake/jobs/${jobId}`, { timeout: 60_000 }),
   listJobs: (params?: Record<string, unknown>) =>
     api.get<{ items: ExtractionJob[]; total: number }>('/intake/jobs', { params }),
   enhance: (data: { job_id?: string; project_id?: number | null; items?: Array<Record<string, unknown>> }) =>
     api.post<EnhanceResponse>('/intake/enhance', data, { timeout: 180_000 }),
   // design/28 §3 Tier 0——瞬时判定，不建 job，cut 5 拖拽确认屏用它给每份
   // 刚拖进来的文件一个初步判定，不等真正上传/识别。
+  // 超时 90s（原 30s）：扫描件分类要渲染前几页原生分辨率图 + 一次视觉调用，
+  // 单份实测 6.5-9s，但同进程里若有招标文件正在识别，pdfium 渲染要在
+  // `_PDF_LOCK` 上排队（design/29 §12.1 实测：四份并发时最后一份超过 30s）。
+  // 客户端已改成逐个送分类请求，这里再留一档余量，避免"后端 200、前端已放弃"。
   classifyTier0: (form: FormData) =>
-    api.post<ClassifyTier0Result>('/intake/classify-tier0', form, { timeout: 30_000 }),
+    api.post<ClassifyTier0Result>('/intake/classify-tier0', form, { timeout: 90_000 }),
   // design/29 §4——工作台卡片概述。facts 只传已确认的结构化字段。
   summarizeFacts: (kind: 'tender' | 'bid', facts: Record<string, unknown>) =>
     api.post<SummarizeFactsResult>('/intake/summarize-facts', { kind, facts }, { timeout: 15_000 }),
@@ -168,6 +176,14 @@ export const analysisApi = {
     api.post<MultiCompareResult>('/analysis/multi-compare', data),
   bidMatrix: (data: { project_id?: number; supplier_ids: number[]; submission_ids?: number[]; material_ids?: number[]; category?: string }) =>
     api.post<BidMatrixResult>('/analysis/bid-matrix', data),
+  // design/31 cut 2b：先比价、后逐行确认。跑的是官方链路本身，只是不落库；
+  // 入参跟 batchConfirm 同形状，因为预览与正式吃的就是同一份输入。沙箱里要
+  // 串完"入库→对齐→矩阵"，比单份 dry-run 慢得多，超时给足。
+  bidMatrixPreview: (data: {
+    project_id: number
+    category: string
+    confirmations: Array<Record<string, unknown>>
+  }) => api.post<BidMatrixPreviewResult>('/analysis/bid-matrix/preview', data, { timeout: 180_000 }),
   bidInsight: (data: BidMatrixResult) =>
     api.post<BidInsight>('/analysis/bid-insight', data, { timeout: 60000 }),
   categoryStats: (category: string) =>

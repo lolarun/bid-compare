@@ -374,7 +374,31 @@ export interface NonPriceFactor {
   evidence_status: string
 }
 
+/** design/31 cut 2b：预览比价的返回。 */
+export interface PendingImpact {
+  anchor_key: string
+  supplier_key: string
+  kind: 'estimated' | 'unbounded'
+  /** unbounded 时为 null——**不要**在界面上把它当 0 显示，那是"影响很小"的意思。 */
+  swing: number | null
+  magnitude: number | null
+  peer_count: number
+}
+
+export interface BidMatrixPreviewResult {
+  matrix: BidMatrixResult
+  queue: PendingImpact[]
+  estimated_total_swing: number
+  unbounded_count: number
+  summary: string
+  notes: string[]
+}
+
 export interface BidMatrixResult {
+  /** design/31 cut 1：这份矩阵是哪一种口径。缺省（旧后端）按 official 处理。 */
+  basis?: 'official' | 'preview'
+  /** preview 口径下有多少行掺了未确认数据；official 恒为 0。 */
+  preview_unconfirmed_rows?: number
   project_id: number | null
   suppliers: SupplierLabel[]
   rows: MatrixRow[]
@@ -454,6 +478,9 @@ export interface TenderBidlistResult {
   // 响应脱节，不是新增字段。抽不到时是空字符串，不是字段缺失。
   project_name?: string
   project_code?: string
+  // design/29 §10 req4：招标单位（招标人/采购人）——工作台卡片徽标后要显示
+  // 的单位名称。项目名不能顶替它，两者不是一回事。
+  tenderer?: string
   tender_date?: string
   deadline?: string
 }
