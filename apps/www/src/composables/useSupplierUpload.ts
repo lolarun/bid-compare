@@ -616,12 +616,18 @@ export function useSupplierUpload(deps: {
     )
   }
 
-  // 从文件名中提取供应商名称提示（用于冲突检测）
-  // 例：「泰科龙投标文件.pdf」→「泰科龙」；「上海绵存报价单.xlsx」→「上海绵存」
+  // 从文件名中提取供应商名称提示（用于冲突检测 + 卡片预填）
+  // 旧命名规范「泰科龙投标文件.pdf」→「泰科龙」（供应商名在最前面）；
+  // 2026-08-21 命名规范换成「项目名-供应商名+文档类型.ext」（项目名在最
+  // 前面，供应商名在"-"之后）——例「徐汇区华泾镇项目-亨通投标文件.pdf」，
+  // 原来的"取第一段"在新规范下会把项目名当成供应商名（三家供应商的卡片
+  // 全显示同一个项目名，手测直接复现了这个问题）。先按字面"-"把项目名
+  // 部分切掉，供应商名从"-"之后的部分里再按常见切割词提取；没有"-"时
+  // （旧命名规范）整串都是供应商部分，行为不变，向后兼容。
   function _extractSupplierHintFromFilename(filename: string): string {
     const base = filename.replace(/\.(pdf|xlsx?|csv|docx?)$/i, '')
-    // 按常见切割词分割，取第一个非空段
-    const parts = base.split(/[投标报价文件单_\-\s··【】()（）]+/)
+    const afterProjectPrefix = base.includes('-') ? base.split('-').slice(1).join('-') : base
+    const parts = afterProjectPrefix.split(/[投标报价文件单_\s··【】()（）]+/)
     return (parts[0] || '').trim()
   }
 

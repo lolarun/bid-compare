@@ -130,6 +130,10 @@ async function onDropBidFiles(file: File) {
 const tenderResult = ref<TenderBidlistResult | null>(null)
 const tenderJob = ref<ExtractionJob | null>(null)
 const tenderError = ref('')
+// 2026-08-21 手测反馈：拖多个文件进来看不出总共传了几个——招标文件（一旦
+// 开始上传/识别，tenderJob 就非空）+ 投标文件数量的总和，跟 classifyingCount
+// 不是一回事（那个只反映"分类接口正在跑"这一瞬间，几秒就归零）。
+const uploadedFileCount = computed(() => (tenderJob.value ? 1 : 0) + batchFiles.value.length)
 const uploaderContext = computed(() => ({ project_id: projectId.value ?? undefined }))
 // design/29 §3/§6：统一拖拽区是唯一入口，招标文件的实际上传/轮询逻辑还是
 // IntakeUploader（约束3同一个精神：复用，不重写）——程序化触发它，不再手写
@@ -586,6 +590,12 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       <p class="ant-upload-hint" style="font-size:12px">
         <LoadingOutlined v-if="classifyingCount > 0" spin /> {{ classifyingCount > 0 ? '识别中…' : '自动识别归类；判不出来时会弹窗让你确认一下' }}
       </p>
+      <!-- 手测反馈（2026-08-21）：拖多个文件进来时看不出总共传了几个——
+           classifyingCount 只反映"正在跑分类接口"这一瞬间，文件一多这个数
+           很快归零，不能当"已上传"总数看。总数改成 uploadedFileCount。 -->
+      <p v-if="uploadedFileCount > 0" class="ant-upload-hint" style="font-size:12px;margin-top:4px">
+        已上传 {{ uploadedFileCount }} 个文件
+      </p>
     </a-upload-dragger>
 
     <!-- Materials strip：design/29 §1/§6——不再是默认可见的上传入口，只在
@@ -705,8 +715,20 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
             </div>
           </template>
           <template v-else>
+            <!-- 手测反馈（2026-08-21）：卡片已经确定是"投标"（上面 badge），
+                 这里不该再让用户猜"到底分析出来没有"——直接给真实进度条 +
+                 阶段文案（f.stage，比如"识别内容"/"整理完成"），不是裸的
+                 百分比数字。 -->
             <div class="summary-card__text">{{ f.finalSupplierName || f.filename }}</div>
-            <div class="summary-card__stats">{{ f.status === 'failed' ? '识别失败' : `识别中…${f.progressPct}%` }}</div>
+            <template v-if="f.status === 'failed'">
+              <div class="summary-card__stats" style="color:#ff4d4f">识别失败：{{ f.error || '未知错误' }}</div>
+            </template>
+            <template v-else>
+              <a-progress :percent="f.progressPct" size="small" status="active" />
+              <div class="summary-card__stats">
+                {{ f.stage || '分析中' }}{{ f.stageDetail ? `（${f.stageDetail}）` : '' }}
+              </div>
+            </template>
           </template>
         </div>
       </div>
