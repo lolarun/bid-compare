@@ -168,7 +168,7 @@ class _FakeVL:
 @pytest.fixture
 def tender_pdf():
     from pathlib import Path
-    p = Path(__file__).resolve().parents[3] / "tests/fixtures/documents/tender/金桥地体上盖招标文件.pdf"
+    p = Path(__file__).resolve().parents[3] / "tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf"
     if not p.exists():
         pytest.skip(f"招标夹具缺失：{p}")
     return str(p)

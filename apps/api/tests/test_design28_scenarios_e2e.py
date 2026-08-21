@@ -54,17 +54,19 @@ class TestScenarioB_AllExcel:
     投标侧：绵存/凯硕/泰科龙投标清单.xlsx（均为 strong bid_list）。"""
 
     def test_tender_side_is_ambiguous_by_design(self):
-        path = DOCS / "tender_list/金桥地体上盖招标文件.xlsx"
+        path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
         _skip_if_missing(path)
         result = classify_excel(str(path))
         assert result.verdict == "uncertain"
         assert result.confidence == "ambiguous"
 
     @pytest.mark.parametrize("filename", [
-        "上海绵存投标清单.xlsx", "凯硕新正投标清单.xlsx", "泰科龙投标清单.xlsx",
+        "金桥地体上盖项目-上海绵存报价清单.xlsx",
+        "金桥地体上盖项目-凯硕新正报价清单.xlsx",
+        "金桥地体上盖项目-泰科龙报价清单.xlsx",
     ])
     def test_bid_side_is_strong_bid_list(self, filename):
-        path = DOCS / "bid_list" / filename
+        path = DOCS / filename
         _skip_if_missing(path)
         result = classify_excel(str(path))
         assert result.verdict == "bid_list"
@@ -77,7 +79,7 @@ class TestScenarioA_AllPdf:
     """Tier 0（文字层）+ Tier 1（识别产物真实夹具）两级都有真实数据可测。"""
 
     def test_tender_pdf_tier0_native_text_layer(self):
-        path = DOCS / "tender/金桥地体上盖招标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-招标文件.pdf"
         _skip_if_missing(path)
         result = classify_pdf(str(path))
         assert result.text_layer == "native"
@@ -89,12 +91,12 @@ class TestScenarioA_AllPdf:
         assert result.confidence == "strong"
 
     @pytest.mark.parametrize("pdf_name,fixture_name", [
-        ("上海绵存投标文件.pdf", "live_shanghaimiancun_quote_result.json"),
-        ("凯硕新正投标文件.pdf", "live_kaishuoxinzheng_quote_result.json"),
-        ("泰科龙投标文件.pdf", "live_taikelong_quote_result.json"),
+        ("金桥地体上盖项目-上海绵存投标文件.pdf", "live_shanghaimiancun_quote_result.json"),
+        ("金桥地体上盖项目-凯硕新正投标文件.pdf", "live_kaishuoxinzheng_quote_result.json"),
+        ("金桥地体上盖项目-泰科龙投标文件.pdf", "live_taikelong_quote_result.json"),
     ])
     def test_bid_pdf_tier0_scanned_then_tier1_strong_bid(self, pdf_name, fixture_name):
-        path = DOCS / "bid" / pdf_name
+        path = DOCS / pdf_name
         _skip_if_missing(path)
         tier0 = classify_pdf(str(path))
         assert tier0.text_layer == "scanned"
@@ -115,7 +117,7 @@ class TestScenarioC_MixedByNecessity:
     去重复断言——那需要编造 job_result 内容，宁可显式跳过并注明去处。"""
 
     def test_tender_pdf_tier0_native_text_layer(self):
-        path = DOCS / "tender/prj2_电缆招标.pdf"
+        path = DOCS / "徐汇区华泾镇项目-招标文件.pdf"
         _skip_if_missing(path)
         result = classify_pdf(str(path))
         assert result.text_layer == "native"
@@ -123,7 +125,7 @@ class TestScenarioC_MixedByNecessity:
     def test_tender_list_excel_is_definitive_no_price_columns(self):
         """§4 原文这份文件"no embedded list, so an Excel supplement is
         required"——独立验证它本身是无价格列的定义性采购清单。"""
-        path = DOCS / "tender_list/prj2_附件一_电缆清单.xlsx"
+        path = DOCS / "徐汇区华泾镇项目-采购清单.xlsx"
         _skip_if_missing(path)
         result = classify_excel(str(path))
         assert result.verdict == "tender_list"
@@ -131,12 +133,13 @@ class TestScenarioC_MixedByNecessity:
         assert result.price_columns == []
 
     @pytest.mark.parametrize("pdf_name", [
-        "prj1_上海浦东.pdf", "prj1_亨通.pdf", "prj1_宏胜.pdf", "prj1_远东.pdf",
+        "徐汇区华泾镇项目-上海浦东投标文件.pdf", "徐汇区华泾镇项目-亨通投标文件.pdf",
+        "徐汇区华泾镇项目-宏胜投标文件.pdf", "徐汇区华泾镇项目-远东投标文件.pdf",
     ])
     def test_bid_pdf_tier0_scanned(self, pdf_name):
         """Tier 0（文字层）用真实文件验证；Tier 1（招标/投标判定）在真实
         回归里已经验证过，此处不重复。"""
-        path = DOCS / "bid" / pdf_name
+        path = DOCS / pdf_name
         _skip_if_missing(path)
         result = classify_pdf(str(path))
         assert result.text_layer == "scanned"

@@ -653,7 +653,7 @@ class TestBrandRecommendE2E:
         self.client = seeded_client
 
     def test_upload_pdf_and_recommend(self):
-        tender_pdf = REPO_ROOT / "tests" / "fixtures" / "documents" / "tender" / "金桥地体上盖招标文件.pdf"
+        tender_pdf = REPO_ROOT / "tests" / "fixtures" / "documents" / "金桥地体上盖项目-招标文件.pdf"
         if not tender_pdf.exists():
             pytest.skip(f"Fixture PDF not found: {tender_pdf}")
 

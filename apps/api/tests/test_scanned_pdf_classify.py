@@ -40,11 +40,11 @@ def _skip_if_missing(path: Path):
 
 class TestNativePdfRealFixtures:
     @pytest.mark.parametrize("filename", [
-        "金桥地体上盖招标文件.pdf",
-        "prj2_电缆招标.pdf",
+        "金桥地体上盖项目-招标文件.pdf",
+        "徐汇区华泾镇项目-招标文件.pdf",
     ])
     def test_real_tender_pdf_classified_correctly(self, filename):
-        path = DOCS / "tender" / filename
+        path = DOCS / filename
         _skip_if_missing(path)
         result = classify_native_pdf(str(path))
         assert result.verdict == "tender"
@@ -55,7 +55,7 @@ class TestNativePdfRealFixtures:
         投标须知"这类章节名，本身带"投标"字样，扫全文（或前两页全文）会
         两侧关键词都命中、退化成 uncertain。判据必须限定在目录之前的封面
         区域——用真实语料验证，不是假设。"""
-        path = DOCS / "tender" / "金桥地体上盖招标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-招标文件.pdf"
         _skip_if_missing(path)
         result = classify_native_pdf(str(path))
         assert result.verdict == "tender", (
@@ -72,14 +72,14 @@ class TestScannedPdfPipeline:
     TestScannedPdfRealAccuracy）。"""
 
     def test_call_none_returns_uncertain_without_crashing(self):
-        path = DOCS / "bid" / "泰科龙投标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-泰科龙投标文件.pdf"
         _skip_if_missing(path)
         result = classify_scanned_pdf(str(path), call=None)
         assert result.verdict == "uncertain"
         assert result.method == "scanned_vl"
 
     def test_injected_call_result_passed_through(self):
-        path = DOCS / "bid" / "泰科龙投标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-泰科龙投标文件.pdf"
         _skip_if_missing(path)
         captured_batches = []
 
@@ -99,7 +99,7 @@ class TestScannedPdfPipeline:
 
     def test_uncertain_from_call_passes_through_honestly(self):
         """模型答"不确定"是合法答案，管线不能把它悄悄变成一个具体判定。"""
-        path = DOCS / "bid" / "泰科龙投标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-泰科龙投标文件.pdf"
         _skip_if_missing(path)
 
         def fake_call(_images: list[bytes]) -> dict:
@@ -120,13 +120,16 @@ class TestScannedPdfRealAccuracy:
 
     @pytest.mark.e2e
     @pytest.mark.parametrize("filename,expected", [
-        ("prj1_上海浦东.pdf", "bid"), ("prj1_亨通.pdf", "bid"),
-        ("prj1_宏胜.pdf", "bid"), ("prj1_远东.pdf", "bid"),
-        ("上海绵存投标文件.pdf", "bid"), ("凯硕新正投标文件.pdf", "bid"),
-        ("泰科龙投标文件.pdf", "bid"),
+        ("徐汇区华泾镇项目-上海浦东投标文件.pdf", "bid"),
+        ("徐汇区华泾镇项目-亨通投标文件.pdf", "bid"),
+        ("徐汇区华泾镇项目-宏胜投标文件.pdf", "bid"),
+        ("徐汇区华泾镇项目-远东投标文件.pdf", "bid"),
+        ("金桥地体上盖项目-上海绵存投标文件.pdf", "bid"),
+        ("金桥地体上盖项目-凯硕新正投标文件.pdf", "bid"),
+        ("金桥地体上盖项目-泰科龙投标文件.pdf", "bid"),
     ])
     def test_real_bid_pdf_classified_correctly(self, filename, expected):
-        path = DOCS / "bid" / filename
+        path = DOCS / filename
         _skip_if_missing(path)
         call = get_scanned_classify_call()
         if call is None:
@@ -142,7 +145,7 @@ class TestScannedPdfRealAccuracy:
         """招标 PDF 走扫描件路径（不是原生文字层路径）时的真实判定——
         跟 TestNativePdfRealFixtures 测的是同一份文档不同判据路径，两条
         都要对。"""
-        path = DOCS / "tender" / "金桥地体上盖招标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-招标文件.pdf"
         _skip_if_missing(path)
         call = get_scanned_classify_call()
         if call is None:
@@ -157,7 +160,7 @@ class TestScannedPdfRealAccuracy:
 
 class TestDispatchRouting:
     def test_native_pdf_routes_to_keyword_path_not_vl(self):
-        path = DOCS / "tender" / "金桥地体上盖招标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-招标文件.pdf"
         _skip_if_missing(path)
 
         def should_not_be_called(_images: list[bytes]) -> dict:
@@ -167,7 +170,7 @@ class TestDispatchRouting:
         assert result.method == "native_text_keyword"
 
     def test_scanned_pdf_routes_to_vl_path(self):
-        path = DOCS / "bid" / "泰科龙投标文件.pdf"
+        path = DOCS / "金桥地体上盖项目-泰科龙投标文件.pdf"
         _skip_if_missing(path)
         called = []
 

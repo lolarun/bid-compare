@@ -33,14 +33,14 @@ def _skip_if_missing(path: Path):
 
 EXCEL_CASES = [
     # (相对路径, 期望 verdict, 期望 confidence, 备注)
-    ("tender_list/prj2_附件一_电缆清单.xlsx", "tender_list", "definitive",
+    ("徐汇区华泾镇项目-采购清单.xlsx", "tender_list", "definitive",
      "0 价格列——空白清单表的定义性特征"),
-    ("tender_list/金桥地体上盖招标文件.xlsx", "uncertain", "ambiguous",
+    ("金桥地体上盖项目-采购清单.xlsx", "uncertain", "ambiguous",
      "design/28 §2 的验收样本：价格列混合信号（部分列全空、部分列全 0），"
      "本该判不确定，判死了才是回归"),
-    ("bid_list/凯硕新正投标清单.xlsx", "bid_list", "strong", "design/28 §2 引用的 100% 参照"),
-    ("bid_list/上海绵存投标清单.xlsx", "bid_list", "strong", ""),
-    ("bid_list/泰科龙投标清单.xlsx", "bid_list", "strong", ""),
+    ("金桥地体上盖项目-凯硕新正报价清单.xlsx", "bid_list", "strong", "design/28 §2 引用的 100% 参照"),
+    ("金桥地体上盖项目-上海绵存报价清单.xlsx", "bid_list", "strong", ""),
+    ("金桥地体上盖项目-泰科龙报价清单.xlsx", "bid_list", "strong", ""),
 ]
 
 
@@ -60,7 +60,7 @@ def test_excel_uncertain_never_guesses_a_definitive_verdict():
     """红线（design/28 §5 red line 3）：低置信度必须标注，不能靠某次运气
     对上真实答案就悄悄升级成 definitive/strong——用金桥这份反复跑几次，
     verdict/confidence 必须稳定，不能因为浮点比较边界抖动。"""
-    path = DOCS / "tender_list/金桥地体上盖招标文件.xlsx"
+    path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
     _skip_if_missing(path)
     results = [classify_excel(str(path)) for _ in range(3)]
     assert all(r.verdict == "uncertain" for r in results)
@@ -69,7 +69,7 @@ def test_excel_uncertain_never_guesses_a_definitive_verdict():
 
 
 def test_excel_definitive_has_no_price_columns():
-    path = DOCS / "tender_list/prj2_附件一_电缆清单.xlsx"
+    path = DOCS / "徐汇区华泾镇项目-采购清单.xlsx"
     _skip_if_missing(path)
     result = classify_excel(str(path))
     assert result.price_columns == []
@@ -78,7 +78,7 @@ def test_excel_definitive_has_no_price_columns():
 
 def test_excel_strong_fill_rate_above_threshold():
     from apps.api.intelligence.document_classify import FILL_RATE_STRONG
-    path = DOCS / "bid_list/凯硕新正投标清单.xlsx"
+    path = DOCS / "金桥地体上盖项目-凯硕新正报价清单.xlsx"
     _skip_if_missing(path)
     result = classify_excel(str(path))
     assert result.fill_rate is not None and result.fill_rate >= FILL_RATE_STRONG
@@ -88,15 +88,15 @@ def test_excel_strong_fill_rate_above_threshold():
 # ── PDF：Tier 0 只给文字层信号，不判招标/投标 ──────────────────────────────
 
 PDF_TEXT_LAYER_CASES = [
-    ("tender/金桥地体上盖招标文件.pdf", "native", "文本型招标 PDF（E2E_FIXTURES.md 记录 ~11771 字）"),
-    ("tender/prj2_电缆招标.pdf", "native", ""),
-    ("bid/上海绵存投标文件.pdf", "scanned", "纯扫描件，无文字层"),
-    ("bid/凯硕新正投标文件.pdf", "scanned", ""),
-    ("bid/泰科龙投标文件.pdf", "scanned", "53 页扫描件，另有转置表/旋转已知坑，见 MANIFEST"),
-    ("bid/prj1_上海浦东.pdf", "scanned", ""),
-    ("bid/prj1_亨通.pdf", "scanned", ""),
-    ("bid/prj1_宏胜.pdf", "scanned", ""),
-    ("bid/prj1_远东.pdf", "scanned", ""),
+    ("金桥地体上盖项目-招标文件.pdf", "native", "文本型招标 PDF（E2E_FIXTURES.md 记录 ~11771 字）"),
+    ("徐汇区华泾镇项目-招标文件.pdf", "native", ""),
+    ("金桥地体上盖项目-上海绵存投标文件.pdf", "scanned", "纯扫描件，无文字层"),
+    ("金桥地体上盖项目-凯硕新正投标文件.pdf", "scanned", ""),
+    ("金桥地体上盖项目-泰科龙投标文件.pdf", "scanned", "53 页扫描件，另有转置表/旋转已知坑，见 MANIFEST"),
+    ("徐汇区华泾镇项目-上海浦东投标文件.pdf", "scanned", ""),
+    ("徐汇区华泾镇项目-亨通投标文件.pdf", "scanned", ""),
+    ("徐汇区华泾镇项目-宏胜投标文件.pdf", "scanned", ""),
+    ("徐汇区华泾镇项目-远东投标文件.pdf", "scanned", ""),
 ]
 
 
@@ -124,8 +124,8 @@ def test_pdf_tier0_never_decides_tender_vs_bid():
 # ── classify_tier0：扩展名分派 + MANIFEST 全量覆盖 ─────────────────────────
 
 def test_classify_tier0_dispatches_by_extension():
-    xlsx = DOCS / "bid_list/凯硕新正投标清单.xlsx"
-    pdf = DOCS / "bid/凯硕新正投标文件.pdf"
+    xlsx = DOCS / "金桥地体上盖项目-凯硕新正报价清单.xlsx"
+    pdf = DOCS / "金桥地体上盖项目-凯硕新正投标文件.pdf"
     _skip_if_missing(xlsx)
     _skip_if_missing(pdf)
     from apps.api.intelligence.document_classify import ExcelClassification, PdfClassification
@@ -141,10 +141,10 @@ def test_classify_tier0_unsupported_extension_returns_none(tmp_path):
 
 def test_manifest_corpus_full_coverage():
     """cut 2 的验收口径（design/28 §7）：unit tests over the whole MANIFEST
-    corpus。用代码列出 MANIFEST.md 记录的全部 14 份文件目录（xlsx 4 份 +
-    pdf 9 份 + 已在别处覆盖的 1 份 = 应为 tender+tender_list+bid+bid_list
-    四个子目录下全部真实文件），逐一跑 Tier 0，不遗漏、不静默跳过。"""
-    all_files = sorted(DOCS.glob("*/*.xlsx")) + sorted(DOCS.glob("*/*.xls")) + sorted(DOCS.glob("*/*.pdf"))
+    corpus。用代码列出 MANIFEST.md 记录的全部 14 份文件（xlsx 5 份 + pdf 9
+    份，2026-08-21 起改为扁平命名，直接放在 documents/ 下，不再分子目录），
+    逐一跑 Tier 0，不遗漏、不静默跳过。"""
+    all_files = sorted(DOCS.glob("*.xlsx")) + sorted(DOCS.glob("*.xls")) + sorted(DOCS.glob("*.pdf"))
     if not all_files:
         pytest.skip("MANIFEST 语料目录不存在（未在这套环境里签出真实夹具）")
     assert len(all_files) == 14, (

@@ -28,7 +28,7 @@ def _skip_if_missing(path: Path):
 
 
 def test_classify_definitive_tender_list(client):
-    path = DOCS / "tender_list/prj2_附件一_电缆清单.xlsx"
+    path = DOCS / "徐汇区华泾镇项目-采购清单.xlsx"
     _skip_if_missing(path)
     with path.open("rb") as fh:
         r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/vnd.ms-excel")})
@@ -42,7 +42,7 @@ def test_classify_definitive_tender_list(client):
 
 
 def test_classify_strong_bid_list(client):
-    path = DOCS / "bid_list/凯硕新正投标清单.xlsx"
+    path = DOCS / "金桥地体上盖项目-凯硕新正报价清单.xlsx"
     _skip_if_missing(path)
     with path.open("rb") as fh:
         r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/vnd.ms-excel")})
@@ -54,7 +54,7 @@ def test_classify_strong_bid_list(client):
 
 
 def test_classify_ambiguous_excel_returns_uncertain_not_error(client):
-    path = DOCS / "tender_list/金桥地体上盖招标文件.xlsx"
+    path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
     _skip_if_missing(path)
     with path.open("rb") as fh:
         r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/vnd.ms-excel")})
@@ -67,7 +67,7 @@ def test_classify_ambiguous_excel_returns_uncertain_not_error(client):
 def test_classify_native_pdf(client):
     """design/29 §3 Tier 1.5 接入后：原生招标 PDF 应该判出真实 verdict
     （tender），不再是笼统的 "document"。"""
-    path = DOCS / "tender/金桥地体上盖招标文件.pdf"
+    path = DOCS / "金桥地体上盖项目-招标文件.pdf"
     _skip_if_missing(path)
     with path.open("rb") as fh:
         r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/pdf")})
@@ -92,7 +92,7 @@ def test_classify_scanned_pdf_without_vision_client_returns_uncertain(client, mo
         "apps.api.intelligence.scanned_pdf_classify.get_scanned_classify_call",
         lambda: None,
     )
-    path = DOCS / "bid/上海绵存投标文件.pdf"
+    path = DOCS / "金桥地体上盖项目-上海绵存投标文件.pdf"
     _skip_if_missing(path)
     with path.open("rb") as fh:
         r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/pdf")})

@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).parent.parent.parent.parent
-TENDER_PDF = REPO / "tests" / "fixtures" / "documents" / "tender" / "金桥地体上盖招标文件.pdf"
-SCANNED_BID_PDF = REPO / "tests" / "fixtures" / "documents" / "bid" / "泰科龙投标文件.pdf"          # 纯扫描件，无文字层
+TENDER_PDF = REPO / "tests" / "fixtures" / "documents" / "金桥地体上盖项目-招标文件.pdf"
+SCANNED_BID_PDF = REPO / "tests" / "fixtures" / "documents" / "金桥地体上盖项目-泰科龙投标文件.pdf"          # 纯扫描件，无文字层
 TEXT_LAYER_NO_TABLE_PDF = REPO / "docs" / "test1" / "prj2" / "附件三：合同文本固定样式.pdf"  # design/28 §6：未迁移文件
 
 BRAND_REQ = [
