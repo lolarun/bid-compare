@@ -807,7 +807,18 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           <SolutionOutlined />对齐核查
         </a-button>
         <a-button><HistoryOutlined />历史</a-button>
-        <a-button type="primary"><DownloadOutlined />导出</a-button>
+        <!-- design/31 cut 4：预览态禁用导出。**不是因为预览数据会被导出**
+             ——导出是从库里按已确认报价重算的，预览一个字节都没落库，泄漏
+             不可能发生（apps/api/tests/test_export_excludes_preview.py）。
+             要挡的是反过来那件事：屏幕上摆着一份含 N 家的预览矩阵，点导出
+             拿到的却是一份按已确认口径重算的、数字完全不同的表（实测：一家
+             都没确认时是一张空表），中间没有任何提示。宁可点不动，也不给一
+             份跟屏幕对不上的文件。 -->
+        <a-tooltip v-if="previewResult"
+                   title="当前是预览口径（含未确认报价）。导出只输出已确认的报价，会与屏幕上的结果不一致——请先完成校对入库再导出。">
+          <a-button type="primary" disabled><DownloadOutlined />导出</a-button>
+        </a-tooltip>
+        <a-button v-else type="primary"><DownloadOutlined />导出</a-button>
       </div>
     </div>
 

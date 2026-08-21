@@ -206,7 +206,7 @@ does and does not cover. Precision is not lowered; the order of work is.
 | 2a | `preview_sandbox` — a session whose writes are always rolled back, proven by row counts taken from outside it — **done** |
 | 2b | Orchestrator + `POST /analysis/bid-matrix/preview` — **done** |
 | 3 | Impact estimate + ordering, as a pure function with unit tests (incl. one 金桥 fixture-derived case) — **done** |
-| 4 | Workbench: preview banner, ordered confirmation queue, preview matrix reuses `BidMatrix` — **done**; export-disabled-for-preview still open |
+| 4 | Workbench: preview banner, ordered confirmation queue, preview matrix reuses `BidMatrix`, export gated in preview mode — **done** |
 
 ## 7. Decisions and open questions
 
@@ -231,3 +231,45 @@ does and does not cover. Precision is not lowered; the order of work is.
 - **Out of scope:** any change to gate semantics, to the official matrix
   computation, or to recommendation logic. This round adds a view and an
   ordering; it does not touch what "official" means.
+
+## §7 SQLite write-lock measurement (done 2026-08-21)
+
+§4.1 listed this as "must be measured before shipping; do not extrapolate from
+the single-file dry-run". Measured (`apps/api/tests/test_preview_sandbox_lock.py`,
+numbers printed by the tests themselves):
+
+| What | Hold time |
+|---|---|
+| 267 rows written + rolled back (89 anchors × 3 suppliers, write volume only) | **0.04 s** |
+| Real chain end-to-end, confirm → align → matrix (2 anchors × 2 suppliers) | **0.06 s** |
+| Concurrent writer during a preview | waits, then **succeeds** |
+
+**The hard line is 5 seconds, and it is a correctness line, not a performance
+target.** pysqlite gives every connection a default `timeout=5.0`, which this
+project never overrides; past that a concurrent write raises
+`sqlite3.OperationalError: database is locked` and the user sees a save that
+mysteriously failed. `LOCK_BUDGET_S = 3.0` leaves margin, and a test asserts
+the 5 s default itself so the derivation breaks loudly if anyone changes it.
+
+### The measured numbers do NOT mean preview is safe
+
+They mean preview is safe **as long as nothing slow runs inside the sandbox**.
+It currently can:
+
+`import_and_match` falls back to embeddings (`anchor_match._embed_client()` →
+real HTTP) whenever the sequential-direct gate doesn't hold, and that call sits
+**inside the sandbox's write transaction**. 89 anchors plus 3×89 quote lines is
+~350 texts to embed in batches — seconds is entirely plausible. A test pins the
+consequence with a 6 s stand-in: the concurrent write does not merely slow
+down, it **fails** with `database is locked`.
+
+So this item is measured, not closed. Two options, neither implemented:
+
+1. Do the embedding work **before** opening the sandbox and pass the vectors in
+   — keeps the lock window at the ~50 ms of pure DB work.
+2. Raise `busy_timeout` on the app engine. Cheaper, but it converts a hard
+   failure into a long stall; option 1 is the real fix.
+
+The corpus-scale run (89 × 3 through the *real* chain, not just write volume)
+still needs real fixtures and a live embedding path — the numbers above cover
+write volume and fixed chain overhead separately, and neither is a substitute.
