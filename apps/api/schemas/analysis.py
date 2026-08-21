@@ -1,4 +1,6 @@
 """Analysis & comparison Pydantic schemas."""
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -368,8 +370,45 @@ class BidMatrixResult(BaseModel):
     common_comparable: dict | None = None
     non_price_factors: list[dict] = Field(default_factory=list)
     comprehensive_recommendation_status: str | None = None
+    # ── design/31 §3：这份矩阵是哪一种 ──────────────────────────────────
+    # "official" = 只由已确认报价算出，可用于定标；
+    # "preview"  = 含未确认草稿，**不得**用于定标、导出正式结论或写入历史价。
+    # 默认 official 是有意的：新增字段时忘了传 → 退化成最严格的那一档不成立，
+    # 但把预览误当正式才是真正会造成损失的方向，而预览路径是新写的、只有一处
+    # 构造点（preview_service），漏传不了。旧调用方一律是官方路径。
+    basis: Literal["official", "preview"] = "official"
+    # 预览专用：这份结果里有多少行掺了未确认数据。official 恒为 0。
+    preview_unconfirmed_rows: int = 0
 
     model_config = {"extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _preview_cannot_recommend_firmly(self):
+        """预览结果不许带"可以定标"的结论——在**契约层**挡，不是在服务层记得挡。
+
+        CLAUDE.md：pending / 未确认数据不得进入官方评估与推荐。预览按定义就
+        含未确认数据，所以 firm 在这里是自相矛盾的组合，不该靠调用方自觉。
+        放宽成"服务层记得设成 conditional"迟早会漏——漏的那次没有任何报错，
+        界面上就是一个看起来很正式的推荐。
+        """
+        if self.basis == "preview":
+            if self.recommendation_level == "firm":
+                raise ValueError(
+                    "basis='preview' 的矩阵不能给出 firm 推荐："
+                    "预览含未确认数据，按 CLAUDE.md 只能是 conditional/blocked"
+                )
+            if self.comprehensive_recommendation_status == "firm":
+                raise ValueError(
+                    "basis='preview' 的矩阵不能给出 firm 综合推荐结论"
+                )
+        else:
+            # official 侧反过来守：不该冒出预览计数。
+            if self.preview_unconfirmed_rows:
+                raise ValueError(
+                    "basis='official' 的矩阵不应有 preview_unconfirmed_rows>0；"
+                    "官方结果按定义只由已确认报价算出"
+                )
+        return self
 
 
 # ─── Bid Insight (AI Analysis) ────────────────────────────────────────────────

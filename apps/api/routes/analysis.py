@@ -108,6 +108,80 @@ def multi_compare(body: MultiCompareRequest, db: Session = Depends(get_db)):
     return result
 
 
+from apps.api.routes.quotes import BatchConfirmRequest  # noqa: E402  (预览与正式共用同一份入参形状)
+
+
+class BidMatrixPreviewRequest(BaseModel):
+    """design/31 cut 2b：预览比价的入参。
+
+    `confirmations` 就是"确认入库"按钮会发的那批 body，一份文件一个。
+    预览与正式用**同一份输入**，差别只在预览不落库——输入形状都不一样的话，
+    "预览跟正式算的是同一件事"这句话就没有依据了。
+    """
+    project_id: int
+    category: str
+    confirmations: list[BatchConfirmRequest]
+
+
+class PendingImpactOut(BaseModel):
+    anchor_key: str
+    supplier_key: str
+    kind: str                 # "estimated" | "unbounded"
+    swing: float | None       # unbounded 时为 None，不用 0 冒充"影响很小"
+    magnitude: float | None
+    peer_count: int
+
+
+class BidMatrixPreviewResult(BaseModel):
+    matrix: BidMatrixResult
+    queue: list[PendingImpactOut]
+    estimated_total_swing: float
+    unbounded_count: int
+    summary: str
+    notes: list[str]
+
+
+@router.post("/bid-matrix/preview", response_model=BidMatrixPreviewResult)
+def bid_matrix_preview(
+    body: BidMatrixPreviewRequest, db: Session = Depends(get_db),
+) -> BidMatrixPreviewResult:
+    """先比价、后逐行确认：在沙箱里跑完整条官方链路，**不落库**。
+
+    注意这个端点故意不用注入进来的 `db`：整条链路必须跑在
+    `preview_sandbox` 自己的连接上，否则回滚管不到。`db` 只保留在签名里让
+    鉴权/依赖链跟其它端点一致。
+    """
+    from apps.api.services.matrix.preview_service import (
+        PreviewNotReady, build_confirmation_queue, build_preview_matrix,
+    )
+    from apps.api.services.matrix.preview_ordering import describe
+
+    try:
+        result = build_preview_matrix(
+            body.project_id, body.category, body.confirmations)
+    except PreviewNotReady as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    ordering = build_confirmation_queue(result.matrix)
+    # leader_gap：第一名与第二名的评标金额差。拿不到就传 None——describe()
+    # 会据此闭嘴，不去谈"名次会不会变"。
+    leader_gap = None
+    totals = sorted(
+        (t.get("eval_amount") for t in (result.matrix.get("totals") or [])
+         if isinstance(t, dict) and t.get("eval_amount") is not None))
+    if len(totals) >= 2:
+        leader_gap = round(float(totals[1]) - float(totals[0]), 2)
+
+    return BidMatrixPreviewResult(
+        matrix=BidMatrixResult(**result.matrix),
+        queue=[PendingImpactOut(**vars(i)) for i in ordering.queue],
+        estimated_total_swing=ordering.estimated_total_swing,
+        unbounded_count=ordering.unbounded_count,
+        summary=describe(ordering, leader_gap),
+        notes=result.notes,
+    )
+
+
 @router.post("/bid-matrix", response_model=BidMatrixResult)
 def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatrixResult:
     """横向对比矩阵 — F6.1 核心接口。
