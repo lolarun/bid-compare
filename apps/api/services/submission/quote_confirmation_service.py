@@ -350,7 +350,8 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
             "blocking_issue": payload}
 
 
-def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
+def confirm_batch(db: Session, body, dry_run: bool = False,
+                  gates_advisory: bool = False) -> dict:
     """将 OCR 提取结果暂存为 BidSubmission + BidQuoteLine（P0 新版）。
 
     `body` must have the same fields as BatchConfirmRequest in routes/quotes.py.
@@ -366,6 +367,19 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
     就停（真实路径的行为逐字节不变，见各处 `if not dry_run` 分支）。dry_run
     永远不 commit，函数末尾统一 rollback，包括 project 自动建档这类中途 flush
     的副作用。
+
+    design/32 §8（gates_advisory）：把"四道门收集不阻断"从 dry_run 里**拆出来**
+    成独立开关。这两件事原本焊在一起，但它们回答的是不同问题：
+      - `dry_run`        —— 要不要落库；
+      - `gates_advisory` —— 门失败了要不要阻断。
+    预览比价需要的组合是"照常写（写在沙箱里，外层统一回滚）+ 门只警告"：
+    它必须真的写进去，后面的对齐才读得到；但一家供应商没过质量门不该让**整个
+    预览**无法进行——用户原话：「能不能比价是一个等级，有几个能比价是另外一个
+    等级」。`dry_run=True` 隐含 `gates_advisory=True`，既有行为逐字节不变。
+
+    **这不是把门放松了。** 门的存在是为了拦住脏数据进入官方结果；预览沙箱
+    从不落库、结果强制 `basis="preview"`，官方侧一点没动。门的结论照样算、
+    照样带回给调用方（`issues`），只是不再中止流程。
     """
     job = db.get(ExtractionJob, body.job_id)
     if not job:
@@ -516,7 +530,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
                 # dry_run：已入库这件事本身不该被 dry-run "预览"到——库里已经有
                 # 数据了，不是"将要写什么"。仍按 checksum 现状报一条 issue，
                 # 但不 raise（没有事务要保护，这条分支从不写任何东西）。
-                if not dry_run:
+                if not (dry_run or gates_advisory):
                     raise ReviewRequiredError(payload)
                 idempotent_issue = payload
             if not dry_run:
@@ -829,7 +843,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
             "review_rows": missing_total_rows[:50],
             "review_row_count": len(missing_total_rows),
         }
-        if dry_run:
+        if dry_run or gates_advisory:
             issues.append(payload)
         else:
             db.rollback()
@@ -839,7 +853,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
     if items and line_count == 0:
         reason_summary = "; ".join({e["reason"] for e in errors[:3]}) if errors else "品类无效或所有行被过滤"
         all_skipped_msg = f"所有 {len(items)} 行报价均被跳过，入库已回滚。原因：{reason_summary}"
-        if dry_run:
+        if dry_run or gates_advisory:
             issues.append({"error": "all_rows_skipped", "message": all_skipped_msg})
         else:
             db.rollback()
@@ -864,7 +878,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
             ),
             "checksum": checksum,
         }
-        if dry_run:
+        if dry_run or gates_advisory:
             issues.append(payload)
         else:
             db.rollback()
@@ -897,6 +911,11 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
         if cache_hit_key:
             dry_run_cache.put(cache_hit_key, result)
         return result
+
+    # gates_advisory 下门不阻断，但结论必须原样带回调用方——不然预览就成了
+    # "悄悄放行"，比阻断更糟。真实路径（两个开关都关）时 issues 恒为空列表，
+    # 响应形状对既有调用方没有变化。
+    advisory_issues = list(issues)
 
     job.result = {**(job.result or {}), "_checksum": checksum}
     ctx = dict(job.context or {})
@@ -936,6 +955,9 @@ def confirm_batch(db: Session, body, dry_run: bool = False) -> dict:
         # 通过但被怀疑过的行：重复行已入库，但带着 duplicate_row 标记，
         # 前端应提示人工复核（REVIEW 不等于拒收——合法的重复真实存在）
         "integrity": integrity,
+        # gates_advisory 下被降级成警告的门（声明总价对不上、原文无合价…）。
+        # 两个开关都关时恒为 []，既有调用方读不到任何新东西。
+        "issues": advisory_issues,
         "errors": errors,
         "unknown_brands": sorted(unknown_brands),
         "supplier_id": submission.supplier_id,

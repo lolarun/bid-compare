@@ -100,10 +100,16 @@ def build_preview_matrix(
         submission_ids: list[int] = []
         for body in confirmations:
             try:
-                out = confirm_batch(db, body, dry_run=False)
+                # gates_advisory=True：质量门只警告不阻断。用户原话——「能不能
+                # 比价是一个等级，有几个能比价是另外一个等级」。一家的声明总价
+                # 对不上，不该让另外两家也看不成；而且这类失败**往往是我们自己
+                # 的识别缺陷**（实测凯硕新正那次：合计行被当成第 90 条报价行，
+                # 总额算了两遍），把用户挡在门外去修一个他制造不了的问题。
+                # 官方路径的门一点没动（gates_advisory 默认 False）。
+                out = confirm_batch(db, body, dry_run=False, gates_advisory=True)
             except Exception as exc:                      # noqa: BLE001
-                # 一份文件入不了库不该让整个预览失败——预览的价值正是"先看个
-                # 大概"。但也绝不静默跳过：哪份缺席、为什么，如实列出来。
+                # 门降级之后仍然抛出的，是"请求本身不成立"那一类（job 不存在、
+                # 类型不对）。一份进不去不该让整个预览失败，但绝不静默跳过。
                 notes.append(f"「{getattr(body, 'job_id', '?')}」未能进入预览：{exc}")
                 log.info("preview: confirm_batch failed job=%s: %s",
                          getattr(body, "job_id", "?"), exc)
@@ -111,6 +117,12 @@ def build_preview_matrix(
             sid = out.get("submission_id") if isinstance(out, dict) else None
             if sid:
                 submission_ids.append(int(sid))
+            # 进来了但带着疑点的，如实说——降级不是放行。
+            for issue in (out.get("issues") or []) if isinstance(out, dict) else []:
+                supplier = getattr(body, "supplier_name", None) or getattr(body, "job_id", "?")
+                notes.append(
+                    f"「{supplier}」已进入预览，但有疑点："
+                    f"{issue.get('message') or issue.get('error')}")
 
         if not submission_ids:
             raise PreviewNotReady("没有任何报价能进入预览，无法比价。" + (

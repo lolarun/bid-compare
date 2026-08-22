@@ -249,3 +249,55 @@ def test_quote_derived_axis_actually_aligns_rows_across_suppliers(compare_client
     assert len(quoted_cells) == 4, (
         f"应有 4 个格子对齐成功，实际 {len(quoted_cells)}——"
         f"检查 rows: {result.matrix['rows']}")
+
+
+# ── design/32 §8：质量门在预览里只警告，不阻断 ─────────────────────────────
+
+def _blow_the_checksum(client, job_id: str) -> None:
+    """把 job 的声明总价改成一个跟明细对不上的数，制造 declared_total_mismatch。
+
+    这正是 2026-08-22 手测撞到的形状：凯硕新正的合计行被当成第 90 条报价行，
+    明细之和 = 真实总额 × 2，声明总价闭环门判 fail。"""
+    from apps.api.models.extraction_job import ExtractionJob
+    from apps.api.core.database import SessionLocal
+    with SessionLocal() as s:
+        job = s.get(ExtractionJob, job_id)
+        res = dict(job.result or {})
+        # 声明总价的唯一口径是 `_doc_meta.bid_total`（见 _declared_total）。
+        # 第一版写成 res["declared_total"]，门根本不认那个键——测试"通过"了
+        # 但什么也没验到。
+        res["_doc_meta"] = {**(res.get("_doc_meta") or {}), "bid_total": 1.0}
+        job.result = res
+        s.commit()
+
+
+def test_a_supplier_failing_the_checksum_gate_still_enters_preview(compare_client, temp_db):
+    """一家的声明总价对不上，不该让整个预览做不成。
+
+    用户原话：「能不能比价是一个等级，有几个能比价是另外一个等级」。
+    """
+    state = _setup_unconfirmed(compare_client)
+    _blow_the_checksum(compare_client, state["confirmations"][0].job_id)
+
+    result = build_preview_matrix(state["project_id"], "阀门", state["confirmations"])
+
+    assert len(result.confirmed_submissions) == 2, (
+        f"两家都该进预览，实际 {len(result.confirmed_submissions)}；notes={result.notes}")
+    assert result.matrix["rows"]
+    # 降级不是放行：疑点必须如实带出来。
+    assert any("疑点" in n for n in result.notes), result.notes
+
+
+def test_official_path_still_blocks_on_the_same_gate(compare_client, temp_db):
+    """预览放行不等于官方路径也放行——门对正式入库一点没松。"""
+    from apps.api.core.errors import ReviewRequiredError
+    from apps.api.services.submission.quote_confirmation_service import confirm_batch
+    from apps.api.core.database import SessionLocal
+
+    state = _setup_unconfirmed(compare_client)
+    body = state["confirmations"][0]
+    _blow_the_checksum(compare_client, body.job_id)
+
+    with SessionLocal() as db:
+        with pytest.raises(ReviewRequiredError):
+            confirm_batch(db, body)          # gates_advisory 默认 False
