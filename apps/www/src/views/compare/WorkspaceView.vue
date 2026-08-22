@@ -133,6 +133,9 @@ onMounted(async () => {
       projectName.value = data.name
       projectCode.value = data.code
     } catch { /* 项目不存在时留空，用户可重新新建 */ }
+    // 打开已有项目：先问后端有没有已确认比价基准，否则按钮会对着一个
+    // 早就确认过的项目继续显示"确认为比价基准"。
+    refreshBaselineState()
   }
   // 2026-08-21：**打开页面时不再建项目**。原来这里无条件 ensureProject()，
   // 理由是"URL 马上带上 projectId，刷新不丢状态"——但空工作台刷新本来就没有
@@ -237,6 +240,7 @@ function onTenderDone(result: TenderBidlistResult) {
   if (result.project_name && !projectNameUserEdited.value) projectName.value = result.project_name
   if (result.project_code && !projectCodeUserEdited.value) projectCode.value = result.project_code
   if (projectId.value) persistProjectMeta({ auto: true })
+  refreshBaselineState()
 }
 
 const excelFile = ref<File | null>(null)
@@ -748,6 +752,51 @@ function onRetryCard(fileId: string) {
   if (f) retryBatchFile(f)
 }
 
+// design/32 §10：招标清单 → 比价基准（TenderListSession）。
+const baselineConfirmed = ref(false)
+const confirmingBaseline = ref(false)
+
+/** 打开已有项目时，先问后端这个项目有没有已确认基准，别让按钮误显示。 */
+async function refreshBaselineState() {
+  if (!projectId.value) { baselineConfirmed.value = false; return }
+  try {
+    const { data } = await analysisApi.tenderListCurrentSessions({ project_id: projectId.value })
+    baselineConfirmed.value = (data.sessions || []).length > 0
+  } catch {
+    // 查不到就按"未确认"显示。宁可多显示一个按钮（点了是幂等的），
+    // 也不要因为一次查询失败让用户以为已经确认过。
+    baselineConfirmed.value = false
+  }
+}
+
+async function confirmBaseline() {
+  if (!projectId.value || !tenderResult.value) return
+  const r = tenderResult.value
+  confirmingBaseline.value = true
+  try {
+    await analysisApi.tenderListConfirm({
+      project_id: projectId.value,
+      category: category.value || r.detected_category || r.material_class,
+      file_name: tenderFilename.value,
+      anchors_json: r.items,
+      anchors_total: r.row_count,
+      source_type: r.source_type,
+      brand_requirement: r.brand_requirement,
+      supplier_brands: r.supplier_brands,
+    })
+    baselineConfirmed.value = true
+    message.success(`已确认 ${r.row_count} 项为比价基准`)
+    // 基准变了，之前那份按报价派生轴算的预览就过期了——留着会让人以为
+    // 它还代表当前口径。清掉，让用户重新点一次。
+    previewResult.value = null
+  } catch (e: unknown) {
+    message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      || '确认比价基准失败')
+  } finally {
+    confirmingBaseline.value = false
+  }
+}
+
 async function runPreview() {
   if (!projectId.value) return
   analyzing.value = true
@@ -924,6 +973,24 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           <a-spin v-if="c.summaryLoading" size="small" style="margin-top:6px" />
           <div v-else-if="c.summary" class="summary-card__text">{{ c.summary }}</div>
 
+          <!-- design/32 §10：招标清单识别出来 ≠ 已成为比价基准。
+               旧 5 步向导（design/27 步骤5 退役）是 tenderListConfirm 唯一的
+               调用者，删掉之后这一步在界面上**没有任何入口**——招标清单永远
+               变不成 TenderListSession，官方矩阵/导出/预览全都以为"没有采购
+               清单"。用户连撞两次才发现。这个按钮就是把那一步补回来。 -->
+          <div v-if="c.kind === 'tender' && tenderResult && (tenderResult.row_count || 0) > 0"
+               class="summary-card__baseline">
+            <template v-if="baselineConfirmed">
+              <span class="summary-card__baseline-ok">✓ 已作为比价基准（{{ tenderResult.row_count }} 项）</span>
+            </template>
+            <template v-else>
+              <a-button type="primary" size="small" :loading="confirmingBaseline"
+                        @click.stop="confirmBaseline">确认为比价基准</a-button>
+              <span class="summary-card__baseline-hint">
+                确认后这 {{ tenderResult.row_count }} 项成为比价的行轴；在此之前比价只能按报价互相对齐
+              </span>
+            </template>
+          </div>
           <div v-if="c.statsText" class="summary-card__stats">
             {{ c.statsText }}
             <span v-if="c.pendingText" class="summary-card__stats-pending">{{ c.pendingText }}</span>
@@ -1095,6 +1162,9 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 /* 2026-08-21 手测反馈：卡片改纵向、100% 宽，不再横排（原来 flex-wrap 横排
    在窄屏/多供应商时挤成一团，也不是"先看概述"该有的阅读顺序）。
    间距统一走 8px 栅格（16/24），卡片之间不再是 12px 这种半档值。 */
+.summary-card__baseline { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.summary-card__baseline-hint { font-size: 12px; color: rgba(0,0,0,0.45); }
+.summary-card__baseline-ok { font-size: 13px; color: #389e0d; font-weight: 500; }
 .preview-banner { margin-top: 16px; }
 .preview-notes { margin-top: 8px; font-size: 12px; color: rgba(0,0,0,0.45); line-height: 1.8; }
 .preview-queue { margin-top: 16px; border: 1px solid #ffe58f; border-radius: 8px; padding: 16px; background: #fffbe6; }
