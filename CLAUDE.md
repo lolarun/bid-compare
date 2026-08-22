@@ -83,10 +83,17 @@ unit tests (local contracts) · snapshot **replay** (determinism) · **fresh** E
 
 These apply across the whole repo. Domain specifics live in the linked rules.
 
-- **Identity.** `TenderAnchor` is the only row axis for the procurement list and the matrix.
-  `BidSubmission.id` is a quote's column identity — never substitute `supplier_id` for
-  submission identity. API fields must distinguish `anchor_id` / `submission_id` /
-  `supplier_id` / `material_id`.
+- **Identity.** Every comparison has exactly one row axis, and every result states which
+  kind it is (`axis_kind`). A `TenderAnchor` set from a confirmed procurement list is the
+  default and the only kind official alignment, evaluation totals, exports, and
+  recommendations may use. When no confirmed procurement list exists, a comparison may fall
+  back to a quote-derived axis (one supplier's own item rows as the reference, others
+  aligned to it by position and confirmed by quantity) — but that axis may feed only the
+  preview lane, never an official result, and it carries no tender-side truth: it can show
+  that suppliers priced the same row differently, never that a supplier omitted an item the
+  tender required. `BidSubmission.id` is a quote's column identity — never substitute
+  `supplier_id` for submission identity. API fields must distinguish `anchor_id` /
+  `submission_id` / `supplier_id` / `material_id`.
 - **Fact lifecycle.** Recognition output enters `ExtractionDraft`; it becomes an official
   quote fact only after user confirmation.
 - **Quality tiers gate everything.** **AUTO** = structure/amounts/source/completeness pass →

@@ -106,15 +106,31 @@ def test_preview_never_recommends_firmly(compare_client, temp_db):
     assert result.matrix.get("comprehensive_recommendation_status") != "firm"
 
 
-def test_preview_refuses_without_confirmed_tender_list(compare_client, temp_db):
-    """基准不能模糊：没有已确认的采购清单就没有行轴，宁可拒绝也不替用户确认。"""
+def test_preview_falls_back_to_quote_derived_axis_without_tender_list(compare_client, temp_db):
+    """design/32：没有已确认采购清单不再直接拒绝——从报价自己派生行轴。"""
     r = compare_client.post("/api/projects", json={"name": "无清单项目", "code": "PV-NO-LIST"})
     project_id = r.json()["id"]
     job = _upload_quote(compare_client, "A.png", (255, 255, 255))
 
-    with pytest.raises(PreviewNotReady, match="采购清单"):
+    result = build_preview_matrix(project_id, "阀门", [
+        BatchConfirmRequest(job_id=job, supplier_name="供应商A",
+                            project_id=project_id, category="阀门"),
+    ])
+    assert result.matrix["axis_kind"] == "quote_derived"
+    assert result.matrix["basis"] == "preview"
+    assert result.matrix["rows"], "派生轴应该能算出行"
+    assert any("未提供采购清单" in n for n in result.notes), result.notes
+
+
+def test_preview_still_refuses_with_zero_confirmable_submissions(compare_client, temp_db):
+    """派生轴解决的是"没有采购清单"，不是"没有报价"——一份报价都进不了库时
+    仍然没有任何东西可以比，这条边界要继续挡住。"""
+    r = compare_client.post("/api/projects", json={"name": "空项目", "code": "PV-EMPTY"})
+    project_id = r.json()["id"]
+
+    with pytest.raises(PreviewNotReady, match="没有任何报价"):
         build_preview_matrix(project_id, "阀门", [
-            BatchConfirmRequest(job_id=job, supplier_name="供应商A",
+            BatchConfirmRequest(job_id="does-not-exist", supplier_name="幽灵供应商",
                                 project_id=project_id, category="阀门"),
         ])
 
@@ -172,7 +188,7 @@ def test_preview_endpoint_returns_matrix_queue_and_persists_nothing(compare_clie
     assert _counts(SessionLocal) == before, "预览端点把数据写进库了"
 
 
-def test_preview_endpoint_409_without_tender_list(compare_client, temp_db):
+def test_preview_endpoint_uses_quote_derived_axis_without_tender_list(compare_client, temp_db):
     r = compare_client.post("/api/projects", json={"name": "无清单2", "code": "PV-NL2"})
     project_id = r.json()["id"]
     job = _upload_quote(compare_client, "A.png", (255, 255, 255))
@@ -182,5 +198,54 @@ def test_preview_endpoint_409_without_tender_list(compare_client, temp_db):
         "confirmations": [{"job_id": job, "supplier_name": "供应商A",
                            "project_id": project_id, "category": "阀门"}],
     })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["matrix"]["axis_kind"] == "quote_derived"
+    assert any("未提供采购清单" in n for n in body["notes"])
+
+
+def test_preview_endpoint_409_when_no_submissions_confirm(compare_client, temp_db):
+    r = compare_client.post("/api/projects", json={"name": "无清单3", "code": "PV-NL3"})
+    project_id = r.json()["id"]
+
+    r = compare_client.post("/api/analysis/bid-matrix/preview", json={
+        "project_id": project_id, "category": "阀门",
+        "confirmations": [{"job_id": "does-not-exist", "supplier_name": "幽灵供应商",
+                           "project_id": project_id, "category": "阀门"}],
+    })
     assert r.status_code == 409
-    assert "采购清单" in r.json()["detail"]
+    assert "没有任何报价" in r.json()["detail"]
+
+
+# ── design/32 A1+A2：真的对齐了，不是每行都掉进 pending ─────────────────────
+
+def test_quote_derived_axis_actually_aligns_rows_across_suppliers(compare_client, temp_db):
+    """两家供应商在派生轴下，同一行确实被认成同一行——不是矩阵有行有列，
+    但格子全是「missing/pending」这种"看起来能用、实际没对上"的假象。
+
+    两家 mock 报价（供应商A/B）品名、规格、位置、数量逐位相同（跟 design/32
+    §2 量出来的语料形状一致），这正是 A2 的判据能通过、不用退到 embedding
+    的场景。"""
+    r = compare_client.post("/api/projects", json={"name": "派生轴对齐项目", "code": "PV-QDA-1"})
+    project_id = r.json()["id"]
+    job_a = _upload_quote(compare_client, "A.png", (255, 255, 255))
+    job_b = _upload_quote(compare_client, "B.png", (250, 250, 250))
+
+    result = build_preview_matrix(project_id, "阀门", [
+        BatchConfirmRequest(job_id=job_a, supplier_name="供应商A",
+                            project_id=project_id, category="阀门"),
+        BatchConfirmRequest(job_id=job_b, supplier_name="供应商B",
+                            project_id=project_id, category="阀门"),
+    ])
+
+    assert result.matrix["axis_kind"] == "quote_derived"
+    assert len(result.matrix["rows"]) == 2, "两条 mock 数据各 2 项，行数应该是 2 不是 4"
+    quoted_cells = [
+        c for row in result.matrix["rows"] for c in (row.get("suppliers") or [])
+        if isinstance(c, dict) and c.get("cell_status") == "quoted"
+    ]
+    # 2 行 × 2 家 = 4 格全部对齐成功；任何一格掉进 pending 都说明位置+数量
+    # 判据没通过、退到了 embedding 或整体判失败——那不是这个用例要覆盖的路径。
+    assert len(quoted_cells) == 4, (
+        f"应有 4 个格子对齐成功，实际 {len(quoted_cells)}——"
+        f"检查 rows: {result.matrix['rows']}")

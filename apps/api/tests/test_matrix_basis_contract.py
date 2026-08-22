@@ -46,3 +46,27 @@ def test_official_cannot_carry_unconfirmed_count():
     """官方结果里冒出"含 N 行未确认"是自相矛盾的，说明上游串了口径。"""
     with pytest.raises(ValidationError, match="preview_unconfirmed_rows"):
         _mk(preview_unconfirmed_rows=1)
+
+
+# ── design/32 §5：axis_kind 与 basis 的耦合，写在契约层不靠自觉 ────────────
+
+def test_quote_derived_axis_requires_preview_basis():
+    with pytest.raises(ValidationError, match="quote_derived"):
+        _mk(axis_kind="quote_derived", basis="official")
+
+
+def test_quote_derived_axis_allowed_under_preview():
+    m = _mk(axis_kind="quote_derived", basis="preview")
+    assert m.axis_kind == "quote_derived"
+
+
+def test_tender_anchor_axis_is_the_default():
+    """所有既有调用方（官方 /bid-matrix、导出）一个字没改，axis_kind 必须
+    仍是 tender_anchor——这是行轴证据最强的那一种，也是唯一允许进官方结果
+    的一种。"""
+    assert _mk().axis_kind == "tender_anchor"
+
+
+def test_tender_anchor_axis_allowed_under_official():
+    m = _mk(axis_kind="tender_anchor", basis="official")
+    assert m.axis_kind == "tender_anchor"

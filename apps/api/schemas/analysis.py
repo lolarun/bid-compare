@@ -379,8 +379,32 @@ class BidMatrixResult(BaseModel):
     basis: Literal["official", "preview"] = "official"
     # 预览专用：这份结果里有多少行掺了未确认数据。official 恒为 0。
     preview_unconfirmed_rows: int = 0
+    # design/32 §5：这份矩阵的行轴是哪一种。默认 tender_anchor 是有意的——
+    # 官方 /bid-matrix、导出从不传这个字段，行为不变；只有 preview_service
+    # 在没有已确认采购清单时才会显式传 quote_derived。
+    # tender_anchor = 来自已确认采购清单，官方/预览均可用；
+    # quote_derived = 来自某一家报价自己（未提供采购清单时的退路），**只能
+    #   进预览**——它能说"这几家同一行报价不一样"，不能说"某家漏报了招标
+    #   要求的项目"，因为没有任何东西记录了"应该有什么"。
+    axis_kind: Literal["tender_anchor", "quote_derived"] = "tender_anchor"
 
     model_config = {"extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _quote_derived_axis_is_preview_only(self):
+        """跟 basis 那条 validator 同一个道理：这条限制写在契约层，不是
+        靠 preview_service 记得只在预览路径调用 quote_derived_axis 模块。
+
+        一旦有人在官方链路里传了 axis_kind='quote_derived'（哪怕只是为了
+        方便复用某段代码），构造时就直接炸，而不是悄悄产出一份"看起来正式、
+        实际没有招标依据"的矩阵。
+        """
+        if self.axis_kind == "quote_derived" and self.basis != "preview":
+            raise ValueError(
+                "axis_kind='quote_derived'（无采购清单、行轴来自报价本身）"
+                "只能用于 basis='preview'——它没有招标侧依据，不能进官方比价"
+            )
+        return self
 
     @model_validator(mode="after")
     def _preview_cannot_recommend_firmly(self):

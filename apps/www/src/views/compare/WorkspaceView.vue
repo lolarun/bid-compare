@@ -1014,6 +1014,19 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           <template #description>{{ previewResult.summary }}</template>
         </a-alert>
 
+        <!-- design/32 §5：行轴来自报价自己（没有采购清单）时，这份结果的
+             证据强度跟"有采购清单"完全不是一回事——只是黄色横幅还说明不了
+             这个区别（那条讲的是"数据未确认"，这条讲的是"没有招标依据可
+             对照"），必须单独说清楚，不能只塞进 notes 里的一行小字。 -->
+        <a-alert v-if="previewResult.matrix.axis_kind === 'quote_derived'"
+                 type="info" show-icon banner class="preview-banner">
+          <template #message>未提供采购清单，比价基准取自本轮报价本身</template>
+          <template #description>
+            只能看出各家同一行报价是否不同；无法判断是否有招标要求的项目被漏报——
+            没有招标清单，就没有「应该有什么」的依据。
+          </template>
+        </a-alert>
+
         <div v-if="previewResult.notes.length" class="preview-notes">
           <div v-for="(n, i) in previewResult.notes" :key="i">· {{ n }}</div>
         </div>

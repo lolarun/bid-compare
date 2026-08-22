@@ -15,11 +15,29 @@
 - **不落库**：由 `preview_sandbox` 保证，机制与已知漏洞见那个模块的文档。
 - **不给正式结论**：`basis="preview"` 的结果在 `BidMatrixResult` 契约层就
   禁止 firm 推荐（design/31 cut 1），不靠这里自觉。
-- **要求采购清单已确认**：没有已确认的 `TenderListSession` 时直接拒绝，
-  **不**在沙箱里替用户把清单确认掉。技术上做得到，但那会让用户看到一份
-  基于"系统替我确认的清单"的比价，而他并不知道自己确认过什么——预览可以
-  模糊，基准不能。采购清单确认是招标侧的一次点击，跟"逐行确认报价"不是
-  一回事，要求它已完成不违背这轮"先比价、别逐行确认"的初衷。
+- **不替用户确认采购清单。** 没有已确认的 `TenderListSession` 时不会在
+  沙箱里替用户把清单确认掉——那会让用户看到一份基于"系统替我确认的清单"
+  的比价，而他并不知道自己确认过什么。采购清单确认是招标侧的一次点击，
+  跟"逐行确认报价"不是一回事。
+
+## design/32：没有采购清单时不再拒绝，退到报价派生轴
+
+2026-08-22 之前，没有已确认 `TenderListSession` 就直接 `PreviewNotReady`。
+用户指出这个前提太强："比价核心是货比三家……如果没有采购清单也应该可以
+对齐"。design/32 §2 用真实语料验证了这个判断：同一项目里每家供应商报价的
+行数、以及"数量"列逐位取值，跨供应商完全一致——报价是照着同一份清单写的，
+位置本身携带对齐信息。
+
+现在的顺序：先按 `get_current_confirmed_session` 找已确认清单；找不到就调
+`quote_derived_axis.build_quote_derived_axis`，从已入库报价中挑条目最多的
+一份当基准，其余按位置对齐、用数量序列校验（复用 `_sequential_matches`，
+zero 新增对齐算法——那套判据本来就不要求 DN 存在）。两条路径产出的矩阵都
+打上 `axis_kind`，好让调用方和界面知道这份结果的证据强度不一样：
+`quote_derived` 的矩阵没有招标侧真值，只能说"这几家同一行报价不一样"，
+不能说"某家漏报了招标要求的项目"。
+
+`axis_kind='quote_derived'` **只能进预览**——契约层拦（见
+`BidMatrixResult._quote_derived_axis_is_preview_only`），不靠这里自觉。
 """
 from __future__ import annotations
 
@@ -73,14 +91,8 @@ def build_preview_matrix(
 
     with preview_sandbox() as db:
         session = get_current_confirmed_session(db, project_id, category)
-        if not session or not session.anchors_json:
-            # 跟官方 /bid-matrix 同一条拒绝理由，措辞也保持一致——同一个前置
-            # 条件在两个入口给出两种说法，用户会以为是两回事。
-            raise PreviewNotReady(
-                f"项目 {project_id} / 品类 {category} 尚无已确认采购清单"
-                "（TenderListSession）。请先完成采购清单上传和确认步骤。"
-            )
-        anchors = rebuild_anchors(session)
+        anchors = rebuild_anchors(session) if session and session.anchors_json else None
+        tender_list_session_id = session.id if anchors else None
 
         # ── 1) 入库：走真实 confirm_batch（dry_run=False）。沙箱负责回滚。
         # 这里**故意不**用 dry_run=True：那条分支自己就会 rollback，
@@ -104,19 +116,36 @@ def build_preview_matrix(
             raise PreviewNotReady("没有任何报价能进入预览，无法比价。" + (
                 f"原因：{notes[0]}" if notes else ""))
 
-        # ── 2) 对齐：同样是官方函数。
+        # ── design/32：没有已确认采购清单时，从已入库报价自己派生行轴。
+        axis_kind = "tender_anchor"
+        if anchors is None:
+            from apps.api.services.matrix.quote_derived_axis import (
+                NoUsableQuoteRows, build_quote_derived_axis,
+            )
+            try:
+                derived = build_quote_derived_axis(db, category, submission_ids)
+            except NoUsableQuoteRows as exc:
+                raise PreviewNotReady(
+                    f"项目 {project_id} / 品类 {category} 尚无已确认采购清单，"
+                    f"且{exc}") from exc
+            anchors = derived.anchors
+            axis_kind = "quote_derived"
+            notes.append(derived.note)
+
+        # ── 2) 对齐：同样是官方函数——无论行轴来自采购清单还是报价派生，
+        # 走的都是同一条 import_and_match，见 quote_derived_axis.py 的模块文档。
         summary, _per_supplier = import_and_match(
             db, None, project_id, category,
             submission_ids=submission_ids,
             anchors=anchors,
-            tender_list_session_id=session.id,
+            tender_list_session_id=tender_list_session_id,
         )
 
         # ── 3) 矩阵：官方函数，参数与 routes/analysis.py 的官方调用一致。
         matrix = build_anchor_matrix(
             db,
             anchors=anchors,
-            tender_list_session_id=session.id,
+            tender_list_session_id=tender_list_session_id,
             used_submission_ids=submission_ids,
             supplier_ids=[],
             submission_ids=submission_ids,
@@ -128,6 +157,7 @@ def build_preview_matrix(
         unconfirmed = _count_unconfirmed_rows(matrix)
         matrix["basis"] = "preview"
         matrix["preview_unconfirmed_rows"] = unconfirmed
+        matrix["axis_kind"] = axis_kind
         # 预览不许带正式结论。契约层也会拦（cut 1），这里先降级是为了让
         # 拦截成为"不可能发生"而不是"发生了会报错"。
         if matrix.get("recommendation_level") == "firm":

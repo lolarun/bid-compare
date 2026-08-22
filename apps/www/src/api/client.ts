@@ -399,6 +399,14 @@ export interface BidMatrixResult {
   basis?: 'official' | 'preview'
   /** preview 口径下有多少行掺了未确认数据；official 恒为 0。 */
   preview_unconfirmed_rows?: number
+  /**
+   * design/32 §5：这份矩阵的行轴是哪一种。
+   * 'tender_anchor' = 来自已确认采购清单（官方/预览均可用，默认值）；
+   * 'quote_derived' = 没有采购清单时从某一家报价自己派生（只在 preview
+   * 出现）——能说"这几家同一行报价不一样"，不能说"某家漏报了招标要求的
+   * 项目"，因为没有任何东西记录了"应该有什么"。
+   */
+  axis_kind?: 'tender_anchor' | 'quote_derived' 
   project_id: number | null
   suppliers: SupplierLabel[]
   rows: MatrixRow[]
