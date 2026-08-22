@@ -240,7 +240,11 @@ function onTenderDone(result: TenderBidlistResult) {
   if (result.project_name && !projectNameUserEdited.value) projectName.value = result.project_name
   if (result.project_code && !projectCodeUserEdited.value) projectCode.value = result.project_code
   if (projectId.value) persistProjectMeta({ auto: true })
-  refreshBaselineState()
+  // 自动设为比价基准。先查一次现状再决定要不要写——重复确认虽然幂等，
+  // 但会平白多一次写库，也会让日志里出现一串看不懂的重复调用。
+  refreshBaselineState().then(() => {
+    if (!baselineConfirmed.value && (tenderResult.value?.row_count || 0) > 0) confirmBaseline()
+  })
 }
 
 const excelFile = ref<File | null>(null)
@@ -804,6 +808,19 @@ async function refreshBaselineState() {
   }
 }
 
+const baselineError = ref('')
+
+/**
+ * design/32 §14：招标清单识别完成后**自动**设为比价基准，不再要用户点一下。
+ *
+ * 上一版给了个「确认为比价基准」按钮，用户实测后的判断是"不需要手工确认"。
+ * 他是对的：那个按钮背后没有真正的决策——采购清单是招标方自己发的文件，
+ * 不像各家报价那样有逐行质量疑点需要人把关。让人点一下只是把系统的流程
+ * 需要伪装成了用户的选择。
+ *
+ * **但不静默**：卡片上常驻"✓ 已作为比价基准（N 项）"，失败时显示原因和
+ * 重试。自动可以，无声不行——用户必须能看出这 N 项已经成了矩阵的行轴。
+ */
 async function confirmBaseline() {
   if (!projectId.value || !tenderResult.value) return
   const r = tenderResult.value
@@ -820,13 +837,15 @@ async function confirmBaseline() {
       supplier_brands: r.supplier_brands,
     })
     baselineConfirmed.value = true
-    message.success(`已确认 ${r.row_count} 项为比价基准`)
+    baselineError.value = ''
+    message.success(`已将 ${r.row_count} 项采购清单设为比价基准`)
     // 基准变了，之前那份按报价派生轴算的预览就过期了——留着会让人以为
     // 它还代表当前口径。清掉，让用户重新点一次。
     previewResult.value = null
   } catch (e: unknown) {
-    message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      || '确认比价基准失败')
+    baselineError.value = (e as { response?: { data?: { detail?: string } } })
+      ?.response?.data?.detail || '接口调用失败'
+    message.error(`未能把采购清单设为比价基准：${baselineError.value}`)
   } finally {
     confirmingBaseline.value = false
   }
@@ -1036,16 +1055,16 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                清单"。用户连撞两次才发现。这个按钮就是把那一步补回来。 -->
           <div v-if="c.kind === 'tender' && tenderResult && (tenderResult.row_count || 0) > 0"
                class="summary-card__baseline">
-            <template v-if="baselineConfirmed">
-              <span class="summary-card__baseline-ok">✓ 已作为比价基准（{{ tenderResult.row_count }} 项）</span>
-            </template>
-            <template v-else>
-              <a-button type="primary" size="small" :loading="confirmingBaseline"
-                        @click.stop="confirmBaseline">确认为比价基准</a-button>
-              <span class="summary-card__baseline-hint">
-                确认后这 {{ tenderResult.row_count }} 项成为比价的行轴；在此之前比价只能按报价互相对齐
-              </span>
-            </template>
+            <span v-if="baselineConfirmed" class="summary-card__baseline-ok">
+              ✓ 已作为比价基准（{{ tenderResult.row_count }} 项）
+            </span>
+            <span v-else-if="confirmingBaseline" class="summary-card__baseline-hint">
+              <LoadingOutlined spin /> 正在设为比价基准…
+            </span>
+            <span v-else-if="baselineError" class="summary-card__baseline-err">
+              未能设为比价基准：{{ baselineError }}
+              <a-button size="small" type="link" @click.stop="confirmBaseline">重试</a-button>
+            </span>
           </div>
           <div v-if="c.statsText" class="summary-card__stats">
             {{ c.statsText }}
@@ -1277,6 +1296,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .summary-card__baseline { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
 .summary-card__baseline-hint { font-size: 12px; color: rgba(0,0,0,0.45); }
 .summary-card__baseline-ok { font-size: 13px; color: #389e0d; font-weight: 500; }
+.summary-card__baseline-err { font-size: 12px; color: #cf1322; }
 .preview-banner { margin-top: 16px; }
 .preview-notes { margin-top: 8px; font-size: 12px; color: rgba(0,0,0,0.45); line-height: 1.8; }
 .preview-queue { margin-top: 16px; border: 1px solid #ffe58f; border-radius: 8px; padding: 16px; background: #fffbe6; }
