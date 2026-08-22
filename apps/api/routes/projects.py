@@ -23,6 +23,28 @@ def _duplicate_project_409(name: str, code: str) -> HTTPException:
     )
 
 
+@router.get("/find-exact", response_model=ProjectOut | None)
+def find_project_exact(
+    name: str = Query(..., min_length=1),
+    code: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """按 (name, code) **精确**找已有项目；没有返回 null。
+
+    给工作台用：招标文件识别出的项目名回填时会撞 `uq_project_name_code`，
+    而那个名字是系统识别出来的、不是用户起的——让用户去改一个他没起过的
+    名字解决冲突，是把系统的问题推给他。撞名基本只有一种真实含义：**这份
+    招标文件之前已经比过一次**。所以要能拿到那个已有项目，把"打开它"作为
+    首选出路。
+
+    用 `list_projects(keyword=...)` 代替不了：那是 `contains` 模糊匹配，
+    "金桥17B-06" 和 "金桥地铁上盖…" 会互相命中，而这里要的恰恰是"跟唯一
+    约束同一个判据"——只有精确相等才是同一个项目。
+    """
+    proj = db.scalar(select(Project).where(Project.name == name, Project.code == code))
+    return proj
+
+
 @router.get("", response_model=dict)
 def list_projects(
     page: int = Query(1, ge=1),

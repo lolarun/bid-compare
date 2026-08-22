@@ -66,6 +66,9 @@ export const projectApi = {
     api.put<Project>(`/projects/${id}`, data),
   delete: (id: number) =>
     api.delete(`/projects/${id}`),
+  /** 按 (name, code) 精确找已有项目；没有返回 null。见后端 find_project_exact。 */
+  findExact: (name: string, code: string) =>
+    api.get<Project | null>('/projects/find-exact', { params: { name, code } }),
 }
 
 // ─── Quotes ─────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message, Modal } from 'ant-design-vue'
+import { Modal, message } from 'ant-design-vue'
 import {
   LoadingOutlined, HistoryOutlined, DownloadOutlined, SolutionOutlined, InboxOutlined,
 } from '@ant-design/icons-vue'
@@ -79,20 +79,42 @@ async function persistProjectMeta(opts: { auto?: boolean } = {}) {
   } catch (e) {
     const res = (e as { response?: { status?: number; data?: { detail?: string } } })?.response
     if (res?.status === 409) {
-      // 后端 uq_project_name_code：同名同编号的项目已存在。两个工作台识别同
-      // 一份招标文件就会撞（重开一次比价、上传失败后重试都属于正常操作），
-      // 所以这里给的是"怎么办"，不是"出错了"。
+      // 后端 uq_project_name_code：同名同编号的项目已存在。
       metaSaveError.value = res.data?.detail || '已有同名项目，请改个名称或编号'
-      if (opts.auto) {
-        // 自动回填这条路径用户没在看输入框（刚上传完招标文件，注意力在识别
-        // 进度上），补一条 toast；手动输入是逐字触发的，只留常驻提示，不刷屏。
-        message.error(`识别到的项目名「${projectName.value}」与已有项目重名，未保存：请手动改名或填不同编号`)
-      }
+      // 自动回填撞名基本只有一种真实含义：**这份招标文件之前已经比过一次**。
+      // 名字是系统识别出来的、不是用户起的，让他去改一个自己没起过的名字来
+      // 解决冲突，是把系统的问题推给他。所以先去把那个已有项目找出来，把
+      // "打开它"作为首选出路；手动逐字输入不弹窗（会边打字边弹）。
+      if (opts.auto) await offerExistingProject()
     } else {
       metaSaveError.value = '项目名称/编号未保存成功，请重试'
       if (opts.auto) message.error(metaSaveError.value)
     }
   }
+}
+
+/** 撞名时找出那个已有项目，问用户要不要直接打开它。 */
+async function offerExistingProject() {
+  let existing: { id: number; name: string } | null = null
+  try {
+    const { data } = await projectApi.findExact(projectName.value, projectCode.value)
+    existing = data
+  } catch { /* 查不到就退回下面那条纯提示，不因为附加查询失败而丢掉主线信息 */ }
+
+  if (!existing) {
+    message.error(`识别到的项目名「${projectName.value}」与已有项目重名，未保存：请手动改名或填不同编号`)
+    return
+  }
+  // 用 confirm 而不是直接跳转：跳走会丢掉这个工作台里已经上传/识别的文件，
+  // 那是用户刚花了几十秒等出来的东西，不能替他决定。
+  Modal.confirm({
+    title: '这份招标文件已经比过一次',
+    content: `已有项目 #${existing.id}「${existing.name}」用的就是这个名称和编号。`
+      + '打开它可以接着上次的结果；留在当前工作台的话，请改个名称或编号再保存。',
+    okText: `打开 #${existing.id}`,
+    cancelText: '留在当前工作台',
+    onOk: () => { router.push(`/workspace/${existing!.id}`) },
+  })
 }
 
 async function onProjectNameInput() {
@@ -111,12 +133,13 @@ onMounted(async () => {
       projectName.value = data.name
       projectCode.value = data.code
     } catch { /* 项目不存在时留空，用户可重新新建 */ }
-  } else {
-    // 立即建项目（不等第一次上传才建）：URL 马上带上 projectId，刷新页面
-    // 不丢工作台状态；上传组件（IntakeUploader）需要 project_id 才能把
-    // context 传给后端，等到"选完文件才建项目"会让第一次上传多等一轮网络。
-    await ensureProject()
   }
+  // 2026-08-21：**打开页面时不再建项目**。原来这里无条件 ensureProject()，
+  // 理由是"URL 马上带上 projectId，刷新不丢状态"——但空工作台刷新本来就没有
+  // 状态可丢，代价却是**每打开一次页面就往 projects 表塞一行**。实测库里
+  // 攒了 23 个零 BidSubmission 的「新比价项目-<时间戳>」空壳。
+  // 四条真正需要 project_id 的路径（招标/采购清单/投标/报价清单）各自
+  // await ensureProject()，改成懒建之后覆盖不变。
   // 后端 page_size 上限 100（Query(..., le=100)）；500 会直接 422，导致这个
   // "取全量供应商列表"的调用每次都失败，静默地把 allSuppliers 留空。跟
   // history/IndexView.vue 同一用途的调用保持一致改成 100。
@@ -301,6 +324,10 @@ async function routeToTender(file: File, card: PendingClassifyCard) {
     message.error(`「${file.name}」招标上传组件未就绪`)
     return
   }
+  // 懒建项目之后这一句是必须的：以前靠 onMounted 预建的项目白蹭，
+  // 现在没有了，招标上传自己要先把项目建出来（IntakeUploader 的 context
+  // 需要 project_id）。
+  await ensureProject()
   tenderFilename.value = file.name
   tenderError.value = ''
   tenderProgressPct.value = 1
@@ -826,6 +853,11 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
          上传入口——Excel 是确定性判据（无价格列→采购清单，填满→报价清单），
          PDF 原生文字层有真实判据可直接路由，扫描件/判不出来的一律弹窗二选一
          （不再是"提示一下让你自己去对应卡片重新拖"）。 -->
+    <!-- 外面这层 div 是必需的：margin 直接写在 .auto-classify-dragger 上不生效
+         —— AntD v4 的 a-upload-dragger 外面还包了一个 .ant-upload-wrapper，
+         我们的 class 落在内层元素上，它的 margin 撑不开外层。用一个自己的
+         容器来管间距，不依赖组件库的内部结构。 -->
+    <div class="upload-zone">
     <a-upload-dragger
       :show-upload-list="false" :multiple="true"
       accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
@@ -844,6 +876,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         共 {{ uploadedFileCount }} 个文件，下方 {{ uploadedFileCount }} 张卡片
       </p>
     </a-upload-dragger>
+    </div>
 
     <!-- design/29 §12（2026-08-21 手测反馈）：三张手动上传卡片全部撤掉。
          统一拖拽区加上"一份文件一张卡片"之后，它们是同一件事的第二个入口
@@ -1037,8 +1070,10 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 /* design/28 cut 5 自动分类拖拽区——视觉上比下方三张精确卡片更突出（更高、
    更亮的强调色），暗示"这是首选入口，下面三张是需要手动指定类型时的备选"。 */
 /* 24px 而不是跟卡片之间一样的 16px：这里分隔的是「上传区」和「结果区」
-   两个功能块，比同类卡片之间的间距大一档，层次才读得出来。 */
-.auto-classify-dragger { margin-bottom: 24px; border-color: #91caff; background: #f0f7ff; }
+   两个功能块，比同类卡片之间的间距大一档，层次才读得出来。间距挂在自己的
+   容器上，不挂在 dragger 上（见模板里的注释）。 */
+.upload-zone { margin-bottom: 24px; }
+.auto-classify-dragger { margin-bottom: 0; border-color: #91caff; background: #f0f7ff; }
 .auto-classify-dragger :deep(.ant-upload-drag-icon) { margin-bottom: 6px; }
 
 /* Materials strip：三张等宽卡片，不是三个内联按钮——每张卡片自己决定内容

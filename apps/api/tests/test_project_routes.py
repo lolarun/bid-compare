@@ -62,3 +62,37 @@ class TestProjectNameUniqueness:
         proj = _create(client, "自身重复写入", "X1").json()
         resp = client.put(f"/api/projects/{proj['id']}", json={"name": "自身重复写入", "code": "X1"})
         assert resp.status_code == 200
+
+
+# ── /find-exact：重名时要能找回那个"已有项目"（2026-08-21）──────────────
+
+class TestFindExact:
+    def test_returns_the_project_when_name_and_code_match_exactly(self, client):
+        r = client.post("/api/projects", json={"name": "金桥地铁上盖 J9A-03", "code": ""})
+        assert r.status_code in (200, 201), r.text
+        pid = r.json()["id"]
+
+        r = client.get("/api/projects/find-exact",
+                       params={"name": "金桥地铁上盖 J9A-03", "code": ""})
+        assert r.status_code == 200
+        assert r.json()["id"] == pid
+
+    def test_returns_null_when_nothing_matches(self, client):
+        r = client.get("/api/projects/find-exact", params={"name": "查无此项目", "code": ""})
+        assert r.status_code == 200
+        assert r.json() is None
+
+    def test_is_exact_not_fuzzy(self, client):
+        """跟唯一约束同一个判据。模糊匹配会把「金桥17B-06」当成
+        「金桥地铁上盖…」的已有项目，那是错的答案，比没有答案更糟。"""
+        client.post("/api/projects", json={"name": "金桥17B-06", "code": ""})
+        r = client.get("/api/projects/find-exact", params={"name": "金桥", "code": ""})
+        assert r.json() is None
+
+    def test_code_participates_in_the_match(self, client):
+        """(name, code) 是复合唯一键——同名不同编号是两个项目，不能混为一谈。"""
+        client.post("/api/projects", json={"name": "同名项目", "code": "A-1"})
+        assert client.get("/api/projects/find-exact",
+                          params={"name": "同名项目", "code": "B-2"}).json() is None
+        assert client.get("/api/projects/find-exact",
+                          params={"name": "同名项目", "code": "A-1"}).json() is not None
