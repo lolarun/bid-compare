@@ -27,6 +27,7 @@ from apps.api.models import (
     BidSubmission,
     BidQuoteLine,
 )
+from apps.api.services.ingestion.list_rows import classify_quote_row
 from apps.api.services.ingestion.standardize import standardize_name
 from apps.api.intelligence.price_basis import derive_price_basis
 from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
@@ -637,6 +638,9 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
     line_total_sum: float = 0.0
     missing_total_rows: list[dict] = []   # 原文无合价、未经人工确认的行
     not_quoted_rows: list[dict] = []      # 原文明确写"不报价"的行——合法，不阻断
+    # design/32 A1：判定为合计/表尾、未入库的行。**必须报出来**——"我们排除了
+    # 一行"这件事静默发生，就等于用删行让门通过。
+    aggregate_rows: list[dict] = []
 
     for idx, item in enumerate(items):
         try:
@@ -646,6 +650,29 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
                 continue
             if _GRAND_TOTAL_NAME_RE.search(raw_name):
                 log.info("batch_confirm: skipping aggregate row %r", raw_name)
+                skipped_count += 1
+                continue
+
+            # design/32 A1：合计/表尾行不是报价行。上面那条正则是这条判据的
+            # 旧的、更窄的版本（实测漏掉了「含税合价（元）：」——它只有
+            # 「含税合计」，一个字之差），保留是为了不改动它已经拦下的形状；
+            # 下面这条用**共用词表 + 三列同值**的正面证据补齐，且**要求该行
+            # 没有数量**——有数量的行永远按条目走，绝不因为名字像表尾就删掉
+            # 一条真实报价（同一份文件里就有一条 qty 丢失的真条目，金额
+            # 3,460 元，见 list_rows.py 模块文档）。
+            _agg = classify_quote_row(
+                idx,
+                name=raw_name,
+                spec=str(item.get("standard_spec") or item.get("spec") or ""),
+                unit=str(item.get("unit") or ""),
+                qty=_num_or_none(item.get("qty")),
+            )
+            if _agg is not None:
+                log.info("batch_confirm: skipping aggregate row #%d %r (%s)",
+                         _agg.index + 1, _agg.label, _agg.reason)
+                aggregate_rows.append({
+                    "index": _agg.index + 1, "label": _agg.label, "reason": _agg.reason,
+                })
                 skipped_count += 1
                 continue
 
@@ -898,6 +925,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
             "skipped_count": skipped_count,
             "not_quoted_rows": len(not_quoted_rows),
             "not_quoted_detail": not_quoted_rows[:50],
+            "aggregate_rows": aggregate_rows,
             "integrity": integrity,
             "checksum": checksum,
             "errors": errors,
@@ -952,6 +980,9 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
         # 必须报出来，否则下游会把"没有金额"误读成"漏识别"。
         "not_quoted_rows": len(not_quoted_rows),
         "not_quoted_detail": not_quoted_rows[:50],
+        # design/32 A1：被判为合计/表尾而未入库的行。空列表是常态；非空时
+        # 调用方必须让用户看见——静默排除等于用删行让门通过。
+        "aggregate_rows": aggregate_rows,
         # 通过但被怀疑过的行：重复行已入库，但带着 duplicate_row 标记，
         # 前端应提示人工复核（REVIEW 不等于拒收——合法的重复真实存在）
         "integrity": integrity,

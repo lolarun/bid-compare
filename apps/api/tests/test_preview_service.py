@@ -301,3 +301,79 @@ def test_official_path_still_blocks_on_the_same_gate(compare_client, temp_db):
     with SessionLocal() as db:
         with pytest.raises(ReviewRequiredError):
             confirm_batch(db, body)          # gates_advisory 默认 False
+
+
+# ── design/32 A1 落到入库侧：合计行不再被当成报价行 ────────────────────────
+
+def test_aggregate_row_is_excluded_and_reported(compare_client, temp_db):
+    """合计行不入库，且必须**报出来**——静默排除等于用删行让门通过。
+
+    形状取自真实数据（凯硕新正 PDF 第 90 行）：标签串进名称/规格/单位三列。
+    """
+    from apps.api.models.extraction_job import ExtractionJob
+    from apps.api.core.database import SessionLocal
+    from apps.api.services.submission.quote_confirmation_service import confirm_batch
+
+    state = _setup_unconfirmed(compare_client)
+    body = state["confirmations"][0]
+
+    with SessionLocal() as s:
+        job = s.get(ExtractionJob, body.job_id)
+        res = dict(job.result or {})
+        items = list(res.get("items") or [])
+        n_real = len(items)
+        # copy_no 必须跟既有行一致：不一致会多出一个副本分组，
+        # _dedupe_copies（design/24 B0）会把整组当成"另一份副本"丢掉，
+        # 这条用例就永远测不到它想测的判据。
+        _copy_no = items[-1].get("copy_no") if items else None
+        items.append({
+            "material": "含税合价（元）：", "spec": "含税合价（元）：",
+            "unit": "含税合价（元）：", "qty": None,
+            "total_price": 999999.0, "category": "阀门", "copy_no": _copy_no,
+        })
+        res["items"] = items
+        job.result = res
+        s.commit()
+
+    with SessionLocal() as db:
+        out = confirm_batch(db, body, gates_advisory=True)
+
+    assert out["line_count"] == n_real, (
+        f"合计行被当成报价行入库了：line_count={out['line_count']}，应为 {n_real}")
+    assert len(out["aggregate_rows"]) == 1, out["aggregate_rows"]
+    assert "含税合价" in out["aggregate_rows"][0]["label"]
+    assert out["aggregate_rows"][0]["reason"]
+
+
+def test_a_real_item_missing_quantity_is_still_stored(compare_client, temp_db):
+    """跟上一条相反的方向：qty 丢失的真条目必须照常入库。
+
+    实测这种行真实存在（识别串列导致 qty 丢失，但金额是真的）。判据要是写成
+    "无数量即丢弃"，这里就会静默少一条报价、少一笔钱。
+    """
+    from apps.api.models.extraction_job import ExtractionJob
+    from apps.api.core.database import SessionLocal
+    from apps.api.services.submission.quote_confirmation_service import confirm_batch
+
+    state = _setup_unconfirmed(compare_client)
+    body = state["confirmations"][0]
+
+    with SessionLocal() as s:
+        job = s.get(ExtractionJob, body.job_id)
+        res = dict(job.result or {})
+        items = list(res.get("items") or [])
+        n_real = len(items)
+        _copy_no = items[-1].get("copy_no") if items else None   # 见上一条用例的说明
+        items.append({
+            "material": "缓闭式止回阀", "spec": "DN100", "unit": "EPDM",
+            "qty": None, "total_price": 3460.0, "category": "阀门", "copy_no": _copy_no,
+        })
+        res["items"] = items
+        job.result = res
+        s.commit()
+
+    with SessionLocal() as db:
+        out = confirm_batch(db, body, gates_advisory=True)
+
+    assert out["line_count"] == n_real + 1, "qty 丢失的真条目被误删了"
+    assert out["aggregate_rows"] == []
