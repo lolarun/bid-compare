@@ -517,6 +517,35 @@ watch(batchFiles, (files) => {
 // 本身也只挂载 activeTab 对应的那一个（见模板里 QuoteGrid 外层的 v-if），
 // 切 tab 时旧的先卸载——两层防护，不是只解决"默认页面卡"这一半。
 const viewMode = ref<'overview' | 'detail'>('overview')
+
+/**
+ * design/32 §13：把原来堆在一屏的东西拆成三段。
+ *
+ * 上传 → 预览 → 对比。三段回答三个不同的问题，混在一屏时用户分不清自己
+ * 正在看哪一个（"历史均价整列是空的"就是这么来的——那是第三段的东西）：
+ *
+ *   upload   有哪些文件、识别成什么了
+ *   preview  货比三家谁便宜（预览口径，不落库、不能定标）
+ *   compare  正式口径 + 对比历史 + AI 总结
+ *
+ * **不做强制向导。** 三个 step 都可以直接点回去——旧的 5 步向导正是因为
+ * 强制线性被退役的（design/27），这里不重蹈覆辙。step 只表达"你在看哪一
+ * 段"，不表达"你必须先完成前一段"。
+ */
+type Stage = 'upload' | 'preview' | 'compare'
+const stage = ref<Stage>('upload')
+
+const _STAGE_ORDER: Stage[] = ['upload', 'preview', 'compare']
+const stageIndex = computed(() => _STAGE_ORDER.indexOf(stage.value))
+
+function goStage(next: Stage) {
+  stage.value = next
+  viewMode.value = 'overview'
+}
+
+function onStageClick(i: number) {
+  goStage(_STAGE_ORDER[i] ?? 'upload')
+}
 function openDetail(tabKey: string) {
   activeTab.value = tabKey
   viewMode.value = 'detail'
@@ -738,6 +767,9 @@ const analyzing = ref(false)
 const confirmedSubmissionIds = computed(() =>
   batchFiles.value.filter((f) => f.confirmed && f.confirmedSubmissionId != null).map((f) => f.confirmedSubmissionId!))
 
+/** 第三段要有内容的前提：至少一家走完「确认入库」。 */
+const canCompare = computed(() => confirmedSubmissionIds.value.length > 0)
+
 // design/31：还没逐行确认时点"开始比价分析"，走预览口径——先看个大概，
 // 再按"确认哪一行最能改变结论"去确认，而不是逼人先把 89 行看完。
 const previewResult = ref<BidMatrixPreviewResult | null>(null)
@@ -819,6 +851,7 @@ async function runPreview() {
       })),
     })
     previewResult.value = data
+    goStage('preview')
     // 预览矩阵也塞进 matrixResult 让 BidMatrix 组件渲染——同一个组件、同一份
     // 数据形状，上方横幅负责说清这是预览口径。
     matrixResult.value = data.matrix
@@ -843,6 +876,7 @@ async function runAnalysis() {
       project_id: projectId.value, supplier_ids: [], submission_ids: confirmedSubmissionIds.value, category: category.value,
     })
     matrixResult.value = data
+    goStage('compare')
   } catch (e: unknown) {
     message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '比价分析失败')
   } finally {
@@ -901,6 +935,24 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </div>
     </div>
 
+    <!-- 上传段的行动按钮：直接进预览。放在卡片下方，跟"共 N 张卡片"同屏。 -->
+    <div v-if="stage === 'upload' && viewMode === 'overview' && docCards.length > 0"
+         class="stage-actions stage-actions--upload">
+      <a-button type="primary" :loading="analyzing" @click="runAnalysis">
+        {{ canCompare ? '开始比价分析' : '先比价看看（预览）' }}
+      </a-button>
+      <span class="stage-actions__hint">预览不落库、不能定标；确认几项之后再进正式比价</span>
+    </div>
+
+    <!-- design/32 §13：三段式。step 只表达"你在看哪一段"，**不表达"必须
+         先完成前一段"**——三个都可以随时点回去。旧的 5 步向导正是因为强制
+         线性被退役的（design/27），不重蹈覆辙。 -->
+    <a-steps :current="stageIndex" size="small" class="stage-steps" @change="onStageClick">
+      <a-step title="上传" :description="`${docCards.length} 份文件`" />
+      <a-step title="预览" description="货比三家，不落库" />
+      <a-step title="对比" :description="canCompare ? '正式口径' : '需先校对入库'" />
+    </a-steps>
+
     <!-- design/28 cut 5 + design/29 §1/§3：拖一堆文件进来自动分类，是唯一
          上传入口——Excel 是确定性判据（无价格列→采购清单，填满→报价清单），
          PDF 原生文字层有真实判据可直接路由，扫描件/判不出来的一律弹窗二选一
@@ -909,7 +961,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
          —— AntD v4 的 a-upload-dragger 外面还包了一个 .ant-upload-wrapper，
          我们的 class 落在内层元素上，它的 margin 撑不开外层。用一个自己的
          容器来管间距，不依赖组件库的内部结构。 -->
-    <div class="upload-zone">
+    <div v-if="stage === 'upload' && viewMode === 'overview'" class="upload-zone">
     <a-upload-dragger
       :show-upload-list="false" :multiple="true"
       accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
@@ -954,7 +1006,8 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
     <!-- TransitionGroup 而不是 v-for + div：招标文件判定完成后会从"分析中"
          那一档跳到第一位，位置变化用 FLIP 动画交代清楚（card-move），否则
          卡片凭空跳一下，看的人不知道刚才发生了什么。 -->
-    <TransitionGroup v-if="docCards.length > 0" name="card" tag="div" class="summary-cards">
+    <TransitionGroup v-if="docCards.length > 0 && stage === 'upload' && viewMode === 'overview'"
+                     name="card" tag="div" class="summary-cards">
       <div
         v-for="c in docCards" :key="c.id"
         class="summary-card" :class="[`summary-card--${c.kind}`, { 'summary-card--static': !c.detailKey }]"
@@ -1068,15 +1121,28 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </a-tabs>
     </template>
 
-    <!-- Result section -->
-    <div class="result-section">
-      <a-button type="primary" :loading="analyzing" @click="runAnalysis">
-        {{ matrixResult ? '重新分析' : (confirmedSubmissionIds.length ? '开始比价分析' : '先比价看看（预览）') }}
-      </a-button>
+    <!-- Result section：预览段与对比段共用这一块，靠 stage 区分。 -->
+    <div v-if="viewMode === 'overview' && stage !== 'upload'" class="result-section">
+      <div class="stage-actions">
+        <template v-if="stage === 'preview'">
+          <a-button :loading="analyzing" @click="runPreview">重新预览</a-button>
+          <a-tooltip v-if="!canCompare"
+                     title="正式比价只认已确认的报价。请先点开卡片，逐家完成「确认入库」。">
+            <a-button type="primary" disabled>进入正式比价</a-button>
+          </a-tooltip>
+          <a-button v-else type="primary" :loading="analyzing" @click="runAnalysis">进入正式比价</a-button>
+          <span class="stage-actions__hint">
+            已确认入库 {{ confirmedSubmissionIds.length }} / {{ docCards.filter(c => c.kind === 'bid' || c.kind === 'bid_list').length }} 家
+          </span>
+        </template>
+        <template v-else>
+          <a-button :loading="analyzing" @click="runAnalysis">重新分析</a-button>
+        </template>
+      </div>
 
       <!-- design/31 §5：预览口径必须自己说清楚是预览。横幅不是装饰——
            这份矩阵长得跟正式结果一模一样，不写就没有任何东西能区分它们。 -->
-      <template v-if="previewResult">
+      <template v-if="previewResult && stage === 'preview'">
         <a-alert type="warning" show-icon banner class="preview-banner">
           <template #message>
             预览口径 · 含 {{ previewResult.matrix.preview_unconfirmed_rows ?? 0 }} 行未确认报价，不作为定标依据
@@ -1156,6 +1222,13 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           </div>
         </div>
       </template>
+      <!-- design/32 §13：对比段 = 正式口径 + 历史对比 + AI 总结。
+           AI 总结（analysisApi.bidInsight）**尚未接进来**——这里如实写明，
+           不放一个空面板假装有。 -->
+      <a-alert v-if="stage === 'compare'" type="info" show-icon banner
+               class="preview-banner"
+               message="正式口径 · 只含已确认报价"
+               description="AI 总结尚未接入本段（接口已有 /analysis/bid-insight，未接线）。" />
       <BidMatrix
         v-if="matrixResult"
         :suppliers="matrixSuppliers"
@@ -1282,5 +1355,9 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .supplier-tab-content { padding: 8px 0; }
 .supplier-tab-content__progress { padding: 24px; text-align: center; color: rgba(0,0,0,0.55); }
 .supplier-tab-content__meta { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.stage-steps { margin-bottom: 24px; }
+.stage-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stage-actions--upload { margin-bottom: 24px; }
+.stage-actions__hint { font-size: 12px; color: rgba(0,0,0,0.45); }
 .result-section { margin-top: 24px; padding-top: 16px; border-top: 1px solid #f0f0f0; }
 </style>
