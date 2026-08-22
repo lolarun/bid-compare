@@ -708,3 +708,37 @@ correct bound but not yet the *binding* one for this route. Moving the blocking
 work off the loop (plain `def`, or `run_in_executor`) is the follow-up; it is
 deliberately **not** bundled here, because it changes the latency profile of
 the whole API surface and deserves its own measurement.
+
+## 18. 全部超时的真因：阻塞调用写在 `async def` 路由里（2026-08-22）
+
+§16 把「轮询超时」归因成「GIL 和 pdfium 锁竞争让请求排队」。**那个判断是错的
+——现在撤回。** 锁竞争只会让请求变慢，不会让请求根本得不到处理；而实测现象
+是**同一时刻所有请求一起超时**，包括跟识别毫不相干的 `PUT /api/projects`。
+
+真因：FastAPI 对两种路由的调度完全不同——`def` 路由丢进线程池，`async def`
+路由直接跑在事件循环上。四个路由把同步阻塞重活写在了 `async def` 里：
+
+| 路由 | 阻塞的东西 |
+|---|---|
+| `intake.upload_document` | `create_job`：SHA256 整个文件 + 写盘 + 写 SQLite（抢写锁） |
+| `intake.classify_tier0_upload` | 一次**真实视觉调用，实测 6.5-9 秒** + pdfium 渲染 |
+| `intake.summarize_facts` | 纯文本 LLM 调用 |
+| `analysis.tender_list_match` | `import_and_match`，可能走 embedding HTTP |
+
+一次拖 4 个文件 = 4 次分类 × 约 7 秒，**服务器有近半分钟完全不响应任何请求**。
+这一条解释了这轮全部四次超时，不需要四个不同的解释：
+
+- 泰科龙分类「接口异常」（§14 归因为客户端 30s 太紧）
+- 上海绵存「轮询超时」（§16 归因为 GIL/锁竞争）
+- 泰科龙上传 `timeout of 60000ms exceeded`
+- 同一时刻 `PUT /api/projects` 报「未保存成功」
+
+前两条的**加大超时/延长忍耐期**是对症的，留着没坏处（网络本来也会抖），但
+它们治的不是这个病。
+
+### 改动
+
+四个路由改成 `def`，FastAPI 放进线程池；`await file.read()` 相应改成
+`file.file.read()`。加 `test_routes_not_async.py`：AST 扫描 `routes/*.py`，
+`async def` 里出现已知阻塞调用即失败，另有 4 条按名字钉住这四个具体路由
+（防重构改名导致扫描漏掉）。

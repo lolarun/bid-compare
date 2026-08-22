@@ -53,7 +53,7 @@ def get_pipeline(request: Request) -> ExtractionPipeline:
 
 
 @router.post("/upload", response_model=JobResponse)
-async def upload_document(
+def upload_document(
     file: UploadFile = File(...),
     type: str = Form(...),
     project_id: Optional[int] = Form(None),
@@ -71,6 +71,13 @@ async def upload_document(
     AUDIT-FIX L4: previously used FastAPI BackgroundTasks which runs after
     response on the same event loop, blocking the worker. Now uses a
     dedicated ThreadPoolExecutor — see core/runtime.py.
+
+    **本函数必须是 `def` 而不是 `async def`**（2026-08-22）：`create_job` 是
+    同步阻塞的——SHA256 整个文件、写盘、再写一条 SQLite（要抢写锁，识别任务
+    正在不停提交进度）。写在 `async def` 里，这段阻塞卡的是**整个事件循环**，
+    期间服务器不处理任何请求：实测表现为上传 60s 超时、同一时刻的
+    `PUT /api/projects` 也一起超时。改成 `def` 之后 FastAPI 会把它放进线程池，
+    只占一个线程，别的请求照常服务。见 `test_intake_routes_not_async.py`。
     """
     if type not in {t.value for t in IngestionType}:
         raise HTTPException(status_code=400, detail=f"Invalid type: {type}")
@@ -91,7 +98,7 @@ async def upload_document(
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="context_json is not valid JSON")
 
-    content = await file.read()
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file upload")
 
@@ -110,7 +117,7 @@ async def upload_document(
 
 
 @router.post("/classify-tier0", response_model=ClassifyTier0Response)
-async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Response:
+def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Response:
     """design/28 §3 Tier 0 + design/29 §3 Tier 1.5——拖进来的文件是招标/
     投标/清单哪一种，瞬时判定，不建 ExtractionJob、不进识别队列。cut 5
     拖拽确认屏的第一级判据来源；xlsx/pdf 判不出来时都是合法答案，不是
@@ -132,7 +139,10 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
         classify_pdf_for_dispatch, get_scanned_classify_call,
     )
 
-    content = await file.read()
+    # `def` 而不是 `async def`：下面 classify_pdf_for_dispatch 会发一次**真实
+    # 视觉调用**（实测 6.5-9 秒），classify_tier0 还要 pdfium 渲染。放在事件
+    # 循环里等于每分类一份文件就把整个服务器冻住那么久。
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file upload")
 
@@ -168,7 +178,7 @@ async def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Re
 
 
 @router.post("/summarize-facts", response_model=SummarizeFactsResponse)
-async def summarize_facts(body: SummarizeFactsRequest) -> SummarizeFactsResponse:
+def summarize_facts(body: SummarizeFactsRequest) -> SummarizeFactsResponse:
     """design/29 §4——工作台卡片概述。只读已确认事实，不碰识别、不新增
     模型调用成本量级（沿用 paddle_doc_meta 已在用的纯文本客户端）。"""
     from apps.api.intelligence.document_summary import compose_summary

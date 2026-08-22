@@ -1058,7 +1058,7 @@ def anchor_review_confirm(
 
 
 @router.post("/tender-list/match", response_model=TenderMatchResult)
-async def tender_list_match(
+def tender_list_match(
     file: UploadFile | None = File(None),
     project_id: int = Form(...),
     category: str | None = Form(None),
@@ -1070,6 +1070,11 @@ async def tender_list_match(
 
     file 可选：提供时直接解析；省略时自动加载当前已确认的 TenderListSession。
     落组后，/bid-matrix 自动渲染为「锚点行 × 供应商」比价矩阵。
+
+    **必须是 `def` 不是 `async def`**：`import_and_match` 是同步阻塞的，而且
+    顺序直连门不成立时会走 embedding 分支发真实 HTTP。写在 `async def` 里，
+    这段阻塞卡的是整个事件循环——期间服务器一个请求都不处理。
+    见 `test_intake_routes_not_async.py`。
     """
     from apps.api.services.alignment.anchor_match import import_and_match
 
@@ -1078,7 +1083,7 @@ async def tender_list_match(
         name = (file.filename or "").lower()
         if not name.endswith((".xlsx", ".xls")):
             raise HTTPException(400, "招标清单需为 Excel 文件(.xlsx/.xls)")
-        content = await file.read()
+        content = file.file.read()
         if not content:
             raise HTTPException(400, "Empty file upload")
 
