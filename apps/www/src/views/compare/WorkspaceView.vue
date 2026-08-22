@@ -741,6 +741,9 @@ const confirmedSubmissionIds = computed(() =>
 // design/31：还没逐行确认时点"开始比价分析"，走预览口径——先看个大概，
 // 再按"确认哪一行最能改变结论"去确认，而不是逼人先把 89 行看完。
 const previewResult = ref<BidMatrixPreviewResult | null>(null)
+/** 展开原文依据的队列项下标；null = 全部收起。一次只展开一条，
+ *  这几条本来就是要逐条看的，全展开会把队列淹掉。 */
+const expandedEvidence = ref<number | null>(null)
 
 /** 已识别完成、还没入库的文件——预览要吃的就是这批。 */
 const previewableFiles = computed(() =>
@@ -1105,13 +1108,48 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
               其中 {{ previewResult.unbounded_count }} 处无法估算影响，排在最前
             </span>
           </div>
-          <div v-for="(q, i) in previewResult.queue.slice(0, 20)" :key="i" class="preview-queue__row">
-            <span class="preview-queue__anchor">#{{ q.anchor_key }}</span>
-            <span class="preview-queue__supplier">{{ q.supplier_key }}</span>
-            <!-- unbounded 的 swing 是 null，绝不显示成 ¥0：那读起来是"影响很小"，
-                 而实际含义是"无从判断"，方向正好相反。 -->
-            <span v-if="q.kind === 'unbounded'" class="preview-queue__warn">影响无从估算（同行报价不足）</span>
-            <span v-else class="preview-queue__swing">可能影响 ¥{{ formatMoney(q.swing || 0) }}</span>
+          <div v-for="(q, i) in previewResult.queue.slice(0, 20)" :key="i" class="preview-queue__item">
+            <div class="preview-queue__row">
+              <span class="preview-queue__anchor">#{{ q.anchor_key }}</span>
+              <span class="preview-queue__supplier">{{ q.supplier_key }}</span>
+              <!-- unbounded 的 swing 是 null，绝不显示成 ¥0：那读起来是"影响很小"，
+                   而实际含义是"无从判断"，方向正好相反。 -->
+              <span v-if="q.kind === 'unbounded'" class="preview-queue__warn">影响无从估算（同行报价不足）</span>
+              <span v-else class="preview-queue__swing">可能影响 ¥{{ formatMoney(q.swing || 0) }}</span>
+              <a-button v-if="q.evidence" size="small" type="link"
+                        @click="expandedEvidence = expandedEvidence === i ? null : i">
+                {{ expandedEvidence === i ? '收起原文依据' : '看原文依据' }}
+              </a-button>
+            </div>
+            <!-- design/32 §11：不让用户去翻纸质件。系统手里有 source_ref，
+                 把「原文第几页第几行」和「那一行我们识别到了什么」摆出来，
+                 哪个字段是空的一眼就看见。 -->
+            <div v-if="q.evidence && expandedEvidence === i" class="preview-evidence">
+              <div class="preview-evidence__loc">
+                原文位置：第 {{ q.evidence.page ?? '?' }} 页 · 第 {{ q.evidence.row ?? '?' }} 行
+                <span class="preview-evidence__caveat">
+                  （以下是系统识别到的内容，不是原文影像——够判断哪个字段没读到，
+                  不足以证明原文就是这个值）
+                </span>
+              </div>
+              <div class="preview-evidence__grid">
+                <span>名称</span><b>{{ q.evidence.raw_name || '—' }}</b>
+                <span>规格</span><b>{{ q.evidence.spec || '—' }}</b>
+                <span>单位</span><b>{{ q.evidence.unit || '—' }}</b>
+                <span>数量</span><b :class="{ 'preview-evidence__missing': q.evidence.qty == null }">
+                  {{ q.evidence.qty ?? '未读到' }}</b>
+                <span>单价</span><b :class="{ 'preview-evidence__missing': q.evidence.unit_price == null }">
+                  {{ q.evidence.unit_price ?? '未读到' }}</b>
+                <span>单价(不含税)</span><b :class="{ 'preview-evidence__missing': q.evidence.unit_price_excl_tax == null }">
+                  {{ q.evidence.unit_price_excl_tax ?? '未读到' }}</b>
+                <span>合价</span><b :class="{ 'preview-evidence__missing': q.evidence.total_price == null }">
+                  {{ q.evidence.total_price ?? '未读到' }}</b>
+                <span>税率</span><b>{{ q.evidence.tax_rate ?? '—' }}</b>
+              </div>
+              <div v-if="q.evidence.pending_note" class="preview-evidence__note">
+                系统标记的疑点：{{ q.evidence.pending_note }}
+              </div>
+            </div>
           </div>
           <div v-if="previewResult.queue.length > 20" class="preview-queue__more">
             仅列出影响最大的 20 处，共 {{ previewResult.queue.length }} 处
@@ -1170,10 +1208,18 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .preview-queue { margin-top: 16px; border: 1px solid #ffe58f; border-radius: 8px; padding: 16px; background: #fffbe6; }
 .preview-queue__title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 .preview-queue__warn { color: #d46b08; font-weight: 500; }
-.preview-queue__row { display: flex; gap: 16px; align-items: baseline; font-size: 13px; padding: 4px 0; }
+.preview-queue__row { display: flex; gap: 16px; align-items: baseline; font-size: 13px; }
 .preview-queue__anchor { flex-shrink: 0; min-width: 48px; color: rgba(0,0,0,0.45); font-variant-numeric: tabular-nums; }
 .preview-queue__supplier { flex-shrink: 0; min-width: 96px; font-weight: 500; }
 .preview-queue__swing { color: rgba(0,0,0,0.65); font-variant-numeric: tabular-nums; }
+.preview-queue__item { padding: 4px 0; }
+.preview-evidence { margin: 4px 0 8px 64px; padding: 12px; background: #fff; border: 1px solid #ffe58f; border-radius: 6px; }
+.preview-evidence__loc { font-size: 12px; color: rgba(0,0,0,0.65); margin-bottom: 8px; }
+.preview-evidence__caveat { color: rgba(0,0,0,0.45); }
+.preview-evidence__grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 12px; font-size: 13px; align-items: baseline; }
+.preview-evidence__grid span { color: rgba(0,0,0,0.45); }
+.preview-evidence__missing { color: #cf1322; font-weight: 600; }
+.preview-evidence__note { margin-top: 8px; font-size: 12px; color: #d46b08; }
 .preview-queue__more { margin-top: 8px; font-size: 12px; color: rgba(0,0,0,0.45); }
 
 .summary-cards { display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px; }

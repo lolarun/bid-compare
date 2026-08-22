@@ -377,3 +377,40 @@ def test_a_real_item_missing_quantity_is_still_stored(compare_client, temp_db):
 
     assert out["line_count"] == n_real + 1, "qty 丢失的真条目被误删了"
     assert out["aggregate_rows"] == []
+
+
+# ── design/32 §11：待确认项要带原文依据（页/行 + 识别到的字段）────────────
+
+def test_queue_items_carry_source_evidence(compare_client, temp_db):
+    """用户问「待确认怎么确认？去看纸质版找那一行？」——不该。系统有
+    source_ref，把页/行和该行识别到的字段一起带出来。
+
+    **必须在沙箱内取**：预览的 BidQuoteLine 退出沙箱就回滚了，
+    `bid_quote_line_id` 变成悬空数字，事后开接口查是查不到的。这条用例
+    正是守这一点——它拿到的证据只可能来自沙箱内。
+    """
+    state = _setup_unconfirmed(compare_client)
+    result = build_preview_matrix(state["project_id"], "阀门", state["confirmations"])
+
+    q = result.queue
+    assert q is not None, "队列应由 service 在沙箱内构建并带回"
+    if q.pending_count == 0:
+        pytest.skip("这批 mock 数据没有 pending 格子，证据链路由真实语料覆盖")
+    for imp in q.queue:
+        ev = q.evidence.get((imp.anchor_key, imp.supplier_key))
+        assert ev is not None, f"待确认项没有原文依据：{imp}"
+        assert "page" in ev and "row" in ev
+        # 关键字段必须都在——用户是靠"哪个是空的"来判断问题出在哪。
+        for k in ("raw_name", "spec", "unit", "qty", "unit_price", "total_price"):
+            assert k in ev, f"证据缺字段 {k}"
+
+
+def test_endpoint_exposes_evidence(compare_client, temp_db):
+    state = _setup_unconfirmed(compare_client)
+    r = compare_client.post("/api/analysis/bid-matrix/preview", json={
+        "project_id": state["project_id"], "category": "阀门",
+        "confirmations": [c.model_dump() for c in state["confirmations"]],
+    })
+    assert r.status_code == 200, r.text
+    for item in r.json()["queue"]:
+        assert "evidence" in item, "队列项没有透出 evidence 字段"

@@ -130,6 +130,10 @@ class PendingImpactOut(BaseModel):
     swing: float | None       # unbounded 时为 None，不用 0 冒充"影响很小"
     magnitude: float | None
     peer_count: int
+    #: design/32 §11：原文依据——页/行 + 该行识别到的全部字段。让用户不必去
+    #: 翻纸质件就能判断"哪个字段没读到"。**它是「我们识别成了什么」，不是
+    #: 原文影像**，界面上要写清楚这个区别。取不到时为 None。
+    evidence: dict | None = None
 
 
 class BidMatrixPreviewResult(BaseModel):
@@ -152,7 +156,7 @@ def bid_matrix_preview(
     鉴权/依赖链跟其它端点一致。
     """
     from apps.api.services.matrix.preview_service import (
-        PreviewNotReady, build_confirmation_queue, build_preview_matrix,
+        PreviewNotReady, build_preview_matrix,
     )
     from apps.api.services.matrix.preview_ordering import describe
 
@@ -162,7 +166,9 @@ def bid_matrix_preview(
     except PreviewNotReady as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    ordering = build_confirmation_queue(result.matrix)
+    # 队列由 service 在沙箱内构建（连原文依据一起取出）——出了沙箱那些
+    # 报价行就回滚了，再查是查不到的。
+    ordering = result.queue
     # leader_gap：第一名与第二名的评标金额差。拿不到就传 None——describe()
     # 会据此闭嘴，不去谈"名次会不会变"。
     leader_gap = None
@@ -174,7 +180,13 @@ def bid_matrix_preview(
 
     return BidMatrixPreviewResult(
         matrix=BidMatrixResult(**result.matrix),
-        queue=[PendingImpactOut(**vars(i)) for i in ordering.queue],
+        queue=[
+            PendingImpactOut(
+                **vars(i),
+                evidence=ordering.evidence.get((i.anchor_key, i.supplier_key)),
+            )
+            for i in ordering.queue
+        ],
         estimated_total_swing=ordering.estimated_total_swing,
         unbounded_count=ordering.unbounded_count,
         summary=describe(ordering, leader_gap),

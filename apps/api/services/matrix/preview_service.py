@@ -65,6 +65,13 @@ class PreviewResult:
     把矩阵列跟输入对上，不要拿去查库或回传给别的接口。"""
     notes: list[str]
     """跑的过程中值得让用户知道的事（某份文件入库时被质量门拦下之类）。"""
+    queue: Any = None
+    """确认队列（`preview_ordering.PreviewOrdering`），**在沙箱内构建**。
+
+    必须在沙箱里建、连证据一起取出来：队列每一项都要指回"原文哪一页哪一行"
+    以及那一行识别到了什么，而这些来自 `BidQuoteLine`——沙箱一退出就全部
+    回滚，`bid_quote_line_id` 变成悬空的数字。事后再开接口去查是查不到的。
+    """
 
 
 def build_preview_matrix(
@@ -186,6 +193,7 @@ def build_preview_matrix(
             unconfirmed_rows=unconfirmed,
             confirmed_submissions=submission_ids,
             notes=notes,
+            queue=build_confirmation_queue(matrix, db=db),
         )
 
 
@@ -217,7 +225,43 @@ def _count_unconfirmed_rows(matrix: dict[str, Any]) -> int:
 _CONFIRMABLE_CELL_STATUS = frozenset({"pending"})
 
 
-def build_confirmation_queue(matrix: dict[str, Any]):
+def _cell_evidence(db, cell: dict[str, Any]) -> dict[str, Any] | None:
+    """一条待确认格子的「原文依据」。
+
+    design/32 §11：用户问「待确认怎么确认？去看纸质版本找到那一行？」——不该。
+    识别产物每行都带 `source_ref`（实测形如 `{"page": 6, "table": 0, "row": 44}`），
+    把它连同该行识别到的全部字段一起显示出来，用户一眼能看出是哪个字段没读到。
+
+    这里给的是**「我们识别成了什么」**，不是原文影像。区别要在界面上说清楚：
+    它足以判断"哪个字段空了"，不足以证明"原文写的就是这个"。
+    """
+    from apps.api.models.bid_submission import BidQuoteLine
+
+    bql_id = cell.get("bid_quote_line_id")
+    if not bql_id:
+        return None
+    bql = db.get(BidQuoteLine, bql_id)
+    if bql is None:
+        return None
+    meta = bql.extraction_meta or {}
+    src = (meta.get("source_ref") or {}) if isinstance(meta, dict) else {}
+    return {
+        "page": src.get("page"),
+        "row": src.get("row"),
+        "raw_name": bql.raw_name,
+        "standard_name": bql.standard_name,
+        "spec": bql.spec,
+        "unit": bql.unit,
+        "qty": bql.qty,
+        "unit_price": bql.unit_price,
+        "unit_price_excl_tax": bql.unit_price_excl_tax,
+        "total_price": bql.total_price,
+        "tax_rate": bql.tax_rate,
+        "pending_note": cell.get("pending_note"),
+    }
+
+
+def build_confirmation_queue(matrix: dict[str, Any], db=None):
     """矩阵 → 确认队列（cut 3 的 `build_ordering` 的适配层）。
 
     队列只装真正待人工确认的格子；"有没有可用价格"是另一件事，由
@@ -230,6 +274,9 @@ def build_confirmation_queue(matrix: dict[str, Any]):
     rows: list[PreviewRow] = []
     labels = {s["id"]: (s.get("name") or s.get("letter") or str(s["id"]))
               for s in (matrix.get("suppliers") or [])}
+    #: (anchor_key, supplier_key) → 原始矩阵格子。队列项只带这两个键，
+    #: 取证据时要靠它找回格子上的 bid_quote_line_id / pending_note。
+    cell_index: dict[tuple[str, str], dict[str, Any]] = {}
     for row in matrix.get("rows") or []:
         cells = []
         for c in row.get("suppliers") or []:
@@ -237,8 +284,11 @@ def build_confirmation_queue(matrix: dict[str, Any]):
                 continue
             status = c.get("cell_status")
             price = c.get("price")
+            supplier_key = labels.get(c.get("id"), str(c.get("id")))
+            anchor_key = str(row.get("anchor_seq") or row.get("material_name") or "?")
+            cell_index[(anchor_key, supplier_key)] = c
             cells.append(PreviewCell(
-                supplier_key=labels.get(c.get("id"), str(c.get("id"))),
+                supplier_key=supplier_key,
                 # 能当"同行报价"参与区间估算的，只有已确认且真有价的格子。
                 unit_price=float(price) if status == "quoted" and price is not None else None,
                 confirmable=status in _CONFIRMABLE_CELL_STATUS,
@@ -248,4 +298,14 @@ def build_confirmation_queue(matrix: dict[str, Any]):
             qty=row.get("quantity"),
             cells=tuple(cells),
         ))
-    return build_ordering(rows)
+    ordering = build_ordering(rows)
+
+    # 给每条待确认附上原文依据。`db` 为 None（单元测试直接喂矩阵）时跳过——
+    # 没有证据不影响排序，排序本来就只依赖价格和数量。
+    if db is not None:
+        ordering.evidence = {
+            (imp.anchor_key, imp.supplier_key): ev
+            for imp in ordering.queue
+            if (ev := _cell_evidence(db, cell_index.get((imp.anchor_key, imp.supplier_key), {})))
+        }
+    return ordering

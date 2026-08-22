@@ -383,6 +383,25 @@ export interface PendingImpact {
   swing: number | null
   magnitude: number | null
   peer_count: number
+  /**
+   * design/32 §11：原文依据——页/行 + 该行识别到的全部字段。
+   * **是「我们识别成了什么」，不是原文影像**；界面上必须写清楚这个区别，
+   * 它足以判断"哪个字段没读到"，不足以证明"原文写的就是这个"。
+   */
+  evidence?: {
+    page?: number | null
+    row?: number | null
+    raw_name?: string
+    standard_name?: string
+    spec?: string
+    unit?: string
+    qty?: number | null
+    unit_price?: number | null
+    unit_price_excl_tax?: number | null
+    total_price?: number | null
+    tax_rate?: number | null
+    pending_note?: string | null
+  } | null
 }
 
 export interface BidMatrixPreviewResult {

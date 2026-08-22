@@ -81,6 +81,10 @@ class PendingImpact:
 class PreviewOrdering:
     """排好序的确认队列 + 如实的覆盖说明。"""
     queue: list[PendingImpact] = field(default_factory=list)
+    #: (anchor_key, supplier_key) → 原文依据（页/行 + 该行识别到的字段）。
+    #: 由调用方在**能读到报价行的那个事务里**填充（预览是沙箱内），退出后
+    #: 那些行就回滚了，事后查不到。空 dict = 没取证据，不代表没有依据。
+    evidence: dict = field(default_factory=dict)
     #: 能给出估算的那部分，波动幅度合计。
     estimated_total_swing: float = 0.0
     #: 连估算都给不了的格子数。>0 时调用方**不得**声称名次不会变。
