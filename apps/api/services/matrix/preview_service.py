@@ -207,11 +207,21 @@ def _count_unconfirmed_rows(matrix: dict[str, Any]) -> int:
     return n
 
 
+#: 真正需要人工确认的格子状态。**只有 pending**。
+#:
+#: 初版判据是"非 quoted 即待确认"，实测把队列灌成了 13 倍：quoted 169 /
+#: missing 50 / aggregated 36 / pending 9，列出 95 条，只有 9 条人能动。
+#:   - `missing`    供应商压根没报这一行。不是"去核对一下"，是"人家没报价"。
+#:   - `aggregated` 合并行，有自己的审核路径，不是逐格确认。
+#:   - `excluded`   已被排除，更不该回到待办里。
+_CONFIRMABLE_CELL_STATUS = frozenset({"pending"})
+
+
 def build_confirmation_queue(matrix: dict[str, Any]):
     """矩阵 → 确认队列（cut 3 的 `build_ordering` 的适配层）。
 
-    只把"没有可用单价"的格子交给排序模块——已经是 quoted 的格子不需要人去
-    确认，把它们也塞进队列，队列就退化成"全部 89 行"，跟没有队列一样。
+    队列只装真正待人工确认的格子；"有没有可用价格"是另一件事，由
+    `PreviewCell.unit_price` 单独表达（missing 同样没价，但它不是待办）。
     """
     from apps.api.services.matrix.preview_ordering import (
         PreviewCell, PreviewRow, build_ordering,
@@ -225,10 +235,13 @@ def build_confirmation_queue(matrix: dict[str, Any]):
         for c in row.get("suppliers") or []:
             if not isinstance(c, dict):
                 continue
-            usable = c.get("cell_status") == "quoted" and c.get("price") is not None
+            status = c.get("cell_status")
+            price = c.get("price")
             cells.append(PreviewCell(
                 supplier_key=labels.get(c.get("id"), str(c.get("id"))),
-                unit_price=float(c["price"]) if usable else None,
+                # 能当"同行报价"参与区间估算的，只有已确认且真有价的格子。
+                unit_price=float(price) if status == "quoted" and price is not None else None,
+                confirmable=status in _CONFIRMABLE_CELL_STATUS,
             ))
         rows.append(PreviewRow(
             anchor_key=str(row.get("anchor_seq") or row.get("material_name") or "?"),

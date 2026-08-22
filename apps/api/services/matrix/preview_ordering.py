@@ -37,12 +37,22 @@ ImpactKind = Literal["estimated", "unbounded"]
 class PreviewCell:
     """一个锚点上某一家供应商的格子。
 
-    `unit_price` 为 None = 这一格还没有可用单价（待确认/读不到/未报价）。
-    这里不区分这三种原因——矩阵侧已经有 pending/excluded/missing 的语义，
-    本模块只关心"有没有可用于估算的数"。
+    两个字段回答**两个不同的问题**，初版把它们挤进了一个：
+
+    - `unit_price` —— 这一格有没有可用于估算的单价。None = 没有。
+    - `confirmable` —— 这一格是不是**人可以去确认**的待办。
+
+    初版只有 `unit_price`，用 `is None` 同时表示"没有价"和"要人确认"。
+    实测代价：同一份数据里 quoted 169 / missing 50 / aggregated 36 /
+    pending 9，队列列出 95 条，其中只有 9 条是人能动的。`missing` 是
+    "供应商没报这一行"——它确实没有价，但用户对它无能为力，列进待办等于
+    让人去确认一件不存在的事。
     """
     supplier_key: str
     unit_price: float | None
+    #: 默认 False：新增字段时忘了传，结果是"这一格不进待办队列"——漏报一条
+    #: 待办，比凭空多报一屏待办容易发现，也容易补。
+    confirmable: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,7 +123,7 @@ def build_ordering(rows: list[PreviewRow]) -> PreviewOrdering:
         _impact(row, cell)
         for row in rows
         for cell in row.cells
-        if cell.unit_price is None
+        if cell.confirmable
     ]
 
     def sort_key(i: PendingImpact):

@@ -20,8 +20,20 @@ from apps.api.services.matrix.preview_ordering import (
 
 
 def _row(anchor: str, qty, **prices) -> PreviewRow:
+    """价格为 None 的格子 = 待确认（`confirmable=True`）。
+
+    2026-08-22 起 `PreviewCell` 把"没有可用价"和"待人工确认"拆成了两个字段
+    （见该类文档：missing 同样没价，但它不是待办）。这个构造器服务的是
+    "待确认"那一档，所以显式置 confirmable；要构造 missing 那一档，用
+    `_unpriced_but_not_confirmable`。
+    """
     return PreviewRow(anchor, qty, tuple(
-        PreviewCell(k, v) for k, v in prices.items()))
+        PreviewCell(k, v, confirmable=v is None) for k, v in prices.items()))
+
+
+def _unpriced_but_not_confirmable(supplier: str) -> PreviewCell:
+    """没有价、但**不是**待办的格子——供应商压根没报这一行（missing）。"""
+    return PreviewCell(supplier, None, confirmable=False)
 
 
 # ─── 影响估算的三档 ──────────────────────────────────────────────────────────
@@ -159,7 +171,8 @@ def test_real_corpus_orders_the_rows_nobody_priced_first():
             anchor_key=str(i + 1),
             qty=first.get("qty"),
             cells=tuple(
-                PreviewCell(name, items[i].get("unit_price"))
+                PreviewCell(name, items[i].get("unit_price"),
+                            confirmable=items[i].get("unit_price") is None)
                 for name, items in by_supplier.items()
             ),
         ))
@@ -172,3 +185,49 @@ def test_real_corpus_orders_the_rows_nobody_priced_first():
     assert kinds == sorted(kinds, key=lambda k: 0 if k == "unbounded" else 1)
     assert o.estimated_total_swing >= 0
     assert o.unbounded_count + sum(1 for k in kinds if k == "estimated") == o.pending_count
+
+
+# ─── 待确认 ≠ 没有价（2026-08-22 实测缺陷）─────────────────────────────────
+
+def test_missing_cells_do_not_enter_the_queue():
+    """供应商没报这一行 = 没有价，但**不是**待办。
+
+    实测：初版用"没有价"当待办判据，同一份数据里 quoted 169 / missing 50 /
+    aggregated 36 / pending 9，队列列出 95 条，只有 9 条人能动。用户看到的是
+    一屏自己无能为力的条目。
+    """
+    row = PreviewRow("1", 10.0, (
+        PreviewCell("甲", 100.0),
+        PreviewCell("乙", 120.0),
+        _unpriced_but_not_confirmable("丙"),      # 丙没报价
+    ))
+    o = build_ordering([row])
+    assert o.pending_count == 0, f"missing 被当成待确认了：{o.queue}"
+
+
+def test_a_pending_cell_still_enters_even_when_a_missing_cell_sits_next_to_it():
+    row = PreviewRow("1", 10.0, (
+        PreviewCell("甲", 100.0),
+        PreviewCell("乙", None, confirmable=True),   # 真待确认
+        _unpriced_but_not_confirmable("丙"),
+    ))
+    o = build_ordering([row])
+    assert [i.supplier_key for i in o.queue] == ["乙"]
+
+
+def test_a_missing_cell_is_not_counted_as_a_peer():
+    """没报价的同行不该被当成"有一个同行"——它提供不了任何价格信息。
+    只有甲一家有价 → 乙的影响只能是 unbounded，不能算出区间。"""
+    row = PreviewRow("1", 10.0, (
+        PreviewCell("甲", 100.0),
+        PreviewCell("乙", None, confirmable=True),
+        _unpriced_but_not_confirmable("丙"),
+    ))
+    impact = build_ordering([row]).queue[0]
+    assert impact.kind == "unbounded"
+    assert impact.peer_count == 1
+
+
+def test_confirmable_defaults_to_false():
+    """漏传时宁可漏报一条待办，也不要凭空多报一屏——前者好发现好补。"""
+    assert PreviewCell("甲", None).confirmable is False
