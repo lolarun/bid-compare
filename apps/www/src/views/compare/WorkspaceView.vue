@@ -1159,6 +1159,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       <BidMatrix
         v-if="matrixResult"
         :suppliers="matrixSuppliers"
+        :show-history="!previewResult"
         :rows="matrixResult.rows"
         :totals="matrixResult.totals"
         :category="category"

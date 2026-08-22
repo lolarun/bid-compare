@@ -23,7 +23,23 @@ const props = defineProps<{
   supplierIds?: number[]
   anchorMatrix?: boolean          // v2.5: true when anchor-full-axis mode
   pendingItemLoading?: Record<number, boolean>
+  /**
+   * design/32 §12：是否显示历史相关的列（历史均价 / 最低偏差）。
+   *
+   * 预览阶段传 false。理由不是"那两列现在是空的"（那只是现象），而是
+   * **跟历史比价属于评标环节，不是"先看看各家报价差多少"这一步该做的事**。
+   * 预览要回答的是"货比三家谁便宜"，历史均价回答的是"这个价合不合理"——
+   * 两个问题，混在一屏里只会让人分不清正在看哪一个。
+   *
+   * 默认 true：既有调用方（正式比价、导出预览）一个字不用改。
+   */
+  showHistory?: boolean
 }>()
+
+// 表头/表尾的跨列数随历史列的显隐变化。硬编码 2 会在隐藏历史列时把表尾
+// 错位一格——这种错位不报错，只是数字对不上列，最难发现。
+const leadCols = computed(() => (props.showHistory !== false ? 2 : 1))   // 材料 [+ 历史均价]
+const tailCols = computed(() => (props.showHistory !== false ? 2 : 1))   // [最低偏差 +] 推荐
 
 const emit = defineEmits<{
   (e: 'confirmItem', itemId: number, action: 'align' | 'exclude'): void
@@ -155,7 +171,7 @@ async function handleExport() {
           ⚠ {{ pendingCellCount }} 个格子待确认（橙色标注，未计入最低价）
         </span>
         <span v-else class="bid-matrix__legend">
-          绿色为该项最低价，灰底为未报价，偏差对比历史均价
+          绿色为该项最低价，灰底为未报价<template v-if="showHistory !== false">，偏差对比历史均价</template>
         </span>
       </div>
       <a-space>
@@ -175,7 +191,7 @@ async function handleExport() {
               材料
               <span v-if="anchorMatrix" style="font-size:10px;color:#1890ff;margin-left:4px;font-weight:400">锚点全量</span>
             </th>
-            <th class="bid-matrix__col-history" rowspan="2">历史均价</th>
+            <th v-if="showHistory !== false" class="bid-matrix__col-history" rowspan="2">历史均价</th>
             <th
               v-for="s in suppliers"
               :key="s.id"
@@ -185,14 +201,14 @@ async function handleExport() {
               <span class="bid-matrix__supplier-tag">{{ s.letter }}</span>
               <span class="bid-matrix__supplier-name">{{ s.name }}</span>
             </th>
-            <th class="bid-matrix__col-min" rowspan="2">最低偏差</th>
+            <th v-if="showHistory !== false" class="bid-matrix__col-min" rowspan="2">最低偏差</th>
             <th class="bid-matrix__col-rec" rowspan="2">推荐</th>
           </tr>
         </thead>
         <tbody>
           <!-- top spacer -->
           <tr v-if="paddingTop > 0" :style="{ height: paddingTop + 'px' }" aria-hidden="true">
-            <td :colspan="2 + suppliers.length + 2" style="padding:0;border:none" />
+            <td :colspan="leadCols + suppliers.length + tailCols" style="padding:0;border:none" />
           </tr>
 
           <tr
@@ -211,7 +227,7 @@ async function handleExport() {
             </td>
 
             <!-- Historical avg -->
-            <td class="bid-matrix__cell-history">
+            <td v-if="showHistory !== false" class="bid-matrix__cell-history">
               <template v-if="rows[vRow.index].historical_avg">
                 <div class="bid-matrix__hist-price">¥{{ rows[vRow.index].historical_avg!.price.toFixed(2) }}</div>
                 <div style="font-size:11px;color:rgba(0,0,0,0.45)">
@@ -290,7 +306,7 @@ async function handleExport() {
             </td>
 
             <!-- Min deviation -->
-            <td>
+            <td v-if="showHistory !== false">
               <span
                 v-if="rows[vRow.index].min_deviation !== null"
                 class="bid-matrix__deviation-pill"
@@ -312,7 +328,7 @@ async function handleExport() {
 
           <!-- bottom spacer -->
           <tr v-if="paddingBottom > 0" :style="{ height: paddingBottom + 'px' }" aria-hidden="true">
-            <td :colspan="2 + suppliers.length + 2" style="padding:0;border:none" />
+            <td :colspan="leadCols + suppliers.length + tailCols" style="padding:0;border:none" />
           </tr>
         </tbody>
 
@@ -320,17 +336,19 @@ async function handleExport() {
         <tfoot>
           <!-- Row 1: Totals (quoted-only) -->
           <tr>
-            <td colspan="2" class="bid-matrix__footer-label">合计（已确认报价）</td>
+            <td :colspan="leadCols" class="bid-matrix__footer-label">合计（已确认报价）</td>
             <td v-for="s in suppliers" :key="'total-' + s.id">
               <div style="font-weight:600;font-size:14px">
                 ¥{{ totalsBySupplier.get(s.id)?.total?.toLocaleString() ?? '—' }}
               </div>
             </td>
-            <td colspan="2"></td>
+            <td :colspan="tailCols"></td>
           </tr>
-          <!-- Row 2: Avg deviation -->
-          <tr>
-            <td colspan="2" class="bid-matrix__footer-label">平均偏差</td>
+          <!-- Row 2: Avg deviation —— 它是"对比历史均价"的偏差，没有历史
+               口径时整行隐藏。显示 +0.0% 比不显示更糟：那是在断言"跟历史
+               持平"，而根本没有历史可比。 -->
+          <tr v-if="showHistory !== false">
+            <td :colspan="leadCols" class="bid-matrix__footer-label">平均偏差</td>
             <td v-for="s in suppliers" :key="'dev-' + s.id">
               <span
                 class="bid-matrix__deviation-pill"
@@ -345,18 +363,18 @@ async function handleExport() {
                 {{ formatDeviation(totalsBySupplier.get(s.id)?.avg_deviation ?? 0) }}
               </span>
             </td>
-            <td colspan="2"></td>
+            <td :colspan="tailCols"></td>
           </tr>
           <!-- Row 3: Completeness (quoted/aggregated only) -->
           <tr>
-            <td colspan="2" class="bid-matrix__footer-label">已确认报价完整度</td>
+            <td :colspan="leadCols" class="bid-matrix__footer-label">已确认报价完整度</td>
             <td v-for="s in suppliers" :key="'comp-' + s.id">
               <span :style="{ color: completeness.get(s.id)?.quoted === completeness.get(s.id)?.total ? '#52c41a' : 'rgba(0,0,0,0.65)' }">
                 {{ completeness.get(s.id)?.quoted ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
                 <span v-if="completeness.get(s.id)?.quoted === completeness.get(s.id)?.total"> ✓</span>
               </span>
             </td>
-            <td colspan="2"></td>
+            <td :colspan="tailCols"></td>
           </tr>
         </tfoot>
       </table>
