@@ -101,10 +101,21 @@ class QuoteFact:
     brand: str = ""                         # 品牌
     unit: str = ""                          # 单位
     qty: float | None = None                # 数量
-    unit_price: float | None = None         # 含税单价
+    # 价格列**按税基分槽**，通用槽只放"原文没标含税/不含税"的单一价格列。
+    # 跨槽配对是被明令禁止的（draft_integrity `_PRICE_PAIRS`：「拿不含税单价去对
+    # 含税合价…偏差恰好是税率，看起来像系统性错误，其实是比错了尺子」）——而在
+    # 2026-08-23 之前这里只有 `unit_price_excl_tax` 一个税基槽，合计(不含税)/
+    # 税率/税额三列在 `tabular_ingestion` 里读得到、却没有字段可放，直接丢弃；
+    # 于是不含税单价只能跟含税合价配对，泰科龙那份 89 行全数 `tax_basis_suspect`，
+    # 整份 submission 被 `systematic_vat_mismatch` 挡在正式比价之外。
+    unit_price: float | None = None         # 单价（原文未区分税基时的单一列）
+    unit_price_incl_tax: float | None = None  # 含税单价
     unit_price_excl_tax: float | None = None  # 不含税单价
-    total_price: float | None = None        # 合价
+    total_price: float | None = None        # 合价（原文未区分税基时的单一列）
+    total_price_incl_tax: float | None = None  # 含税合价 / 价税合计
+    total_price_excl_tax: float | None = None  # 不含税合价 / 合计(不含税)
     tax_rate: float | None = None           # 税率
+    tax_amount: float | None = None         # 税额
     material_type: str = ""                 # 材质 (不锈钢/球墨铸铁/碳钢…)
     remark: str = ""                        # 备注
     canonical: dict = field(default_factory=dict)          # 结构化属性 (dn/valve_type/pn…)
@@ -137,12 +148,18 @@ class QuoteFact:
         见最佳实践评审 D1 —— 它是确认写入路径的克隆且漏了 price_basis 桥接，
         唯一调用方是已下线的一次性修复脚本 repair_project63.py）。
         """
-        if self.total_price is not None:
+        # "原文读到了合价"包含三个税基槽的任意一个。只看通用 `total_price` 会把
+        # 「只印了价税合计、没有无税基合价列」的文档（泰科龙）误判成 missing，
+        # 从而触发 `missing_total_requires_review` —— 原文明明白白印着金额。
+        if any(v is not None for v in
+               (self.total_price, self.total_price_incl_tax, self.total_price_excl_tax)):
             self.total_source = "ocr"
             return
         self.total_source = "missing"
-        if self.unit_price is not None and self.qty is not None:
-            self.derived_total_candidate = round(self.unit_price * self.qty, 4)
+        any_unit = next((v for v in (self.unit_price, self.unit_price_incl_tax,
+                                     self.unit_price_excl_tax) if v is not None), None)
+        if any_unit is not None and self.qty is not None:
+            self.derived_total_candidate = round(any_unit * self.qty, 4)
 
     def to_item_dict(self) -> dict:
         """Return a dict compatible with batch-confirm's expected item shape.
@@ -158,9 +175,13 @@ class QuoteFact:
             "unit": self.unit,
             "qty": self.qty,
             "unit_price": self.unit_price,
+            "unit_price_incl_tax": self.unit_price_incl_tax,
             "unit_price_excl_tax": self.unit_price_excl_tax,
             "total_price": self.total_price,
+            "total_price_incl_tax": self.total_price_incl_tax,
+            "total_price_excl_tax": self.total_price_excl_tax,
             "tax_rate": self.tax_rate,
+            "tax_amount": self.tax_amount,
             "material_type": self.material_type,
             "remark": self.remark,
             "canonical": self.canonical,
@@ -187,9 +208,13 @@ def quote_fact_from_row(
     unit: str = "",
     qty: float | None = None,
     unit_price: float | None = None,
+    unit_price_incl_tax: float | None = None,
     unit_price_excl_tax: float | None = None,
     total_price: float | None = None,
+    total_price_incl_tax: float | None = None,
+    total_price_excl_tax: float | None = None,
     tax_rate: float | None = None,
+    tax_amount: float | None = None,
     material_type: str = "",
     remark: str = "",
     llm_canonical: dict | None = None,
@@ -212,9 +237,13 @@ def quote_fact_from_row(
         unit=unit,
         qty=qty,
         unit_price=unit_price,
+        unit_price_incl_tax=unit_price_incl_tax,
         unit_price_excl_tax=unit_price_excl_tax,
         total_price=total_price,
+        total_price_incl_tax=total_price_incl_tax,
+        total_price_excl_tax=total_price_excl_tax,
         tax_rate=tax_rate,
+        tax_amount=tax_amount,
         material_type=material_type,
         remark=remark,
         canonical=canonical,

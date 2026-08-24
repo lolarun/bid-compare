@@ -44,6 +44,10 @@ REVIEW = "review"
 BLOCKED = "blocked"
 
 COLUMN_SHIFT_FLAG = "column_shift"
+#: 这一行的合价不是直接读到的，是识别侧按位移锚点从错位的格子里推回来的
+#: （`paddle_vl._recover_shifted_total`，docs/design/34）。数量与单价在同一行里
+#: 确实丢了、不会被一起推回——所以带这个 flag 的行**永远是"只有合价"的行**。
+TOTAL_RECOVERED_FLAG = "total_recovered_by_shift"
 DUPLICATE_FLAG = "duplicate_row"
 ARITHMETIC_FLAG = "arithmetic_mismatch"
 TRUNCATION_FLAG = "value_truncated"
@@ -401,6 +405,55 @@ def check_row_arithmetic(row, *, tolerance: float = INTEGRITY_ARITHMETIC_TOLERAN
         return res
     return ArithmeticResult(status="not_evaluable", qty=qty,
                             reason="缺数量/单价/合价之一，无法评估（不计为通过）")
+
+
+def row_identities_hold(fields, *, tolerance: float = INTEGRITY_ARITHMETIC_TOLERANCE) -> bool:
+    """这一行的金额之间能不能自圆其说——**凡输入齐全的恒等式都要成立，且至少成立一条**。
+
+    四条恒等式：`数量×单价≈合价`（复用 `check_row_arithmetic`，含按根/按束报价的
+    倍率豁免）、`合价×税率≈税额`、`合价×(1+税率)≈价税合计`、`合价+税额≈价税合计`。
+
+    "一条都评估不了就当不可信"是有意的——不是"没有反证就放行"。这条判据有两个
+    调用方，用途不同但要的是同一把尺子：
+      · `paddle_vl` 判位移脏行还能保住多少（移位不一定波及整行：实测 6+1 行是
+        单位落进数量槽、价格三件套完全自洽，全清是矫枉过正）；
+      · design/33 的空格子补位判一次填充可不可信——第二个模型在**错误方向**上会
+        返回格式完整、貌似合理的错值（把税额填进价税合计），实测这道门对
+        90°/270° 两个方向给出 9/9 与 0/9 的完美分离，是补位敢落库的唯一理由。
+
+    放在这里而不是各写一份：算术判据全仓只此一处（CLAUDE.md「同一业务结果不得
+    各算各的」），`check_row_arithmetic` 已经住在这个模块。
+    """
+    from apps.api.core.utils import parse_rate
+
+    def num(slot: str):
+        v = fields.get(slot)
+        if v is None:
+            return None
+        v = str(v).strip()
+        return _num(v) if v else None
+
+    checks: list[bool] = []
+    res = check_row_arithmetic(fields, tolerance=tolerance)
+    if res.status != "not_evaluable":
+        checks.append(res.status in ("ok", "multiplier"))
+
+    net = num("total_price_excl_tax")
+    if net is None:
+        net = num("total_price")
+    rate = parse_rate(fields.get("tax_rate") or "")
+    tax, incl = num("tax_amount"), num("total_price_incl_tax")
+
+    def close(a, b):
+        return abs(a - b) <= max(abs(b), 1.0) * tolerance
+
+    if net is not None and rate is not None and tax is not None:
+        checks.append(close(net * rate, tax))
+    if net is not None and rate is not None and incl is not None:
+        checks.append(close(net * (1 + rate), incl))
+    if net is not None and tax is not None and incl is not None:
+        checks.append(close(net + tax, incl))
+    return bool(checks) and all(checks)
 
 
 @dataclass

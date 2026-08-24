@@ -130,6 +130,7 @@ def test_build_tender_fields_never_invents_values():
 import re  # noqa: E402
 
 from apps.api.intelligence.vl_tender import (  # noqa: E402
+    _META_KEYS,
     parse_tender_document,
     parse_tender_meta,
 )
@@ -221,8 +222,7 @@ def test_meta_failure_does_not_sink_the_list(tender_pdf):
 
     r = parse_tender_document(tender_pdf, vl_call=flaky, target_pages=[5])
     assert len(r.draft.rows) == 2
-    assert r.meta == {"project_name": "", "project_code": "",
-                      "tender_date": "", "deadline": ""}
+    assert r.meta == {k: "" for k in _META_KEYS}
 
 
 def test_meta_parser_ignores_unknown_lines_and_never_guesses():
@@ -318,3 +318,17 @@ def test_prompt_contains_no_real_supplier_or_project_names():
     text = build_requirements_prompt(DEFAULT_TENDER_REQUIREMENTS)
     for forbidden in ("金桥", "凯硕", "泰科龙", "绵存", "宏胜", "亨通", "远东", "浦东"):
         assert forbidden not in text
+
+
+def test_meta_parser_reads_tenderer_unit_name():
+    """design/29 §10 req4：招标单位是工作台卡片上要单独显示的字段。
+    project_name 不能顶替它——项目名不是单位名。"""
+    parsed = parse_tender_meta(
+        "project_name: 某某工程\n"
+        "project_code: ZB-2026-001\n"
+        "tenderer: 某某建设集团有限公司\n"
+        "tender_date: 2026-01-01\n"
+        "deadline: 2026-02-01\n"
+    )
+    assert parsed["tenderer"] == "某某建设集团有限公司"
+    assert parsed["project_name"] == "某某工程"

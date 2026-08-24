@@ -58,13 +58,23 @@ class _UnusedTenderOnlyProvider(LLMProvider):
 
 REPO = Path(__file__).resolve().parents[3]
 GOLDEN_DIR = REPO / "data" / "golden"
-PDF_DIR = REPO / "tests" / "fixtures" / "documents" / "bid"
+# 2026-08-21：语料改成扁平命名（`{项目名}-{供应商名}{文档类型}.ext`）直接放在
+# documents/ 下，`bid/` 子目录已空（commit c69f53b 同步了别处的引用，漏了这里，
+# 两条用例因此 StopIteration —— 不是识别退化，是找不到文件）。
+PDF_DIR = REPO / "tests" / "fixtures" / "documents"
 
 CATEGORY = "阀门"
 # (供应商名关键字, 快照 slug, 预期识别行数)。
+# 2026-08-22 快照重录：生产默认值 `merge_tables` 由 True 改为 False（见
+# `providers/paddle_ocr.py::submit_and_parse` 的实测表），快照必须跟着换成同一个
+# 参数下的真实产物——留着旧的等于让回放验证一份 production 不再产出的输入
+# （`paddle_snapshot.py` 模块文档"裁剪等于让测试验证一份不存在的输入"同一条理由）。
+# 绵存因此从 87 行变成 89 行（对参照清单逐位零差错），不是放宽预期，是召回真的变好。
+# 凯硕 2026-08-22 再从 90 行变成 89 行：`含税合价（元）：` 那行原先因为 paddle_vl
+# `_TOTAL_KW` 漏了"合价"被当成明细入库，现在正确判成合计行——参照清单正是 89 条。
 SUPPLIERS = [
-    ("凯硕", "quote_kaishuo", 90),
-    ("绵存", "quote_miancun", 87),
+    ("凯硕", "quote_kaishuo", 89),
+    ("绵存", "quote_miancun", 89),
 ]
 
 
@@ -148,6 +158,12 @@ def _resolve_review_rows(items: list[dict]) -> list[dict]:
     冒充"已确认"。"""
     fixed = []
     for it in items:
+        # design/34：识别侧判定位置映射坏掉的行（数值槽位里出现自由文本）会被清空
+        # 金额并打 `column_shift`，`batch-confirm` 的结构完整性闸门据此要求逐行复核。
+        # 这里模拟"人已经对着原文看过了"——**只是承认，不补值**：那些数字在识别
+        # 产物里根本不存在（design/34 §2.1），凭空填一个才是这道门要拦的事。
+        if "column_shift" in (it.get("validation_flags") or []):
+            it = dict(it, integrity_ack=True)
         has_total = any(it.get(k) is not None
                         for k in ("total_price", "total_price_incl_tax", "total_price_excl_tax"))
         if has_total or it.get("not_quoted"):

@@ -50,15 +50,24 @@ def _load_live(name: str) -> dict:
 # ── 场景 B：金桥 all-Excel —— design/28 §4 明确点名的优先场景，零模型调用 ──
 
 class TestScenarioB_AllExcel:
-    """招标侧：金桥地体上盖招标文件.xlsx（刻意保留的 ambiguous 验收样本）+
-    投标侧：绵存/凯硕/泰科龙投标清单.xlsx（均为 strong bid_list）。"""
+    """招标侧：金桥采购清单.xlsx（空白清单表）+
+    投标侧：绵存/凯硕/泰科龙报价清单.xlsx（均为 strong bid_list）。"""
 
-    def test_tender_side_is_ambiguous_by_design(self):
+    def test_tender_side_is_recognised_as_a_blank_list(self):
+        """2026-08-23 改判：这份从 "uncertain" 变成 tender_list/definitive。
+
+        实测它的价格列**一个真实价格都没有**——`单价(不含税)` 整列空，
+        `合计(不含税)`/`税额`/`价税合计` 三列的非空取值无一例外全是 "0"。
+        旧判据把逐格的 "0" 算成"填了"，于是算出 63% 填充率判成不确定；接着弹窗
+        二选一、取消键默认落到"投标文件"，**采购清单就变成了比价矩阵里的一列
+        供应商**（0/89、合计 ¥0）。那是类别错误，不是置信度问题。
+        判据的两处修补见 `test_document_classify` 里同名的说明。
+        """
         path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
         _skip_if_missing(path)
         result = classify_excel(str(path))
-        assert result.verdict == "uncertain"
-        assert result.confidence == "ambiguous"
+        assert result.verdict == "tender_list"
+        assert result.confidence == "definitive"
 
     @pytest.mark.parametrize("filename", [
         "金桥地体上盖项目-上海绵存报价清单.xlsx",

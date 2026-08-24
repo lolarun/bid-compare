@@ -32,6 +32,10 @@ export const materialApi = {
     api.delete(`/materials/${id}`),
   categories: () =>
     api.get<{ profession: string; category: string; count: number }[]>('/materials/categories'),
+  /** 系统支持的品类词表（与主数据里有没有物料无关）——品类选择器的选项来源。
+   *  不在前端另抄一份，否则迟早跟后端 `PROFESSION_MAP` 漂移。 */
+  supportedCategories: () =>
+    api.get<string[]>('/materials/supported-categories'),
   standardize: (data: { text: string; category?: string }) =>
     api.post<StandardizeResult>('/materials/standardize', data),
   extendedSchema: (category: string) =>

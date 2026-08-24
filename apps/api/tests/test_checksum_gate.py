@@ -66,3 +66,101 @@ def test_checksum_reports_threshold_for_audit():
     cs = _build_checksum(_Job(1000.0), 900.0, 10)
     assert cs["threshold_pct"] == pytest.approx(CHECKSUM_BLOCK_DELTA_RATIO * 100)
     assert cs["declared"] == 1000.0 and cs["line_sum"] == 900.0
+
+
+# ── design/33 §6 决策②：补位金额不进这道门 ──────────────────────────────────
+#
+# `_build_checksum` 本身不知道"补位"这回事——它只吃一个现成的 `line_total_sum`。
+# 排除逻辑在**累加那一步**（`quote_confirmation_service.confirm_batch` 的主循环），
+# 这里必须端到端走一次真实的 batch-confirm，不能只测 `_build_checksum`。
+#
+# 2026-08-23 复核：design/33 文档原本写着这条"已实现、有测试锁住"，两者都不是
+# 真的——`line_total_sum` 当时无条件累加每一行。这条测试补齐它，并且是先红后绿
+# 验证过的（临时改掉 confirm_batch 里的排除条件，这条测试立刻失败）。
+
+import io
+import json
+
+from fastapi.testclient import TestClient
+from PIL import Image
+
+
+def _png() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _mk_client(monkeypatch, tmp_path, canned: dict):
+    from apps.api.intelligence.pipeline import ExtractionPipeline
+    from apps.api.intelligence.providers.mock import MockProvider
+    from apps.api.intelligence.base import ExtractionResponse
+
+    class _Provider(MockProvider):
+        def extract(self, images, schema, prompt, timeout=90, **kwargs):
+            return ExtractionResponse(
+                data=canned, raw_text=json.dumps(canned, ensure_ascii=False),
+                confidence=1.0, tokens_used=0, provider="mock-checksum", duration_ms=1,
+            )
+
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    monkeypatch.setattr(
+        "apps.api.services.ingestion.document_ingestion.UPLOAD_DIR", tmp_path / "uploads"
+    )
+    monkeypatch.setattr("apps.api.main._build_pipeline", lambda: ExtractionPipeline(_Provider()))
+    from apps.api.main import app
+    return TestClient(app)
+
+
+def test_gap_filled_amounts_are_excluded_from_the_declared_total_checksum(
+    temp_db, monkeypatch, tmp_path, auth_override, db_session,
+):
+    """一行读到的、一行补出来的，声明总价按**只读到的那行**核对。
+
+    声明总价 = 两行的真实合计（150）。若补位的 100 被计入，line_sum 会等于
+    declared、门禁 pass——这恰恰是设计要防的：门"过了"是因为补位悄悄把账
+    填平，不是因为识别本身完整。line_sum 必须只等于未补位那一行的 50。
+
+    `_doc_meta.bid_total` 走 Paddle 封面抽取才会有值，MockProvider 路径不产
+    这个键（`pipeline.py` 的注释原话）——这里直接在 DB 里补上，跟"声明总价
+    核对"这道门本身要不要被补位绕过是两件事，不该为了凑齐前置条件去伪造一条
+    真实不存在的 Paddle 调用链路。
+    """
+    from apps.api.models import ExtractionJob
+
+    canned = {
+        "supplier_name": "宏胜电缆", "quote_date": "2026-08-01",
+        "items": [
+            {"material": "YJV-3*95", "spec": "0.6/1kV", "unit": "米",
+             "qty": 10, "unit_price": 5, "total_price": 50},
+        ],
+    }
+    with _mk_client(monkeypatch, tmp_path, canned) as c:
+        r = c.post("/api/intake/upload", data={"type": "quote", "category": "电缆", "project_id": ""},
+                   files={"file": ("宏胜.png", _png(), "image/png")})
+        assert r.status_code == 200, r.text
+        job_id = r.json()["id"]
+
+        job = db_session.get(ExtractionJob, job_id)
+        job.result = {**(job.result or {}), "_doc_meta": {"bid_total": 150.0}}
+        db_session.commit()
+
+        overrides = [
+            {"material": "YJV-3*95", "spec": "0.6/1kV", "unit": "米",
+             "qty": 10, "unit_price": 5, "total_price": 50},
+            {"material": "YJV-3*70", "spec": "0.6/1kV", "unit": "米",
+             "qty": 20, "unit_price": 5, "total_price": 100,
+             "validation_flags": ["gap_filled"]},
+        ]
+        r = c.post("/api/quotes/batch-confirm", json={
+            "job_id": job_id, "supplier_name": "宏胜电缆", "category": "电缆",
+            "overrides": overrides, "dry_run": True,
+        })
+        assert r.status_code == 200, r.text
+        checksum = next(
+            (i for i in r.json()["issues"] if i.get("error") == "declared_total_mismatch"), None)
+        # 补位那 100 被排除后，line_sum 只剩 50——跟声明的 150 差了 100，
+        # 远超门禁阈值，checksum 门必须命中而不是被补位悄悄填平。
+        assert checksum is not None, (
+            "补位金额混进了 line_sum——门禁没有命中，声明总价核对被悄悄填平了")
+        assert checksum["checksum"]["line_sum"] == pytest.approx(50.0)

@@ -71,6 +71,18 @@ def get_scanned_classify_call() -> ScannedClassifyCall | None:
     from apps.api.core.config import get_settings
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider, ProviderError
 
+    # design/41：视觉供应商由 `VISION_CLIENT_VENDOR` 决定，默认 dashscope。
+    # 配 mimo 但没 key 时**明确回落并记日志**，不静默降级。
+    from apps.api.core.domain_config import VISION_CLIENT_VENDOR
+
+    if VISION_CLIENT_VENDOR == "mimo":
+        from apps.api.intelligence.providers.mimo_vision import get_mimo_vision_provider
+
+        mimo = get_mimo_vision_provider()
+        if mimo is not None:
+            return mimo.classify_document_kind
+        log.warning("VISION_CLIENT_VENDOR=mimo 但没有 MIMO_API_KEY，回落 dashscope")
+
     settings = get_settings()
     if not settings.DASHSCOPE_API_KEY:
         return None

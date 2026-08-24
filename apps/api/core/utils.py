@@ -43,6 +43,31 @@ def parse_num(v: Any, *, lenient: bool = False) -> float | None:
         return None
 
 
+def parse_rate(v: Any) -> float | None:
+    """把税率读成小数。`"13%"` → 0.13；`"13"` → 0.13；`0.13` → 0.13。
+
+    `parse_num` 只剥离已知分隔符，不认百分号，`float("13%")` 直接 ValueError。
+    此前 `paddle_vl._parse_rate` 各自实现了一份，且它的注释明确留了个问题：
+    「vl_quote.build_quote_fields 那层理论上有同样的问题，这里不代它下结论」。
+    收拢到这里，让所有读税率的入口用同一把尺子。
+
+    **裸数字按百分数处理。** 增值税率的真实取值只有 0/1/3/5/6/9/13(%) 这几档，
+    没有一档会写成大于 1 的小数；反过来 Excel 里把税率存成 `13` 而显示成
+    `13%` 是常态。故 `>1` 一律除以 100，`<=1` 原样当小数——这条判据对真实税率
+    全域无歧义，不是猜测。
+    """
+    if v is None or v == "":
+        return None
+    s = str(v).strip()
+    if s.endswith("%"):
+        n = parse_num(s[:-1])
+        return None if n is None else n / 100
+    n = parse_num(s)
+    if n is None:
+        return None
+    return n / 100 if n > 1 else n
+
+
 def parse_id_csv(value: str, field_name: str = "ids") -> list[int]:
     """Parse a comma-separated integer string into list[int].
 

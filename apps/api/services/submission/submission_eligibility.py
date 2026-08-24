@@ -29,6 +29,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models import BidQuoteLine, BidSubmission, ExtractionJob
+from apps.api.core.domain_config import (
+    INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT,
+    INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO,
+)
 from apps.api.services.ingestion.draft_integrity import BLOCKED, COLUMN_SHIFT_FLAG, OK, REVIEW
 
 log = logging.getLogger(__name__)
@@ -120,14 +124,39 @@ def evaluate_submission(db: Session, submission: BidSubmission) -> EligibilityVe
         add(REVIEW, "checksum_unknown",
             "没有文件声明总价，无法闭环校验——不等于校验通过", **checksum)
 
-    # ③ 结构缺陷行：列错位没有合法形态，一行即不可用
+    # ③ 结构缺陷行：列错位。**比例决定牵不牵连整份**，不是"一行即不可用"。
+    #
+    # 2026-08-22 改（docs/design/34）：原来任何一行错位就整份 BLOCKED。那条规则写下
+    # 时，`column_shift` 从 Paddle 那条路几乎不会触发（旧判据跑在已经规范化成统一宽度
+    # 的 CSV 上，看不见识别侧的位移）；补上识别侧检测后它真的会响了，七份语料里四份
+    # 中招，其中两份只因为 1 行——一行错位毙掉整份报价，用户连另外 130 多行都看不到。
+    #
+    # 改成用 `domain_config` 里**本来就写着这个意思**的两个常量（那里的注释原文：
+    # "低于此比例仍逐行 BLOCKED 那些行本身，只是不牵连整份"）——份级判据此前没有
+    # 兑现它。行本身照旧带 flag、进复核、不进正式计算，跟 pending 同一个处理方式
+    # （CLAUDE.md §4）；BLOCKED 留给"结构整体不可靠"。
+    #
+    # **阈值标定基准与本判据不同源，需要复核**：那两个常量是按"单元格数 ≠ 表头列数
+    # 的行占比"标的（实测右移影响 86/90 行的那批），而识别侧新判据是类型判据
+    # （数值槽位里出现自由文本），触发面窄得多。沿用是为了不凭空造新数字，不是因为
+    # 已经验证过它对新判据也合适。
     shifted = [ln for ln in lines
                if COLUMN_SHIFT_FLAG in ((ln.extraction_meta or {}).get("validation_flags") or [])]
     v.stats["column_shift_rows"] = len(shifted)
     if shifted:
-        add(BLOCKED, "column_shift",
-            f"{len(shifted)} 行存在列错位，按列名取到的值不可信",
-            rows=[ln.id for ln in shifted[:20]])
+        # 数"因错位丢了合价"的行，不是"触发了检测器"的行——理由同
+        # `quote_confirmation_service._check_structural_integrity`。
+        lossy = [ln for ln in shifted if ln.total_price is None]
+        ratio = len(lossy) / len(lines) if lines else 0.0
+        v.stats["column_shift_ratio"] = round(ratio, 4)
+        v.stats["column_shift_lossy_rows"] = len(lossy)
+        structural = (ratio > INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO
+                      and len(lossy) >= INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT)
+        add(BLOCKED if structural else REVIEW, "column_shift",
+            (f"{len(shifted)} 行存在列错位（占 {ratio:.1%}），整份结构不可靠"
+             if structural else
+             f"{len(shifted)} 行存在列错位（占 {ratio:.1%}），这些行不进正式计算，其余行可用"),
+            rows=[ln.id for ln in shifted[:20]], ratio=round(ratio, 4))
 
     # ④ 合价来源。missing = 原文该有金额却没读到且未经人工补写，
     #    not_quoted = 原文明确不报价（合法，只作统计）。

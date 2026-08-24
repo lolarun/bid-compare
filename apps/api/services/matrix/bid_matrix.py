@@ -295,7 +295,22 @@ def _price_and_total(
         total = round(item.agg_total, 2)
     else:
         price = data.unit_price
-        total = round(price * (data.quantity or 1), 2) if price else None
+        if price:
+            total = round(price * (data.quantity or 1), 2)
+        else:
+            # **原文只有合价、没有单价**时，用原文的合价（2026-08-23 补）。
+            #
+            # 这一支此前直接返回 None，于是整行在矩阵里彻底消失——实测泰科龙
+            # 那份报价表压根没有"含税单价"列、只印"价税合计"（design/26 §3.3
+            # 记过这个表的形态），29 行因此看起来像"未报价"，界面完整度显示
+            # 52/89，用户以为系统把行弄丢了。
+            #
+            # 合价是**原文读到的真值**，不是推算出来的，没有理由因为算不出单价
+            # 就把它丢掉——比价基准本来就是每项报价（数量×单价），一行只有合价
+            # 照样能比。反过来**绝不从合价倒推单价**：那是凭空造一个原文没有的
+            # 数字（CLAUDE.md §4：只做校验与标记，禁止未经确认自动覆盖/派生）。
+            # `price` 保持 None，最低价判定与单价偏差自然跳过这一行。
+            total = data.total_price
     return price, total, data
 
 

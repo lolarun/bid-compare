@@ -18,10 +18,13 @@ from apps.api.services.submission.submission_eligibility import (
 class _Line:
     _next = 1
 
-    def __init__(self, unit_price=100.0, total_source="ocr", flags=None):
+    def __init__(self, unit_price=100.0, total_source="ocr", flags=None,
+                 total_price=100.0):
         self.id = _Line._next
         _Line._next += 1
         self.unit_price = unit_price
+        # 列错位判据数的是"因错位丢了合价"的行，所以这个字段必须能单独设（design/34）
+        self.total_price = total_price
         self.extraction_meta = {"total_source": total_source,
                                 "validation_flags": list(flags or [])}
 
@@ -98,11 +101,33 @@ def test_missing_checksum_key_is_also_review():
     assert v.verdict == REVIEW and v.eligible and not v.clean
 
 
-def test_column_shift_one_row_blocks():
-    """列错位没有合法形态，一行即整份不可用。"""
-    v = _verdict([_Line(), _Line(flags=["column_shift"])])
+def test_column_shift_few_rows_is_review_not_blocked():
+    """少量列错位只让那些行进复核，不牵连整份（docs/design/34，2026-08-22 改）。
+
+    原判据是"一行即整份不可用"。识别侧补上位移检测后它真的会触发了——七份语料四份
+    中招，其中两份只因为 1 行；一行毙掉整份，用户连另外一百多行都看不到。改用
+    `domain_config` 里本来就写着这个意思的比例/绝对数双闸门。
+    """
+    v = _verdict([_Line(), _Line(flags=["column_shift"], total_price=None)])
+    assert v.verdict == REVIEW
+    assert v.eligible and not v.clean          # 可用，但必须留下疑点
+    assert any(r.code == "column_shift" for r in v.reasons)
+
+
+def test_column_shift_above_ratio_blocks_whole_submission():
+    """错位行占比过高 = 整份结构不可靠，这时才 BLOCKED。"""
+    lines = ([_Line() for _ in range(6)]
+             + [_Line(flags=["column_shift"], total_price=None) for _ in range(4)])
+    v = _verdict(lines)                        # 4/10 = 40%，且 >= 绝对数下限
     assert v.verdict == BLOCKED
     assert any(r.code == "column_shift" for r in v.reasons)
+
+
+def test_column_shift_below_absolute_count_stays_review():
+    """比例超标但绝对行数太少（小表被比例稀释的反面）——不牵连整份。"""
+    lines = [_Line(), _Line(), _Line(flags=["column_shift"], total_price=None)]  # 1/3 超比例，但只有 1 行
+    v = _verdict(lines)
+    assert v.verdict == REVIEW and v.eligible
 
 
 def test_missing_total_blocks():
@@ -148,3 +173,15 @@ def test_blocking_summary_only_lists_ineligible():
     bad = _verdict([_Line()], status="rejected")
     out = blocking_summary([good, bad])
     assert len(out) == 1 and out[0]["verdict"] == BLOCKED
+
+
+def test_column_shift_that_kept_its_total_is_not_structural():
+    """错位但金额保住了 → 不计入"结构不可靠"的分子（docs/design/34）。
+
+    实测来源：一份 89 行报价有 6 行错位（单位掉进数量槽），但那 6 行的金额通过算术
+    自洽校验、对标准答案 6/6 全对。按"触发检测器就算"会让它 6.7% 超阈值、整份被拦，
+    连预览都进不去；按"丢了合价才算"则占比 0，正常放行。
+    """
+    lines = [_Line() for _ in range(4)] + [_Line(flags=["column_shift"]) for _ in range(4)]
+    v = _verdict(lines)                      # 4/8 触发，但一行都没丢合价
+    assert v.verdict == REVIEW and v.eligible

@@ -293,7 +293,13 @@ function sourceRefLabel(row: Row): string {
   const q = row as QuoteRow
   if (!q.source_ref) return ''
   const s = q.source_ref as Record<string, unknown>
-  if (s.page) return `P${s.page}`
+  // page_end 大于 page：这一行只能定位到一个页区间（跨页合并表拆不回物理页，见
+  // apps/api/intelligence/paddle_vl.py::_merged_page_spans）。显示 "P7-8"，不显示
+  // "P7"——后者是把一个不确定的区间当成断言，会把用户送到错的一页。
+  if (s.page) {
+    const end = typeof s.page_end === 'number' ? s.page_end : null
+    return end != null && end > Number(s.page) ? `P${s.page}-${end}` : `P${s.page}`
+  }
   if (s.location) return String(s.location)
   return JSON.stringify(s).slice(0, 20)
 }

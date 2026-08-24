@@ -25,9 +25,9 @@ def reconcile_vs_excel(
 ) -> dict:
     """对比 ExtractionDraft rows 与 Excel ground truth。"""
     if doc_type == "tender":
-        from apps.api.services.tender.tender_list import parse_tender_xlsx
+        from apps.api.services.tender.tender_list import parse_tender_all_sheets
         from apps.api.services.tender.source_reconcile import reconcile_anchors
-        xlsx_anchors = parse_tender_xlsx(xlsx_path)
+        xlsx_anchors = parse_tender_all_sheets(xlsx_path)
         xlsx_items = [
             {"seq": str(a.seq), "name": a.name, "spec": a.spec,
              "unit": a.unit, "qty": a.qty}

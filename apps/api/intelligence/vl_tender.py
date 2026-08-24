@@ -21,7 +21,7 @@
 ## 一次解析，两个消费方
 
 招标（比价）与邀标对**招标文件解析能力的要求是一致的**：都要采购清单，也都要封面
-四标量（项目名称/编号/日期/截止时间）。差别只在下游怎么用——比价把清单转成
+标量（项目名称/编号/招标单位/日期/截止时间）。差别只在下游怎么用——比价把清单转成
 TenderAnchor，邀标把标量存进招标记录。所以解析只有一份
 （`parse_tender_document`），两个入口各自映射输出。
 
@@ -153,7 +153,7 @@ class TenderParseResult:
     漂移，同一份 PDF 在两个入口给出不同的清单。
     """
     draft: ExtractionDraft                  # 采购清单（锚点行）
-    meta: dict                              # 封面四标量
+    meta: dict                              # 封面标量
     requirements: dict                      # 招标要求（品牌等，可扩展）
     rotations: dict
     unresolved_pages: list
@@ -173,7 +173,7 @@ def parse_tender_document(file_path: str, *, vl_call: VLCall,
     唯一诚实的做法：宁可多花钱，不要靠猜跳过页（见 docs/design/21 §2.4）。
 
     指定了清单页时，封面页仍会额外渲染——封面通常不在清单页里，漏掉它就等于
-    静默丢掉四个标量。
+    静默丢掉封面标量。
     """
     from PIL import Image
 
@@ -247,17 +247,22 @@ def recognize_tender_vl(file_path: str, **kw) -> ExtractionDraft:
 # 这几个字段有真实消费方（邀标流程 /invite/save 会存），所以 `extract_tender`
 # 切到 VL 时**必须一并提供**，否则就是静默清空。
 
-PROMPT_TENDER_META = """这是一份招标文件的首页。请告诉我下面四项，每行一个，格式 key: value：
+PROMPT_TENDER_META = """这是一份招标文件的首页。请告诉我下面五项，每行一个，格式 key: value：
 
 project_name  项目名称
 project_code  项目编号/招标编号
+tenderer      招标单位/招标人/采购人全称（发出这份招标文件的单位，不是投标单位）
 tender_date   招标日期
 deadline      投标截止时间
 
-文档上没写的就留空，不要推测。只返回这四行，不要其他说明。"""
+文档上没写的就留空，不要推测。只返回这五行，不要其他说明。"""
 
-_META_KEYS = ("project_name", "project_code", "tender_date", "deadline")
-# 首页够了。招标文件常有几十页，为四个标量把整份送进去是纯浪费；
+# tenderer（招标单位）是 design/29 §10 req4"卡片徽标后显示单位名称"的唯一
+# 数据来源——招标侧此前只抽项目名/编号/日期，没有任何字段承载"这份文件是
+# 谁发出的"。不用 project_name 顶替：项目名不是单位名，拿它冒充等于让卡片
+# 陈述一件文档没说过的事。
+_META_KEYS = ("project_name", "project_code", "tenderer", "tender_date", "deadline")
+# 首页够了。招标文件常有几十页，为几个封面标量把整份送进去是纯浪费；
 # 取前两页是为了容忍封面之后紧跟一页"招标公告"的排版。
 META_PAGES = 2
 
@@ -283,7 +288,7 @@ def extract_tender_meta(images: list[bytes], vl_call: VLCall) -> dict[str, str]:
     try:
         return parse_tender_meta(vl_call(images[:META_PAGES], PROMPT_TENDER_META))
     except Exception:                                            # noqa: BLE001
-        log.warning("招标封面元信息抽取失败，四个标量留空", exc_info=True)
+        log.warning("招标封面元信息抽取失败，封面标量留空", exc_info=True)
         return {k: "" for k in _META_KEYS}
 
 

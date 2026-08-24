@@ -65,6 +65,23 @@ def list_materials(
     }
 
 
+@router.get("/supported-categories", response_model=list[str])
+def list_supported_categories():
+    """系统支持的全部品类（`config.ALL_CATEGORIES`），与物料主数据里**有没有
+    数据无关**。
+
+    跟下面的 `/categories` 是两件事：那个按 Material 表分组统计"实际有多少条
+    物料"，一个全新库里会是空的；这个是词表本身，供前端做品类选择器。
+    2026-08-23 新增——此前前端没有任何手动选择品类的入口，而 `batch-confirm`
+    的错误提示写着"请先选择本报价所属品类"，指向一个不存在的控件：招标文件
+    不带采购清单时用户到那一步就是死路。选择器的选项必须来自后端这一份词表，
+    在前端另抄一份迟早会跟 `PROFESSION_MAP` 漂移。
+    """
+    from apps.api.core.config import ALL_CATEGORIES
+
+    return ALL_CATEGORIES
+
+
 @router.get("/categories", response_model=list[dict])
 def list_categories(db: Session = Depends(get_db)):
     rows = db.execute(select(

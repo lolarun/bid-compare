@@ -21,11 +21,18 @@ class SourceRef:
     page: int
     table: int = 0
     row: int = 0
+    # 页码区间终点。识别侧只能确定这一行落在 page..page_end 之间（Paddle 跨页合并表
+    # 把续页的行全塞进 begin 页，且不给几何坐标，拆不回物理页——见
+    # `paddle_vl._merged_page_spans`）。None 或等于 page 时页码是确定的；大于 page 时
+    # 下游必须如实显示"第 page-page_end 页"，**不得把 page 当成确定事实**。
+    page_end: int | None = None
     bbox: tuple[float, float, float, float] | None = None   # x0,y0,x1,y1 in page pixels
     tile_bbox: tuple[float, float, float, float] | None = None  # fraction of page if tiled
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {"page": self.page, "table": self.table, "row": self.row}
+        if self.page_end is not None and self.page_end > self.page:
+            d["page_end"] = self.page_end
         if self.bbox is not None:
             d["bbox"] = list(self.bbox)
         if self.tile_bbox is not None:
@@ -427,6 +434,9 @@ def compute_quality(
         )
         mismatch_rows_info.append({
             "page": r.source_ref.page,
+            **({"page_end": r.source_ref.page_end}
+               if r.source_ref.page_end is not None
+               and r.source_ref.page_end > r.source_ref.page else {}),
             "table": r.source_ref.table,
             "row": r.source_ref.row,
             "seq": f.get("seq"),

@@ -33,6 +33,22 @@ MATCH_MAX_LINE_CONCENTRATION: float = 0.60
 # Declared-total tolerance: 3% before raising a completeness flag
 MATCH_DECLARED_TOTAL_TOLERANCE: float = 0.03
 
+# ── 报价侧品类推断（2026-08-23）────────────────────────────────────────────
+# 品类原本只有招标侧产出（`tender_list_preview` 的多数派 `detected_category`）。
+# 招标文件没带采购清单时（实测：某份招标 PDF 的材料明细表整行写"详见附件1"，
+# 而附件没有装订进来）品类恒为空，前端 `category` 一直是空串，`batch-confirm`
+# 逐份拒收——而界面上**没有任何手动选择品类的控件**，用户到这一步是死路。
+# design/32 的"无采购清单也能比价"（报价派生轴）因此在实现上完全不可达。
+#
+# 修法是让报价行自己投票出品类。实测三份真实语料的把握度：
+#   亨通 130/132 电缆 · 远东 135/138 电缆 · 泰科龙 89/89 阀门
+# 阈值取 0.8：真实文档的一致度在 0.98 以上，留出的余量足以让"混装多品类的
+# 文件"落在阈值之下、退回人工，而不是被多数派硬吞掉。**不达标就留空**，
+# 由人工选择——绝不猜一个品类往下走（CLAUDE.md §4：不得靠静默填充抬高等级）。
+QUOTE_CATEGORY_VOTE_MIN_SHARE: float = 0.80
+# 绝对行数下限：几行的小样本即使 100% 一致也不足以定性，避免被一两行带偏。
+QUOTE_CATEGORY_VOTE_MIN_ROWS: int = 5
+
 # Cosine similarity below this value is flagged as low-confidence match (→ pending)
 MATCH_LOW_CONFIDENCE_THRESHOLD: float = 0.70
 
@@ -221,6 +237,59 @@ SEQ_FAMILY_CONSISTENCY_MIN: float = 0.90
 # 三处已统一到这一个常量（评审 D4，2026-08-11）。名字仍带 SEQ_ 前缀是历史遗留
 # （最早只服务 anchor_match 的顺序直连判据），语义已是通用数量比较判据。
 SEQ_QTY_TOLERANCE: float = 0.001
+
+# ── 保序子序列直连（供应商只报清单的一部分）─────────────────────────────────
+# 见 `anchor_match._subsequence_positions`。
+
+# 允许多少比例的锚点"没有数量证据"（数量为空或 0，多为复合行的父行）。
+# 0.10：徐汇清单 170 条里有 7 条（4.1%）。放宽到大多数锚点都无数量时，
+# "数量序列子序列"这条判据就名存实亡了，必须卡住。
+SUBSEQ_MAX_WILDCARD_RATE: float = 0.10
+
+# 断同分时最高分必须领先次高分的差值。0.15 = 实测那一处真实同分
+# （预分支电缆头 vs RTXMY-6*50+E25，两者数量同为 2）的分差远大于它，
+# 而随手两个相似型号串之间的分差通常在 0.05 以内。断不开就整份回落语义，
+# 不留"大概是这个"。
+SUBSEQ_TIEBREAK_MARGIN: float = 0.15
+
+# ── 分类筛页（docs/design/41）────────────────────────────────────────────────
+# 只把"真的是报价清单"的页送去 Paddle（¥0.09/页）。分类侧走小米 MiMo 订阅制，
+# 实测泰科龙 53 页分类耗 46,232 token ≈ ¥0.0004，相对 Paddle 可忽略。
+# 阈值/模型集中在这里，不散落在 intelligence 里（CLAUDE.md §4「阈值集中」）。
+PAGE_FILTER_MODEL: str = "mimo-v2.5"
+PAGE_FILTER_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
+# 一个 8 页窗口要输出 8 行判定；实测 reasoning_tokens≈0，4000 足够有余。
+PAGE_FILTER_MAX_TOKENS: int = 4000
+
+# 文本类调用（封面标量、招标要求、卡片概述）走哪家。design/41 的调查里 mimo
+# 在同等条件下准确率不输 qwen 且订阅制成本近乎为零，但**这三项的失败后果各不
+# 相同**（概述错了只是文案难看，封面标量错了会影响声明总价核对门），所以给一个
+# 开关逐项切、而不是一次性硬换。默认 `dashscope` = 现状，改这个值前先跑
+# `test_text_client_switch.py`。
+TEXT_CLIENT_VENDOR: str = "dashscope"        # 'dashscope' | 'mimo'
+# 视觉类调用（扫描件招/投标判定、空格子补位、招标 VL-direct 回落）走哪家。
+# 跟文本分开一个开关：两类调用的失败后果、验证方式都不同，捆在一起切换等于
+# 逼人一次性接受两种风险。**embedding 不在这两个开关的管辖范围**——mimo 没有
+# embedding 接口，对齐兜底（`anchor_match._embed`）只能是 dashscope，那是硬约束。
+VISION_CLIENT_VENDOR: str = "dashscope"      # 'dashscope' | 'mimo'
+
+# ── 列→角色映射的确定性验证（design/40 §5.1）────────────────────────────────
+# 见 `intelligence/column_roles.verify_roles`。这三个阈值是**模型提议能否被采纳**
+# 的唯一闸门，也同样用来判词表结果够不够格（验证器对提议来源中立）。
+
+# 数值型列（数量/单价/合价/税率/税额）的非空取值里，能解析成数的占比下限。
+# 0.95 而不是 1.0：真实表里混一两个"面议"/"/"是常态，不该据此判定整列认错。
+COLUMN_ROLE_NUMERIC_MIN_RATE: float = 0.95
+
+# 名称列的非空取值里，"不是纯数字"的占比下限。整列都是数字 = 认成了序号或数量。
+# 0.80 留出余量：型号本身是纯数字的条目（"4"、"110"）真实存在。
+COLUMN_ROLE_TEXT_MIN_RATE: float = 0.80
+
+# `数量 × 单价 ≈ 合价` 的闭合率下限，**同税基配对**下评估。
+# 0.85 而不是更高：泰科龙那种原文就有空洞、绵存那种按根/按套报价的倍率行都会
+# 拉低闭合率，它们是已知的真实形态（design/33、`_PLAUSIBLE_MULTIPLIERS`），
+# 不该让列映射为此背锅。低于 0.85 才是"这三列里有一列认错了"的量级。
+COLUMN_ROLE_ARITHMETIC_MIN_RATE: float = 0.85
 
 
 # ── 识别进度估算（design/27 §6）─────────────────────────────────────────────

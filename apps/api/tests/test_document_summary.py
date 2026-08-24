@@ -50,3 +50,40 @@ def test_bid_facts_only_include_bid_relevant_fields():
     compose_summary("bid", {"supplier_name": "某供应商", "row_count": 5,
                              "deadline": "不该出现"}, lambda p: captured.append(p) or "ok")
     assert "不该出现" not in captured[0]
+
+
+def test_tender_facts_carry_tenderer_unit_name():
+    """design/29 §10 req4/req5：招标单位是卡片上要单独显示的字段，概述里
+    也要能出现——之前 facts 里根本没有这个键，模型无从提起。"""
+    captured = []
+    compose_summary("tender", {"tenderer": "某某建设集团", "row_count": 89},
+                    lambda p: captured.append(p) or "ok")
+    assert "招标单位" in captured[0]
+    assert "某某建设集团" in captured[0]
+
+
+def test_tender_only_tenderer_still_composes():
+    """项目名抽不到、只抽到招标单位时也要出概述——旧的守卫只认
+    project_name/supplier_name，会把这种情况判成"无可概述"。"""
+    result = compose_summary("tender", {"tenderer": "某某建设集团"}, call=None)
+    assert "某某建设集团" in result
+
+
+def test_bid_two_totals_stay_separate_facts():
+    """design/29 §10 req5：明细合计与文件声明总价是两个事实，不合并——
+    两者不一致正是人工核对的信号，糊成一个数就把信号抹掉了。"""
+    captured = []
+    compose_summary("bid", {"supplier_name": "某供应商", "row_count": 5,
+                            "quote_total": 123456.78, "declared_total": 123400},
+                    lambda p: captured.append(p) or "ok")
+    assert "报价明细合计" in captured[0] and "123456.78" in captured[0]
+    assert "文件声明总价" in captured[0] and "123400" in captured[0]
+
+
+def test_counts_are_stated_as_items_not_rows():
+    """design/29 §10 req6：清单条目统一叫「项」，卡片/概述/明细三处口径一致。"""
+    captured = []
+    compose_summary("bid", {"supplier_name": "某供应商", "row_count": 5},
+                    lambda p: captured.append(p) or "ok")
+    assert "报价清单项数" in captured[0]
+    assert "行数" not in captured[0]

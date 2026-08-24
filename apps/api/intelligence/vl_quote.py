@@ -68,6 +68,7 @@ from apps.api.intelligence.extraction_draft import (
 )
 from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_NOT_QUOTED,
+    TOTAL_RECOVERED_FLAG,
     check_column_alignment,
     check_sequence_continuity,
     classify_amount_cell,
@@ -217,6 +218,8 @@ _SLOTS: dict[str, list[tuple[str, ...]]] = {
     "row_type":    [("row_type",)],
     "copy_no":     [("copy_no",)],
     "page":        [("page",), ("页码",), ("页",)],
+    "page_end":    [("page_end",),],
+    "column_shift": [("column_shift",),],
 }
 # 通用槽位对 _EXCL 与 _INCL 都要排斥——单向排斥（只挡 excl）正是 A2 缺陷的成因：
 # "含税单价" 不含 _EXCL 关键词，会被通用槽位放行、抢在 unit_price_incl_tax 之前
@@ -325,6 +328,9 @@ class _ParsedRow:
     fields: dict
     extra: dict = field(default_factory=dict)
     flags: list = field(default_factory=list)
+    # 跨页合并表的**区间终点**：识别侧确知这一行落在 page..page_end 之间，但拆不到
+    # 具体哪一页（见 paddle_vl._merged_page_spans）。None 或等于 page 时页码是确定的。
+    page_end: int | None = None
 
 
 def _norm_row_type(raw: str) -> str:
@@ -381,6 +387,21 @@ def parse_csv(text: str, page_count: int, *,
     for i, row in enumerate(body):
         page_raw = re.sub(r"\D", "", cell(row, "page"))
         page = int(page_raw) if page_raw.isdigit() and 1 <= int(page_raw) <= page_count else None
+        end_raw = re.sub(r"\D", "", cell(row, "page_end"))
+        page_end = (int(end_raw) if end_raw.isdigit() and 1 <= int(end_raw) <= page_count
+                    else None)
+        # 区间终点比起点还小说明这一格是脏数据——丢弃它，退回"页码就是 page"，
+        # 不要拿一个不成立的区间去糊弄下游。
+        if page_end is not None and page is not None and page_end < page:
+            page_end = None
+        # design/34：识别侧已经判定这一行的位置映射坏了（数值槽位里是自由文本），
+        # 金额字段在那边就清空了，这里只负责把结论变成行级 flag——`column_shift`
+        # 这个值本来就在词表里（`check_column_alignment` 用同一个），不新增术语。
+        shift_raw = (cell(row, "column_shift") or "").strip()
+        shift_marked = shift_raw not in ("", "0")
+        # "recovered"：合价不是直接读到的，是按位移锚点推回来的（paddle_vl.
+        # _recover_shifted_total）。单独一个 flag，好让复核界面把它跟"直接读到"分开。
+        total_recovered = shift_raw == "recovered"
         raw_cells = {h: (row[j] if j < len(row) else "") for j, h in enumerate(header) if h}
         used = set(cmap.values())
         builder = field_builder or build_quote_fields
@@ -390,13 +411,16 @@ def parse_csv(text: str, page_count: int, *,
         # 标签是身份声明，不是可以顺手统一的字符串）。默认值维持向后兼容。
         fields["parser_mode"] = parser_mode
         flags: list[str] = []
-        if i in shifted:
+        if i in shifted or shift_marked:
             flags.append("column_shift")
+        if total_recovered:
+            flags.append(TOTAL_RECOVERED_FLAG)
         if i in trunc_rows:
             flags.append("value_truncated")
         out.append(_ParsedRow(
             row_type=_norm_row_type(cell(row, "row_type")),
             page=page,
+            page_end=page_end,
             copy_no=cell(row, "copy_no").strip(),
             raw_cells=raw_cells,
             fields=fields,
@@ -478,7 +502,8 @@ def build_draft(text: str, *, file_path: str, page_count: int,
                         page_row_index=per_page_rows[page]),
             # bbox 不可得：整份一次调用拿不到像素坐标。按规则不得宣称行级像素追溯，
             # 故 bbox 留 None，只给页/行序。
-            source_ref=SourceRef(page=page, table=0, row=per_page_rows[page]),
+            source_ref=SourceRef(page=page, table=0, row=per_page_rows[page],
+                                 page_end=p.page_end),
             validation_flags=list(p.flags),
             field_sources={k: ("direct_cell" if v not in (None, "") else "missing")
                            for k, v in p.fields.items()},

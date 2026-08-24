@@ -405,6 +405,92 @@ def _make_full_project(client) -> dict:
 # ── Gate tests ───────────────────────────────────────────────────────────────
 
 class TestBidMatrixGates:
+    def test_alignment_never_run_returns_recoverable_error(self, compare_client):
+        """项目 137 实测复现（2026-08-24）：两家报价真的入库了、招标清单也确认了，
+        唯独 `tender-list/match` 从没跑过——`used_submission_ids` 因此是空的。
+
+        这不是构造出来的边角情况：截至这条测试写下的时刻，**全前端没有任何界面
+        会调用 `/analysis/tender-list/match`**（`AnchorReviewMatrix.vue` 只读现成
+        对齐结果）。正常的 上传→入库→比价 流程走到底，任何项目都会撞上这道门。
+
+        断言两件事：① error 码是 `alignment_not_run`，不是裸字符串（前端要靠它
+        识别"能自动补救"）；② 补跑一次 match 之后重试 `/bid-matrix` 真的能成功
+        ——这正是前端 `runAnalysis` 现在做的恢复动作，这里在后端把同一条路径
+        走一遍，不只测错误码本身。
+        """
+        # 复刻 _make_full_project 到 tender-list/confirm 那一步，但**跳过 match**。
+        r = compare_client.post(
+            "/api/intake/upload",
+            data={"type": "quote", "category": "阀门", "project_id": ""},
+            files={"file": ("A.png", _png(), "image/png")},
+        )
+        job_a = r.json()["id"]
+        buf_b = io.BytesIO()
+        Image.new("RGB", (16, 16), (250, 250, 250)).save(buf_b, format="PNG")
+        r = compare_client.post(
+            "/api/intake/upload",
+            data={"type": "quote", "category": "阀门"},
+            files={"file": ("B.png", buf_b.getvalue(), "image/png")},
+        )
+        job_b = r.json()["id"]
+
+        rs_a = compare_client.post("/api/suppliers", json={"name": "供应商A137", "categories": ["阀门"]})
+        supplier_a_id = rs_a.json()["id"]
+        rs_b = compare_client.post("/api/suppliers", json={"name": "供应商B137", "categories": ["阀门"]})
+        supplier_b_id = rs_b.json()["id"]
+
+        r = compare_client.post("/api/quotes/batch-confirm", json={
+            "job_id": job_a, "supplier_id": supplier_a_id,
+            "supplier_name": "供应商A137", "project_name": "137复现项目", "category": "阀门",
+        })
+        assert r.status_code == 200, r.text
+        project_id = r.json()["project_id"]
+        sub_a_id = r.json()["submission_id"]
+
+        r = compare_client.post("/api/quotes/batch-confirm", json={
+            "job_id": job_b, "supplier_id": supplier_b_id,
+            "supplier_name": "供应商B137", "project_id": project_id, "category": "阀门",
+        })
+        assert r.status_code == 200, r.text
+        sub_b_id = r.json()["submission_id"]
+
+        anchor_items = [
+            {"seq": "1", "name": "DN100 闸阀", "spec": "Z45X-16Q", "unit": "个", "qty": 10, "category": "阀门"},
+            {"seq": "2", "name": "DN50 闸阀",  "spec": "Z45X-16Q", "unit": "个", "qty": 20, "category": "阀门"},
+        ]
+        r = compare_client.post("/api/analysis/tender-list/confirm", json={
+            "project_id": project_id, "category": "阀门",
+            "file_name": "test.xlsx", "anchors_json": anchor_items,
+            "anchors_total": len(anchor_items), "source_type": "excel",
+        })
+        assert r.status_code == 200, r.text
+        # 到这里为止：两家都真的入库了（有 BidQuoteLine），session 也确认了——
+        # 唯独没调用过 tender-list/match。这正是项目 137 的状态。
+
+        r = compare_client.post("/api/analysis/bid-matrix", json={
+            "project_id": project_id, "category": "阀门",
+            "supplier_ids": [supplier_a_id, supplier_b_id],
+            "submission_ids": [sub_a_id, sub_b_id],
+        })
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "alignment_not_run", detail
+
+        # 前端恢复动作：补跑一次 match，再重试 bid-matrix。
+        r = compare_client.post("/api/analysis/tender-list/match", data={
+            "project_id": str(project_id), "category": "阀门",
+            "submission_ids": f"{sub_a_id},{sub_b_id}",
+        })
+        assert r.status_code == 200, r.text
+
+        r = compare_client.post("/api/analysis/bid-matrix", json={
+            "project_id": project_id, "category": "阀门",
+            "supplier_ids": [supplier_a_id, supplier_b_id],
+            "submission_ids": [sub_a_id, sub_b_id],
+        })
+        assert r.status_code == 200, r.text
+        assert len(r.json()["rows"]) > 0
+
     def test_submission_ids_mismatch_returns_409(self, compare_client):
         """body.submission_ids ≠ session.used_submission_ids → 409."""
         state = _make_full_project(compare_client)
@@ -418,7 +504,11 @@ class TestBidMatrixGates:
             },
         )
         assert r.status_code == 409, r.text
-        assert "used_submission_ids" in r.json()["detail"]
+        # 2026-08-24 改：detail 从裸字符串改成 {error, message} 结构化——前端
+        # 要按 error 码识别"能不能自动重新对齐再重试"，不能靠翻译过的中文文案
+        # 做字符串匹配（那是给人看的话，会变；error 码不会）。
+        detail = r.json()["detail"]
+        assert detail["error"] == "alignment_stale", detail
 
     def test_stale_finalization_does_not_empty_matrix(self, compare_client, db_session):
         """B2 回归：过期 finalize 快照（group_ids 指向旧轮次的组）不得把矩阵清空。
@@ -1246,12 +1336,24 @@ class TestCompareStateRestore:
         # 已入库的 job 不应再出现在 inflight
         assert job_conf not in inflight_ids
 
+        # 品类必须跟着回来（2026-08-23）。**这条覆盖的是一个真实缺陷**：
+        # 前端 `restoreBatchFiles` 重建卡片时，已入库的条目走
+        # `if (entry.confirmed) continue`，永远触发不到那个回填品类的识别回调，
+        # 于是刷新一次品类就变回空串、点预览被"还没有确定品类"挡住——而系统
+        # 手里明明有品类（这里的已入库报价行上就带着）。刷新恢复这条路此前
+        # 没有任何测试覆盖，缺陷因此一直没被发现。
+        assert data["category"] == "阀门", (
+            f"刷新恢复必须能拿回品类，实得 {data['category']!r}——"
+            "拿不回来的话用户刷新一次就被挡在预览外面")
+
     def test_empty_for_new_project(self, compare_client):
         rp = compare_client.post("/api/projects", json={"name": "空恢复项目", "remark": ""})
         pid = rp.json()["id"]
         r = compare_client.get("/api/analysis/compare-state", params={"project_id": pid})
         assert r.status_code == 200, r.text
-        assert r.json() == {"submissions": [], "inflight_jobs": []}
+        # `category` 2026-08-23 新增：全新项目没有任何证据，必须是空串而不是
+        # 猜一个——空串是"该由用户手选"的信号，猜出来的品类会一路带到入库。
+        assert r.json() == {"submissions": [], "inflight_jobs": [], "category": ""}
 
 
 # ── batch-confirm 复活废弃 submission（"老问题"：超时/旧轮次 superseded 后再上传同一文件）──
