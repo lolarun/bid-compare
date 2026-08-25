@@ -32,6 +32,10 @@ from apps.api.services.ingestion.standardize import standardize_name
 from apps.api.intelligence.price_basis import derive_price_basis
 from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
 from apps.api.services.submission import dry_run_cache
+from apps.api.core.domain_config import (
+    INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT,
+    INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO,
+)
 from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_NOT_QUOTED,
     ARITHMETIC_FLAG,
@@ -231,13 +235,15 @@ def _truncation_from_items(items: list[dict]):
     return corroborate_truncation(rep, items) if rep.suspects else rep
 
 
-def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> dict:
+def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False,
+                   gates_advisory: bool = False) -> dict:
     """列错位 / 重复行门。两者的处置**不同**，因为它们的合法性不同：
 
-    - **列错位**：数据列数与表头不一致，按列名取到的每个值都可能是别的列的值。
-      没有任何一种正常表格会这样，故一律阻断（422 + rollback）。上游表格来源必须
-      在 `validation_flags` 里带上 `column_shift`（见 draft_integrity）；items 到这
-      一层已经是 dict，自己发现不了。
+    - **列错位**：按列名取到的值可能是别的列的值，一行也不放行——**但这只约束正式
+      入库**。预览走 `gates_advisory=True`，本门与其它三道门一样只收集不阻断
+      （2026-08-22 修：本门当初漏接了这个开关，见 `confirm_batch` 的 design/32 §8
+      说明；后果是识别侧补上位移检测后，一份 89 行的报价只因 1 行错位就整份进不了
+      预览，三家里只剩一家能比价——而预览是沙箱自动跑的，没有人能去逐行 ack）。
     - **重复行**：**合法的重复真实存在**——同一型号阀门同量同价出现在给水和排水两
       个系统里，是正常清单。实测三份真实阀门文档各有 3~6 组这样的行，且逐行核对
       与 golden 完全一致。故 REVIEW 级重复只标注、不阻断；只有当重复金额占比越过
@@ -307,15 +313,16 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
 
     blocking_dup = dup_rows if dup.verdict == BLOCKED else set()
     blocking_arith = arith_rows if arith.verdict == BLOCKED else set()
+    blocking_shift = shifted
     block_rows = [
         _integrity_row(items, i,
-                       ([COLUMN_SHIFT_FLAG] if i in shifted else [])
+                       ([COLUMN_SHIFT_FLAG] if i in blocking_shift else [])
                        + ([DUPLICATE_FLAG] if i in blocking_dup else [])
                        + ([ARITHMETIC_FLAG] if i in blocking_arith else []),
-                       _column_for(i, ([COLUMN_SHIFT_FLAG] if i in shifted else [])
+                       _column_for(i, ([COLUMN_SHIFT_FLAG] if i in blocking_shift else [])
                                   + ([DUPLICATE_FLAG] if i in blocking_dup else [])
                                   + ([ARITHMETIC_FLAG] if i in blocking_arith else [])))
-        for i in sorted(shifted | blocking_dup | blocking_arith)
+        for i in sorted(blocking_shift | blocking_dup | blocking_arith)
         if not items[i].get("integrity_ack")
     ]
 
@@ -324,7 +331,7 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
             "error": "structural_integrity_requires_review",
             "message": (
                 f"{len(block_rows)} 行未通过结构完整性检查"
-                f"（列错位 {len(shifted)} 行 / 重复 {len(blocking_dup)} 行 / "
+                f"（列错位 {len(blocking_shift)} 行 / 重复 {len(blocking_dup)} 行 / "
                 f"算术不闭合 {len(blocking_arith)} 行，"
                 f"重复金额占比 {dup.amount_ratio:.1%}，"
                 f"算术错误率 {arith.error_rate:.1%}）。"
@@ -335,7 +342,9 @@ def _gate_integrity(db: Session, items: list[dict], dry_run: bool = False) -> di
             "duplicates": dup.to_dict(),
             "arithmetic": arith.to_dict(),
         }
-        if not dry_run:
+        # `gates_advisory`：门的结论照算、照带回（payload 进 `blocking_issue`），
+        # 只是不中止流程——跟 dry_run 同一个语义，本门此前漏接了这个参数。
+        if not (dry_run or gates_advisory):
             db.rollback()
             raise ReviewRequiredError(payload)
     else:
@@ -625,7 +634,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
     # 在写任何一行之前先看**表的形状**：列错位与重复行是下游唯一察觉不到的两类缺陷，
     # 错位后的金额仍是合法数字、重复行仍能通过逐行算术校验。两者都只标注和阻断，
     # 不删行、不改值、不猜正确列序——恢复正确值必须回原始页面重读。
-    integrity = _gate_integrity(db, items, dry_run=dry_run)
+    integrity = _gate_integrity(db, items, dry_run=dry_run, gates_advisory=gates_advisory)
 
     # ── 逐行处理 → BidQuoteLine ────────────────────────────────────────────────
     from apps.api.services.history.comparison import get_category_thresholds, determine_alert
@@ -763,6 +772,13 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
                     "unit_price": price,
                     "derived_total_candidate": derived_candidate,
                     "reason": "原文无合价；需人工确认后方可入库",
+                    # 2026-08-23：随行带上原文备注/核对说明。真实语料里出现过这种情况：
+                    # 原表在单价/合价格子印的是「/」（明确不报价），但经过 CSV/Excel
+                    # 转换后，这个符号只留在"核对说明"列的文字里（映射进 remark），
+                    # 单价合价两格本身变成纯空白——分类器在格子层面看不出"读不到"
+                    # 和"明确不报"的区别，只能来问人。人要判断，就得看到这条备注，
+                    # 而不是重新翻一遍原文。
+                    "remark": str(item.get("remark") or ""),
                 })
 
             deviation: float | None = None
@@ -840,7 +856,14 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
             )
             db.add(line)
             line_count += 1
-            if total is not None:
+            # design/33 §6 决策②：补位金额不进声明总价闭环门。声明总价是这份文件
+            # 里**唯一不依赖抽取质量的事实**（上面的门禁注释原话）——把补位喂给它，
+            # 等于用同一次识别的产物去验证那次识别是否完整，独立性就没了。
+            # `gap_filled` 是 `intelligence/gap_fill.py` 写在行上的标记，一路经
+            # `pipeline.py` 的 validation_flags 透传到这里的 item。
+            # 2026-08-23 复核：design/33 文档原本就写着这条"已实现、有测试锁住"，
+            # 但两者都不是真的——line_total_sum 之前无条件累加了每一行，这里补上。
+            if total is not None and "gap_filled" not in (item.get("validation_flags") or []):
                 line_total_sum += total
 
         except Exception as e:

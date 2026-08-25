@@ -190,3 +190,62 @@ def test_submit_and_parse_raises_when_credentials_missing(tmp_path, monkeypatch)
     ))
     with pytest.raises(ProviderError, match="未配置"):
         paddle_ocr.submit_and_parse(_write_tmp_pdf(tmp_path))
+
+
+# ── 提交参数 ────────────────────────────────────────────────────────────────
+# merge_tables 2026-08-22 由 True 改为 False：开着的时候 Paddle 把跨页续表整段行
+# 塞进 begin 那一页，续页的行全部继承错误页码（泰科龙 19/89 行、绵存 73 行）。
+# 7 份报价件 + 2 份招标件实测，关掉后页归属全对、召回同等或更好（绵存 87→89 行、
+# 宏胜 132→136 行）。这个默认值是实测结论，改回去要先拿出新的实测。
+
+def test_submit_sends_merge_tables_false_by_default(tmp_path, monkeypatch):
+    from urllib.parse import parse_qs
+
+    seen: list[dict] = []
+    calls = [
+        {"error_code": 0, "access_token": "tok"},
+        {"error_code": 0, "result": {"task_id": "T1"}},
+        {"error_code": 0, "result": {"status": "success",
+                                     "parse_result_url": "https://x/result.json"}},
+        {"pages": []},
+    ]
+    inner = _seq_urlopen(calls)
+
+    def _spy(req, *a, **kw):
+        data = getattr(req, "data", None)
+        if data:
+            seen.append({k: v[0] for k, v in parse_qs(data.decode("utf-8")).items()})
+        return inner(req, *a, **kw)
+
+    monkeypatch.setattr(paddle_ocr, "urlopen", _spy)
+    paddle_ocr.submit_and_parse(_write_tmp_pdf(tmp_path))
+
+    submit = next(f for f in seen if "file_data" in f)
+    assert submit["merge_tables"] == "false"
+    assert submit["recognize_seal"] == "true"
+
+
+def test_submit_merge_tables_can_still_be_turned_on(tmp_path, monkeypatch):
+    """开关本身还在——改的是默认值，不是把能力删掉（对照实验还要用它）。"""
+    from urllib.parse import parse_qs
+
+    seen: list[dict] = []
+    calls = [
+        {"error_code": 0, "access_token": "tok"},
+        {"error_code": 0, "result": {"task_id": "T1"}},
+        {"error_code": 0, "result": {"status": "success",
+                                     "parse_result_url": "https://x/result.json"}},
+        {"pages": []},
+    ]
+    inner = _seq_urlopen(calls)
+
+    def _spy(req, *a, **kw):
+        data = getattr(req, "data", None)
+        if data:
+            seen.append({k: v[0] for k, v in parse_qs(data.decode("utf-8")).items()})
+        return inner(req, *a, **kw)
+
+    monkeypatch.setattr(paddle_ocr, "urlopen", _spy)
+    paddle_ocr.submit_and_parse(_write_tmp_pdf(tmp_path), merge_tables=True)
+
+    assert next(f for f in seen if "file_data" in f)["merge_tables"] == "true"

@@ -49,7 +49,7 @@ import logging
 import re
 from typing import Callable
 
-from apps.api.core.utils import parse_num
+from apps.api.core.utils import parse_num, parse_rate
 from apps.api.intelligence.copy_detect import detect_copies
 from apps.api.intelligence.extraction_draft import ExtractionDraft
 from apps.api.intelligence.vl_quote import build_draft, map_columns
@@ -71,7 +71,13 @@ _ARITH_TOL = 0.02
 _PCT_RE = re.compile(r"^\d+(\.\d+)?\s*%$")
 
 _SUBTOTAL_KW = ("小计",)
-_TOTAL_KW = ("合计", "总计", "总价")
+# "合价" 是 2026-08-22 补的：`ingestion/list_rows.FOOTER_MARKERS` 里一直有它，这里
+# 漏了——**同一个一字之差 design/32 已经在报价入库侧修过一次**（那边是 `含税合计`
+# 有、`含税合价` 无），本模块是这套词表的第三份拷贝，于是又栽了一遍：凯硕的
+# "含税合价（元）："被当成明细行入库，90 行 vs 参照 89 行的差额就是它。
+# 本表比 `FOOTER_MARKERS` 窄是**有意的**：识别侧要区分 subtotal / total 两种 row_type，
+# 而那张表把"小计"和"合计"混在一起，直接共用会让小计行被标成合计。加词时两边都要看。
+_TOTAL_KW = ("合价", "合计", "总计", "总价")
 
 # 判断"这一行是不是表头"用这几个槽位是否解析成数字——表头本身不该是数字。
 _NUMERIC_HINT_SLOTS = ("qty", "tax_rate", "unit_price_excl_tax", "total_price_excl_tax")
@@ -210,6 +216,111 @@ def _merge_wrapped_rows(data_rows: list[list[str]], name_idx: int,
     return out
 
 
+# 必须是数值的槽位。**税率不在内**：它的合法字面值是 "13%"，`parse_num` 不认百分号
+# （见 `_parse_rate` 存在的理由），放进来会让每一个正常行都被判成脏行。
+_AMOUNT_SLOTS = ("qty", "unit_price", "total_price",
+                 "unit_price_excl_tax", "total_price_excl_tax",
+                 "unit_price_incl_tax", "total_price_incl_tax", "tax_amount")
+
+# 合价类槽位，从左到右就是它们在真实表里的惯常顺序（不含税 → 通用 → 含税）。
+# `_recover_shifted_total` 拿最左边那个当"位移锚点"：位移是整体的，认最左边一个
+# 就够，认多了反而会在同一行里挑出互相矛盾的两个来源。
+_TOTAL_SLOTS = ("total_price_excl_tax", "total_price", "total_price_incl_tax")
+
+
+def _dirty_amount_slots(fields: dict) -> list[str]:
+    """数值槽位里装着自由文本（既不是数，也不是"/"、"无"这类明确不报价标记）的槽位名。
+
+    **这是"这一行的位置映射已经坏了"的证据，不是"这一格没读到"。** 远东实测：某行
+    少了一格，单位之后整体左移一位，备注的自由文本落进 `total_price` 槽位；
+    `classify_amount_cell` 判它非数字返回 `AMOUNT_EMPTY`、下游把它变成 None，
+    **唯一能证明这行坏了的证据就此被静默丢弃**，而旁边两个同样移了位的数字
+    （真实身份是单价和合价）看着完全正常地存了进去——31/138 行数量是错值、
+    `validation_flags` 全空。空值是诚实状态，形状合理的错数字不是。
+
+    既有的两道闸门都看不见这件事：`check_column_alignment` 跑在已经规范化成统一
+    宽度的 CSV 上；`_has_plausible_numeric_signal` 只要有**一个**数值槽能解析就放行
+    （移位后 qty/单价恰好都是数字）。详见 docs/design/34。
+    """
+    out = []
+    for slot in _AMOUNT_SLOTS:
+        v = (fields.get(slot) or "").strip()
+        if v and parse_num(v) is None and classify_amount_cell(v) != AMOUNT_NOT_QUOTED:
+            out.append(slot)
+    return out
+
+
+def _row_arithmetic_consistent(fields: dict) -> bool:
+    """这一行剩下的金额之间还能不能自圆其说——用来决定脏行要清掉多少。
+
+    脏槽位证明发生了移位，但**移位不一定波及整行**：泰科龙/凯硕实测有 6+1 行是
+    单位落进了数量槽，价格三件套完全自洽——把这些正确价格一起清掉是矫枉过正。
+    远东那类则相反：qty 和单价都是别行的数字，一条恒等式也立不住。
+
+    判据本身搬去了 `draft_integrity.row_identities_hold`（2026-08-23，实现
+    design/33 时）——空格子补位要用**同一把尺子**判填充可不可信，两处各写一份
+    迟早会漂。这里保留薄封装，是因为识别阶段的容差比入库门宽（见
+    `_ARITH_TOL` / `EXTRACTION_ARITHMETIC_TOLERANCE` 的注释），那个差异是有意的。
+    """
+    from apps.api.services.ingestion.draft_integrity import row_identities_hold
+
+    return row_identities_hold(fields, tolerance=_ARITH_TOL)
+
+
+def _recover_shifted_total(col_map: dict[int, str], row: list[str],
+                           prev_row: list[str] | None = None) -> tuple[str, str] | None:
+    """位移行里**只把合价**救回来，返回 (槽位名, 值)；救不了返回 None。
+
+    为什么单独救合价、不顺手救数量和单价（远东实测逐值核对过）：位移是"某一格被
+    Paddle 丢掉、右边所有列整体左移一位"。**丢掉那一格右边的值都还在，只是错位；
+    它左边的没动；唯独它本身没了。** 备注是自由文本，它落在哪一格就暴露了位移量
+    （跟 `_locate_tax_rate_idx` 用"NN%"的形状当逐行锚点是同一个套路，不是新判据）。
+    合价紧邻备注、在位移点右侧，右移回去必对；数量/单价在位移点附近，右移回去拿到
+    的是被纵向游程平滑污染的邻行值——实测某行右移后合价 1666013.63 正确，而单价会
+    变成 150009.49，那是另一行的合价。所以这里**只动合价**。
+
+    只在恰好一个金额槽位是自由文本时才敢做：多个脏槽位说明这一行乱得不止一处位移，
+    位移量算不准，宁可整行留空（design/34 §3 的"拒绝优先"仍然是默认）。
+    """
+    dirty = [(i, slot) for i, slot in col_map.items()
+             if slot in _AMOUNT_SLOTS
+             and (v := (row[i] if i < len(row) else "").strip())
+             and parse_num(v) is None and classify_amount_cell(v) != AMOUNT_NOT_QUOTED]
+    if len(dirty) != 1:
+        return None
+    d_idx = dirty[0][0]
+    # **只认一种位移形态：自由文本落在"整表最右列的左边一格"，即位移恰好 1。**
+    #
+    # 曾经写成"取右边最近的非金额列当它的家"，那是错的，7 份实测里对了 26/29 是运气：
+    # `tax_rate` 不在 `_AMOUNT_SLOTS`（"13%" 解析不出数，见 `_parse_rate`），会被当成
+    # 文本列选成"家"；`brand` 和 `remark` 都是自由文本，选哪个没有依据；某份实测还
+    # 算出位移 3——一行掉三格几乎不可能，那次就救错了。
+    #
+    # 收紧到"最右列左邻 + 位移 1"之后实测：救回从 29 次降到 22 次，而**各份合价命中
+    # 标答的数量一个都没少**（泰科龙 80、凯硕 87 不变）——被砍掉的 7 次恢复，那些行的
+    # 金额本来就已被 `_row_arithmetic_consistent` 保住，恢复是多余动作。同样的准确率、
+    # 少一堆没道理的猜测，这是收紧的全部理由。
+    rightmost = max(col_map)
+    if rightmost - d_idx != 1:
+        return None
+    shift = 1
+    tot = next(((i, slot) for i, slot in sorted(col_map.items()) if slot in _TOTAL_SLOTS), None)
+    if tot is None:
+        return None
+    src = tot[0] - shift
+    if not (0 <= src < len(row)):
+        return None
+    v = (row[src] or "").strip()
+    if parse_num(v) is None:
+        return None
+    # 纵向游程平滑的护栏：同一个值在相邻行的**同一格**里重复出现，说明这一格是被
+    # 上一行涂下来的，不是这一行自己的数（远东实测 `150009.49` 连续三行占着同一格）。
+    # 救回一个被污染的合价比留空更糟——留空看得见，错值看不见。
+    if prev_row is not None and src < len(prev_row) and (prev_row[src] or "").strip() == v:
+        return None
+    return (tot[1], v)
+
+
 def _classify_columns(header: list[str]) -> dict[int, str]:
     """列 → 槽位，只按表头文字（`map_columns`，跟 qwen 路径同一套关键词表）。
     只给"材质区块之前"稳定不受行级掉格影响的字段（目前是 name/spec）当权威
@@ -230,20 +341,13 @@ def _locate_tax_rate_idx(row: list[str]) -> int | None:
 
 
 def _parse_rate(s: str) -> float | None:
-    """税率原文形如 "13%"——`core.utils.parse_num` 只剥离已知分隔符（逗号/货币
-    符号），不认百分号，直接 float("13%") 会 ValueError 返回 None（已实测确认）。
-    这里按百分号语义转小数，只在本模块内部用，不改 `parse_num` 的全局行为——
-    那是四层共用的基础设施，改它的影响面超出本次 P1 范围，另行核实是否也该
-    在 `vl_quote.build_quote_fields` 那层修（qwen 的报价行 tax_rate 走同一个
-    非 lenient `_num` 调用，理论上有同样的问题，但那份文档从未在真实百分号
-    文本下验证过，这里不代它下结论）。"""
-    if not s:
-        return None
-    t = s.strip()
-    if t.endswith("%"):
-        n = parse_num(t[:-1])
-        return (n / 100) if n is not None else None
-    return parse_num(t)
+    """税率归一化。**实现已收拢到 `core.utils.parse_rate`**（2026-08-23）。
+
+    这里原本是本模块私有的一份，注释里留着一个未决问题：「另行核实是否也该在
+    别处修」。答案是该——`tabular_ingestion` 读 Excel 的税率列时撞上了同一件事
+    （Excel 常把 13% 存成裸数字 13），于是两份实现变成必然。保留这个薄封装只
+    为不动本模块既有调用点的名字。"""
+    return parse_rate(s)
 
 
 def _classify_trailing_cells(excl_unit: str, excl_total: str, rate: str,
@@ -466,18 +570,60 @@ _CANONICAL_SLOTS = [
 ]
 
 
+def _merged_page_spans(pages: list[dict]) -> dict[int, int]:
+    """`begin` 页 → 这张跨页表最后一个续页的 `page_num`（0 起，跟 Paddle 一致）。
+
+    Paddle 对跨页续表返回 `tables[].merge_table = begin|inner|end`，**整段行全部塞进
+    begin 那一页的 table 对象**，inner/end 页只留一个 `cells=[]/matrix=[]` 的空壳。
+    行一条不丢、顺序不乱，丢的是**页号**——续页上的行会全部继承 begin 页的页码。
+    实测覆盖面：7 份 fixture 除一份外全部出现，3 次重跑逐字节一致（泰科龙 19/89 行
+    错页、绵存一张表 73 行横跨 4 个物理页）。
+
+    没有几何可以把行拆回物理页（Paddle 的 table `cells[].position` 全是 `None`），
+    所以这里只算**跨页区间**，交给下游如实标注"第 N-M 页"，不再把 begin 页当事实
+    断言——宁可说不准，不能说错（`.claude/rules/recognition.md` 来源诚实标注）。
+    """
+    spans: dict[int, int] = {}
+    begin: int | None = None
+    for page in pages:
+        num = page.get("page_num")
+        if not isinstance(num, int):
+            continue
+        for table in page.get("tables") or []:
+            state = table.get("merge_table")
+            if state == "begin":
+                begin = num
+                spans[begin] = num
+            elif state in ("inner", "end") and begin is not None:
+                spans[begin] = num
+                if state == "end":
+                    begin = None
+            elif state is None:
+                # 普通独立表：中断当前跨页链，避免把后面无关的表算进区间。
+                begin = None
+    return spans
+
+
 def build_quote_csv(doc_json: dict) -> str | None:
     """Paddle 结构化 JSON → 规范 CSV 文本。一份文档没有任何可辨认报价表时返回
     None（交给调用方判定 BLOCKED，不产出一个空壳 CSV 让下游误以为"已尝试且无货"）。
     """
     pages = doc_json.get("pages") or []
+    page_spans = _merged_page_spans(pages)
     last_header: list[str] | None = None
     # 续页续接必须限定在**相邻页范围内**（同一份的判据，见 tender_text_layer.py
-    # 的 build_anchor_csv 同款先例）——泰科龙实测：报价表本身第 4-14 页（0起页码
-    # 3-13）内部偶有跳页（Paddle 没在每页都切出表格对象），最大间隔 2 页；不设
-    # 上限的话，第 35 页起的阀门尺寸/零件材料参考表（跟报价表结构完全无关，只是
-    # 恰好没有报价关键词、被判成"非表头"）会被当成报价表续页一路吃到文档末尾——
-    # 188 行里 99 行是这么混进来的假续页，直接把 recall 从可用打到 12.4%。
+    # 的 build_anchor_csv 同款先例）。
+    #
+    # **这个上限原来的依据已经失效，2026-08-22 重新取证。** 原注释写的是"泰科龙
+    # 报价表内部偶有跳页，最大间隔 2 页"——那些跳页是 `merge_tables=True` 造出来的
+    # 假象（Paddle 把跨页续表整段塞进 begin 页，inner/end 页留空壳），本仓库当天已把
+    # 该参数默认值改成 False。改完之后 7 份实测里 6 份的报价表页码**完全连续**，
+    # 只有一份仍有一处间隔 2 页（尾页与前一段之间夹了一页非清单内容）。
+    # 上限仍然必须存在，但依据换成了后者。
+    #
+    # 不设上限的后果同样是实测过的：文档后段的尺寸/材料参考表跟报价表结构无关、
+    # 恰好又没有报价关键词而被判成"非表头"，会被当成续页一路吃到文档末尾——
+    # 某份 188 行里 99 行是这么混进来的假续页，recall 从可用打到 12.4%。
     _MAX_CONTINUATION_GAP = 3
     last_price_page: int | None = None
     collected: list[dict] = []  # 每行：{slot: text, ..., "_page": int, "_row_type": str}
@@ -485,6 +631,10 @@ def build_quote_csv(doc_json: dict) -> str | None:
     for page in pages:
         page_num = page.get("page_num")
         page_1based = (page_num + 1) if isinstance(page_num, int) else None
+        # 跨页合并表：这一页的行其实横跨 page_1based..page_end_1based，见 _merged_page_spans。
+        page_end_1based = page_1based
+        if isinstance(page_num, int) and page_num in page_spans:
+            page_end_1based = page_spans[page_num] + 1
         for table in page.get("tables") or []:
             grid = _resolve_matrix(table)
             if len(grid) < 1:
@@ -531,6 +681,7 @@ def build_quote_csv(doc_json: dict) -> str | None:
                 # 这两条碎片各自当成一条脏行处理，name/spec 都不完整。
                 data_rows = _merge_wrapped_rows(data_rows, name_idx, spec_idx)
 
+            prev_raw_row: list[str] | None = None
             for row in data_rows:
                 if not any((c or "").strip() for c in row):
                     continue  # 全空行（合并单元格续行的占位符）
@@ -541,6 +692,23 @@ def build_quote_csv(doc_json: dict) -> str | None:
                     continue  # 关键字段都拿不到，大概率是脏行
                 if not _has_plausible_numeric_signal(fields):
                     continue  # 数值槽位塞的是自由文本——多半是续页误吸收了不相关表格
+                # design/34：数值槽位里的自由文本 = 这一行位置映射已坏。**拒绝，不纠正**
+                # ——远东实测那些行的真实数量/单价在整份响应全文里都搜不到，"往右移
+                # 一位"只是给错值换个标签。脏槽位一律清空；其余金额看算术还立不立得住
+                # （只有单位落进数量槽这种局部移位才留得下正确价格）。
+                shifted_slots = _dirty_amount_slots(fields)
+                recovered = None
+                if shifted_slots:
+                    # 清空之前先看合价救不救得回来——它的值往往还在行里，只是错位
+                    # （design/34 §2.5 修正：数量/单价确实丢了，合价没丢）。
+                    recovered = _recover_shifted_total(col_map, row, prev_raw_row)
+                    for slot in shifted_slots:
+                        fields[slot] = ""
+                    if not _row_arithmetic_consistent(fields):
+                        for slot in _AMOUNT_SLOTS:
+                            fields[slot] = ""
+                    if recovered is not None:
+                        fields[recovered[0]] = recovered[1]
                 # 未被槽位认领的原始列（专业/型号/工作压力/材质×）**不**在这里
                 # 自行保留成额外 CSV 列：曾经这样做过，后果是原始中文表头文字
                 # （比如"型号"）会在 CSV 回灌进 `parse_csv` 时被它自己的
@@ -549,10 +717,15 @@ def build_quote_csv(doc_json: dict) -> str | None:
                 # 复现：spec 被换成型号值，qty/price 全线跟着错位）。`parse_csv`
                 # 自己就有 unclaimed-column → extra_fields 的机制（`extra=`那行），
                 # 不需要在这里重复一遍还留一个撞车的口子。
+                prev_raw_row = row
                 row_type = _classify_row_type(row, name_idx)
                 collected.append({
                     **fields,
                     "_page": page_1based,
+                    "_page_end": page_end_1based,
+                    # 值 "recovered" 与 "1" 的区别下游要看得见：前者的合价是**按位移
+                    # 锚点推回来的**，不是直接读到的，界面和复核都该知道这件事。
+                    "_column_shift": ("recovered" if recovered else "1") if shifted_slots else "",
                     "_row_type": row_type,
                 })
 
@@ -563,13 +736,15 @@ def build_quote_csv(doc_json: dict) -> str | None:
                for r in collected]
     copy_nos = detect_copies(row_keys)
 
-    fieldnames = (["row_type"] + _CANONICAL_SLOTS + ["copy_no", "page"])
+    fieldnames = (["row_type"] + _CANONICAL_SLOTS
+                  + ["copy_no", "page", "page_end", "column_shift"])
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(fieldnames)
     for r, copy_no in zip(collected, copy_nos):
         row_out = [r["_row_type"]] + [r.get(s, "") for s in _CANONICAL_SLOTS]
-        row_out += [str(copy_no), str(r["_page"] or "")]
+        row_out += [str(copy_no), str(r["_page"] or ""), str(r.get("_page_end") or ""),
+                    r.get("_column_shift") or ""]
         writer.writerow(row_out)
     return buf.getvalue()
 
@@ -586,6 +761,7 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
                            page_count: int, supplier_name: str = "",
                            declared_total: float | None = None,
                            text_call=None, requirements=None,
+                           gap_filler=None,
                            progress_cb=None) -> ExtractionDraft:
     """生产入口：整份 PDF → Paddle 结构化 JSON → 规范 CSV → ExtractionDraft。
 
@@ -671,7 +847,7 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
         # 没有任何一张报价表——按 CLAUDE.md §4 BLOCKED（无有效报价）处理，
         # 用一份空表交给 build_draft，让现有质量门给出 BLOCKED 而不是在这里
         # 提前抛异常吞掉诊断信息。
-        csv_text = "row_type," + ",".join(_CANONICAL_SLOTS) + ",copy_no,page\n"
+        csv_text = "row_type," + ",".join(_CANONICAL_SLOTS) + ",copy_no,page,page_end,column_shift\n"
 
     processed_pages = list(range(1, page_count + 1))
     # 抽取到的封面 meta 优先于调用方传入的 supplier_name/declared_total
@@ -686,6 +862,29 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
                         supplier_name=effective_supplier_name,
                         declared_total=effective_declared_total,
                         parser_mode=PARSER_MODE)
+    # ── 空格子补位（docs/design/33，2026-08-22 用户批准）─────────────────────
+    # **默认关闭**：`gap_filler=None` 时 `fill_gaps` 直接返回，7 份快照的回放
+    # 指标逐字节不变。生产由调用方显式注入，测试因此保持离线可复现。
+    #
+    # 放在 `build_draft` **之后**：找洞的判据是"这张表有这个列、而这一格什么都
+    # 没读到"，需要成型的 `DraftRow.fields` 和 `source_ref.page` 才能判，raw CSV
+    # 阶段两者都还没有。
+    if gap_filler is not None:
+        from apps.api.intelligence.gap_fill import fill_gaps
+        from apps.api.intelligence.document_loader import DocumentLoader
+
+        _notify("补读缺失金额", 98)
+
+        def _render(page: int) -> bytes | None:
+            return DocumentLoader.render_pages(file_path, [page]).get(page)
+
+        report = fill_gaps(draft.rows, filler=gap_filler, render_page=_render)
+        if report.outcomes:
+            # 补位做了什么必须随行落进 meta——补过的值在界面上要跟直读的区分开，
+            # 复核时也要能回答"这个数哪来的"。只写成功不写拒绝就是黑箱。
+            draft.meta["gap_fill"] = report.to_dict()
+            log.info("空格子补位：%s", report.to_dict())
+
     if quote_meta:
         draft.meta["quote_meta"] = quote_meta
     if quote_requirements:

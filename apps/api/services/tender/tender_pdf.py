@@ -294,13 +294,17 @@ def extract_bidlist(
     _cat_counts = Counter(item["category"] for item in items_out if item.get("category"))
     detected_category = _cat_counts.most_common(1)[0][0] if _cat_counts else ""
 
-    # 封面四标量。比价链路目前不消费它们，但仍然返回——供应商推荐将来会用到，
+    # 封面标量。比价链路目前不消费它们，但仍然返回——供应商推荐将来会用到，
     # 且**同一份解析器对同一种文档应当产出同样的东西**，不该因为下游暂时不读就不给。
+    # （design/29 §10 起 tenderer/招标单位有了真实消费方：工作台卡片的单位名称。）
+    from apps.api.intelligence.vl_tender import _META_KEYS
+
     tender_meta = (draft.meta or {}).get("tender_meta") or {}
 
     return {
-        **{k: tender_meta.get(k, "") for k in
-           ("project_name", "project_code", "tender_date", "deadline")},
+        # 键集合以 vl_tender._META_KEYS 为准，不在这里再抄一份字面量——
+        # 招标单位（tenderer）加进去时这里漏改就是一次静默丢字段。
+        **{k: tender_meta.get(k, "") for k in _META_KEYS},
         "items": items_out,
         "brand_requirement": brand_requirement,
         "supplier_brands": supplier_brands,

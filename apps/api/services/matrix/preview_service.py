@@ -247,6 +247,10 @@ def _cell_evidence(db, cell: dict[str, Any]) -> dict[str, Any] | None:
     src = (meta.get("source_ref") or {}) if isinstance(meta, dict) else {}
     return {
         "page": src.get("page"),
+        # 跨页合并表的行只知道落在 page..page_end 之间，拆不到具体页（见
+        # `paddle_vl._merged_page_spans`）。有这个键就说明页码是**区间不是断言**，
+        # 界面必须照区间显示——把 page 单独摆出来会把用户送到错的一页。
+        "page_end": src.get("page_end"),
         "row": src.get("row"),
         "raw_name": bql.raw_name,
         "standard_name": bql.standard_name,

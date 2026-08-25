@@ -180,9 +180,13 @@ def enhance_ocr_items(
         On failure: adds "error" key.
     """
     settings = get_settings()
-    client = get_dashscope_client()
-    if client is None:
+    # design/41：统一入口，供应商由 domain_config.TEXT_CLIENT_VENDOR 决定。
+    from apps.api.services.llm_provider import get_text_client
+
+    got = get_text_client()
+    if got is None:
         return {"items": items, "summary": {}, "error": "LLM API key not configured"}
+    client, _text_model = got
 
     try:
         items_text = _build_items_text(items)
@@ -196,7 +200,7 @@ def enhance_ocr_items(
 
         t0 = time.time()
         resp = client.chat.completions.create(
-            model=settings.DASHSCOPE_LLM_MODEL,  # qwen3.6-flash: fast enough, cheaper
+            model=_text_model,          # 供应商/模型由 get_text_client 统一决定
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             timeout=120,

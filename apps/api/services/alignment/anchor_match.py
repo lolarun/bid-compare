@@ -13,8 +13,10 @@ Combined score: cos × (1.0 + 0.3 × c_score) 提升同类型匹配排序。
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ from apps.api.models.supplier import Supplier
 from apps.api.services.ingestion.canonical import (
     canonical_match_score, extract_valve_canonical, valve_type_compatible,
 )
-from apps.api.services.tender.tender_list import TenderAnchor, parse_tender_xlsx
+from apps.api.services.tender.tender_list import TenderAnchor, parse_tender_all_sheets
 from apps.api.services.ingestion.standardize import normalize_model_code
 
 
@@ -67,6 +69,8 @@ from apps.api.core.domain_config import (
     SEQ_EVIDENCE_COVERAGE_MIN,
     SEQ_FAMILY_CONSISTENCY_MIN,
     SEQ_QTY_TOLERANCE,
+    SUBSEQ_MAX_WILDCARD_RATE,
+    SUBSEQ_TIEBREAK_MARGIN,
 )
 EMBED_MODEL = "text-embedding-v4"
 _EMBED_BATCH = 10
@@ -476,6 +480,8 @@ _SEQ_EVIDENCE_COVERAGE = SEQ_EVIDENCE_COVERAGE_MIN
 _SEQ_EVIDENCE_CONSISTENCY = SEQ_EVIDENCE_CONSISTENCY_MIN
 _SEQ_FAM_CONSISTENCY = SEQ_FAMILY_CONSISTENCY_MIN
 _SEQ_QTY_TOL = SEQ_QTY_TOLERANCE
+_SUBSEQ_MAX_WILDCARD_RATE = SUBSEQ_MAX_WILDCARD_RATE
+_SUBSEQ_TIEBREAK_MARGIN = SUBSEQ_TIEBREAK_MARGIN
 
 # 顺序直连的**判据维度**。原实现只认 DN 一种，导致无 DN 的品类（电缆、桥架、
 # 母线槽…）`dn_cov` 恒为 0、门禁必然拒绝，顺序直连**永远无法启用**——这不是
@@ -590,6 +596,112 @@ def _doc_order(qis: list[int], doc_index: dict | None) -> tuple[list[int], bool]
     return sorted(qis, key=lambda qi: doc_index[qi]), False
 
 
+def _align_key(*parts) -> str:
+    """把锚点/报价的标识文本压成一个可比字符串。仅用于**断同分**，见 `_subsequence_positions`。"""
+    s = unicodedata.normalize("NFKC", "".join(str(p or "") for p in parts)).upper()
+    return re.sub(r"[\s（）()\-]", "", s.replace("×", "*").replace("X", "*"))
+
+
+def _subsequence_positions(
+    anchor_qtys: list, anchor_keys: list[str],
+    quote_qtys: list, quote_keys: list[str],
+) -> list[int] | None:
+    """报价行数 < 锚点数时的**保序子序列直连**。返回逐行落位；不安全时返回 None。
+
+    ## 为什么需要它
+
+    原顺序直连的第一道整表门禁是「行数 == 锚点数」。真实场景里供应商**只报清单
+    的一部分**是常态：徐汇采购清单 170 条（矿物电缆 78 + 普通电缆 92），四家各报
+    136 条——正好是「矿物 1..44 + 普通全部」，其余 34 条（一整块 `RTXMY-*`、数量
+    恒为 2）一家都没报。行数不等于是**业务事实**，不是数据损坏，可原门禁一律判成
+    "不可直连"回落语义匹配，实测匹配率 58%。
+
+    ## 判据：数量序列 + 保序，文本只用来断同分
+
+    数量不是供应商能选的，来自招标方，同一条目各家必须一致（`design/32` 据此建
+    报价派生轴，本文件的参照清单也断言了这一点）。所以「报价的数量序列是锚点数量
+    序列的保序子序列」是一条强证据。
+
+    **文本相似度绝不用于创造匹配**，只在数量可行的候选之间断同分——这条边界是有意
+    的：一旦允许文本单独定案，就等于把语义匹配偷偷搬进了"确定性直连"这条路。
+
+    ## 唯一性怎么证
+
+    左贪心（每行取**最早**可行锚点）和右贪心（取**最晚**）都跑一遍：
+      - 两边给同一个落位 → 该行是被**逼出来**的，无歧义，直接采信；
+      - 两边不同 → 可行区间是 [左, 右]，在区间内按 `_align_key` 打分取最高，
+        且必须领先次高 `_SUBSEQ_TIEBREAK_MARGIN` 才算断开；
+      - 任何一行断不开 → **整份放弃直连**回落语义。宁可整表回退，也不留一行
+        "大概是这个"混进确定性结果里。
+
+    实测（徐汇四家）：135/136 行左右自动一致，1 行需要断同分（报价的
+    `预分支电缆头 RTTYZ-4x120+E70-...` 数量 2，与锚点 `RTXMY-6*50+E25` 数量同为 2，
+    数量分不开、文本一眼可分），断开后四家均与人工核对的真值逐行完全一致。
+
+    ## 锚点数量为 0 / 空 = **没有数量证据**，不是"数量是零"
+
+    徐汇清单里有复合行：父行（有序号）数量留空或 0，紧跟几条**序号为空的续行**
+    装着分解后的数量，而供应商报的是按并联根数折算后的值
+    （`WDZA-YJY-2*(4*240+E120)` 续行 276，报价 138.09 = 276÷2；
+    `4(1*400)+E(1*400)` 续行 2220，报价 444.59 = 2220÷5）。折算关系要懂电缆规格
+    代数才能推，这里**不推**——把这类锚点当成"该位置无数量证据"放行，让文本和
+    保序约束去定位，是不猜测又不丢行的唯一诚实做法。这类位置必须是少数
+    （`_SUBSEQ_MAX_WILDCARD_RATE`），否则整条判据就名存实亡。
+    """
+    n, m = len(anchor_qtys), len(quote_qtys)
+    if m <= 0 or m > n:
+        return None
+
+    def feasible(ai: int, qj: int) -> bool:
+        a = anchor_qtys[ai]
+        if not a:                       # None / 0 → 无数量证据，允许落位
+            return True
+        return _qty_eq(a, quote_qtys[qj])
+
+    wildcards = sum(1 for a in anchor_qtys if not a)
+    if wildcards / n > _SUBSEQ_MAX_WILDCARD_RATE:
+        return None
+    # 区分度：数量全一样的清单，"保序子序列"随便怎么排都成立，证明不了对应关系。
+    if _chance_agreement([a for a in anchor_qtys if a]) > _SEQ_EVIDENCE_MAX_CHANCE_AGREEMENT:
+        return None
+
+    lo: list[int] = []
+    i = 0
+    for j in range(m):
+        while i < n and not feasible(i, j):
+            i += 1
+        if i >= n:
+            return None
+        lo.append(i)
+        i += 1
+    hi: list[int] = []
+    i = n - 1
+    for j in range(m - 1, -1, -1):
+        while i >= 0 and not feasible(i, j):
+            i -= 1
+        if i < 0:
+            return None
+        hi.append(i)
+        i -= 1
+    hi.reverse()
+
+    out: list[int] = []
+    for j in range(m):
+        if lo[j] == hi[j]:
+            out.append(lo[j])
+            continue
+        cand = [ai for ai in range(lo[j], hi[j] + 1) if feasible(ai, j)]
+        scored = sorted(
+            ((difflib.SequenceMatcher(None, anchor_keys[ai], quote_keys[j]).ratio(), ai)
+             for ai in cand), reverse=True)
+        if len(scored) < 2 or scored[0][0] - scored[1][0] < _SUBSEQ_TIEBREAK_MARGIN:
+            log.info("subsequence direct-connect 放弃：第 %d 行在 [%d,%d] 内断不开同分",
+                     j, lo[j], hi[j])
+            return None
+        out.append(scored[0][1])
+    return out
+
+
 def _sequential_matches(
     anchors: list,
     quotes: list,
@@ -636,7 +748,25 @@ def _sequential_matches(
         # 文档顺序：完整合法的 document_row_index 用它；全缺(历史)回退id顺序；残缺/非法→拒绝直连。
         qis, _reject = _doc_order(qis, doc_index)
         n = len(qis)
-        if _reject or not (continuous and n == len(order)):
+        # `pos_of[pos]` = 第 pos 行报价落在 `order` 里的下标。
+        # 行数相等 → 恒等（原有的逐位直连）；行数少于锚点 → 试保序子序列
+        # （供应商只报了清单的一部分，见 `_subsequence_positions`）。
+        pos_of: list[int] | None = None
+        if not _reject and continuous:
+            if n == len(order):
+                pos_of = list(range(n))
+            elif n < len(order):
+                pos_of = _subsequence_positions(
+                    [getattr(anchors[order[p]], "qty", None) for p in range(len(order))],
+                    [_align_key(getattr(anchors[order[p]], "profession", ""),
+                                getattr(anchors[order[p]], "name", ""),
+                                getattr(anchors[order[p]], "spec", ""))
+                     for p in range(len(order))],
+                    [getattr(quotes[qi], "quantity", None) for qi in qis],
+                    [_align_key(getattr(materials[qi], "standard_name", ""),
+                                getattr(materials[qi], "spec", "")) for qi in qis],
+                )
+        if pos_of is None:
             embed_qi.extend(qis)
             continue
         # ── 逐位置评估 ──
@@ -646,7 +776,7 @@ def _sequential_matches(
         qty_values: list[float] = []     # 用于判断数量判据是否有区分度
         dn_values: list[str] = []
         for pos, qi in enumerate(qis):
-            ai = order[pos]
+            ai = order[pos_of[pos]]
             adn, qdn = a_dn[ai], quote_dns[qi]
             dn_present = bool(adn and qdn)
             dn_hit = dn_present and str(adn) == str(qdn)
@@ -743,7 +873,7 @@ def import_and_match(
     from apps.api.services.supplier.brand_match import check_brand
 
     if anchors is None:
-        anchors = parse_tender_xlsx(xlsx_bytes)
+        anchors = parse_tender_all_sheets(xlsx_bytes)
 
     allowed_aliases, supplier_expected = brand_ctx or (set(), {})
 

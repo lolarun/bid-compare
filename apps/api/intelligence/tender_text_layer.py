@@ -14,7 +14,7 @@
 （列错位、截断、序号连续性、行数台账）——`parser_mode="text_layer"` 标注来源，
 不冒充 vl_direct（评审 N1 的教训：标签必须诚实反映真实来源）。
 
-封面四标量（项目名称/编号/日期/截止时间）仍走 VL：那是首页落款里的自由文本，
+封面标量（项目名称/编号/招标单位/日期/截止时间）仍走 VL：那是首页落款里的自由文本，
 不同文档措辞差异大，正则提取脆弱且样本特定；两页的小调用相对于整份清单的渲染+
 识别成本很小，不是这一轮要省的大头。
 
@@ -307,14 +307,14 @@ def parse_tender_document_text_layer(
     """文字层直抽的完整入口。抽取不可信时返回 None——调用方（tender_pdf.py）
     据此整份回落 parse_tender_document（VL-direct），不做部分结果的静默拼接。
 
-    封面四标量仍走 vl_call（§标头说明为什么）：只渲染 META_PAGES 页，
+    封面标量仍走 vl_call（§标头说明为什么）：只渲染 META_PAGES 页，
     不做方向预检（原生 PDF 天然不存在"扫描件歪了"的问题，见 §标头）。
     """
     import pdfplumber
     from apps.api.intelligence.document_loader import DocumentLoader
     from apps.api.intelligence.extraction_draft import ExtractionDraft  # noqa: F401
     from apps.api.intelligence.vl_tender import (
-        META_PAGES, build_tender_draft, extract_tender_meta,
+        _META_KEYS, META_PAGES, build_tender_draft, extract_tender_meta,
     )
 
     def _notify(stage: str, pct: int) -> None:
@@ -339,7 +339,7 @@ def parse_tender_document_text_layer(
     meta_pages = [p for p in range(1, META_PAGES + 1) if p <= page_count]
     images = DocumentLoader.render_pages(file_path, meta_pages) if meta_pages else {}
     meta = (extract_tender_meta([images[p] for p in meta_pages if p in images], vl_call)
-            if images else {k: "" for k in ("project_name", "project_code", "tender_date", "deadline")})
+            if images else {k: "" for k in _META_KEYS})
 
     _notify("整理结果", 90)
     draft = build_tender_draft(

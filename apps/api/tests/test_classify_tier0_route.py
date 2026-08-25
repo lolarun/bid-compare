@@ -53,15 +53,44 @@ def test_classify_strong_bid_list(client):
     assert body["fill_rate"] >= 0.9
 
 
-def test_classify_ambiguous_excel_returns_uncertain_not_error(client):
-    path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
-    _skip_if_missing(path)
+def test_classify_uncertain_is_a_legal_answer_not_an_error(client, tmp_path):
+    """"不确定"是合法答案，不是接口异常——200 + verdict=uncertain。
+
+    2026-08-23：原来这条用金桥采购清单当样本，那份已改判为 tender_list
+    （它的价格列一个真实价格都没有：整列空 + 整列 0，见 test_document_classify）。
+    要守的是**接口对"判不出"的表现**，不是某份文件的归类，所以换成一份价格
+    真的填了一半的合成表——判据边界该由合成样本守，业务事实才需要真实语料。
+    """
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["序号", "名称", "单位", "数量", "单价", "合价"])
+    for i in range(1, 41):
+        priced = i <= 20
+        ws.append([i, f"闸阀 DN{i}", "个", 2,
+                   100.0 + i if priced else "", (100.0 + i) * 2 if priced else ""])
+    path = tmp_path / "半填清单.xlsx"
+    wb.save(path)
     with path.open("rb") as fh:
-        r = client.post("/api/intake/classify-tier0", files={"file": (path.name, fh, "application/vnd.ms-excel")})
-    assert r.status_code == 200, r.text  # 不确定是合法答案，不是接口异常
+        r = client.post("/api/intake/classify-tier0",
+                        files={"file": (path.name, fh, "application/vnd.ms-excel")})
+    assert r.status_code == 200, r.text
     body = r.json()
     assert body["verdict"] == "uncertain"
     assert body["confidence"] == "ambiguous"
+
+
+def test_classify_blank_procurement_list_is_definitive(client):
+    """金桥采购清单：价格表头在、格子里一个真实价格都没有 → 空白清单表。"""
+    path = DOCS / "金桥地体上盖项目-采购清单.xlsx"
+    _skip_if_missing(path)
+    with path.open("rb") as fh:
+        r = client.post("/api/intake/classify-tier0",
+                        files={"file": (path.name, fh, "application/vnd.ms-excel")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["verdict"] == "tender_list"
+    assert body["confidence"] == "definitive"
 
 
 def test_classify_native_pdf(client):

@@ -103,16 +103,39 @@ def _access_token(api_key: str, secret_key: str) -> str:
     return token
 
 
-def submit_and_parse(file_path: str, *, merge_tables: bool = True,
+def submit_and_parse(file_path: str, *, merge_tables: bool = False,
                      recognize_seal: bool = True, page_count: int | None = None,
                      progress_cb=None) -> dict:
     """整份 PDF → 提交 → 轮询 → 下载结构化解析结果。
 
-    `merge_tables=True`：跨页表格自动合并（凯硕/泰科龙等清单横跨多页时依赖
-    这个开关，不合并的话每页各自成一张独立表，`paddle_vl.py` 的续页续接
-    逻辑就没有意义了）。`recognize_seal=True`：投标文件封面常见红章，识别
-    出来至少不会污染表格内容。两者都是 try_paddleocr_vl.py 探索期验证过的
-    默认值，不是本模块新拍的板。
+    `merge_tables=False`（**2026-08-22 由 True 改过来，7 份报价件 + 2 份招标件实测**）：
+    开着的时候 Paddle 把跨页续表的**整段行塞进 begin 那一页的 table 对象**，
+    inner/end 页只留一个空壳——行不丢、顺序不乱，但续页上的行**全部继承 begin
+    页的页码**，`source_ref` 从此说的是错页（泰科龙 19/89 行、绵存一张表 73 行
+    横跨 4 个物理页）。关掉之后每页各自成表，页归属在源头就对了。
+
+    曾经以为"关掉续页续接逻辑就没意义了"——**反了**：`paddle_vl.build_quote_csv`
+    的 `last_header` 复用本来就是为"没有自己表头的续页"写的，每页独立成表正是
+    它的用武之地。实测（每份都比过参照清单）：
+
+    | 文档 | merge=true | merge=false |
+    |---|---|---|
+    | 泰科龙 | 89 行，页 5-7/9-10/12-14（缺 8、11） | 89 行，页 5-14 **无缺口** |
+    | 凯硕 | 90 行，页 4/6 | 90 行，页 4-7；名称错 8→7 处 |
+    | 绵存 | **87** 行 | **89 行、逐位零差错** |
+    | 宏胜 | 132 行，页 3/6/8/9 | **136 行**，页 3-9 |
+    | 亨通 | 132 行，页 2/3/8/9/10 | 132 行，页 2-10 |
+    | 浦东 | 263 行，缺页 6/7 | 264 行，页 2-15 |
+    | 远东 | 无合并，开关空操作 | 同左（±1 行是换行续行折叠的跑次抖动） |
+
+    招标侧（`paddle_tender.py` 同样吃这个默认值）两臂产出完全一致，不受影响。
+    **没有一项变差**，所以是改默认值而不是加开关——留一个"哪次用哪个"的疑问
+    没有价值。`paddle_vl._merged_page_spans()` / `SourceRef.page_end` 那条如实标注
+    页区间的路留着当兜底：万一某份文档 Paddle 仍然合并，宁可显示"第 7-8 页"，
+    也不能把用户送到错的一页。
+
+    `recognize_seal=True`：投标文件封面常见红章，识别出来至少不会污染表格内容。
+    这一项仍是 try_paddleocr_vl.py 探索期验证过的默认值。
 
     `page_count`/`progress_cb`（design/27 §6 补）：轮询期间是唯一能报进度的
     地方——百度轮询响应只有一个状态字段，没有逐页细分（§9 已核实，不是

@@ -54,14 +54,15 @@ log = logging.getLogger(__name__)
 TextCall = Callable[[str], str]
 
 PROMPT_META_TEXT = """以下是这份文件前几页经过 OCR 识别出的文字内容（可能有轻微识别噪声）。
-请从中提取下面四项，每行一个，格式 key: value：
+请从中提取下面五项，每行一个，格式 key: value：
 
 project_name  项目名称
 project_code  项目编号/招标编号
+tenderer      招标单位/招标人/采购人全称（发出这份招标文件的单位，不是投标单位）
 tender_date   招标日期/发出日期
 deadline      投标截止时间
 
-文档上没写的就留空，不要推测。只返回这四行，不要其他说明。
+文档上没写的就留空，不要推测。只返回这五行，不要其他说明。
 
 === 文字内容 ===
 """
@@ -71,8 +72,36 @@ def get_text_client_call() -> TextCall | None:
     """生产文字抽取客户端：DashScope 通用文本模型（非视觉，见模块文档）。
     没配 key 时返回 None，调用方按标量/要求缺失处理（跟 vision 路径同一个
     "失败不拖垮主线"约定，不抛异常）。"""
+    import os
+
     from apps.api.core.config import get_settings
+    from apps.api.core.domain_config import TEXT_CLIENT_VENDOR
     from apps.api.services.llm_provider import get_dashscope_client
+
+    # design/41：文本类调用可以切到 mimo（订阅制，成本近乎为零）。**默认仍是
+    # dashscope**——切换靠 `domain_config.TEXT_CLIENT_VENDOR`，不是靠"哪个 key
+    # 配了就用哪个"的隐式探测。没配 mimo 的 key 时**明确回落 dashscope 并记日志**，
+    # 不静默失败（`.claude/rules/recognition.md` 禁的是能力探测后的静默降级）。
+    if TEXT_CLIENT_VENDOR == "mimo":
+        mimo_key = (os.environ.get("MIMO_API_KEY") or "").strip()
+        if mimo_key:
+            from openai import OpenAI
+
+            from apps.api.core.domain_config import (
+                PAGE_FILTER_BASE_URL, PAGE_FILTER_MODEL,
+            )
+            client = OpenAI(api_key=mimo_key, base_url=PAGE_FILTER_BASE_URL)
+
+            def _mimo_call(prompt: str) -> str:
+                resp = client.chat.completions.create(
+                    model=PAGE_FILTER_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=60,
+                )
+                return resp.choices[0].message.content or ""
+
+            return _mimo_call
+        log.warning("TEXT_CLIENT_VENDOR=mimo 但没有 MIMO_API_KEY，回落 dashscope")
 
     client = get_dashscope_client()
     if client is None:
@@ -101,7 +130,7 @@ def extract_meta_from_text(page_texts: Sequence[str], text_call: TextCall) -> di
             return {k: "" for k in _META_KEYS}
         return parse_tender_meta(text_call(PROMPT_META_TEXT + context))
     except Exception:                                              # noqa: BLE001
-        log.warning("封面元信息抽取失败（Paddle 文字层路径），四个标量留空", exc_info=True)
+        log.warning("封面元信息抽取失败（Paddle 文字层路径），封面标量留空", exc_info=True)
         return {k: "" for k in _META_KEYS}
 
 

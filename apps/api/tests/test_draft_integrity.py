@@ -313,7 +313,7 @@ def test_gate_lets_legitimate_duplicates_through_with_a_flag():
 
 
 def test_gate_blocks_column_shift_even_for_a_single_row():
-    """列错位没有合法形态——一行也不放行。"""
+    """正式入库：列错位一行也不放行——用户要么改数据，要么逐行 integrity_ack。"""
     from apps.api.core.errors import ReviewRequiredError
     from apps.api.services.submission.quote_confirmation_service import _gate_integrity
     items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i) for i in range(10)]
@@ -324,6 +324,25 @@ def test_gate_blocks_column_shift_even_for_a_single_row():
     assert ei.value.status_code == 422
     assert ei.value.detail["error"] == "structural_integrity_requires_review"
     assert db.rolled_back is True
+
+
+def test_gate_is_advisory_for_preview(monkeypatch):
+    """**预览永远不拦。** `gates_advisory=True` 时本门只收集不阻断。
+
+    2026-08-22 修：本门当初漏接了 `gates_advisory`（design/32 §8 拆分 dry_run 与
+    gates_advisory 时没拆干净，另外三道门都接了）。识别侧补上列错位检测后，一份
+    89 行的报价只因 1 行错位就整份进不了预览——而预览是沙箱自动跑的，没有人能去
+    逐行 ack，用户看到的就是"功能不好使"。预览不落库、结果强制 basis="preview"，
+    拦它没有任何安全收益。
+    """
+    from apps.api.services.submission.quote_confirmation_service import _gate_integrity
+    items = [_item(f"DN{20 + i}", 1, 10 + i, 10 + i) for i in range(10)]
+    items[3]["validation_flags"] = [COLUMN_SHIFT_FLAG]
+    db = _FakeDb()
+    out = _gate_integrity(db, items, gates_advisory=True)
+    assert db.rolled_back is False, "预览不得回滚"
+    assert out["blocking_issue"] is not None, "但结论必须照样带回来，不能悄悄放过"
+    assert out["blocking_issue"]["error"] == "structural_integrity_requires_review"
 
 
 def test_gate_blocks_wholesale_duplication():

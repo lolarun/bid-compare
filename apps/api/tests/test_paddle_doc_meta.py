@@ -12,7 +12,7 @@ from apps.api.intelligence.paddle_doc_meta import (
     extract_quote_meta_from_text,
     extract_requirements_from_text,
 )
-from apps.api.intelligence.vl_tender import DEFAULT_TENDER_REQUIREMENTS
+from apps.api.intelligence.vl_tender import _META_KEYS, DEFAULT_TENDER_REQUIREMENTS
 
 
 def test_extract_meta_from_text_parses_key_value_response():
@@ -33,7 +33,7 @@ def test_extract_meta_from_text_parses_key_value_response():
 def test_extract_meta_from_text_empty_pages_returns_blank_without_calling():
     calls = []
     meta = extract_meta_from_text([], lambda p: calls.append(p) or "")
-    assert meta == {"project_name": "", "project_code": "", "tender_date": "", "deadline": ""}
+    assert meta == {k: "" for k in _META_KEYS}
     assert calls == []
 
 
@@ -42,7 +42,7 @@ def test_extract_meta_from_text_exception_does_not_propagate():
         raise RuntimeError("network down")
 
     meta = extract_meta_from_text(["文字"], boom)
-    assert meta == {"project_name": "", "project_code": "", "tender_date": "", "deadline": ""}
+    assert meta == {k: "" for k in _META_KEYS}
 
 
 def test_extract_requirements_from_text_parses_sections():

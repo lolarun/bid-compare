@@ -882,6 +882,12 @@ class CompareStateInflightJobOut(BaseModel):
 class CompareStateResult(BaseModel):
     submissions: list[CompareStateSubmissionOut]
     inflight_jobs: list[CompareStateInflightJobOut]
+    #: 本项目已经能确定的品类（已确认采购清单 > 已入库报价行 > 报价识别产物）。
+    #: 拿不到时为空串——那时确实还没有任何证据，该由用户手选。
+    #: 2026-08-23 新增：此前前端只在"识别完成回调"里赋值品类，刷新/重进项目时
+    #: 那个回调不会对已入库的卡片触发，于是 category 变回空串、点预览被拦，
+    #: 而系统手里明明有品类。品类是项目级事实，由后端一次性给出。
+    category: str = ""
 
 
 # ─── tender-list/llm-fill ───────────────────────────────────────────────────

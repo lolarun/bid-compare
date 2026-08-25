@@ -486,6 +486,14 @@ export function useSupplierUpload(deps: {
     entry.quality = asQualityMeta(job.result)
     entry.declaredTotal = asDeclaredTotal(job.result)
     entry.detectedSupplierName = shape.supplier_name || ''
+    // 品类兜底：招标文件没带采购清单时（实测有招标 PDF 写"详见附件1"而附件未
+    // 装订），`tenderCategory` 恒为空，每一份报价都会被 batch-confirm 拒收，而
+    // 界面上直到今天才有手动选择品类的入口。报价行自己投票出的品类（后端
+    // 2026-08-23 新增，把握不足时为空串）在这里回填——**只在还没有品类时填**，
+    // 绝不覆盖招标清单或用户手选的值：采购清单是更权威的来源。
+    if (!tenderCategory.value && shape.detected_category) {
+      tenderCategory.value = shape.detected_category
+    }
     // Auto-match against known suppliers; initialize finalSupplierName from OCR
     if (entry.detectedSupplierName) {
       const name = entry.detectedSupplierName.replace(/\s/g, '').toLowerCase()
@@ -510,6 +518,14 @@ export function useSupplierUpload(deps: {
       ({ data } = await analysisApi.compareState({ project_id: pid }))
     } catch {
       return   // 新项目无状态，静默
+    }
+    // 品类恢复：**必须在这里做**。下面重建卡片时，已入库的条目会被
+    // `if (entry.confirmed) continue` 跳过、永远走不到 `onBatchJobDone`
+    // （品类回填就挂在那个回调里），于是刷新一次品类就变回空串、点预览被
+    // "还没有确定品类"挡住——而系统手里明明有品类（已确认的采购清单，或者
+    // 已入库报价行上的 category）。后端 compare-state 现在一次性给出。
+    if (!tenderCategory.value && data.category) {
+      tenderCategory.value = data.category
     }
     const restored: BatchFileEntry[] = []
     for (const s of data.submissions) {
@@ -626,9 +642,21 @@ export function useSupplierUpload(deps: {
       // 注：后端 confirm_batch 从未产出过 "supplier_alias_conflict" 这个错误形状
       // （供应商同名合并走 /suppliers 的另一条独立解析路径），此前这里有一段处理
       // 它的 window.confirm 分支是永远走不到的死代码，一并清掉。
-      if (await handleBatchConfirmError(e, message, () => onMissingTotalDetails?.(entry.id))) {
+      if (await handleBatchConfirmError(
+        e, message,
+        () => onMissingTotalDetails?.(entry.id),
+        (indexes) => {
+          // 用户在弹窗里核对备注后确认"这些行原文确实未报价"——把标记写回
+          // 对应的 item，下面的重试就会带着它一起提交。下标是后端按
+          // `enumerate(overrides)` 给出的，跟 entry.items 数组位置直接对应。
+          for (const i of indexes) {
+            const it = entry.items[i]
+            if (it) it.not_quoted = true
+          }
+        },
+      )) {
         entry.confirming = false
-        await confirmBatchEntry(entry, true)  // 用户核对差异后确认强制入库
+        await confirmBatchEntry(entry, true)  // 用户核对差异/确认未报价后重新入库
       }
     } finally {
       entry.confirming = false

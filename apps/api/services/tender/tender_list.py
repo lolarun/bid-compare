@@ -15,12 +15,15 @@
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import openpyxl
 
 from apps.api.services.ingestion.canonical import extract_valve_canonical
+
+log = logging.getLogger(__name__)
 
 
 # ── 列名同义映射:把表头单元格文本归一到标准字段 ──────────────────────────
@@ -237,16 +240,106 @@ def pick_default_sheet(sheets: list[SheetInfo]) -> str | None:
     return max(candidates, key=lambda s: s.row_count).name
 
 
+def parse_tender_all_sheets(
+    source: str | bytes | io.BytesIO,
+) -> list[TenderAnchor]:
+    """把**全部**像清单的 Sheet 合并成一条锚点轴，按工作簿里的 Sheet 顺序首尾相接。
+
+    存在的理由（2026-08-23，B3 用例实测）：徐汇采购清单是两张表——`矿物电缆`
+    78 条、`普通电缆` 92 条——而 `pick_default_sheet` 只挑数据行最多的那张。
+    于是行轴只有 92 条，四家各 136 行报价里的 44 行矿物电缆**无处可落**，被
+    归入 residue/聚合，匹配率 58%。少读一张表不是"少一点覆盖"，是把半份清单
+    整个丢掉，而画面上没有任何地方说少了。
+
+    **Sheet 名进 `profession`。** 这份清单的列只有 `序号/名称/单位/数量`，没有
+    规格列——材料类别（矿物电缆 / 普通电缆）唯一的载体就是 Sheet 名本身，丢掉它
+    等于把两张表的行混成一锅无从分辨。放进 `profession` 而不是 `name`：`name`
+    必须保持原文字面（报价侧按它对齐），`profession` 本就是"分组/专业"语义。
+    Sheet 名不覆盖已有的 `专业` 列——原表有就以原表为准。
+
+    **seq 全局重排 1..N。** 每张表的序号各自从 1 开始，合并后必然重号，而顺序
+    直连的整表门禁要求"锚点序号连续唯一"（`_sequential_matches`）。原表序号保留
+    在 `raw["原表序号"]` 里可回溯，不丢。
+
+    **汇总表不合并。** "像清单"（有规范表头）并不等于"是清单的一部分"：真实附件
+    常带一张「汇总表」，表头一样，行却是「材料设备合计」这类聚合项。把它并进来
+    等于凭空多出一条不存在的锚点，还会重复计量。判据复用既有的 `_FOOTER_MARKERS`
+    ——**整张表的条目名都命中表尾标记（合计/总计/小计…）时，它是汇总不是清单**，
+    不另起一套"汇总表"关键词。只有一张候选表时不做这个判断（那张就是清单本身，
+    没有可对比的对象，宁可原样解析也不要把唯一的表判没了）。
+
+    单 Sheet 工作簿走这条路的结果与 `parse_tender_xlsx()` 完全一致（只是 seq
+    被重排成 1..N），所以调用方不需要按 Sheet 数分支。
+    """
+    sheets = [s for s in list_tender_sheets(source) if s.looks_like_list]
+    if not sheets:
+        raise ValueError("找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
+    parsed = [(info, parse_tender_xlsx(source, sheet=info.name)) for info in sheets]
+    if len(parsed) > 1:
+        parsed = [(info, rows) for info, rows in parsed
+                  if not _looks_like_summary_sheet(rows)] or parsed
+    merged: list[TenderAnchor] = []
+    for info, rows in parsed:
+        for a in rows:
+            if not a.profession:
+                a.profession = info.name
+            a.raw = dict(a.raw or {}, 原表序号=str(a.seq), 来源工作表=info.name)
+            a.seq = len(merged) + 1
+            merged.append(a)
+    return merged
+
+
+def _layout_by_llm(rows: list[list]) -> tuple[int, dict[str, int]] | None:
+    """词表定位不到表头时的兜底：`(表头行号, colmap)`，验不过就返回 None。
+
+    角色名两边不同（本模块用 `qty`/`material`，`column_roles` 用
+    `quantity`/`material_type`），在这里**显式转换**而不是把任何一边改名——
+    `_COL_SYNONYMS` 的键是 `TenderAnchor` 字段名，`ROLE_LABELS` 的键是跨报价/
+    招标两侧共用的规范角色名，两套各有各的约束，硬统一会牵动更多东西。
+    """
+    from apps.api.intelligence.column_roles import propose_layout_by_llm, verify_roles
+    from apps.api.intelligence.paddle_doc_meta import get_text_client_call
+
+    call = get_text_client_call()
+    if call is None:
+        return None
+    got = propose_layout_by_llm(rows, call)
+    if got is None:
+        return None
+    header_idx, roles = got
+    data = [[("" if c is None else str(c)) for c in r] for r in rows[header_idx + 1:]]
+    verdict = verify_roles(roles, data)
+    if not verdict.ok:
+        log.info("招标清单版式模型提议未通过验证：%s", verdict.reasons)
+        return None
+    _ROLE_TO_FIELD = {"quantity": "qty", "material_type": "material"}
+    colmap = {_ROLE_TO_FIELD.get(k, k): v for k, v in roles.items()}
+    log.info("招标清单版式改用模型提议：表头行 %d，列 %s", header_idx, colmap)
+    return header_idx, colmap
+
+
+def _looks_like_summary_sheet(anchors: list[TenderAnchor]) -> bool:
+    """这张表是「汇总」而非清单明细？——条目名**全部**命中表尾标记即是。
+
+    要求"全部"而不是"多数"：真实清单里混进一两条名字带"合计"的条目是可能的
+    （比如"合计管件"这种品名），据此丢掉整张表的代价远大于多留一条汇总行。
+    """
+    if not anchors:
+        return True
+    return all(any(m in (a.name or "") for m in _FOOTER_MARKERS) for a in anchors)
+
+
 def parse_tender_xlsx(
     source: str | bytes | io.BytesIO, sheet: str | None = None,
 ) -> list[TenderAnchor]:
-    """解析招标清单 xlsx,返回锚点行列表。
+    """解析招标清单 xlsx **单个 Sheet**,返回锚点行列表。
 
     Args:
         source: 文件路径、字节内容或 BytesIO。
         sheet: 指定 Sheet 名；None 时用 workbook 的 active sheet(单 Sheet 文件的
-            默认行为不变)。多 Sheet 场景下调用方应先用 list_tender_sheets +
-            pick_default_sheet 选定，再传进来——本函数本身不做多 Sheet 探测。
+            默认行为不变)。
+            **多 Sheet 清单应改调 `parse_tender_all_sheets`**——只解析其中一张
+            会静默丢掉其余整张表的锚点（见该函数文档）。
 
     Returns:
         TenderAnchor 列表(已剔除标题行、表头行、表尾说明行)。
@@ -260,10 +353,19 @@ def parse_tender_xlsx(
 
     header_idx = _find_header_row(rows)
     if header_idx is None:
-        raise ValueError("找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
-
-    header = rows[header_idx]
-    colmap, mat_cols, has_subheader = _map_columns(rows, header_idx)
+        # 词表连表头行都定位不到 → 问模型要版式（design/40 §5 L1）。
+        # 招标侧比报价侧多这一坎：`_find_header_row` 靠"同时出现序号类和名称类
+        # 关键词"才认得出表头，表头一旦写成词表不认识的字，连从第几行开始是数据
+        # 都不知道，只给列角色没有用。产出照样要过验证才作数。
+        llm = _layout_by_llm(rows)
+        if llm is None:
+            raise ValueError("找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
+        header_idx, colmap = llm
+        header = rows[header_idx]
+        mat_cols, has_subheader = [], False
+    else:
+        header = rows[header_idx]
+        colmap, mat_cols, has_subheader = _map_columns(rows, header_idx)
 
     data_start = header_idx + (2 if has_subheader else 1)
     anchors: list[TenderAnchor] = []

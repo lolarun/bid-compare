@@ -13,6 +13,7 @@ function makeFile(overrides: Partial<BatchFileEntry> = {}): BatchFileEntry {
   return {
     id: 'f1',
     filename: 'a.pdf',
+    docKind: 'bid',
     status: 'done',
     stage: 'done',
     stageDetail: '',
@@ -25,6 +26,7 @@ function makeFile(overrides: Partial<BatchFileEntry> = {}): BatchFileEntry {
     nameConflictHints: [],
     items: [],
     quality: null,
+    declaredTotal: null,
     confirmedSupplierId: null,
     confirmedSubmissionId: null,
     confirmed: false,

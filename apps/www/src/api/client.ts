@@ -280,6 +280,11 @@ export interface MatrixRow {
   material_name: string
   spec: string
   anchor_seq?: string | null       // v2.5: links row back to TenderAnchor.seq
+  // 后端一直在传（`bid_matrix.py::build_anchor_matrix` 的 "quantity"/"unit"
+  // 字段，预览的报价派生轴走的是同一个函数），只是这个类型和模板一直没接住。
+  // 数量是比对单价的前提——不知道这行代表几件，¥93 和 ¥93×17 看起来一样。
+  quantity?: number | null
+  unit?: string | null
   historical_avg: { price: number; period: string; projects: number } | null
   reasonable_low: { price: number; date: string; project: string } | null
   suppliers: SupplierCell[]
@@ -390,6 +395,9 @@ export interface PendingImpact {
    */
   evidence?: {
     page?: number | null
+    /** 页区间终点。大于 page 时表示这一行只能定位到 page..page_end 之间（跨页合并
+     *  表拆不回物理页），界面必须显示区间而不是单独一个 page。 */
+    page_end?: number | null
     row?: number | null
     raw_name?: string
     standard_name?: string
@@ -654,6 +662,12 @@ export interface QuoteExtractionItem {
   // 全局文档行序（1..N）：顺序直连对齐的行身份，必须往返到 batch-confirm，不能丢。
   document_row_index?: number | null
   material_type?: string
+  // "原文明确写了不报价"（2026-08-23）：批量确认页人工核对备注后勾选，随
+  // overrides 传回 batch-confirm——后端一直认这个字段（`quote_confirmation_service`
+  // 的 not_quoted 判定 `or bool(item.get("not_quoted"))`），此前前端从未设置过它，
+  // 唯一入口只有原文格子本身写着"/"这类符号（`classify_amount_cell`），格子被
+  // 转换丢了这个符号就只能来问人，而问人之后又没有回传通道——这个字段补上闭环。
+  not_quoted?: boolean
   remark: string
   // hidden fields — never displayed in UI but must round-trip to batch-confirm
   // intact so that canonical / validation_warning reach anchor-match unchanged.
@@ -1068,6 +1082,10 @@ export interface CompareStateInflightJob {
 export interface CompareStateResult {
   submissions: CompareStateSubmission[]
   inflight_jobs: CompareStateInflightJob[]
+  /** 项目已能确定的品类（已确认采购清单 > 已入库报价行 > 报价识别产物）。
+   *  空串 = 确实没有任何证据，该由用户手选。刷新/重进项目时靠它恢复品类——
+   *  前端自己的识别回调对已入库卡片不触发，只靠回调会丢。 */
+  category?: string
 }
 
 export interface AnchorMatchSummary {

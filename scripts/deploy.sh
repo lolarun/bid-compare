@@ -35,10 +35,10 @@ sleep 5
 curl -sf http://172.18.0.1:8100/api/health || echo "⚠️  健康检查未通过，看 docker compose logs backend"
 
 echo "=== pull + extract frontend dist ==="
-docker pull "${ACR_REGISTRY}/bidcom/mempas-web:${TAG:-latest}"
+docker pull "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
 mkdir -p /opt/pixora/infra/nginx/html/mempas
 docker run --rm -v /opt/pixora/infra/nginx/html/mempas:/out \
-  "${ACR_REGISTRY}/bidcom/mempas-web:${TAG:-latest}"
+  "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
 
 echo "=== reload shared nginx（pixel-lora 的 infra-nginx-1 容器）==="
 docker exec infra-nginx-1 nginx -s reload

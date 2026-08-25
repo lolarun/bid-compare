@@ -368,3 +368,128 @@ def test_recognize_quote_paddle_supplier_name_param_is_fallback_when_meta_empty(
     assert draft.meta["quote_meta"]["supplier_name"] == ""  # 抽取本身留空
     assert draft.meta["supplier_name"] == "调用方传入的供应商名"  # 兜底值生效
     assert draft.quality.declared_total == 999.0  # 抽取留空(None)时兜底值生效
+
+
+# ── 跨页合并表：页码是区间，不是断言 ────────────────────────────────────────
+# Paddle 对跨页续表返回 merge_table=begin|inner|end，**整段行全塞进 begin 那页的
+# table 对象**，inner/end 页只留一个空壳。行一条不丢、顺序不乱，丢的是页号。
+# 实测：泰科龙 19/89 行错页、绵存一张表 73 行横跨 4 个物理页，3 次重跑一致。
+# 曾经把这个现象误诊成"漏页/页面角色误判"，追错了一整轮。
+
+def test_merged_page_spans_maps_begin_to_last_continuation_page():
+    from apps.api.intelligence.paddle_vl import _merged_page_spans
+
+    pages = [
+        {"page_num": 0, "tables": [{"merge_table": None}]},
+        {"page_num": 1, "tables": [{"merge_table": "begin"}]},
+        {"page_num": 2, "tables": [{"merge_table": "inner"}]},
+        {"page_num": 3, "tables": [{"merge_table": "end"}]},
+        {"page_num": 4, "tables": [{"merge_table": None}]},
+    ]
+    assert _merged_page_spans(pages) == {1: 3}
+
+
+def test_merged_page_spans_plain_table_breaks_the_chain():
+    """`end` 之后又出现的普通表不得被算进上一条链的区间。"""
+    from apps.api.intelligence.paddle_vl import _merged_page_spans
+
+    pages = [
+        {"page_num": 0, "tables": [{"merge_table": "begin"}]},
+        {"page_num": 1, "tables": [{"merge_table": "end"}]},
+        {"page_num": 2, "tables": [{"merge_table": None}]},
+        {"page_num": 3, "tables": [{"merge_table": "inner"}]},   # 没有 begin 的孤儿
+    ]
+    assert _merged_page_spans(pages) == {0: 1}
+
+
+def test_build_quote_csv_emits_page_end_for_merged_table():
+    """合并表的每一行都要带上区间终点；独立表的 page_end 等于 page（页码确定）。"""
+    import csv as _csv
+    import io as _io
+
+    merged = _table(_HEADER, [
+        ["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "13%", "2.60", "22.60", "KITZ"],
+        ["2", "阀门", "DN25", "个", "1", "10.00", "10.00", "13%", "1.30", "11.30", "KITZ"],
+    ])
+    merged["merge_table"] = "begin"
+    doc = {"pages": [
+        {"page_num": 0, "tables": [merged]},
+        {"page_num": 1, "tables": [{"merge_table": "end", "cells": [], "matrix": []}]},
+    ]}
+    rows = list(_csv.DictReader(_io.StringIO(build_quote_csv(doc))))
+    assert [r["page"] for r in rows] == ["1", "1"]
+    assert [r["page_end"] for r in rows] == ["2", "2"]
+
+
+def test_source_ref_page_end_only_surfaces_when_page_is_uncertain():
+    """`to_dict` 只在区间真的跨页时给出 page_end——页码确定的行不该多出一个键，
+    否则下游分不清"确定的第 7 页"和"7 到 8 页之间某处"。"""
+    from apps.api.intelligence.extraction_draft import SourceRef
+
+    assert "page_end" not in SourceRef(page=7, page_end=7).to_dict()
+    assert "page_end" not in SourceRef(page=7).to_dict()
+    assert SourceRef(page=7, page_end=8).to_dict()["page_end"] == 8
+
+
+def test_parse_csv_drops_page_end_smaller_than_page():
+    """区间终点比起点还小是脏数据——退回"页码就是 page"，不拿不成立的区间糊弄下游。"""
+    from apps.api.intelligence.vl_quote import parse_csv
+
+    text = \
+        "row_type,seq,name,qty,page,page_end\n" \
+        "quote_line,1,阀门,2,7,3\n" \
+        "quote_line,2,阀门,1,7,9\n"
+    parsed, _header, _diag = parse_csv(text, page_count=20)
+    assert [(r.page, r.page_end) for r in parsed] == [(7, None), (7, 9)]
+
+
+# ── 位移行只救合价（docs/design/34 §2.5 修正）────────────────────────────────
+# 数量/单价在位移里是真丢了（远东实测：真值在整份响应全文都搜不到），合价没丢
+# ——它紧邻备注、在位移点右侧，按锚点右移回去必对。所以救合价、不救数量单价。
+
+def test_recover_shifted_total_uses_free_text_as_anchor():
+    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+
+    header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
+    # 少了"数量"那一格 → 单价/合价/备注整体左移一位，末尾补空
+    row = ["3", "阀门", "DN50", "个", "557.71", "1666013.63", "见附注A", ""]
+    got = _recover_shifted_total(_classify_columns(header), row)
+    assert got == ("total_price", "1666013.63")
+
+
+def test_recover_shifted_total_refuses_when_value_smeared_from_previous_row():
+    """同一个值在相邻行的同一格重复 = 纵向游程平滑涂下来的，不是这行自己的数。
+    救回一个被污染的合价比留空更糟——留空看得见，错值看不见。"""
+    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+
+    header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
+    prev = ["3", "阀门", "DN50", "个", "150009.49", "150009.49", "见附注A", ""]
+    row = ["4", "阀门", "DN65", "个", "150009.49", "150009.49", "见附注B", ""]
+    cm = _classify_columns(header)
+    assert _recover_shifted_total(cm, row) is not None          # 不看上一行时会救
+    assert _recover_shifted_total(cm, row, prev) is None        # 看了就拒
+
+
+def test_recover_shifted_total_refuses_when_more_than_one_dirty_slot():
+    """脏槽位不止一个 = 乱得不止一处位移，位移量算不准，宁可整行留空。"""
+    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+
+    header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
+    row = ["3", "阀门", "DN50", "个", "见附注A", "见附注B", "1666013.63", ""]
+    assert _recover_shifted_total(_classify_columns(header), row) is None
+
+
+def test_shifted_row_keeps_total_but_never_regains_qty_or_unit_price():
+    """端到端：位移行救回合价，数量/单价必须保持空——它们是真丢了。"""
+    import csv as _csv
+    import io as _io
+
+    header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
+    good = ["1", "阀门", "DN20", "个", "2", "10.00", "20.00", "见附注A"]
+    bad = ["2", "阀门", "DN25", "个", "10.00", "30.00", "见附注B", ""]
+    doc = _doc([(0, [_table(header, [good, bad])])])
+    rows = list(_csv.DictReader(_io.StringIO(build_quote_csv(doc))))
+    assert rows[0]["qty"] == "2" and rows[0]["total_price"] == "20.00"
+    assert rows[1]["total_price"] == "30.00"          # 救回来了
+    assert rows[1]["qty"] == "" and rows[1]["unit_price"] == ""   # 绝不顺手填回
+    assert rows[1]["column_shift"] == "recovered"

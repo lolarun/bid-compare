@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from apps.api.core.config import get_settings
@@ -62,7 +63,7 @@ class ExtractionPipeline:
         t_start = time.time()
 
         # 招标（比价）与邀标对**招标文件解析能力的要求是一致的**：都要采购清单，
-        # 也都要封面四标量。故两个入口共用同一份解析结果（`parse_tender_document`/
+        # 也都要封面标量。故两个入口共用同一份解析结果（`parse_tender_document`/
         # `parse_tender_document_paddle`），只在输出映射上不同——本方法映射成
         # TENDER_SCHEMA，`extract_tender_bidlist` 映射成 TenderAnchor。给两条
         # 流程各写一个解析器，同一份 PDF 迟早会给出两种清单。
@@ -224,14 +225,74 @@ class ExtractionPipeline:
         from apps.api.intelligence.providers import paddle_ocr
 
         _notify(progress_cb, "渲染PDF", 20)
+        # 空格子补位（design/33）：Paddle 什么都没返回的金额格，交给第二个模型
+        # 再读一遍。拿不到 filler（provider 没有视觉能力）时它是 None，补位整体
+        # 关闭、格子保持空白——**不做能力探测后的静默降级**。
+        from apps.api.intelligence.gap_fill import get_production_filler
+
+        # ── 分类筛页（docs/design/41）──────────────────────────────────────
+        # Paddle 按页收费，整份投标文件里大半是资质/封面/条款。先用便宜模型逐页
+        # 判"是不是报价清单页"，只把命中页拼成子集 PDF 送 Paddle。
+        #
+        # **默认关闭**：没配 MIMO_API_KEY 时 classifier 是 None，`select_pages`
+        # 返回"全送"，这条链路逐字节等于接入前。
+        #
+        # **一切存疑都送**：窗口失败、模型漏答、渲染不出图、台账不闭合——任何一种
+        # 情况都整份送，绝不冒险跳页（`.claude/rules/recognition.md`「禁止静默
+        # 截断」）。台账写进 draft.meta，跳过哪几页、为什么跳过，事后查得到。
+        target_path, page_filter_ledger = self._maybe_filter_pages(
+            file_path, page_count, progress_cb)
+
         draft = recognize_quote_paddle(
-            file_path,
+            target_path,
             submit_and_parse=paddle_ocr.submit_and_parse,
-            page_count=page_count,
+            page_count=(len(page_filter_ledger.sent) if page_filter_ledger.enabled
+                        else page_count),
             text_call=get_text_client_call(),
+            gap_filler=get_production_filler(self.provider),
             progress_cb=progress_cb,
         )
+        if page_filter_ledger.enabled:
+            draft.meta["page_filter"] = page_filter_ledger.to_dict()
         return self._draft_to_quote_response(draft, context or {}, t_start)
+
+    def _maybe_filter_pages(self, file_path: str, page_count: int, progress_cb):
+        """`(要送 Paddle 的文件路径, 台账)`。任何一步出问题都退回整份送。
+
+        返回原路径 = 没筛页（要么没启用、要么中途放弃）。子集 PDF 落在系统临时
+        目录，不污染上传目录，也不进版本库。
+        """
+        from apps.api.intelligence.page_filter import (
+            build_subset_pdf, get_production_classifier, select_pages, PageFilterLedger,
+        )
+
+        classifier = get_production_classifier()
+        if classifier is None or not file_path.lower().endswith(".pdf"):
+            return file_path, PageFilterLedger(total_pages=page_count,
+                                               sent=list(range(1, page_count + 1)))
+        _notify(progress_cb, "挑出报价清单页", 15)
+        try:
+            from apps.api.intelligence.document_loader import DocumentLoader
+
+            imgs = DocumentLoader.render_pages(file_path, list(range(1, page_count + 1)))
+            pages, ledger = select_pages(imgs, classifier=classifier)
+        except Exception:                                          # noqa: BLE001
+            log.warning("分类筛页失败，整份送 Paddle", exc_info=True)
+            return file_path, PageFilterLedger(total_pages=page_count,
+                                               sent=list(range(1, page_count + 1)))
+        if not ledger.skipped:
+            return file_path, ledger          # 一页没筛掉，没必要重拼 PDF
+
+        import tempfile
+
+        out = str(Path(tempfile.gettempdir()) / f"pf_{Path(file_path).stem}.pdf")
+        subset = build_subset_pdf(file_path, pages, out)
+        if subset is None:
+            ledger.errors.append("子集 PDF 拼装失败，整份送")
+            ledger.sent = list(range(1, page_count + 1))
+            ledger.skipped, ledger.skip_reasons = [], {}
+            return file_path, ledger
+        return subset, ledger
 
     def _draft_to_quote_response(
         self,
@@ -326,6 +387,8 @@ class ExtractionPipeline:
     # ─── post-processing ──────────────────────────────────────────────────
     @staticmethod
     def _postprocess_tender(data: dict) -> dict:
+        from apps.api.intelligence.vl_tender import _META_KEYS
+
         items = data.get("items") or []
         cleaned = []
         for it in items:
@@ -351,10 +414,9 @@ class ExtractionPipeline:
                 "extended_attrs": ext,
             })
         return {
-            "project_name": (data.get("project_name") or "").strip(),
-            "project_code": (data.get("project_code") or "").strip(),
-            "tender_date": (data.get("tender_date") or "").strip(),
-            "deadline": (data.get("deadline") or "").strip(),
+            # 封面标量键集合以 vl_tender._META_KEYS 为准（tenderer/招标单位是
+            # design/29 §10 卡片单位名称的唯一来源），不在这里另抄一份字面量。
+            **{k: (data.get(k) or "").strip() for k in _META_KEYS},
             "items": cleaned,
         }
 
@@ -464,10 +526,17 @@ class ExtractionPipeline:
         # 不依赖会跨页重置的 source_ref.row 或数据库自增 id。
         for _i, _it in enumerate(cleaned, 1):
             _it["document_row_index"] = _i
+        # 品类：报价行自己投票。招标侧一直有 `detected_category`，报价侧此前没有
+        # ——招标文件不带采购清单时品类恒为空，`batch-confirm` 逐份拒收，而界面上
+        # 没有手动选品类的控件，用户到这一步是死路（design/32 的报价派生轴因此
+        # 不可达）。判据与招标侧同源，把握不足返回 "" 交人工，不猜。
+        from apps.api.services.ingestion.category_classify import detect_category_from_items
+
         return {
             "supplier_name": (data.get("supplier_name") or "").strip(),
             "quote_date": (data.get("quote_date") or "").strip(),
             "items": cleaned,
+            "detected_category": detect_category_from_items(cleaned),
             "context": ctx,
         }
 

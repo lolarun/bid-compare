@@ -27,6 +27,15 @@ export interface QuoteExtractionShape {
   supplier_name: string
   quote_date: string
   items: QuoteExtractionItem[]
+  /**
+   * 报价行投票出的品类（后端 2026-08-23 新增，PDF/Excel 两条路同一函数产出）。
+   *
+   * 没有采购清单时这是品类的**唯一**来源：招标文件不带清单（实测有招标 PDF
+   * 的材料明细表整行写"详见附件1"、附件未装订）时，`category` 恒为空串，
+   * 每一份报价都会被 `batch-confirm` 拒收，而界面上没有手动选品类的控件——
+   * 用户到这一步是死路。把握不足时后端返回空串，交人工选择，不猜。
+   */
+  detected_category: string
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -85,7 +94,7 @@ export function asTenderShape(result: unknown): TenderExtractionShape {
 export function asQuoteShape(result: unknown): QuoteExtractionShape {
   if (!isObj(result)) {
     console.warn('[extraction] quote result is not an object', result)
-    return { supplier_name: '', quote_date: '', items: [] }
+    return { supplier_name: '', quote_date: '', items: [], detected_category: '' }
   }
   const rawItems = result.items
   const items: QuoteExtractionItem[] = Array.isArray(rawItems)
@@ -155,6 +164,7 @@ export function asQuoteShape(result: unknown): QuoteExtractionShape {
     supplier_name: asStr(result.supplier_name),
     quote_date: asStr(result.quote_date),
     items,
+    detected_category: asStr(result.detected_category),
   }
 }
 
@@ -258,4 +268,16 @@ export function asQualityMeta(result: unknown): QualityMeta | null {
   if (!isObj(result)) return null
   const q = result._quality
   return isObj(q) ? (q as unknown as QualityMeta) : null
+}
+
+/**
+ * design/29 §10 req5：文件自己声明的投标总价（封面/汇总页抽出来的
+ * `_doc_meta.bid_total`），跟明细逐行相加的合计是**两个事实**——卡片上
+ * 分别陈述，不合并。拿不到时返回 null（"读不到"不等于"没有"），调用方
+ * 按缺失处理，不得用明细合计冒充。
+ */
+export function asDeclaredTotal(result: unknown): number | null {
+  if (!isObj(result)) return null
+  const dm = result._doc_meta
+  return isObj(dm) ? asNumOrNull(dm.bid_total) : null
 }

@@ -54,21 +54,39 @@ const totalsBySupplier = computed(() => {
   return map
 })
 
-// Completeness: only quoted/aggregated cells count (pending cells excluded)
+/**
+ * 完整度：**两个数一起给**，因为它们回答的是两个不同的问题。
+ *
+ * 原来只显示一个 `quoted/total`，而 quoted 数的是"有单价的格子"。实测泰科龙
+ * 显示 52/89，用户第一反应是"丢了 37 行"——其实不是：那 89 行里 64 行已经
+ * 对齐上了锚点，只是其中 12 行没读到单价（识别空洞，design/33），另有 25 行
+ * 因为名称列读错没对上锚点（design/34）。一个裸的 52/89 把"没对上"和"对上了
+ * 但缺单价"混成一个数字，读起来像系统把行弄丢了。
+ *
+ * 而且 52 这个口径本身跟比价基准不一致：比价看的是每项报价（数量×单价），
+ * 单价只在跟历史采购价比时才是主角。一行有合价没单价，照样能参与比价。
+ *
+ * 所以给两个数：
+ *   · aligned  已对齐到锚点、且拿得到金额（单价或合价任一）——**可比价的行**
+ *   · priced   其中还拿到了单价的——跟历史价比、算单价偏差要用这个口径
+ */
 const completeness = computed(() => {
   const total = props.rows.length
-  const map = new Map<number, { quoted: number; total: number }>()
+  const map = new Map<number, { priced: number; aligned: number; total: number }>()
   for (const s of props.suppliers) {
-    map.set(s.id, { quoted: 0, total })
+    map.set(s.id, { priced: 0, aligned: 0, total })
   }
   for (const row of props.rows) {
     for (const cell of row.suppliers) {
       const status = cell.cell_status
       const isConfirmed = !status || status === 'quoted' || status === 'aggregated'
-      if (cell.price !== null && isConfirmed) {
-        const entry = map.get(cell.submission_id ?? cell.id)
-        if (entry) entry.quoted++
-      }
+      if (!isConfirmed) continue
+      const entry = map.get(cell.submission_id ?? cell.id)
+      if (!entry) continue
+      // 有单价或有合价，都算"这一项能比"——合价才是比价基准，单价缺失不该
+      // 让这一行从"可比"里消失。
+      if (cell.price !== null || cell.total !== null) entry.aligned++
+      if (cell.price !== null) entry.priced++
     }
   }
   return map
@@ -101,7 +119,9 @@ function isPendingLoading(itemId: number | null | undefined): boolean {
 
 /* ---------- virtual scroll ---------- */
 const scrollRef = ref<HTMLElement | null>(null)
-const ROW_HEIGHT = 80  // slightly taller to accommodate cell_status badges
+// 92：初始估算值，实际高度由 measureElement 动态重算——加了数量行(材料格)
+// 和合价行(价格格)之后 80 明显偏窄，调大只是让首屏少一点跳动，不是硬限制。
+const ROW_HEIGHT = 92
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -221,6 +241,11 @@ async function handleExport() {
             <td class="bid-matrix__cell-material">
               <div style="font-weight:500">{{ rows[vRow.index].material_name }}</div>
               <div style="font-size:12px;color:rgba(0,0,0,0.45)">{{ rows[vRow.index].spec }}</div>
+              <!-- 数量：比单价的前提——不知道这行几件，¥93 和 ¥93×17 看起来
+                   一样。后端一直在传，之前类型和模板都没接住。 -->
+              <div v-if="rows[vRow.index].quantity != null" class="bid-matrix__cell-qty">
+                数量 {{ rows[vRow.index].quantity }}{{ rows[vRow.index].unit || '' }}
+              </div>
               <div v-if="rows[vRow.index].anchor_seq" style="font-size:10px;color:rgba(0,0,0,0.3);margin-top:1px">
                 #{{ rows[vRow.index].anchor_seq }}
               </div>
@@ -247,9 +272,16 @@ async function handleExport() {
               <template v-if="!cell.cell_status || cell.cell_status === 'quoted' || cell.cell_status === 'aggregated'">
                 <template v-if="cell.price !== null">
                   <div class="bid-matrix__price-row">
+                    <!-- cell.price 后端语义一直是单价（`_price_and_total` 的
+                         第一个返回值），但界面上只写着一个裸数字，用户分不清
+                         是单价还是这一行的合价——显式标一下。 -->
+                    <span class="bid-matrix__price-label">单价</span>
                     <span class="bid-matrix__price">¥{{ cell.price.toFixed(2) }}</span>
                     <span v-if="cell.is_lowest" class="bid-matrix__lowest-badge">★ 最低</span>
                     <span v-if="cell.cell_status === 'aggregated'" class="bid-matrix__agg-badge">聚合</span>
+                  </div>
+                  <div v-if="cell.total !== null" class="bid-matrix__total-row">
+                    合价 ¥{{ cell.total.toFixed(2) }}
                   </div>
                   <span
                     class="bid-matrix__deviation-pill"
@@ -365,13 +397,35 @@ async function handleExport() {
             </td>
             <td :colspan="tailCols"></td>
           </tr>
-          <!-- Row 3: Completeness (quoted/aggregated only) -->
+          <!-- Row 3: 可比价行数（主口径：有金额即可比） -->
           <tr>
-            <td :colspan="leadCols" class="bid-matrix__footer-label">已确认报价完整度</td>
+            <td :colspan="leadCols" class="bid-matrix__footer-label">
+              可比价
+              <a-tooltip title="已对齐到采购清单、且拿得到金额（单价或合价）的行数。比价看的是每项报价（数量×单价），一行只有合价照样能比。">
+                <span class="bid-matrix__footer-hint">?</span>
+              </a-tooltip>
+            </td>
             <td v-for="s in suppliers" :key="'comp-' + s.id">
-              <span :style="{ color: completeness.get(s.id)?.quoted === completeness.get(s.id)?.total ? '#52c41a' : 'rgba(0,0,0,0.65)' }">
-                {{ completeness.get(s.id)?.quoted ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
-                <span v-if="completeness.get(s.id)?.quoted === completeness.get(s.id)?.total"> ✓</span>
+              <span :style="{ color: completeness.get(s.id)?.aligned === completeness.get(s.id)?.total ? '#52c41a' : 'rgba(0,0,0,0.65)' }">
+                {{ completeness.get(s.id)?.aligned ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
+                <span v-if="completeness.get(s.id)?.aligned === completeness.get(s.id)?.total"> ✓</span>
+              </span>
+            </td>
+            <td :colspan="tailCols"></td>
+          </tr>
+          <!-- Row 4: 其中有单价的（跟历史价比、算单价偏差要用这个口径）。
+               单独一行而不是塞进上一行：两个数回答两个问题，挤在一起反而
+               像"52/89"那样让人以为丢了行。 -->
+          <tr>
+            <td :colspan="leadCols" class="bid-matrix__footer-label">
+              其中有单价
+              <a-tooltip title="上一行里还读到了单价的行数。差额是原文缺单价或未读到——不影响按合价比价，但跟历史采购价对比时用不上。">
+                <span class="bid-matrix__footer-hint">?</span>
+              </a-tooltip>
+            </td>
+            <td v-for="s in suppliers" :key="'priced-' + s.id">
+              <span class="bid-matrix__footer-sub">
+                {{ completeness.get(s.id)?.priced ?? 0 }}/{{ completeness.get(s.id)?.total ?? 0 }}
               </span>
             </td>
             <td :colspan="tailCols"></td>
@@ -517,6 +571,23 @@ async function handleExport() {
     }
   }
 
+  &__price-label {
+    font-size: 11px;
+    color: rgba(0, 0, 0, 0.35);
+  }
+
+  &__total-row {
+    font-size: 11px;
+    color: rgba(0, 0, 0, 0.45);
+    margin-top: 2px;
+  }
+
+  &__cell-qty {
+    font-size: 11px;
+    color: rgba(0, 0, 0, 0.45);
+    margin-top: 2px;
+  }
+
   &__lowest-badge {
     display: inline-block;
     background: #f6ffed;
@@ -604,6 +675,26 @@ async function handleExport() {
     background: #fafafa;
     color: @text-color;
     font-size: 13px;
+  }
+
+  &__footer-hint {
+    display: inline-block;
+    margin-left: 4px;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+    text-align: center;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.12);
+    color: rgba(0, 0, 0, 0.55);
+    font-size: 10px;
+    font-weight: 400;
+    cursor: help;
+  }
+
+  &__footer-sub {
+    color: @text-color-tertiary;
+    font-size: 12px;
   }
 
   tfoot td {

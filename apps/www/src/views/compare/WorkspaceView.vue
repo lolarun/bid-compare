@@ -16,7 +16,7 @@ import { Modal, message } from 'ant-design-vue'
 import {
   LoadingOutlined, HistoryOutlined, DownloadOutlined, SolutionOutlined, InboxOutlined,
 } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi, intakeApi } from '@/api'
+import { projectApi, supplierApi, analysisApi, intakeApi, materialApi } from '@/api'
 import type { Supplier, TenderBidlistResult, BidMatrixResult, ExtractionJob } from '@/api/client'
 import { useSupplierUpload, inferBidDocKind } from '@/composables/useSupplierUpload'
 import type { BatchFileEntry, BidDocKind } from '@/composables/useSupplierUpload'
@@ -40,6 +40,26 @@ const projectId = ref<number | null>(route.params.projectId ? Number(route.param
 const projectName = ref('')
 const projectCode = ref('')
 const category = ref('')
+
+// 品类选择器的选项。懒加载（聚焦时才拉）——大多数场景品类会被招标识别或报价
+// 投票自动填好，用户根本不会点开这个下拉，没必要每次进页面都请求一次。
+const categoryOptionsRaw = ref<string[]>([])
+const categoryOptions = computed(() =>
+  categoryOptionsRaw.value.map(c => ({ label: c, value: c })))
+const categoryPlaceholder = computed(() =>
+  category.value ? '' : '选择品类')
+async function loadCategoryOptions() {
+  if (categoryOptionsRaw.value.length) return
+  try {
+    const { data } = await materialApi.supportedCategories()
+    categoryOptionsRaw.value = data
+  } catch {
+    // 拉不到就让下拉是空的——比塞一份前端硬编码的词表好：那份副本迟早会跟
+    // 后端 PROFESSION_MAP 漂移，而"选项是空的"至少是个看得见的故障。
+    message.error('品类列表加载失败，请重试')
+  }
+}
+
 const projectNameUserEdited = ref(false)   // 用户手动改过名称后，自动回填不再覆盖
 const projectCodeUserEdited = ref(false)
 const bootstrapping = ref(false)
@@ -242,8 +262,17 @@ function onTenderDone(result: TenderBidlistResult) {
   if (projectId.value) persistProjectMeta({ auto: true })
   // 自动设为比价基准。先查一次现状再决定要不要写——重复确认虽然幂等，
   // 但会平白多一次写库，也会让日志里出现一串看不懂的重复调用。
+  baselineSource.value = {
+    category: category.value || result.detected_category || result.material_class,
+    fileName: tenderFilename.value,
+    items: result.items,
+    total: result.row_count,
+    sourceType: result.source_type,
+    brandRequirement: result.brand_requirement,
+    supplierBrands: result.supplier_brands,
+  }
   refreshBaselineState().then(() => {
-    if (!baselineConfirmed.value && (tenderResult.value?.row_count || 0) > 0) confirmBaseline()
+    if (!baselineConfirmed.value && (result.row_count || 0) > 0) confirmBaseline()
   })
 }
 
@@ -255,6 +284,9 @@ const excelError = ref('')
 // 卡片要显示文件名和"多少项"，所以这两个值得留下来，不能只活在 toast 里。
 const excelFilename = ref('')
 const excelRowCount = ref<number | null>(null)
+// 采购清单里的候选表名。>1 时不自动设基准（见 uploadExcel），文案要能报出表名，
+// 不能只说"有多个表"——用户得知道漏的是哪几张才知道怎么拆。
+const excelSheetNames = ref<string[]>([])
 async function uploadExcel(file: File) {
   excelFilename.value = file.name
   excelPreviewing.value = true
@@ -271,6 +303,28 @@ async function uploadExcel(file: File) {
     excelRowCount.value = data.total
     if (data.detected_category && !category.value) category.value = data.detected_category
     message.success(`采购清单已预览：${data.total} 项`)
+    // **预览完还要落成基准**，跟招标 PDF 那条路一样（design/32 §14）。
+    // 在此之前这里就断了：预览接口不写库，而唯一调用 `confirmBaseline` 的
+    // 地方在 `onTenderDone` 里——那是 PDF 的回调。Excel 拖进来看着一切正常
+    // （分类判对、预览成功、卡片显示项数），行轴却一直是报价派生的。
+    // 预览返回的 items/total/detected_category 正是 confirm 需要的全部输入，
+    // 不用再跑一遍解析。
+    //
+    // 多 Sheet 已由后端合并（design/39 §3：`parse_tender_all_sheets` 把全部像
+    // 清单的 Sheet 首尾相接、汇总表排除在外），`data.total` 就是合并后的总条数，
+    // 这里不需要再按 Sheet 数分支。本文件曾短暂加过一道"多 Sheet 不自动落基准"
+    // 的闸——那是后端只解析一张表时的止损，后端修好之后它就变成了误拦。
+    excelSheetNames.value = (data.sheets || []).map((s) => s.name)
+    baselineSource.value = {
+      category: category.value || data.detected_category,
+      fileName: file.name,
+      items: data.items,
+      total: data.total,
+      // 采购清单是招标方发的原始表，差异以它为准（source_reconcile.py 的口径）。
+      sourceType: 'excel_primary',
+    }
+    await refreshBaselineState()
+    if (!baselineConfirmed.value && data.total > 0) await confirmBaseline()
   } catch (e: unknown) {
     excelError.value = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '预览失败'
     message.error(excelError.value)
@@ -497,22 +551,37 @@ function badgeCount(fileId: string): number {
 }
 
 const dryRunAutoChecked = new Set<string>()
-watch(batchFiles, (files) => {
-  for (const f of files) {
+// 三个 watcher 需要的**只是每份文件的标量**（id/状态/是否已入库/供应商名/份数），
+// 一个都用不到 `items` 里那 100+ 行明细。此前它们挂的是 `{ deep: true }`：
+// Vue 于是要遍历 4 份 × 136 行 × 十几个字段 ≈ 8000 个响应式属性来建立依赖，
+// 而且**用户在表格里改任何一个格子**（`f.items[i]` 变了）都会把三个 watcher
+// 全部叫醒、再整体重新遍历一遍。明细页的卡顿就是这么来的——回调里的
+// `refreshDryRun` / `fetchSupplierSummary` 各自有幂等守卫、不会真发请求，
+// 但遍历的代价照付不误。
+//
+// 改成观察一个**标量签名字符串**：编辑单元格不再触发，新增/删除文件、识别
+// 完成、入库完成、改供应商名这些真正该触发的事件一个不落。
+const batchFileSignal = computed(() => batchFiles.value
+  .map((f) => `${f.id}|${f.status}|${f.confirmed}|${f.finalSupplierName.trim()}`)
+  .join(','))
+
+watch(batchFileSignal, () => {
+  for (const f of batchFiles.value) {
     if (f.status === 'done' && !f.confirmed && f.finalSupplierName.trim() && !dryRunAutoChecked.has(f.id)) {
       dryRunAutoChecked.add(f.id)
       refreshDryRun(f)
     }
   }
-}, { deep: true })
+})
 
 // ─── Tabs ──────────────────────────────────────────────────────────────
 const activeTab = ref('list')
-watch(batchFiles, (files) => {
+watch(batchFileSignal, () => {
   // 首次有报价文件时自动切到第一个 tab，体验上少一次点击；之后不再自动跳
   // （用户可能正在看别的 tab）。
+  const files = batchFiles.value
   if (activeTab.value === 'list' && files.length === 1) activeTab.value = files[0].id
-}, { deep: true })
+})
 
 // 手测反馈（2026-08-21）：明细表格（QuoteGrid，每个是一整个 Univer 引擎实例）
 // 默认页面就卡顿——AntD a-tabs 默认全量挂载所有 pane，4 家供应商 = 4 个并发
@@ -525,12 +594,14 @@ const viewMode = ref<'overview' | 'detail'>('overview')
 /**
  * design/32 §13：把原来堆在一屏的东西拆成三段。
  *
- * 上传 → 预览 → 对比。三段回答三个不同的问题，混在一屏时用户分不清自己
+ * 上传 → 预览 → 比价。三段回答三个不同的问题，混在一屏时用户分不清自己
  * 正在看哪一个（"历史均价整列是空的"就是这么来的——那是第三段的东西）：
  *
  *   upload   有哪些文件、识别成什么了
  *   preview  货比三家谁便宜（预览口径，不落库、不能定标）
- *   compare  正式口径 + 对比历史 + AI 总结
+ *   compare  正式口径 + 单价/历史价对比 + AI 总结（界面标题 2026-08-23 从
+ *            "对比"改成"比价"——"对比"听着像个动作，"比价"才是这一步在
+ *            回答的问题；变量名/stage 值仍是 compare，不是数据迁移）
  *
  * **不做强制向导。** 三个 step 都可以直接点回去——旧的 5 步向导正是因为
  * 强制线性被退役的（design/27），这里不重蹈覆辙。step 只表达"你在看哪一
@@ -685,11 +756,11 @@ async function fetchSupplierSummary(f: BatchFileEntry) {
   }
 }
 
-watch(batchFiles, (files) => {
-  for (const f of files) {
+watch(batchFileSignal, () => {
+  for (const f of batchFiles.value) {
     if (f.status === 'done') fetchSupplierSummary(f)
   }
-}, { deep: true })
+})
 
 // design/29 §5 D3：报价总计口径——全部行都算（含待确认），标注待确认行数，
 // 不是官方评估总价（那是比价矩阵/评估服务算的，两边不共用一套算法，避免
@@ -774,12 +845,62 @@ const confirmedSubmissionIds = computed(() =>
 /** 第三段要有内容的前提：至少一家走完「确认入库」。 */
 const canCompare = computed(() => confirmedSubmissionIds.value.length > 0)
 
+/**
+ * 预览页上「还差谁没入库」以及**一键把他们入库**（design/36 §2.3 / §4.2）。
+ *
+ * 在此之前预览这一屏只写着"已确认入库 0 / 4 家"和一句 tooltip「请先点开卡片，
+ * 逐家完成确认入库」——**说了要求，不给能满足它的控件**：「确认入库」按钮在
+ * 明细视图的供应商标签页里，从这一屏看不见。用户连撞两次都卡在这里。
+ *
+ * §4.2 那个待决问题（批量确认 vs 逐份路由）在这里定成**两者都要**：能一次过的
+ * 一次过，过不去的按名字报出来并带到第一家的明细页。只批量会把"哪份有哪个疑点"
+ * 盖掉；只路由则四家就要点四轮，这一屏的存在意义正是省掉这个。
+ */
+const pendingEntries = computed(() =>
+  batchFiles.value.filter((f) => !f.confirmed && f.status === 'done' && f.jobId))
+const confirmingAll = ref(false)
+
+async function confirmAllPending() {
+  if (confirmingAll.value || !pendingEntries.value.length) return
+  confirmingAll.value = true
+  try {
+    // 逐份串行：`confirmBatchEntry` 内部会因 checksum 差异弹确认框并递归重试，
+    // 并发跑会同时弹出好几个框，用户分不清哪个对应哪一份。
+    for (const f of [...pendingEntries.value]) {
+      await confirmBatchEntry(f)
+    }
+    const left = pendingEntries.value
+    if (left.length) {
+      // 剩下的是**真的需要人看原文**的（原文无合价之类，系统不代为计算）。
+      // 报出名字并带到第一家，而不是留一句"部分失败"让人自己找。
+      const names = left.map((f) => f.finalSupplierName || f.detectedSupplierName || f.filename)
+      message.warning(`还有 ${left.length} 家要人工核对：${names.join('、')}`)
+      if (left[0].id) openDetail(left[0].id)
+    }
+  } finally {
+    confirmingAll.value = false
+  }
+}
+
 // design/31：还没逐行确认时点"开始比价分析"，走预览口径——先看个大概，
 // 再按"确认哪一行最能改变结论"去确认，而不是逼人先把 89 行看完。
 const previewResult = ref<BidMatrixPreviewResult | null>(null)
 /** 展开原文依据的队列项下标；null = 全部收起。一次只展开一条，
  *  这几条本来就是要逐条看的，全展开会把队列淹掉。 */
 const expandedEvidence = ref<number | null>(null)
+
+/**
+ * 「第几页」的显示文字。识别侧给出 page_end 且大于 page 时，说明这一行只能定位到
+ * 一个页区间（Paddle 跨页合并表把续页的行全塞进 begin 页，又不给几何坐标，拆不回
+ * 物理页——见 apps/api/intelligence/paddle_vl.py::_merged_page_spans）。
+ * 宁可显示"7-8"让用户翻两页，也不能显示"7"把人送到错的一页。
+ */
+function evidencePageLabel(ev: { page?: number | null; page_end?: number | null } | null | undefined): string {
+  const p = ev?.page
+  if (p == null) return '?'
+  const end = ev?.page_end
+  return end != null && end > p ? `${p}-${end}` : String(p)
+}
 
 /** 已识别完成、还没入库的文件——预览要吃的就是这批。 */
 const previewableFiles = computed(() =>
@@ -811,6 +932,31 @@ async function refreshBaselineState() {
 const baselineError = ref('')
 
 /**
+ * 比价基准的来源——**两条入口共用一个形状**。
+ *
+ * 2026-08-23 修复的缺陷就出在这里没有共用：`confirmBaseline` 直接读
+ * `tenderResult`（招标 PDF 那条路的 ref），而采购清单 Excel 走的是
+ * `uploadExcel`，它只调预览接口、从不写 `tenderResult`。于是拖一份 xlsx
+ * 采购清单进来，分类判对了（`tender_list`、definitive、93 项）、预览成功了、
+ * toast 说"采购清单已预览：93 项"、卡片也显示 93 项——**但它永远不会落成
+ * TenderListSession**，行轴一直是报价派生的那条。用户看不出来，因为唯一
+ * 的破绽是"✓ 已作为比价基准"这个标记**不出现**，而没人知道该去找它。
+ *
+ * 谁写 `baselineSource`，谁就能成为基准；`confirmBaseline` 只认这个 ref，
+ * 不再认某一条具体入口的中间状态。
+ */
+type BaselineSource = {
+  category: string
+  fileName: string
+  items: unknown[]
+  total: number
+  sourceType: string
+  brandRequirement?: unknown[]
+  supplierBrands?: unknown[]
+}
+const baselineSource = ref<BaselineSource | null>(null)
+
+/**
  * design/32 §14：招标清单识别完成后**自动**设为比价基准，不再要用户点一下。
  *
  * 上一版给了个「确认为比价基准」按钮，用户实测后的判断是"不需要手工确认"。
@@ -820,25 +966,29 @@ const baselineError = ref('')
  *
  * **但不静默**：卡片上常驻"✓ 已作为比价基准（N 项）"，失败时显示原因和
  * 重试。自动可以，无声不行——用户必须能看出这 N 项已经成了矩阵的行轴。
+ *
+ * 无参：来源从 `baselineSource` 取。模板里的「重试」按钮是
+ * `@click.stop="confirmBaseline"`，会把 MouseEvent 当第一个实参传进来——
+ * 收参数的话这里就得防它，不如让来源只有一个出处。
  */
 async function confirmBaseline() {
-  if (!projectId.value || !tenderResult.value) return
-  const r = tenderResult.value
+  if (!projectId.value || !baselineSource.value) return
+  const src = baselineSource.value
   confirmingBaseline.value = true
   try {
     await analysisApi.tenderListConfirm({
       project_id: projectId.value,
-      category: category.value || r.detected_category || r.material_class,
-      file_name: tenderFilename.value,
-      anchors_json: r.items,
-      anchors_total: r.row_count,
-      source_type: r.source_type,
-      brand_requirement: r.brand_requirement,
-      supplier_brands: r.supplier_brands,
+      category: src.category,
+      file_name: src.fileName,
+      anchors_json: src.items,
+      anchors_total: src.total,
+      source_type: src.sourceType,
+      brand_requirement: src.brandRequirement,
+      supplier_brands: src.supplierBrands,
     })
     baselineConfirmed.value = true
     baselineError.value = ''
-    message.success(`已将 ${r.row_count} 项采购清单设为比价基准`)
+    message.success(`已将 ${src.total} 项采购清单设为比价基准`)
     // 基准变了，之前那份按报价派生轴算的预览就过期了——留着会让人以为
     // 它还代表当前口径。清掉，让用户重新点一次。
     previewResult.value = null
@@ -853,6 +1003,19 @@ async function confirmBaseline() {
 
 async function runPreview() {
   if (!projectId.value) return
+  // 品类校验——`useSupplierUpload.confirmBatchEntry`（"校对入库"逐份确认）
+  // 早就有这道守卫，"先比价看看（预览）"这条入口漏了。后果：招标文件识别
+  // 不出品类时（本例采购清单项数为 0——招标 PDF 只列"详见附件1"，附件没
+  // 装订进来，见 HANDOFF「B1 已知缺口」），`category.value` 一直是空字符串，
+  // 这里会把空品类发给每一份报价，后端逐个拒绝，预览拿第一个失败原因
+  // （一段带着 job 哈希的原始异常文本）当整体报错甩出来——用户看到的就是
+  // "「910335a3...」未能进入预览：category 不能为空"这种没人看得懂的东西。
+  // 在这里拦住，复用 `confirmBatchEntry` 已经验证过的说法，让人知道该做
+  // 什么（去补品类），而不是去读一个内部错误 id。
+  if (!category.value) {
+    message.error('还没有确定品类——请先上传/确认招标文件或采购清单，取得品类信息后再预览')
+    return
+  }
   analyzing.value = true
   previewResult.value = null
   try {
@@ -881,6 +1044,78 @@ async function runPreview() {
   }
 }
 
+/**
+ * 「进入正式比价」——**按钮永远可点**（2026-08-23 用户定的口径：直接进比价，
+ * 在比价页给提示）。
+ *
+ * 原来它是灰的，配一句 tooltip「请先点开卡片，逐家完成确认入库」——说了要求、
+ * 不给能满足要求的控件（那个按钮在明细视图的供应商标签页里，这一屏看不见）。
+ * 跟「预览不要拦」是同一条产品判断：**拦住不给出路，用户只会觉得功能不好使。**
+ *
+ * 现在点一下就把该做的做掉：能入库的先入库，然后照常进比价。真的一家都入不了
+ * 的时候也**不再原地不动**，而是进到比价段、由 `compareBlockReason` 用人话说明
+ * 卡在谁身上。系统不替用户跳过确认这一步（那是 CLAUDE.md 的事实生命周期），
+ * 但也不把人堵在一个没有按钮的屏幕上。
+ */
+async function enterCompare() {
+  if (pendingEntries.value.length) await confirmAllPending()
+  await runAnalysis()
+  if (confirmedSubmissionIds.value.length === 0) goStage('compare')
+}
+
+/** 比价段进不去时的**人话**说明；null = 没有阻塞。 */
+const compareBlockReason = computed(() => {
+  if (confirmedSubmissionIds.value.length > 0) return null
+  if (!batchFiles.value.length) return '还没有报价——先把投标文件或报价清单拖进来。'
+  const left = pendingEntries.value.map(
+    (f) => f.finalSupplierName || f.detectedSupplierName || f.filename)
+  if (!left.length) return '报价还在识别中，等它跑完再来。'
+  return `正式比价只认已确认的报价，现在一家都还没确认：${left.join('、')}。`
+    + '点开对应的卡片核对原文后确认入库，确认一家就能开始比。'
+})
+
+/**
+ * 后端 v4.2 硬闸门发现「已入库、但没跑过对齐核查」时会 409。
+ *
+ * **这不是可以指望用户手动补的一步**：全前端搜过，`/analysis/tender-list/match`
+ * 从没被任何界面调用过——`AnchorReviewMatrix.vue`（"对齐核查"按钮的落地页）只读
+ * 现成的对齐结果，读不到时的提示语说"请先...「开始匹配」"，但这个"开始匹配"按钮
+ * 在当前版本的界面里根本不存在。也就是说，对绝大多数项目，这道闸从一开始就会拦，
+ * 而拦下来之后没有任何路能走出去——跟 design/36 §2.3 那次是同一个病：说了要求，
+ * 不给能满足要求的控件。
+ *
+ * 用当前已确认的报价重新匹配一次，没有独立价值——纯粹是矩阵生成的前置条件，
+ * 所以在这里自动补跑，而不是把"used_submission_ids"这种内部字段名甩给用户、
+ * 指望他知道要去点一个不存在的按钮。
+ */
+async function alignSubmissions(): Promise<void> {
+  if (!projectId.value) return
+  const form = new FormData()
+  form.append('project_id', String(projectId.value))
+  form.append('category', category.value)
+  form.append('submission_ids', confirmedSubmissionIds.value.join(','))
+  await analysisApi.tenderListMatch(form)
+}
+
+/** 后端错误 detail 两种形状都要认：早期路由是裸字符串，design/36 之后新加的
+ *  门禁改成 `{error, message}` 结构化——两边都可能同时存在于同一个后端里，
+ *  不是非此即彼。 */
+function errDetailMessage(e: unknown): string {
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    return String((detail as { message: unknown }).message)
+  }
+  return '比价分析失败'
+}
+function errCode(e: unknown): string | null {
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (detail && typeof detail === 'object' && 'error' in detail) {
+    return String((detail as { error: unknown }).error)
+  }
+  return null
+}
+
 async function runAnalysis() {
   if (!projectId.value) return
   if (confirmedSubmissionIds.value.length === 0) {
@@ -891,13 +1126,29 @@ async function runAnalysis() {
   previewResult.value = null
   analyzing.value = true
   try {
-    const { data } = await analysisApi.bidMatrix({
-      project_id: projectId.value, supplier_ids: [], submission_ids: confirmedSubmissionIds.value, category: category.value,
-    })
-    matrixResult.value = data
-    goStage('compare')
+    try {
+      const { data } = await analysisApi.bidMatrix({
+        project_id: projectId.value, supplier_ids: [], submission_ids: confirmedSubmissionIds.value, category: category.value,
+      })
+      matrixResult.value = data
+      goStage('compare')
+      return
+    } catch (e: unknown) {
+      const code = errCode(e)
+      // alignment_not_run：从没对齐过。alignment_stale：对齐过，但当前确认的
+      // 供应商集合已经变了（比如 enterCompare 刚批量入库了新的一家）。两种都
+      // 是"重新匹配一次就能解决"，其余错误（比如 alignment_missing_bql——那是
+      // 数据真的缺，重试只会原地空转）照常报错，不静默重试。
+      if (code !== 'alignment_not_run' && code !== 'alignment_stale') throw e
+      await alignSubmissions()
+      const { data } = await analysisApi.bidMatrix({
+        project_id: projectId.value, supplier_ids: [], submission_ids: confirmedSubmissionIds.value, category: category.value,
+      })
+      matrixResult.value = data
+      goStage('compare')
+    }
   } catch (e: unknown) {
-    message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '比价分析失败')
+    message.error(errDetailMessage(e))
   } finally {
     analyzing.value = false
   }
@@ -927,7 +1178,23 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
             style="width:160px"
             @change="onProjectCodeInput"
           />
-          <span v-if="category">· {{ category }}</span>
+          <!-- 品类选择器（2026-08-23 新增）。此前品类**只能**由招标识别自动
+               回填，界面上没有任何手动入口，而 batch-confirm 的报错却写着
+               "请先选择本报价所属品类"——指向一个不存在的控件。招标文件不带
+               采购清单时（实测有招标 PDF 写"详见附件1"而附件未装订）用户到
+               那一步就是死路。选项来自后端词表，不在前端另抄一份。 -->
+          <span>·</span>
+          <a-select
+            v-model:value="category"
+            :options="categoryOptions"
+            :placeholder="categoryPlaceholder"
+            :status="category ? undefined : 'warning'"
+            size="small"
+            style="width:132px"
+            :bordered="false"
+            allow-clear
+            @focus="loadCategoryOptions"
+          />
           <span v-if="batchFiles.length">· {{ batchFiles.length }} 家投标</span>
         </div>
         <div v-if="metaSaveError" class="workspace-header__meta-error">
@@ -969,7 +1236,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
     <a-steps :current="stageIndex" size="small" class="stage-steps" @change="onStageClick">
       <a-step title="上传" :description="`${docCards.length} 份文件`" />
       <a-step title="预览" description="货比三家，不落库" />
-      <a-step title="对比" :description="canCompare ? '正式口径' : '需先校对入库'" />
+      <a-step title="比价" :description="canCompare ? '正式口径' : '需先校对入库'" />
     </a-steps>
 
     <!-- design/28 cut 5 + design/29 §1/§3：拖一堆文件进来自动分类，是唯一
@@ -1053,17 +1320,26 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                调用者，删掉之后这一步在界面上**没有任何入口**——招标清单永远
                变不成 TenderListSession，官方矩阵/导出/预览全都以为"没有采购
                清单"。用户连撞两次才发现。这个按钮就是把那一步补回来。 -->
-          <div v-if="c.kind === 'tender' && tenderResult && (tenderResult.row_count || 0) > 0"
+          <!-- 招标 PDF 和采购清单 Excel **都要**显示这一行。此前只有 'tender'
+               这一档：Excel 那条路既不落基准、也没有任何标记说它没落——两个
+               缺口叠在一起，用户唯一能察觉的破绽是这行字不出现，而没人知道
+               该去找它。两条入口现在共用 `baselineSource`（见 confirmBaseline）。 -->
+          <div v-if="(c.kind === 'tender' || c.kind === 'tender_list')
+                 && ((baselineSource?.total || 0) > 0 || baselineError)"
                class="summary-card__baseline">
             <span v-if="baselineConfirmed" class="summary-card__baseline-ok">
-              ✓ 已作为比价基准（{{ tenderResult.row_count }} 项）
+              ✓ 已作为比价基准（{{ baselineSource?.total }} 项）
             </span>
             <span v-else-if="confirmingBaseline" class="summary-card__baseline-hint">
               <LoadingOutlined spin /> 正在设为比价基准…
             </span>
             <span v-else-if="baselineError" class="summary-card__baseline-err">
               未能设为比价基准：{{ baselineError }}
-              <a-button size="small" type="link" @click.stop="confirmBaseline">重试</a-button>
+              <!-- 只有"有来源、调用失败"才值得重试。多 Sheet 那种是**这份文件
+                   本身还不能用**（baselineSource 压根没建），给个重试按钮等于
+                   请用户去点一个必然无声失败的东西。 -->
+              <a-button v-if="baselineSource" size="small" type="link"
+                        @click.stop="confirmBaseline">重试</a-button>
             </span>
           </div>
           <div v-if="c.statsText" class="summary-card__stats">
@@ -1140,16 +1416,17 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </a-tabs>
     </template>
 
-    <!-- Result section：预览段与对比段共用这一块，靠 stage 区分。 -->
+    <!-- Result section：预览段与比价段共用这一块，靠 stage 区分。 -->
     <div v-if="viewMode === 'overview' && stage !== 'upload'" class="result-section">
       <div class="stage-actions">
+        <!-- 按钮不再是灰的。理由见 `enterCompare` 的文档：拦住不给出路，
+             跟「预览不要拦」是同一条产品判断。点一下就把能入库的入库、
+             然后进比价；真进不去时由比价段的说明接手。 -->
         <template v-if="stage === 'preview'">
           <a-button :loading="analyzing" @click="runPreview">重新预览</a-button>
-          <a-tooltip v-if="!canCompare"
-                     title="正式比价只认已确认的报价。请先点开卡片，逐家完成「确认入库」。">
-            <a-button type="primary" disabled>进入正式比价</a-button>
-          </a-tooltip>
-          <a-button v-else type="primary" :loading="analyzing" @click="runAnalysis">进入正式比价</a-button>
+          <a-button type="primary" :loading="analyzing || confirmingAll" @click="enterCompare">
+            {{ canCompare ? '进入正式比价' : '校对入库并比价' }}
+          </a-button>
           <span class="stage-actions__hint">
             已确认入库 {{ confirmedSubmissionIds.length }} / {{ docCards.filter(c => c.kind === 'bid' || c.kind === 'bid_list').length }} 家
           </span>
@@ -1211,7 +1488,10 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                  哪个字段是空的一眼就看见。 -->
             <div v-if="q.evidence && expandedEvidence === i" class="preview-evidence">
               <div class="preview-evidence__loc">
-                原文位置：第 {{ q.evidence.page ?? '?' }} 页 · 第 {{ q.evidence.row ?? '?' }} 行
+                <!-- page_end > page 表示识别侧只知道这一行落在一个**页区间**里
+                     （跨页合并表拆不回物理页）。这种情况必须显示区间：单独摆一个
+                     page 会把用户送到错的那一页，比不给页码更糟。 -->
+                原文位置：第 {{ evidencePageLabel(q.evidence) }} 页 · 第 {{ q.evidence.row ?? '?' }} 行
                 <span class="preview-evidence__caveat">
                   （以下是系统识别到的内容，不是原文影像——够判断哪个字段没读到，
                   不足以证明原文就是这个值）
@@ -1241,10 +1521,24 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
           </div>
         </div>
       </template>
-      <!-- design/32 §13：对比段 = 正式口径 + 历史对比 + AI 总结。
+      <!-- design/32 §13：比价段（原"对比段"）= 正式口径 + 历史对比 + AI 总结。
            AI 总结（analysisApi.bidInsight）**尚未接进来**——这里如实写明，
            不放一个空面板假装有。 -->
-      <a-alert v-if="stage === 'compare'" type="info" show-icon banner
+      <!-- 进得来、但还没有可比的东西时，**在这一页把原因说清楚**，而不是在上一页
+           用一个灰按钮把人挡住（2026-08-23 用户定的口径）。文案说的是"卡在谁身上、
+           下一步做什么"，不是检查项代号。 -->
+      <a-alert v-if="stage === 'compare' && compareBlockReason" type="warning" show-icon banner
+               class="preview-banner"
+               message="还不能出正式比价结果"
+               :description="compareBlockReason">
+        <template #action>
+          <a-button size="small" type="primary" :loading="confirmingAll"
+                    :disabled="!pendingEntries.length" @click="confirmAllPending">
+            逐家校对入库
+          </a-button>
+        </template>
+      </a-alert>
+      <a-alert v-else-if="stage === 'compare'" type="info" show-icon banner
                class="preview-banner"
                message="正式口径 · 只含已确认报价"
                description="AI 总结尚未接入本段（接口已有 /analysis/bid-insight，未接线）。" />

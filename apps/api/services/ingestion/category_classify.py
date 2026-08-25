@@ -79,6 +79,53 @@ class CategoryGuess:
         return not self.category or self.confidence < CONFIDENCE_THRESHOLD
 
 
+def detect_category_from_items(items: list[dict]) -> str:
+    """一批报价/清单行 → 多数派品类；把握不足时返回 ""（交人工选择）。
+
+    **为什么报价侧也需要这个**：品类原本只有招标侧产出，招标文件不带采购清单
+    时（实测有招标 PDF 的材料明细表整行写"详见附件1"、附件未装订）品类恒为空，
+    `batch-confirm` 会逐份拒收，而界面上没有手动选品类的控件——用户到这一步是
+    死路，design/32 的"无采购清单也能比价"因此不可达。让报价行自己投票即可解开。
+
+    判据与招标侧同源：逐行调用 `classify_category`（同一张词表、同一套语义），
+    取多数派。两道闸门都过才算数（阈值见 `domain_config`）：
+      · 多数派占**可判定行**的比例 ≥ `QUOTE_CATEGORY_VOTE_MIN_SHARE`
+      · 可判定行数 ≥ `QUOTE_CATEGORY_VOTE_MIN_ROWS`
+    任一不满足就返回 ""——**宁可让人来选，也不猜一个品类往下走**。混装多品类
+    的文件正是要落在这里，而不是被多数派硬吞掉。
+    """
+    from collections import Counter
+
+    from apps.api.core.domain_config import (
+        QUOTE_CATEGORY_VOTE_MIN_ROWS,
+        QUOTE_CATEGORY_VOTE_MIN_SHARE,
+    )
+
+    votes: Counter[str] = Counter()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        # 报价行的名称键是 `material`，清单锚点是 `name`——两侧都认，避免调用方
+        # 为了迁就这个函数再复制一遍字段。
+        name = str(it.get("material") or it.get("name") or "").strip()
+        if not name:
+            continue
+        g = classify_category(
+            name,
+            str(it.get("spec") or ""),
+            str(it.get("pressure") or ""),
+            str(it.get("material_type") or ""),
+        )
+        if g.category:
+            votes[g.category] += 1
+
+    decided = sum(votes.values())
+    if decided < QUOTE_CATEGORY_VOTE_MIN_ROWS:
+        return ""
+    top, top_n = votes.most_common(1)[0]
+    return top if top_n / decided >= QUOTE_CATEGORY_VOTE_MIN_SHARE else ""
+
+
 def classify_category(
     name: str, spec: str = "", pressure: str = "", material: str = "",
 ) -> CategoryGuess:

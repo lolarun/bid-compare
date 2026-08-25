@@ -340,18 +340,26 @@ _BLOCK_PROMPT = """你在做投标报价清单与招标采购清单的**分段�
 %s"""
 
 
-def dashscope_block_resolver(model: str = "qwen-plus") -> BlockResolver:
-    """用集中式 LLM 客户端做块级对应。只判分段对应，不碰行。"""
+def dashscope_block_resolver(model: str | None = None) -> BlockResolver:
+    """用集中式 LLM 客户端做块级对应。只判分段对应，不碰行。
+
+    `model=None` 时由 `get_text_client()` 决定（design/41 统一入口）；显式传
+    模型名仍然有效，留给测试和一次性排查用。函数名保留 `dashscope_` 前缀是
+    因为它已经是多处调用方的公开名字，改名是另一件事——**名字里的供应商不再
+    代表实际供应商**，这一点写在这里免得误导。
+    """
     def _resolve(quote_summaries: list[dict], anchor_summaries: list[dict]) -> dict[int, int]:
-        from apps.api.services.llm_provider import get_dashscope_client
-        client = get_dashscope_client()
-        if client is None:
+        from apps.api.services.llm_provider import get_text_client
+        got = get_text_client()
+        if got is None:
             return {}
+        client, _default_model = got
+        _model = model or _default_model
         prompt = _BLOCK_PROMPT % (
             json.dumps(quote_summaries, ensure_ascii=False, indent=1),
             json.dumps(anchor_summaries, ensure_ascii=False, indent=1))
         r = client.chat.completions.create(
-            model=model, temperature=0,
+            model=_model, temperature=0,
             messages=[{"role": "user", "content": prompt}])
         text = (r.choices[0].message.content or "").strip()
         text = text[text.find("{"):text.rfind("}") + 1] if "{" in text else "{}"

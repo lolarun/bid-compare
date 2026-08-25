@@ -52,7 +52,7 @@ class MockProvider(LLMProvider):
             return "\n".join(f"{p},0" for p in pages)
         # 招标文件解析有两种调用：采购清单（CSV）与封面标量（key: value）。
         # **必须按提示词区分**——它们的产出形状完全不同，混用会让招标任务拿到
-        # 报价形状的数据（实测：封面四标量全空，邀标流程存不进招标记录）。
+        # 报价形状的数据（实测：封面标量全空，邀标流程存不进招标记录）。
         if "key: value" in prompt:
             return self._canned_tender_meta()
         is_tender = "采购清单" in prompt or "招标文件" in prompt
@@ -95,7 +95,7 @@ class MockProvider(LLMProvider):
             return {}
 
     def _canned_tender_meta(self) -> str:
-        """封面四标量 → `key: value` 逐行。取自与清单**同一份** canned 数据。"""
+        """封面标量 → `key: value` 逐行。取自与清单**同一份** canned 数据。"""
         d = self._tender_data()
         return "\n".join(
             f"{k}: {d.get(k) or ''}"

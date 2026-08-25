@@ -243,11 +243,16 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                     ))
                 )
                 if _any_active_sub:
-                    raise HTTPException(
-                        409,
-                        "报价确认异常：项目存在 BidSubmission 但当前会话 used_submission_ids 为空。"
-                        "请重新执行「校对入库」→「对齐核查」后再生成矩阵。",
-                    )
+                    # error 码给前端识别用（design/36 §2.3 同一条教训：拦住不给出路，
+                    # 用户只会觉得功能不好使）。这道门挡的是"对齐核查从没跑过"，而
+                    # `/tender-list/match` 不传 file 时会自动用当前已确认 session 重建
+                    # 锚点、按当前已入库的 submission 重新对齐——这一步没有独立价值，
+                    # 纯粹是矩阵生成的前置条件，前端据此可以自动补跑一次再重试，不需要
+                    # 把"used_submission_ids"这种内部字段名甩给用户。
+                    raise HTTPException(409, {
+                        "error": "alignment_not_run",
+                        "message": "报价已入库，但对齐核查还没跑过，无法生成矩阵。",
+                    })
             else:
                 _sids_with_bql: set[int] = set(db.scalars(
                     select(_BQLCheck.submission_id).where(
@@ -257,20 +262,27 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
                 ).all())
                 _missing_bql = sorted(sid for sid in _used_sids if sid not in _sids_with_bql)
                 if _missing_bql:
+                    # **不给这条 error 码**：跟上面那条不一样，重跑对齐核查治不好
+                    # 这个——那些 submission 在这个品类下是真的没有 BidQuoteLine（多半
+                    # 是入库时 category 传空），自动重试只会原地空转。前端应该照实
+                    # 展示这句话，不是悄悄重试。
                     raise HTTPException(
                         409,
                         f"used_submission_ids 中以下 submission 在品类「{body.category}」下无 BQL：{_missing_bql}。"
                         "请重新执行「校对入库」（确保 category 非空）后再对齐。",
                     )
 
-            # body.submission_ids 必须与 session.used_submission_ids 完全一致（禁止外部覆盖）
+            # body.submission_ids 必须与 session.used_submission_ids 完全一致（禁止外部覆盖）。
+            # 这不是"外部覆盖"的例外——真正会写 used_submission_ids 的仍然只有
+            # `/tender-list/match` 这一条路；前端拿到这个 error 码时该做的是调那条
+            # 路用当前确认的 submission 重新对齐，而不是直接把 body.submission_ids
+            # 塞进去顶替。
             _body_sids = set(body.submission_ids or [])
             if _body_sids and _used_sids and _body_sids != _used_sids:
-                raise HTTPException(
-                    409,
-                    f"body.submission_ids {sorted(_body_sids)} 与会话 used_submission_ids {sorted(_used_sids)} 不一致。"
-                    "矩阵只消费当前会话 used_submission_ids，不支持外部传入覆盖。",
-                )
+                raise HTTPException(409, {
+                    "error": "alignment_stale",
+                    "message": "有新入库的报价还没对齐核查，矩阵会漏掉这几家。",
+                })
 
             # B2: 过期 finalize 快照防御 —— 若锁定组与当前 session 的 confirmed 组零交集，
             # 说明这是上一轮匹配的快照（重跑 match 后已产生新组），按它过滤会把矩阵清空。
@@ -367,13 +379,16 @@ def refresh_baselines(category: str | None = None, db: Session = Depends(get_db)
 @router.post("/bid-insight", response_model=BidInsightResult)
 def bid_insight(body: BidInsightRequest):
     """AI 综合分析建议 — 调用 Qwen 文本模型分析比价矩阵。"""
-    from apps.api.services.llm_provider import get_dashscope_client
+    # 供应商与模型都从统一入口取（design/41）——此前这里写死 `model="qwen-plus"`，
+    # 换供应商时极易漏掉这一处，造成"大部分切了、这里还在老供应商上"的分裂。
+    from apps.api.services.llm_provider import get_text_client
 
-    client = get_dashscope_client()
-    if client is None:
+    got = get_text_client()
+    if got is None:
         return BidInsightResult(error="LLM API key not configured")
+    client, model = got
     matrix_data = body.model_dump()
-    result = generate_bid_insight(matrix_data, client, model="qwen-plus")
+    result = generate_bid_insight(matrix_data, client, model=model)
     return result
 
 
@@ -944,7 +959,7 @@ async def tender_list_preview(
 ):
     """解析采购清单 xlsx，返回品名/规格/数量预览，不跑嵌入，立即返回。"""
     from apps.api.services.tender.tender_list import (
-        list_tender_sheets, parse_tender_xlsx, pick_default_sheet,
+        list_tender_sheets, parse_tender_all_sheets, parse_tender_xlsx, pick_default_sheet,
     )
 
     name = (file.filename or "").lower()
@@ -960,7 +975,13 @@ async def tender_list_preview(
         raise HTTPException(400, "找不到可识别的表头(第一版仅支持规范表头;序号/名称/数量缺失)")
 
     try:
-        anchors = parse_tender_xlsx(content, sheet=resolved_sheet)
+        # 不指定 sheet 时**合并全部像清单的 Sheet**（2026-08-23）。此前默认只解析
+        # `pick_default_sheet` 挑中的那一张：徐汇采购清单两张表（矿物电缆 78 /
+        # 普通电缆 92），行轴只出 92 条，四家各 136 行报价里的 44 行矿物电缆无处
+        # 可落，匹配率 58%——而界面上只会显示"采购清单 92 项"，看不出少了一半。
+        # 显式传 sheet（Sheet 切换器）时仍只解析那一张，那是用户的明确选择。
+        anchors = (parse_tender_xlsx(content, sheet=sheet) if sheet
+                   else parse_tender_all_sheets(content))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1135,7 +1156,7 @@ def tender_list_match(
         if not category:
             raise HTTPException(400, "上传招标清单时必须指定 category（品类）")
         from apps.api.services.tender.tender_list import (
-            parse_tender_xlsx, rebuild_anchors, group_anchors_by_category,
+            parse_tender_all_sheets, rebuild_anchors, group_anchors_by_category,
         )
         _s = get_current_confirmed_session(db, project_id, category)
         if _s:
@@ -1145,7 +1166,7 @@ def tender_list_match(
                 prebuilt_anchors = rebuild_anchors(_s)
         else:
             # 自动落 session：解析文件 → 按品类分组 → 每个品类建 confirmed session。
-            parsed = parse_tender_xlsx(content)
+            parsed = parse_tender_all_sheets(content)
             groups = group_anchors_by_category(parsed, default_category=category)
 
             # 校验：请求的 category 必须在检测到的品类列表里，防止跨品类污染。
@@ -2391,7 +2412,47 @@ def compare_state(
             "has_result": bool(j.result),
         })
 
-    return {"submissions": submissions_out, "inflight_jobs": inflight_out}
+    # ── 品类（2026-08-23 补）────────────────────────────────────────────
+    # 刷新/重进项目时，前端此前**拿不到品类**：它只在两个地方赋值——招标识别
+    # 完成、以及报价识别完成的回调。而 `restoreBatchFiles` 对已入库的卡片直接
+    # `continue` 跳过那个回调，于是刷新之后 `category` 是空串，点预览就被
+    # "还没有确定品类"挡住，而用户**明明已经入过库了**、系统手里就有品类。
+    #
+    # 品类是项目级的事实，不该让前端从一堆卡片里凑。这里按已有证据一次性给出，
+    # 优先级与业务权威性一致：已确认采购清单 > 已入库报价行 > 报价识别产物。
+    from apps.api.models.tender_list_session import TenderListSession as _TLS
+
+    resolved_category = ""
+    # `is_current` 与 `status='confirmed'` **两个条件都要**——只查其中一个会
+    # 取到已被取代或尚未确认的会话（`tender_session_service.
+    # get_current_confirmed_session` 的文档明确警告过这一点；那个 helper 需要
+    # 先知道品类，这里正是要反过来求品类，用不上它，但闸门必须一致）。
+    _sess = db.scalars(
+        select(_TLS).where(
+            _TLS.project_id == project_id,
+            _TLS.is_current.is_(True),
+            _TLS.status == "confirmed",
+        ).order_by(_TLS.id.desc())
+    ).first()
+    if _sess and _sess.category:
+        resolved_category = _sess.category
+    if not resolved_category and subs:
+        _cat = db.scalar(
+            select(_BQL.category).where(
+                _BQL.submission_id.in_([s.id for s in subs]),
+                _BQL.category.isnot(None), _BQL.category != "",
+            ).limit(1)
+        )
+        resolved_category = _cat or ""
+    if not resolved_category:
+        for j in inflight_jobs:
+            _dc = ((j.result or {}).get("detected_category") or "").strip()
+            if _dc:
+                resolved_category = _dc
+                break
+
+    return {"submissions": submissions_out, "inflight_jobs": inflight_out,
+            "category": resolved_category}
 
 
 @router.get("/tender-list/versions", response_model=list[TenderListVersionOut])

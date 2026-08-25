@@ -12,12 +12,14 @@ Tier 0 对 PDF 不作分类判定，调用方应直接进入 Tier 1。
 """
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import openpyxl
 
+from apps.api.core.utils import parse_num
 from apps.api.intelligence.tender_text_layer import has_usable_text_layer
 from apps.api.intelligence.vl_quote import _PRICE_SLOTS, map_columns
 
@@ -31,6 +33,16 @@ _HEADER_SCAN_ROWS = 5
 # 阈值取二者之间、明显偏向 strong 一侧，不卡在某个实测出来的具体百分比上
 # ——那是两点拟合，不是分布，卡精确值会把测量误差当成判据。
 FILL_RATE_STRONG = 0.90
+
+# 判据的**另一半**（2026-08-23 补）。原来只有「几乎全满 → 报价清单」和「压根没有
+# 价格列 → 采购清单」两支，中间缺了最典型的一种形态：**表头有价格列、格子全是空的
+# 空白表**。那正是采购清单的定义性特征（design/28 §2：投标方待填），却因为落不进
+# 任何一支而被判成"不确定"，然后弹窗、再被误route 成报价清单——金桥采购清单实测
+# 就是这样变成比价矩阵里的一列供应商的。
+#
+# 阈值给 2% 而不是 0：真实空白表里混进一两个示例值（"如：128.00"）是常见的，
+# 不该让整份表因此失去"空白"的身份。
+FILL_RATE_BLANK = 0.02
 
 
 ExcelVerdict = Literal["tender_list", "bid_list", "uncertain"]
@@ -75,18 +87,42 @@ def classify_pdf(file_path: str) -> PdfClassification:
     )
 
 
-def _load_header_and_rows(file_path: str, sheet: str | None = None,
-                           ) -> tuple[list[str], list[list[str]]]:
-    """打开工作簿，在前 `_HEADER_SCAN_ROWS` 行里选槽位命中数最多的一行当表头。
+def _read_all_rows(file_path: str, sheet: str | None = None) -> list[list[str]]:
+    """把表格文件读成 `list[list[str]]`，xlsx/xls 与 csv 走同一个出口。
 
-    命中数并列时取更靠前的行——真实文档里越往后越可能是数据行本身凑巧撞上
-    价格类关键词（比如备注写了"单价另议"）。
+    CSV 之所以在这里（而不是"CSV 不归 Tier 0 管"）：判据本身跟载体无关——
+    看表头有没有价格列、填充率多少。此前 `classify_tier0` 对 `.csv` 返回
+    None，路由把它当成"不支持的文件类型"挡在门外，而 `extract_quote_tabular`
+    其实读得好好的（实测徐汇四份报价 CSV 各 136 项全部解析成功）。能力在，
+    门口拦了，用户看到的是"不支持"。
+
+    编码顺序跟 `tabular_ingestion._load_dataframe` 保持一致：国内供应商导出的
+    CSV 有相当比例是 GBK。
     """
+    if Path(file_path).suffix.lower() == ".csv":
+        for enc in ("utf-8-sig", "gbk", "utf-8"):
+            try:
+                with open(file_path, encoding=enc, newline="") as fh:
+                    return [[c.strip() for c in row] for row in csv.reader(fh)]
+            except UnicodeDecodeError:
+                continue
+        return []
     wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
     ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
     rows = [[("" if c is None else str(c).strip()) for c in row]
             for row in ws.iter_rows(values_only=True)]
     wb.close()
+    return rows
+
+
+def _load_header_and_rows(file_path: str, sheet: str | None = None,
+                           ) -> tuple[list[str], list[list[str]]]:
+    """读表格文件，在前 `_HEADER_SCAN_ROWS` 行里选槽位命中数最多的一行当表头。
+
+    命中数并列时取更靠前的行——真实文档里越往后越可能是数据行本身凑巧撞上
+    价格类关键词（比如备注写了"单价另议"）。
+    """
+    rows = _read_all_rows(file_path, sheet)
     if not rows:
         return [], []
 
@@ -96,6 +132,26 @@ def _load_header_and_rows(file_path: str, sheet: str | None = None,
         if hits > best_hits:
             best_idx, best_hits = idx, hits
     return rows[best_idx], rows[best_idx + 1:]
+
+
+def _column_is_all_zero(rows: list[list[str]], idx: int) -> bool:
+    """这一列的非空取值是不是**无一例外都是零**？整列空返回 False。
+
+    整列空由 `_looks_filled` 那条路自然算成 0% 填充，不需要在这里重复判定；
+    这里只管"填了，但填的全是 0"这一种。
+    """
+    seen = 0
+    for row in rows:
+        if idx >= len(row):
+            continue
+        v = (row[idx] or "").strip()
+        if not v:
+            continue
+        n = parse_num(v)
+        if n is None or n != 0:
+            return False
+        seen += 1
+    return seen > 0
 
 
 def _looks_filled(cell: str) -> bool:
@@ -137,6 +193,20 @@ def classify_excel(file_path: str, sheet: str | None = None) -> ExcelClassificat
     idx_of = {h: i for i, h in enumerate(header)}
     price_idx = [idx_of[h] for h in price_headers if h in idx_of]
 
+    # **整列全零的价格列不算价格列**（2026-08-23）。
+    #
+    # `_looks_filled` 逐格把 "0" 算成"填了"，那条判据是对的：一格写 0 和一格
+    # 空白是两种不同的信号。但**整列**看就不成立——89 项全报 0 元不是报价，是
+    # 占位。金桥采购清单实测：`单价(不含税)` 整列空，`合计(不含税)`/`税额`/
+    # `价税合计` 三列的非空取值**无一例外全是 "0"**，一个真实价格都没有；旧判据
+    # 却算出 63% 填充率 → uncertain → 弹窗 → 一路落进报价清单，于是**采购清单
+    # 变成了比价矩阵里的一列供应商**（0/89、合计 ¥0）。那是类别错误，不是
+    # 置信度问题。
+    #
+    # 这跟 design/39 里「锚点数量为 0 = 没标数量，不是数量是零」是同一条推理：
+    # 单点的零可以是事实，整列的零是"这一列没有信息"。
+    price_idx = [i for i in price_idx if not _column_is_all_zero(rows, i)]
+
     if not price_idx:
         return ExcelClassification(
             file_path=file_path, verdict="tender_list", confidence="definitive",
@@ -157,6 +227,11 @@ def classify_excel(file_path: str, sheet: str | None = None) -> ExcelClassificat
         verdict, confidence = "bid_list", "strong"
         reason = (f"识别到价格列 {price_headers}，填充率 {fill_rate:.0%} ≥ "
                   f"{FILL_RATE_STRONG:.0%} 门槛——已填好价格的报价单。")
+    elif fill_rate <= FILL_RATE_BLANK:
+        verdict, confidence = "tender_list", "definitive"
+        reason = (f"识别到价格列 {price_headers}，但填充率只有 {fill_rate:.0%}"
+                  f"——有价格表头、格子是空的，正是投标方待填的空白清单表"
+                  f"（design/28 §2）。")
     else:
         verdict, confidence = "uncertain", "ambiguous"
         reason = (f"识别到价格列 {price_headers}，填充率 {fill_rate:.0%}，"
@@ -174,14 +249,21 @@ def classify_tier0(
 ) -> ExcelClassification | PdfClassification | None:
     """按扩展名分派。
 
-    xlsx/xls → `ExcelClassification`（可能是 definitive/strong 的确定判
+    xlsx/xls/csv → `ExcelClassification`（可能是 definitive/strong 的确定判
     定，也可能是 verdict="uncertain" 的"判不了"——两者都是正常返回值）。
     pdf      → `PdfClassification`（永远判不了招标/投标，只给文字层信号；
                 调用方看到这个类型就该知道"还没分类完，进 Tier 1"）。
     其他扩展名 → None，调用方视为本层不支持，不是分类失败。
+
+    **`.csv` 于 2026-08-23 补入。** 此前它落进"其他扩展名"返回 None，路由据此
+    答 `kind="unsupported"`，界面显示「不支持的文件类型」——而报价 CSV 的解析
+    链路一直是通的（`extract_quote_tabular` 实测四份各 136 项全过）。能力在，
+    门口拦了。判据与载体无关（看表头有没有价格列、填充率多少），CSV 就是单表
+    的 Excel，所以复用同一支判据、也仍然返回 `ExcelClassification`：前端按
+    `kind === 'excel'` 分流，不用改。
     """
     suffix = Path(file_path).suffix.lower()
-    if suffix in (".xlsx", ".xls"):
+    if suffix in (".xlsx", ".xls", ".csv"):
         return classify_excel(file_path, sheet)
     if suffix == ".pdf":
         return classify_pdf(file_path)
