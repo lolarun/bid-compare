@@ -46,7 +46,7 @@ services:
     build:
       context: .
       dockerfile: apps/www/Dockerfile
-    container_name: mempas-web
+    container_name: mempas-www
     restart: unless-stopped
     depends_on:
       - backend
