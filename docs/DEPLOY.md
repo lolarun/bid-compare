@@ -1,20 +1,93 @@
 # MEMPAS 部署指南（阿里云 ECS · 与 pixel-lora 共宿主 · GitHub Actions）
 
-> **状态 — 2026-08-18 更新，PLAN（待实现，未执行）。**
-> 旧版单机方案（独立 ECS `101.37.166.68`、手动 `git pull && docker compose up -d --build`）
-> 已确认废弃——那台机器现在连不上，不再维护。新方案：**bid-compare 迁移到
-> pixel-lora 项目正在用的那台 ECS（`106.14.113.209`）上共宿主**，构建方式也从
-> "ECS 上本地 build" 换成"GitHub Actions 构建镜像 → 推阿里云 ACR → SSH 触发
-> ECS 拉镜像重启"，跟 pixel-lora 现有的 `.github/workflows/deploy.yml` 同一套
-> 模式（该文件路径：`C:\Users\Justin\codes\repos\pixel-lora\.github\workflows\deploy.yml`）。
+> **状态 — 2026-08-25：已落地并验证通过。** 访问地址
+> **<https://bid.hotcrp.cn/>**（HTTPS，不是原计划的 HTTP-only，见下方"与规划
+> 的三处出入"）。
 >
-> 本文档是**规划稿**：架构、workflow、compose 文件都是设计出来待评审的，
-> 还没有落地执行——没有跑过 `docker build`、没有改过 pixel-lora 仓库、没有
-> SSH 上过 106.14.113.209。旧版一~八节的内容（ECS 选型/首次部署/运维手册等）
-> 保留在下方标注为"已废弃"的区块，供历史对照与回滚参考，不再是当前指引。
+> 首次成功的部署：GitHub Actions run `32799699509`（2026-08-25 02:03 UTC）。
+> 在此之前该 workflow **连续失败 9 次**（2026-08-18 建立起从未成功过），根因
+> 全部是同一个——仓库的 GitHub Secrets 一个都没配，卡在 ACR 登录的
+> `Username and password required`。**不是代码问题，也不是 ECS 环境问题。**
 >
-> **域名已定**（2026-08-18）：`bid.hotcrp.cn`，暂时 HTTP-only（无 SSL 证书，
-> 走 80 端口，443/证书留到后续再补，§3.4 已更新）。
+> 验证结果（2026-08-25，浏览器实测，不是推断）：
+>
+> | 检查项 | 结果 |
+> |---|---|
+> | 前端 <https://bid.hotcrp.cn/> | ✅ 登录页正常渲染 |
+> | 后端 <https://bid.hotcrp.cn/api/health> | ✅ `{"status":"ok","service":"mempas","llm_provider":"dashscope_ocr"}` |
+> | 镜像构建推送 ACR | ✅ mempas-api / mempas-www 双双成功 |
+> | SSH 部署（容器重建 + dist 提取 + nginx reload） | ✅ 全部完成 |
+>
+> ### 与规划的三处出入（都是实测发现，不是设计变更）
+>
+> 1. **实际走 HTTPS，不是原计划的 HTTP-only。** 原文说"暂时 HTTP-only、走 80
+>    端口、443 留到后续"——实测 **80 端口被阿里云网关拦截**（`curl -I
+>    http://bid.hotcrp.cn` 返回 403，响应头 `Server: Beaver`，那是阿里云的拦截
+>    网关不是 nginx；直连 `106.14.113.209` 同样 403，说明请求根本没到服务器）。
+>    典型的未备案域名 80 端口拦截。**443 反而是通的**，所以正式访问地址是
+>    `https://`。§3.4 关于 HTTP-only 的描述已经不成立。
+> 2. **`deploy.sh` 的健康检查会误报失败。** 日志里出现
+>    `⚠️ 健康检查未通过，看 docker compose logs backend`，但实测服务完全正常。
+>    原因是脚本在容器 `Started` 后只 `sleep 5` 就探测，后端还没起完。**这行用了
+>    `|| echo` 不会让部署失败**，所以它是噪声不是故障——但也意味着**真出问题时
+>    同样不会让 workflow 变红**，看到这条警告不能当没事，要自己复核。
+> 3. **`ECS_SSH_KEY` 复用 pixel-lora 的部署密钥**：
+>    `pixel-lora/infra/ssh/pixora_deploy`（不是 `~/.ssh/id_rsa`）。这把密钥本来
+>    就是给 `106.14.113.209` 用的，两个项目共宿主，直接复用。
+>
+> ### GitHub Secrets（这是唯一的前置条件，缺一不可）
+>
+> 在 **bid-compare 仓库自己的** Settings → Secrets 里配。**GitHub Secrets 按
+> 仓库隔离，pixel-lora 配了不等于这边能用**，也无法跨仓库读取——这正是之前
+> 9 次失败的原因。
+>
+> | Secret | 值来源 |
+> |---|---|
+> | `ACR_REGISTRY` | `pixora-acr-registry.cn-shanghai.cr.aliyuncs.com`（与 pixel-lora 同一实例） |
+> | `ACR_USERNAME` | 阿里云容器镜像服务的访问凭证用户名 |
+> | `ACR_PASSWORD` | 同上的密码。**控制台不可查看、只能重置**；重置会让 pixel-lora 的同名 secret 失效，必须同步更新两个仓库 |
+> | `ECS_HOST` | `106.14.113.209` |
+> | `ECS_SSH_KEY` | `pixel-lora/infra/ssh/pixora_deploy` 的内容（PEM） |
+>
+> ```bash
+> gh secret set ACR_REGISTRY --repo lolarun/bid-compare --body "pixora-acr-registry.cn-shanghai.cr.aliyuncs.com"
+> gh secret set ECS_HOST     --repo lolarun/bid-compare --body "106.14.113.209"
+> gh secret set ECS_SSH_KEY  --repo lolarun/bid-compare < ../pixel-lora/infra/ssh/pixora_deploy
+> gh secret set ACR_USERNAME --repo lolarun/bid-compare   # 交互粘贴
+> gh secret set ACR_PASSWORD --repo lolarun/bid-compare   # 交互粘贴
+> gh secret list --repo lolarun/bid-compare               # 确认 5 个都在
+> ```
+>
+> ### 日常发布
+>
+> push 到 `main` 自动触发；也可手动：
+>
+> ```bash
+> gh workflow run build-and-deploy --repo lolarun/bid-compare
+> gh run list --repo lolarun/bid-compare --limit 1
+> ```
+>
+> 发布后**自己验证一遍**（因为健康检查会误报，见出入②）：
+>
+> ```bash
+> curl -s https://bid.hotcrp.cn/api/health     # 期望 {"status":"ok",...}
+> ```
+>
+> ### 服务器上的 `.env`（不进版本库，与 GitHub Secrets 是两回事）
+>
+> GitHub Secrets 只管**构建和推镜像**；ECS 上运行时另需两个文件：
+>
+> - `/opt/mempas/.env` — `ACR_REGISTRY` / `TAG`，给 `docker-compose.prod.yml`
+>   拼镜像地址（`deploy.sh` 第 25 行 `source .env`）
+> - `/opt/mempas/apps/api/.env` — 后端运行时密钥（`DASHSCOPE_API_KEY`、
+>   `BAIDU_UNLIMITED_OCR_*` 等）。**新增可选项 `MIMO_API_KEY`**：配了才启用
+>   design/41 的分类筛页，不配则该功能自动关闭、行为与接入前一致。
+>
+> 下方一~八节是**旧版单机方案**（独立 ECS `101.37.166.68`，手动
+> `git pull && docker compose up -d --build`）。那台机器已废弃、连不上，
+> 内容仅供历史对照与回滚参考，**不是当前指引**。
+
+
 
 ## 目录
 
@@ -57,7 +130,7 @@
                      │    ├─ server: mng.aiguozhanbijin.com.cn  → pixora-mng dist
                      │    ├─ server: api.aiguozhanbijin.com.cn  → pixora-api:8000
                      │    ├─ server: m.aiguozhanbijin.com.cn    → pixora-h5 dist
-                     │    └─ server: bid.hotcrp.cn (HTTP-only)   → mempas-www dist
+                     │    └─ server: bid.hotcrp.cn (HTTPS/443)   → mempas-www dist
                      │                                    │
                      │                          proxy /api/ ▼
                      │                          172.18.0.1:8100 (bridge-gateway-only)
@@ -226,7 +299,15 @@ services:
 
 不再需要 `frontend` 服务——静态文件由 `scripts/deploy.sh`（§4）用一次性容器提取到共享 nginx 的挂载目录，不是常驻服务。
 
-### 3.4 访问域名 —— 已定：`bid.hotcrp.cn`，暂 HTTP-only
+### 3.4 访问域名 —— `bid.hotcrp.cn`，实际走 HTTPS（本节原文已过时）
+
+> **2026-08-25 订正：本节下面写的"暂时不配 SSL、走 80 端口 HTTP"已经不成立。**
+> 实测 80 端口被阿里云网关拦截（403 + `Server: Beaver`，直连 IP 同样如此，
+> 请求根本到不了服务器），而 **443 是通的**。线上正式地址是
+> **<https://bid.hotcrp.cn/>**。本节余下内容保留作历史对照，配置时以顶部
+> 状态横幅为准。
+
+### 3.4（原文，已过时）访问域名 —— 已定：`bid.hotcrp.cn`，暂 HTTP-only
 
 2026-08-18 确认：域名用 `bid.hotcrp.cn`，**暂时不配 SSL，走 80 端口 HTTP**（不是
 `.com.cn`，所以不是 pixel-lora `aiguozhanbijin.com.cn` 的子域名，是完全独立的
