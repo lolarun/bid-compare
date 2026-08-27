@@ -265,7 +265,11 @@ CMD ["sh", "-c", "rm -rf /out/* && cp -r /app/dist/. /out/ && echo 'mempas-www d
 
 **代价**（§2.2 已提过一次）：`docker-compose.yml`（独立单机部署方案，见附录）现在**用不了**——它期望这个文件产出常驻监听 80 的 nginx 容器，现在默认产出的是构建完就退出的 builder。真要切回独立单机方案，先取消注释 Stage 2。
 
-### 3.3 `docker-compose.prod.yml`（新建，bid-compare 仓库根目录）
+### 3.3 `docker-compose.prod.yml`（已建成，bid-compare 仓库根目录）
+
+> 下面是**首次编写时**的版本，用来说明设计意图；实际文件后来加了
+> `reservations` 资源预留、注释也更新过。跟 §4 步骤 6 一样，**出入以仓库里
+> 的 `docker-compose.prod.yml` 本身为准**，这里不是权威副本。
 
 ```yaml
 # 拉镜像版，不在 ECS 上 build——配合 GitHub Actions 产出的镜像使用。
@@ -363,36 +367,49 @@ server {
    - `infra/nginx/nginx.conf`：新增 §3.4 给出的 `bid.hotcrp.cn` server block（`proxy_pass http://172.18.0.1:8100/api/;`，已用实测网关 IP，不用再改）。需要在 `docker-compose.prod.yml` 的 nginx 服务 `volumes` 里加一行 `./nginx/html/mempas:/usr/share/nginx/html/mempas:ro` 挂载。
    - `scripts/deploy.sh`：加一段跟 www/mng/h5 一样的"pull mempas-www builder 镜像 → 提取 dist → nginx reload"逻辑——但这段其实应该放在 **bid-compare 自己的** `scripts/deploy.sh`（§4 步骤 6 新建）里更合理，因为 mempas 的发布节奏跟 pixora 的发布节奏是独立的，不应该耦合进 pixora 的部署脚本触发。**建议**：bid-compare 自己的 deploy.sh 提取 dist 到 `/opt/pixora/infra/nginx/html/mempas`（写到 pixora 的目录里）+ `docker exec` pixora 的 nginx 容器 reload——这样两边部署互相独立触发，只共享"nginx 读哪个目录"这一份配置。
 5. 在 GitHub 仓库 Settings 配置 §3.1 表格里的 4 个 Secrets。
-6. **新建 `scripts/deploy.sh`**（bid-compare 仓库）：
+6. **`scripts/deploy.sh`**（bid-compare 仓库；已建成并跑通，下面是当前实际
+   内容，2026-08-27 核对过一致——**这段代码块会漂移，出入以仓库里的文件
+   本身为准，别改这里当权威**）：
 
    ```bash
    #!/usr/bin/env bash
    set -euo pipefail
    cd /opt/mempas
-   set -a; source .env; set +a   # ACR_REGISTRY / ACR_NAMESPACE=bidcom / TAG
+   set -a; source .env; set +a   # ACR_REGISTRY / TAG
 
    echo "=== pull backend image ==="
    docker compose -f docker-compose.prod.yml pull backend
 
-   echo "=== run alembic migrations（one-shot，幂等）==="
-   docker compose -f docker-compose.prod.yml run --rm --no-deps backend \
-     alembic upgrade head
-
-   echo "=== restart backend ==="
+   echo "=== restart backend（含自动迁移，见下方注释）==="
    docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+   echo "=== wait api healthy ==="
+   sleep 5
+   curl -sf http://172.18.0.1:8100/api/health || echo "⚠️  健康检查未通过，看 docker compose logs backend"
 
    echo "=== pull + extract frontend dist ==="
    docker pull "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
+   mkdir -p /opt/pixora/infra/nginx/html/mempas
    docker run --rm -v /opt/pixora/infra/nginx/html/mempas:/out \
      "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
 
-   echo "=== reload shared nginx (pixora 容器) ==="
-   docker exec infra-nginx-1 nginx -s reload   # 实测确认的真实容器名（compose 项目名取自目录 infra/，不是仓库名 pixora）
+   echo "=== reload shared nginx（pixel-lora 的 infra-nginx-1 容器）==="
+   docker exec infra-nginx-1 nginx -s reload
 
-   echo "=== ✅ mempas deploy done ==="
+   echo "=== prune dangling images ==="
+   docker image prune -f
    ```
 
-   最后一行的容器名是猜的（`docker compose` 默认命名规则 `<项目名>-<服务名>-<序号>`），**首次执行前需要在 ECS 上 `docker ps` 核实真实容器名**再改这个脚本。
+   **没有单独一步 `alembic upgrade head`——这是有意的，不是漏了。** MEMPAS
+   的迁移是 `apps/api/core/database.py::init_db()` 在 FastAPI 启动时自动跑的
+   （程序化配置 Alembic，不依赖 `alembic.ini`），`docker compose up -d`
+   重启 backend 时就顺带跑完；镜像里也根本没拷 `alembic.ini`，单独跑
+   `alembic upgrade head` 的 CLI 命令会直接报 `FileNotFoundError`。这是
+   MEMPAS 自己的既有设计，跟 pixel-lora 那种"显式一次性迁移"的模式不同，
+   照抄 pixel-lora 的 deploy.sh 结构会跑不通。
+
+   容器名 `infra-nginx-1` 已在 ECS 上用 `docker ps` 核实过，是真实值（compose
+   项目名取自目录 `infra/`，不是仓库名 `pixora`），不是猜测。
 7. **首次手动跑一遍全流程**（不经 GitHub Actions，本地/ECS 上手动执行每一步），确认走通，再让 GitHub Actions 接管。
 8. 全部验证通过后，**退役** `101.37.166.68`（释放实例，若还在计费）。
 

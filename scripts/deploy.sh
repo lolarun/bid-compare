@@ -48,4 +48,4 @@ docker image prune -f
 
 echo ""
 echo "=== ✅ mempas deploy done ==="
-echo "  http://bid.hotcrp.cn"
+echo "  https://bid.hotcrp.cn"
