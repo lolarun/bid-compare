@@ -174,3 +174,34 @@ replacing it with ¥0 would read as "negligible".
   design/34 识别空洞). This document is about the screen, not the numbers.
 - `AnchorReviewMatrix` — it already does per-row confirmation correctly and is
   not being changed.
+
+## 7. Follow-up, built 2026-08-26 — `showConclusions`, column split, AI card order
+
+Independent of §4's still-unbuilt proposal above (the inert-button removal and
+「校对入库」 action have **not** been touched by this follow-up — this section
+only covers what shipped), three manual-test findings on `BidMatrix.vue` and
+`WorkspaceView.vue`:
+
+1. **`showConclusions` prop, same pattern as `showHistory` (§4.1).** Preview is
+   "look before you commit", not comparison — showing ★最低/绿色高亮/推荐列
+   there states a comparison conclusion before the user has confirmed the data
+   is even right. `showConclusions=false` in the preview lane hides all three;
+   default `true` leaves every other caller unchanged. This is a **separate**
+   switch from `showHistory`, not a rename or merge of it — `showHistory` gates
+   "compare against history", `showConclusions` gates "state a conclusion at
+   all", and they only happen to both be `false` in preview today.
+2. **Unit price and total price split into two columns**, in both the preview
+   and formal matrix (previously stacked as two lines inside one cell). Applied
+   uniformly to both lanes — a component that renders preview and formal data
+   in two different column layouts would make them read as two different
+   tables rather than the same comparison at two stages.
+3. **AI 综合分析建议 card moved above the matrix** in `WorkspaceView.vue`
+   (formal lane only — preview still has no AI summary, per §"AI stays
+   explanatory" and the fact preview produces no official conclusion to
+   explain). Rationale: conclusion first, detail second. The `stage==='compare'`
+   guard on the LLM call, and the "仅解释系统结果，不构成定标结论" tag on the
+   card, are unchanged by the reposition — moving it doesn't upgrade its role.
+
+Also corrected in passing: the `showHistory` prop's doc comment cited
+"design/32 §12", which never existed in that document — retargeted to this
+section.
