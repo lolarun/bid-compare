@@ -313,3 +313,48 @@ def test_role_vocabulary_is_the_single_source():
     from apps.api.services.ingestion.tabular_ingestion import _TABULAR_COLUMN_PATTERNS
     unknown = set(_TABULAR_COLUMN_PATTERNS) - set(ROLE_LABELS)
     assert not unknown, f"词表里有 ROLE_LABELS 不认识的角色：{unknown}"
+
+
+# ── 比价有效价：Excel 路径也必须产出（2026-08-25 手测抓到）────────────────
+
+def test_tabular_path_emits_effective_total_price():
+    """**Excel 上传这条路此前完全不产出 `effective_total_price`**（全文件零处），
+    只有 PDF 路径（`pipeline.py`）有。
+
+    后果是手测在界面上看到的：前端 `bidStatsFor` 读
+    `effective_total_price ?? total_price`，表头区分含税/不含税的报价单
+    （泰科龙、凯硕：值落在 `total_price_excl_tax`，通用 `total_price` 本来就
+    该是空的）退回读空槽位，卡片上「明细合计」**显示成 ¥0**。绵存看着正常
+    纯属巧合——它表头是通用的"单价/合价"，值恰好落在 `total_price`。
+
+    这条断言三份真实语料的合计都不为零，且与各自 Excel 的真实总额一致。
+    """
+    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
+
+    cases = {
+        "泰科龙": 1_067_616.40,      # 表头：不含税单价 + 价税合计 → dual_tax
+        "凯硕新正": 932_154.00,      # 同上
+        "上海绵存": 1_667_051.00,    # 表头：通用 单价/合价 → unspecified
+    }
+    for name, expected in cases.items():
+        path = DOCS / f"金桥地体上盖项目-{name}报价清单.xlsx"
+        if not path.exists():
+            pytest.skip(f"缺夹具：{path.name}")
+        items = extract_quote_tabular(str(path), {"project_id": 0, "category": "阀门"})["items"]
+        assert all("effective_total_price" in it for it in items),             f"{name}：Excel 路径没有产出 effective_total_price"
+        total = sum(it.get("effective_total_price") or 0 for it in items)
+        assert total == pytest.approx(expected, rel=1e-6),             f"{name}：明细合计 {total:,.2f}，期望 {expected:,.2f}"
+
+
+def test_effective_price_uses_the_same_deriver_as_the_pdf_path():
+    """两条上传路径必须用**同一个** `derive_price_basis`，不许各写一套。
+
+    判的是"这一行的钱按哪个税基读"——两条路给出不同答案，就会出现"同一份
+    报价，PDF 传和 Excel 传合计不一样"这种没人能解释的事。
+    """
+    import inspect
+
+    from apps.api.services.ingestion import tabular_ingestion
+
+    src = inspect.getsource(tabular_ingestion)
+    assert "derive_price_basis" in src, "Excel 路径没有复用共享的口径判定"
