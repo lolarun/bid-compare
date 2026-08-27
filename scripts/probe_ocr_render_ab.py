@@ -5,9 +5,9 @@ Qwen-VL-OCR table_parsing, and counts suspect valve-term occurrences so we can
 see whether the bump from 2.0/2400 → 3.0/3600 actually recovers 橡胶瓣/闸阀/etc.
 
 Usage:
-    python scripts/test_ocr_render_ab.py
-    python scripts/test_ocr_render_ab.py --pdf tests/fixtures/documents/金桥地体上盖项目-凯硕新正投标文件.pdf --pages 5,6,7
-    python scripts/test_ocr_render_ab.py --configs 2.0:2400,3.0:3600
+    python scripts/probe_ocr_render_ab.py
+    python scripts/probe_ocr_render_ab.py --pdf tests/fixtures/documents/金桥地体上盖项目-凯硕新正投标文件.pdf --pages 5,6,7
+    python scripts/probe_ocr_render_ab.py --configs 2.0:2400,3.0:3600
 
 Needs DASHSCOPE_API_KEY (read from apps/api/.env).
 """

@@ -1,7 +1,7 @@
 """一次性脚本：对真实招标 PDF 跑 tender_pdf.extract_bidlist，输出完整诊断报告。
 
 用法：
-    python scripts/test_tender_pdf.py [pdf_path [xlsx_path]]
+    python scripts/probe_tender_pdf.py [pdf_path [xlsx_path]]
 
 pdf_path  默认: tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf
 xlsx_path 默认: tests/fixtures/documents/金桥地体上盖项目-采购清单.xlsx

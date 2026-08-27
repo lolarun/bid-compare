@@ -171,21 +171,26 @@ Keep in `scripts/` root: the A/B rigs and scoring harnesses (`ab_uncertainty`,
 `e2e_diff`, `audit_golden`, `score_paddleocr_vl`, `model_bakeoff_compare`,
 `stitch_vs_multi_bench`, `vl_direct_bakeoff`, `vl_prod_e2e`,
 `visual_stability_test`, `try_paddleocr_vl`, `try_page_classify_gate`,
-`tender_vl_probe`, `test_ocr_render_ab`), the fixture/golden builders
+`tender_vl_probe`, `probe_ocr_render_ab`), the fixture/golden builders
 (`build_ocr_fixture`, `record_vl_snapshots`, `create_golden_fixtures`,
 `rebuild_golden_from_excel`, `build_cable_golden`, `build_raw_assets`), the
 data importers (`import_historical`, `import_brands`, `import_data`,
 `convert_excel_to_csv`, `analyze_data`, `export_excel`, `seed_supplier_aliases`),
 the measurement/reporting tools (`block_align_report`, `measure_anchor_alignment`,
 `api_e2e_compare`, `p2_acceptance_run`, `export_customer_bid_matrix`,
-`dump_tender`, `verify_rowcounts`), plus `wipe_test_projects.py` and
-`deploy.sh`.
+`dump_tender`, `verify_rowcounts`, `probe_tender_pdf`), plus
+`wipe_test_projects.py` and `deploy.sh`.
 
 **Naming rule that falls out of this: no `test_*.py` in `scripts/` root.**
-Only `test_ocr_render_ab.py` survives the archive pass; rename it to
-`probe_ocr_render_ab.py`. Files named `test_*` outside `apps/api/tests/` and
-`tests/` are never collected by pytest (`testpaths`), so the name promises a
-guarantee nothing enforces.
+Two files survived the archive pass under the old name and were renamed
+during execution — `test_ocr_render_ab.py` → `probe_ocr_render_ab.py`
+(the plan's original call) and `test_tender_pdf.py` → `probe_tender_pdf.py`
+(missed in the original enumeration above — it takes `pdf_path`/`xlsx_path`
+arguments and is re-runnable on new input, the same shape as
+`tender_vl_probe.py`, so it belongs in the keep list, not the archive).
+Files named `test_*` outside `apps/api/tests/` and `tests/` are never
+collected by pytest (`testpaths`), so the name promises a guarantee nothing
+enforces.
 
 `scripts/archive/README.md` records why each group was archived, mirroring
 `docs/design/archive/README.md`.
