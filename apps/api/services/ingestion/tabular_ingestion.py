@@ -28,6 +28,7 @@ from typing import Any
 
 from apps.api.core.utils import parse_rate
 from apps.api.intelligence.column_roles import propose_by_llm, verify_roles
+from apps.api.intelligence.price_basis import derive_price_basis
 
 log = logging.getLogger(__name__)
 
@@ -492,7 +493,20 @@ def extract_quote_tabular(file_path: str, ctx: dict) -> dict:
             remark=remark.strip(),
             source_ref={"sheet": _sheet_name(file_path), "row": int(idx) + 2},
         )
-        items.append(fact.to_item_dict())
+        # 价格口径与比价有效价（design/29 §11.1）。**复用 PDF 路径同一个
+        # `derive_price_basis`，不另写一套口径判定**——两套迟早会漂，而这里判的
+        # 是"这一行的钱该按哪个税基读"，两条上传路径必须给出同一个答案。
+        #
+        # 2026-08-25 补：此前 Excel 这条路**完全没有产出** `effective_total_price`
+        # （全文件零处），只有 PDF 路径（`pipeline.py:506`）有。前端
+        # `bidStatsFor` 读 `effective_total_price ?? total_price`，于是表头区分
+        # 含税/不含税的报价单（泰科龙、凯硕：值落在 `total_price_excl_tax`、
+        # 通用 `total_price` 本来就是空的）退回读空槽位，**卡片上"明细合计"
+        # 显示成 ¥0**。绵存看着正常纯属巧合——它表头是通用的"单价/合价"，
+        # 值恰好落在 `total_price`。修的是缺失，不是改任何原值。
+        item = fact.to_item_dict()
+        item.update(derive_price_basis(item))
+        items.append(item)
 
     # ── 6. Hard fail on 0 items ───────────────────────────────────────────────
     # Prevents silent empty uploads that would pass batch-confirm but produce
