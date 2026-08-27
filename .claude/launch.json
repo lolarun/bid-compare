@@ -4,16 +4,16 @@
     {
       "name": "backend",
       "runtimeExecutable": "uvicorn",
-      "runtimeArgs": ["apps.api.main:app", "--port", "8000"],
-      "port": 8000,
+      "runtimeArgs": ["apps.api.main:app", "--port", "8020"],
+      "port": 8020,
       "autoPort": false
     },
     {
       "name": "frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "3000"],
+      "runtimeArgs": ["run", "dev", "--", "--port", "5120"],
       "cwd": "apps/www",
-      "port": 3000,
+      "port": 5120,
       "autoPort": false
     }
   ]

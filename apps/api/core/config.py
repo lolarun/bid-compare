@@ -57,9 +57,13 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "data/uploads"
 
     # CORS (parsed elsewhere)
+    # 5120 是当前的前端固定端口（CLAUDE.md §3）。dev 下前端走 Vite 代理
+    # （/api 同源转发到后端），正常不触发 CORS；这里仍然列出来，是为了让
+    # 直连后端的场景（浏览器直接打后端地址、脱离代理调试）不至于莫名其妙
+    # 被拦。3000/5173 保留：老的本地环境和 Vite 默认端口仍可能在用。
     CORS_ORIGINS: str = (
-        "http://localhost:3000,http://localhost:5173,"
-        "http://127.0.0.1:3000,http://127.0.0.1:5173"
+        "http://localhost:5120,http://localhost:3000,http://localhost:5173,"
+        "http://127.0.0.1:5120,http://127.0.0.1:3000,http://127.0.0.1:5173"
     )
 
     model_config = SettingsConfigDict(

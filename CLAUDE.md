@@ -54,12 +54,19 @@ scripts/             One-off / batch / audit scripts (must be parameterized — 
 
 Environment: **Windows 11 / PowerShell**. Use POSIX syntax only inside the Bash tool.
 
-Fixed ports — do not change; the Vite dev proxy targets `localhost:8000`:
+Fixed ports — do not change; the Vite dev proxy targets `127.0.0.1:8020`:
 
 | Service  | Port | Start command |
 |----------|------|---------------|
-| Backend  | 8000 | `uvicorn apps.api.main:app --port 8000` |
-| Frontend | 3000 | `npm --prefix apps/www run dev -- --port 3000` |
+| Backend  | 8020 | `uvicorn apps.api.main:app --port 8020` |
+| Frontend | 5120 | `npm --prefix apps/www run dev -- --port 5120` |
+
+> Moved off 8000/3000 on 2026-08-26: port 8000 on this machine is repeatedly
+> re-claimed by an unrelated local service, which silently breaks the dev proxy
+> mid-session. Changing these means changing all four places that actually take
+> effect — `.claude/launch.json`, `apps/www/vite.config.ts` (`server.port` **and**
+> `server.proxy['/api'].target`), and `Settings.CORS_ORIGINS` in
+> `apps/api/core/config.py` — not just the table above.
 
 Server lifecycle: **do not use `--reload`.** On a port conflict, kill the existing process
 first, then restart on the same fixed port. Do not start ad-hoc ports.
