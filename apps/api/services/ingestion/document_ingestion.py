@@ -129,11 +129,22 @@ class DocumentIngestionService:
         filename: str,
         type: IngestionType | str,
         context: dict[str, Any] | None = None,
+        force: bool = False,
     ) -> ExtractionJob:
         """Create (or return existing idempotent) job. NOT yet executed.
 
         Idempotency key = (file_hash, type, context_hash). Same file uploaded
         for two different suppliers gets two distinct jobs.
+
+        `force=True` **跳过幂等命中，强制新建一个 job 重新识别**。
+
+        为什么需要它（2026-08-25）：幂等键里**没有代码版本**，所以识别逻辑改好
+        之后，同一份文件在同一项目下重传会命中旧 job、直接返回**改动前的旧结果**。
+        这个坑本轮咬过两次——项目 106 的品类，以及三份报价单"明细合计 ¥0"。
+        用户此前唯一的出路是新建项目（换掉 context_hash），既不直观也留一堆废项目。
+
+        **默认仍然幂等**：不传 `force` 时行为逐字节不变，重复上传照样省掉一次
+        识别调用（那是真实的钱）。强制重跑必须是用户显式点出来的动作。
         """
         type_str = type.value if isinstance(type, IngestionType) else str(type)
         if type_str not in {t.value for t in IngestionType}:
@@ -159,6 +170,9 @@ class DocumentIngestionService:
             if prior.status == JobStatus.FAILED.value:
                 continue
             if _hash_context(prior.context or {}) == ctx_hash:
+                if force:
+                    log.info("force=True，跳过幂等命中（旧 job %s），重新识别", prior.id)
+                    break
                 log.info("Idempotent hit: returning existing job %s", prior.id)
                 return prior
 

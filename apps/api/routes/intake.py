@@ -10,6 +10,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional
 
 from fastapi import (
@@ -201,6 +202,46 @@ def get_job(
     job = service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return JobResponse.model_validate(job)
+
+
+@router.post("/jobs/{job_id}/re-recognize", response_model=JobResponse)
+def re_recognize_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    pipeline: ExtractionPipeline = Depends(get_pipeline),
+) -> JobResponse:
+    """拿这个 job 已经存下来的原文件**重新识别一遍**，返回新 job。
+
+    为什么要有这个入口（2026-08-25）：`create_job` 的幂等键是
+    `(file_hash, type, context_hash)`，**里面没有代码版本**。识别逻辑改好之后
+    重传同一份文件会命中旧 job、拿回改动前的旧结果——本轮已经咬过两次（项目
+    106 的品类，以及三份报价单的"明细合计 ¥0"）。在此之前用户唯一的出路是
+    **新建项目**换掉 context_hash，既不直观，也留下一堆废项目。
+
+    走的是**已存盘的原文件**（`job.file_path`），不需要用户重新上传——重传
+    反而会再次撞上同一个幂等键。新 job 沿用旧 job 的 `type` 和 `context`，
+    所以下游（供应商归属、项目、品类）完全不变，只是识别结果是新的。
+
+    **旧 job 不动**：不删不改，留作对照和审计。识别是要花钱的，重跑必须是
+    用户显式点出来的动作，不能由系统自作主张。
+    """
+    service = DocumentIngestionService(db, pipeline)
+    old = service.get_job(job_id)
+    if not old:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not old.file_path or not Path(old.file_path).exists():
+        raise HTTPException(
+            status_code=410,
+            detail={"error": "source_file_gone",
+                    "message": "原文件已不在服务器上，无法重新识别，请重新上传该文件。"},
+        )
+
+    content = Path(old.file_path).read_bytes()
+    job = service.create_job(content, old.filename or "upload", old.type,
+                             old.context or {}, force=True)
+    if job.status == "pending":
+        submit_extraction(job.id)
     return JobResponse.model_validate(job)
 
 
