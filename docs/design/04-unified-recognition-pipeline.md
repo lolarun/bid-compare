@@ -261,4 +261,6 @@ Not doing for now (low ROI or data-dependent): cross-document validation, fine-t
 - [The Rise of Semantic Entity Resolution (Towards Data Science)](https://towardsdatascience.com/the-rise-of-semantic-entity-resolution/)
 - [Invoice matching: the procurement leader's 2026 guide (Amazon Business)](https://business.amazon.com/en/blog/invoice-matching)
 - [Qwen-OCR / qwen-vl-ocr docs (Alibaba Cloud Model Studio)](https://www.alibabacloud.com/help/en/model-studio/qwen-vl-ocr)
-- Internal reference: `C:\Users\Justin\codes\repos\fabric-bridge` — `docs/technical-design.md`, `docs/prompts.md`
+- Internal reference: a sibling project's pipeline design (`fabric-bridge`
+  repo, not this one) — kept for the pattern, not a citation into this
+  repository; this repo has no `docs/technical-design.md` or `docs/prompts.md`.

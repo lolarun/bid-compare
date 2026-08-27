@@ -28,7 +28,7 @@
 > vision call for it once the anchor-table parser existed).
 >
 > **Acceptance criteria (§5) verified with real numbers, not estimated**: run
-> against 金桥地铁上盖 J9A-03 (`docs/test/金桥地体上盖招标文件.pdf`) —
+> against 金桥地铁上盖 J9A-03 (`tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf`) —
 > real VL-direct baseline (`vl_tender.parse_tender_document`, full pipeline
 > incl. orientation pre-check) **363.8s**; text-layer path **14-18s** (~20-25x).
 > 89/89 anchor rows in both, first/last row field-for-field identical
@@ -185,7 +185,7 @@ provided the shape is honored exactly.
 
 ## 5. Acceptance criteria
 
-Run against 金桥地铁上盖 J9A-03 (`docs/test/金桥地体上盖招标文件.pdf`,
+Run against 金桥地铁上盖 J9A-03 (`tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf`,
 18 pages, confirmed text-layer, existing golden Excel):
 
 - 89/89 anchor rows recovered (name/spec/unit/qty), matching the VL-direct
@@ -236,7 +236,7 @@ Run against 金桥地铁上盖 J9A-03 (`docs/test/金桥地体上盖招标文件
 
 - Unit: `has_usable_text_layer()` against a small fixture set (the 2
   text-layer + 2 scan tender PDFs already sampled in §2, plus the existing
-  `docs/test/金桥地体上盖招标文件.pdf`).
+  `tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf`).
 - Contract: text-layer path's `ExtractionDraft` output diffed field-for-field
   against the same document's VL-direct output (§5).
 - Fallback: malformed/undetectable table on a text-layer PDF routes to

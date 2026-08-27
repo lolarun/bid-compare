@@ -197,26 +197,55 @@ enforces.
 
 ## 6. Phase 3 — documentation hygiene
 
-### 6.1 Nineteen dead cross-references
+### 6.1 Nineteen candidate dead cross-references — most were already correctly
+scoped; two were real
 
-`docs/design/*.md` cite files that no longer exist. Each needs either a
-retarget or an explicit "retired" note — a design doc pointing at a deleted
-module is how a reader concludes the module still exists:
+The original sweep (a plain path-existence check across `docs/design/*.md`)
+flagged 19 file paths that no longer exist. Checking each one's *context*
+narrowed this to two genuine problems — the other 17 were already handled
+correctly by conventions this project had already established, and rewriting
+them would have contradicted those conventions rather than followed them:
 
-```
-apps/api/intelligence/prompts.py               apps/api/intelligence/table_recognizer.py
-apps/api/services/rebuild_submission_lines.py  apps/www/src/views/compare/IndexView.vue
-docs/design/03-数据分析计划.md                  docs/design/06-功能设计.md
-docs/ops/production-cleanup-runbook.md         docs/prompts.md
-docs/technical-design.md                       docs/test/金桥地体上盖招标文件.pdf
-scripts/{apply_cleanup_to_copy,audit_suppliers,build_production_fix_package,
-         export_production_snapshot,merge_suppliers,recalculate_ref_prices,
-         repair_project63,verify_db_state}.py
-```
+- **`docs/design/03-数据分析计划.md` / `06-功能设计.md`** — both citations are
+  *inside* `docs/design/archive/`, citing other archive files by their
+  pre-rename Chinese names. `docs/design/archive/README.md` already states
+  this is deliberate: archive files are frozen and their internal
+  cross-references are not updated. Not a defect.
+- **`apps/api/intelligence/prompts.py`, `table_recognizer.py`,
+  `apps/api/services/rebuild_submission_lines.py`, and the eight
+  `scripts/{audit_suppliers,merge_suppliers,...}.py`** — all appear inside
+  `docs/design/09`, `10`, `12`, `19`, `21`, `22`, which each carry their own
+  **"Status — audited YYYY-MM-DD"** banner (the convention this repo already
+  uses, e.g. design/41's retraction banner) stating explicitly, as of that
+  audit date, what was and was not built. `design/21` in particular is titled
+  *"Retiring the Legacy Recognition Path"* and states outright that
+  `table_recognizer.py`/`prompts.py` were physically deleted 2026-08-11.
+  These are point-in-time audit records, not living specs — the banners
+  already do the job an update would do. Rewriting them to erase the deleted
+  module's name would destroy the historical record the audit exists to keep.
+- **`apps/www/src/views/compare/IndexView.vue`** — same: appears inside
+  `design/07`'s and `design/22`'s already-dated, already-audited context.
 
-The pre-rename Chinese filenames (`03-数据分析计划.md`, `06-功能设计.md`) are
-from the 2026-06-23 English rename; `docs/design/archive/README.md` says archive
-files deliberately keep old names, but these citations are in **live** docs.
+The two that were real, both fixed:
+
+- **`docs/design/04-unified-recognition-pipeline.md`** cited
+  `docs/technical-design.md` / `docs/prompts.md` as if they were files in
+  *this* repository. They belong to a different, sibling project
+  (`fabric-bridge`) — the citation was cross-repo contamination, not a stale
+  path. Reworded to say so explicitly.
+- **`docs/design/25-tender-text-layer-extraction.md`** cited
+  `docs/test/金桥地体上盖招标文件.pdf` three times. Unlike the cases above,
+  this file was never deleted — it was *renamed* by design/28's fixture
+  flattening (§3 of this document) to
+  `tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf`, and design/25
+  predates that rename. A reader today would get a wrong path for a file that
+  still exists and is still used. Retargeted all three.
+
+**Lesson for next time**: a bare path-existence grep over historical design
+docs produces mostly false positives once a project has an audited-banner
+convention. The useful signal is "citation with no status caveat, in a doc
+that isn't already dated/archived" — check that before treating a missing
+path as a defect.
 
 ### 6.2 Point-in-time reports belong with the other point-in-time reports
 
@@ -234,13 +263,18 @@ them there and add rows to its table.
 - `35` is unused. Leave the gap; do not backfill.
 - This document takes `43`.
 
-### 6.4 The two TODOs
+### 6.4 The two TODOs — fixed
 
-Root `TODO.md` (engineering / tech debt) claims 「最后更新：2026-06-23」 in its
-header while its last commit is 2026-08-22. `docs/TODO.md` (product / UI /
-customer feedback) is frozen at v0.2.1 / 2026-05-29. The split itself is stated
-in the root file and is fine; both headers need to become true, or
-`docs/TODO.md` needs an explicit "superseded, see HANDOFF" banner.
+Root `TODO.md` (engineering / tech debt) claimed 「最后更新：2026-06-23」 in its
+header while its last commit was 2026-08-22 (a 2026-08-22 entry recording a
+recognition-accuracy defect the user explicitly deferred). Header now states
+both dates: the last real edit, and the last batch of structural items.
+
+`docs/TODO.md` (product / UI / customer feedback) was frozen at v0.2.1 /
+2026-05-29 with nothing marking it stale. It now carries an explicit banner:
+product/UI/customer-feedback tracking moved to `HANDOFF.md` (dated sections,
+newest first, invalidation banners on stale ones — the convention set
+2026-08-22), and the old content is kept for historical reference only.
 
 ### 6.5 May-2026 documents — needs a call, not a default
 
@@ -281,7 +315,7 @@ handoff value comes from a single place a successor reads top to bottom.
 | 0 — commit the fixture files under the new names + fix the 12 stale references | `git stash -u` the untracked fixtures → run the four affected test modules → confirm they fail → restore → confirm they pass. This is the red/green proof that Phase 0 fixes a real breakage rather than describing one. |
 | 1 — evidence-backed deletions | Full backend suite + `npm test` + `vue-tsc`. Removing `ocr_snapshots/` must not move any count. |
 | 2 — `scripts/archive/` | `git mv` only, no edits. Grep the tree for each archived filename to confirm nothing imports it. |
-| 3 — documentation | Re-run the dead-reference scan from §6.1; it must return empty. |
+| 3 — documentation | §6.1 revised in place after checking context (see the "Lesson for next time" note); the two genuine fixes verified individually rather than by re-running the original bare-existence grep, which would still flag the 17 correctly-scoped historical citations as false positives. |
 
 Each phase is a separate commit. Phase 0 stands alone — it is a fix, and it
 should not be buried inside a cleanup commit.
