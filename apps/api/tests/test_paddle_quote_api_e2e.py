@@ -19,7 +19,8 @@
 
 ## 供应商配对：为什么是凯硕+绵存，不是电缆那四份
 
-`tests/fixtures/documents/bid`（design/28 起从 `docs/test1/prj1` 搬迁至此）
+`tests/fixtures/documents`（design/28 起从 `docs/test1/prj1` 搬迁至此，
+design/43 起改为扁平命名、不再有 `bid/` 子目录）
 的四份电缆投标（浦东/亨通/宏胜/远东）实测过 `missing_total`
 行数分别是 20/10/0/34（design/26 §6 P2a/P2b）——"原文无合价"门是单行即阻断
 （quote_confirmation_service.py 的既定策略，亨通历史上就是这类错位造成过

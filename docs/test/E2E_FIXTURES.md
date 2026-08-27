@@ -1,6 +1,14 @@
 # 比价 E2E 测试文档清单（金桥地铁上盖 J9A-03 阀门项目）
 
-本文件记录"当前资料完整交付"这条 E2E 的**唯一基准测试集**。所有识别准确率、质量门、对齐与导出的验收都以这套文档为准。规范副本位于 `tests/fixtures/documents/`（design/28 起从 `docs/test/` 迁移，见同目录 `MANIFEST.md`；`docs/项目资料/初始资料/` 下有重复原件，仅作来源备份，不用于测试）。
+> **2026-08-26（design/43）**：本文件已被 `tests/fixtures/documents/MANIFEST.md`
+> 取代为当前权威语料清单（18 文件、A/B/C 三场景、design/28 起维护）。本文件保留
+> 作为该 3-供应商子集当初的详细核对记录（页数/文字层类型/已知风险），下表路径
+> 已随 design/43 的扁平化改名更新，但**新增语料请只更新 MANIFEST.md**。
+>
+> `docs/项目资料/初始资料/` 下曾有重复原件（仅作来源备份），design/43 已删除
+> ——`tests/fixtures/documents/` 现在是**唯一副本**。
+
+本文件记录"当前资料完整交付"这条 E2E 的最初基准测试集。所有识别准确率、质量门、对齐与导出的验收都以 `tests/fixtures/documents/`（design/28 起从 `docs/test/` 迁移，见同目录 `MANIFEST.md`）为准。
 
 > 用途：作为回归 fixture（CLAUDE.md §10 允许的"真实回归样本"），不是项目专用硬编码。
 
@@ -8,11 +16,11 @@
 
 | 角色 | 文件 | 路径 | 页数/大小 | 标准答案(ground truth) |
 |---|---|---|---|---|
-| 招标文件 | 金桥地体上盖招标文件.pdf | `tests/fixtures/documents/tender/金桥地体上盖招标文件.pdf` | 18 页 / 0.30 MB | ✅ 见下方 Excel 清单 |
-| 采购清单 | 金桥地体上盖招标文件.xlsx | `tests/fixtures/documents/tender_list/金桥地体上盖招标文件.xlsx` | — | ✅ **本身即标准答案**；用户已核对，与招标 PDF ~100% 一致 |
-| 投标-1 | 上海绵存投标文件.pdf | `tests/fixtures/documents/bid/上海绵存投标文件.pdf` | **31 页** / 17.50 MB | ⏳ 待转换为 Excel |
-| 投标-2 | 泰科龙投标文件.pdf | `tests/fixtures/documents/bid/泰科龙投标文件.pdf` | **53 页** / 35.19 MB | ⏳ 待转换为 Excel（扫描+转置表，最难）|
-| 投标-3 | 凯硕新正投标文件.pdf | `tests/fixtures/documents/bid/凯硕新正投标文件.pdf` | 19 页 / 14.88 MB | ⏳ 待转换为 Excel |
+| 招标文件 | 金桥地体上盖项目-招标文件.pdf | `tests/fixtures/documents/金桥地体上盖项目-招标文件.pdf` | 18 页 / 0.30 MB | ✅ 见下方 Excel 清单 |
+| 采购清单 | 金桥地体上盖项目-采购清单.xlsx | `tests/fixtures/documents/金桥地体上盖项目-采购清单.xlsx` | — | ✅ **本身即标准答案**；用户已核对，与招标 PDF ~100% 一致 |
+| 投标-1 | 金桥地体上盖项目-上海绵存投标文件.pdf | `tests/fixtures/documents/金桥地体上盖项目-上海绵存投标文件.pdf` | **31 页** / 17.50 MB | ✅ 见下方 Excel 清单 |
+| 投标-2 | 金桥地体上盖项目-泰科龙投标文件.pdf | `tests/fixtures/documents/金桥地体上盖项目-泰科龙投标文件.pdf` | **53 页** / 35.19 MB | ✅ 见下方 Excel 清单（扫描+转置表，最难）|
+| 投标-3 | 金桥地体上盖项目-凯硕新正投标文件.pdf | `tests/fixtures/documents/金桥地体上盖项目-凯硕新正投标文件.pdf` | 19 页 / 14.88 MB | ✅ 见下方 Excel 清单 |
 
 > 招标清单另有 `.xls` 版本（75 KB）同目录，内容相同；测试以用户指定的 `.xlsx` 为准。
 
@@ -27,13 +35,13 @@
 
 **三份报价均为扫描件，无文字层。** 数据层成败完全取决于"扫描件 OCR + TableGrid"；三份标准答案都需人工核对 OCR 结果，无文本直抽捷径。
 
-## 待办：3 份报价需制作"标准答案 Excel"
+## 标准答案 Excel（已全部完成，见 MANIFEST.md）
 
-招标侧已有 Excel 作为标准答案；**3 份投标 PDF 需各自转成一份逐行核对过的 Excel**，作为识别准确率的对照基准。每份至少含：序号、名称、规格/型号、品牌、单位、数量、不含税单价、含税单价、税率、不含税合价、含税合价、来源页码。
+三份投标 PDF 均已有逐行核对过的标准答案 Excel：
 
-- [ ] 上海绵存投标文件 → Excel
-- [x] 泰科龙投标文件 → Excel ✅ `tests/fixtures/documents/bid_list/泰科龙投标清单.xlsx`（89行，声明总价 1,067,616.41，用户逐行核对）
-- [ ] 凯硕新正投标文件 → Excel
+- [x] 上海绵存投标文件 → `tests/fixtures/documents/金桥地体上盖项目-上海绵存报价清单.xlsx`
+- [x] 泰科龙投标文件 → `tests/fixtures/documents/金桥地体上盖项目-泰科龙报价清单.xlsx`（89行，声明总价 1,067,616.41，用户逐行核对）
+- [x] 凯硕新正投标文件 → `tests/fixtures/documents/金桥地体上盖项目-凯硕新正报价清单.xlsx`
 
 ## ⚠️ 已知风险（量化基线，待修）
 

@@ -1,7 +1,7 @@
 """Compare 8B vs 32B SiliconFlow models on test PDFs.
 
 Usage:
-    python scripts/compare_models.py [--pdf tests/fixtures/documents/bid/xxx.pdf]
+    python scripts/compare_models.py [--pdf tests/fixtures/documents/xxx.pdf]
 
 Runs each test PDF through both models, prints a side-by-side summary.
 """

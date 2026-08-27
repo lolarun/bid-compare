@@ -52,7 +52,7 @@ MAX_AMOUNT_DEVIATION = 0.10
 
 
 def _pdf(name: str) -> Path:
-    return next((REPO / "tests" / "fixtures" / "documents" / "bid").glob(f"*{name}*.pdf"))
+    return next((REPO / "tests" / "fixtures" / "documents").glob(f"*{name}*投标文件.pdf"))
 
 
 def _best_copy(rows: list) -> tuple[str, list]:

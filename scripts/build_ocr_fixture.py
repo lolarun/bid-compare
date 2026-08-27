@@ -5,7 +5,7 @@
 
 用法：
     python scripts/build_ocr_fixture.py \
-        --pdf tests/fixtures/documents/bid/xxx.pdf --page 3 --page 5 --angle 0 --angle 270 \
+        --pdf tests/fixtures/documents/xxx.pdf --page 3 --page 5 --angle 0 --angle 270 \
         --out apps/api/tests/fixtures/ocr_html/yuandong
 
 每个 (页, 角度) 落一个文件：p<页>_r<角度>.html，并写一份 manifest.json 记录

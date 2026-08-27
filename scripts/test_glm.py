@@ -1,7 +1,7 @@
 """Test ZhipuAI GLM vision models on tests/fixtures/documents PDFs.
 
 Usage:
-    python scripts/test_glm.py [--pdf tests/fixtures/documents/bid/xxx.pdf]
+    python scripts/test_glm.py [--pdf tests/fixtures/documents/xxx.pdf]
 """
 
 from __future__ import annotations

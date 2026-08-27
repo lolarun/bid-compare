@@ -54,7 +54,7 @@ def test_has_usable_text_layer_false_on_scan():
 
 def test_has_usable_text_layer_missing_file_returns_false_not_raise():
     from apps.api.intelligence.tender_text_layer import has_usable_text_layer
-    assert has_usable_text_layer(str(REPO / "tests" / "fixtures" / "documents" / "tender" / "不存在.pdf")) is False
+    assert has_usable_text_layer(str(REPO / "tests" / "fixtures" / "documents" / "不存在.pdf")) is False
 
 
 # ─── §2 采购清单表：跨页续表 + 两级表头拍平 ────────────────────────────────────

@@ -45,10 +45,10 @@ OUT_DIR = REPO / "tests" / "fixtures" / "vl_snapshots"
 
 # slug → (文件名关键字, 所在目录)
 DOCS = {
-    "quote_cable_pudong": ("上海浦东", "tests/fixtures/documents/bid"),
-    "quote_cable_hengtong": ("亨通", "tests/fixtures/documents/bid"),
-    "quote_cable_hongsheng": ("宏胜", "tests/fixtures/documents/bid"),
-    "quote_cable_yuandong": ("远东", "tests/fixtures/documents/bid"),
+    "quote_cable_pudong": ("上海浦东", "tests/fixtures/documents"),
+    "quote_cable_hengtong": ("亨通", "tests/fixtures/documents"),
+    "quote_cable_hongsheng": ("宏胜", "tests/fixtures/documents"),
+    "quote_cable_yuandong": ("远东", "tests/fixtures/documents"),
 }
 
 

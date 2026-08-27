@@ -42,9 +42,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 REPO = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO / "apps" / "api" / ".env"
 OUT_DIR = REPO / "outputs" / "baidu_paddleocr_vl"
-PRJ1 = REPO / "tests/fixtures/documents/bid"
-TEST = REPO / "tests/fixtures/documents/bid"
-TENDER = REPO / "tests/fixtures/documents/tender"
+PRJ1 = REPO / "tests/fixtures/documents"
+TEST = REPO / "tests/fixtures/documents"
+TENDER = REPO / "tests/fixtures/documents"
 
 
 def _sha256(path: Path) -> str:
@@ -60,18 +60,18 @@ def _git_sha() -> str:
 
 # 跟 scripts/vl_prod_e2e.py 的 DOCS 保持同一套七份文档，方便和生产识别器的结果对照。
 DOCS = {
-    "kaishuo": (TEST / "凯硕新正投标文件.pdf", REPO / "data/golden/quote_kaishuo.json"),
-    "taikelong": (TEST / "泰科龙投标文件.pdf", REPO / "data/golden/quote_taikelong.json"),
-    "miancun": (TEST / "上海绵存投标文件.pdf", REPO / "data/golden/quote_miancun.json"),
-    "pudong": (PRJ1 / "prj1_上海浦东.pdf",
+    "kaishuo": (TEST / "金桥地体上盖项目-凯硕新正投标文件.pdf", REPO / "data/golden/quote_kaishuo.json"),
+    "taikelong": (TEST / "金桥地体上盖项目-泰科龙投标文件.pdf", REPO / "data/golden/quote_taikelong.json"),
+    "miancun": (TEST / "金桥地体上盖项目-上海绵存投标文件.pdf", REPO / "data/golden/quote_miancun.json"),
+    "pudong": (PRJ1 / "徐汇区华泾镇项目-上海浦东投标文件.pdf",
                REPO / "data/golden/quote_cable_pudong.json"),
-    "hengtong": (PRJ1 / "prj1_亨通.pdf",
+    "hengtong": (PRJ1 / "徐汇区华泾镇项目-亨通投标文件.pdf",
                  REPO / "data/golden/quote_cable_hengtong.json"),
-    "hongsheng": (PRJ1 / "prj1_宏胜.pdf",
+    "hongsheng": (PRJ1 / "徐汇区华泾镇项目-宏胜投标文件.pdf",
                   REPO / "data/golden/quote_cable_hongsheng.json"),
-    "yuandong": (PRJ1 / "prj1_远东.pdf",
+    "yuandong": (PRJ1 / "徐汇区华泾镇项目-远东投标文件.pdf",
                  REPO / "data/golden/quote_cable_yuandong.json"),
-    "jinqiao": (TENDER / "金桥地体上盖招标文件.pdf", None),  # 招标文件，无 quote golden
+    "jinqiao": (TENDER / "金桥地体上盖项目-招标文件.pdf", None),  # 招标文件，无 quote golden
 }
 SEVEN_QUOTE_DOCS = ["kaishuo", "taikelong", "miancun", "pudong", "hengtong", "hongsheng", "yuandong"]
 

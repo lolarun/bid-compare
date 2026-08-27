@@ -40,13 +40,13 @@ OUT_DIR = REPO / "tmp" / "vl_bakeoff"
 
 # 七份投标文件（四份电缆 + 三份既有基线），doc 名 → (PDF 所在目录, golden slug)
 DOCS = {
-    "上海浦东": ("tests/fixtures/documents/bid", "quote_cable_pudong"),
-    "亨通":     ("tests/fixtures/documents/bid", "quote_cable_hengtong"),
-    "宏胜":     ("tests/fixtures/documents/bid", "quote_cable_hongsheng"),
-    "远东":     ("tests/fixtures/documents/bid", "quote_cable_yuandong"),
-    "凯硕新正": ("tests/fixtures/documents/bid", "quote_kaishuo"),
-    "上海绵存": ("tests/fixtures/documents/bid", "quote_miancun"),
-    "泰科龙":   ("tests/fixtures/documents/bid", "quote_taikelong"),
+    "上海浦东": ("tests/fixtures/documents", "quote_cable_pudong"),
+    "亨通":     ("tests/fixtures/documents", "quote_cable_hengtong"),
+    "宏胜":     ("tests/fixtures/documents", "quote_cable_hongsheng"),
+    "远东":     ("tests/fixtures/documents", "quote_cable_yuandong"),
+    "凯硕新正": ("tests/fixtures/documents", "quote_kaishuo"),
+    "上海绵存": ("tests/fixtures/documents", "quote_miancun"),
+    "泰科龙":   ("tests/fixtures/documents", "quote_taikelong"),
 }
 
 # PDF 渲染全局串行。pypdfium2 不是线程安全的：七路并发渲染实测直接触发原生崩溃
