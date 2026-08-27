@@ -5,18 +5,23 @@
   只加"这个项目现在比价比到哪了"——各品类的当前轮次、已确认供应商数、
   定标基准轮、最近活动。
 
-  D-1（用户 2026-08-27 决策）：新建项目按钮对所有比价角色可见，P3 角色门禁
-  上线后再收成仅管理员——不是"入口一出生就是目标形态"那个更保守的选项。
+  D-1（用户 2026-08-27 决策，F3 收口）：新建项目按钮 F1 落地时对所有比价角色
+  可见，明说了"P3 角色门禁上线后再收成仅管理员"——design/42 P3 落地
+  （POST /api/projects 现在要求管理员），这里同步收口，不是新决定。
 -->
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { PlusOutlined, ProjectOutlined, RightOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { projectApi } from '@/api'
 import type { ProjectsOverviewItem, QuoteRoundStatus } from '@/api/client'
+import { useUserStore } from '@/stores/user'
+import { ROLE_ADMIN } from '@/types/role'
 
 const router = useRouter()
+const userStore = useUserStore()
+const isAdmin = computed(() => userStore.userInfo?.role === ROLE_ADMIN)
 
 const items = ref<ProjectsOverviewItem[]>([])
 const total = ref(0)
@@ -91,7 +96,9 @@ function fmtDate(d: string | null) {
     <div class="entry-view__header">
       <div>
         <h1 class="entry-view__title">招标比价分析</h1>
-        <div class="entry-view__subtitle">选择一个项目进入比价，或新建一个</div>
+        <div class="entry-view__subtitle">
+          {{ isAdmin ? '选择一个项目进入比价，或新建一个' : '选择一个项目进入比价' }}
+        </div>
       </div>
       <a-space>
         <a-input-search
@@ -100,7 +107,8 @@ function fmtDate(d: string | null) {
           style="width:260px"
           @search="() => { query.page = 1; fetchData() }"
         />
-        <a-button type="primary" @click="openCreateModal">
+        <!-- design/42 §8 D1 / design/44 F3：项目创建收口给管理员。 -->
+        <a-button v-if="isAdmin" type="primary" @click="openCreateModal">
           <template #icon><PlusOutlined /></template>
           新建项目
         </a-button>
@@ -108,8 +116,9 @@ function fmtDate(d: string | null) {
     </div>
 
     <a-spin :spinning="loading">
-      <a-empty v-if="!loading && items.length === 0" description="还没有项目">
-        <a-button type="primary" @click="openCreateModal">新建第一个项目</a-button>
+      <a-empty v-if="!loading && items.length === 0"
+               :description="isAdmin ? '还没有项目' : '还没有项目，请联系项目管理员创建'">
+        <a-button v-if="isAdmin" type="primary" @click="openCreateModal">新建第一个项目</a-button>
       </a-empty>
 
       <div v-else class="entry-view__list">

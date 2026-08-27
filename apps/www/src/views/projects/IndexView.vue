@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ProjectOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import { projectApi } from '@/api'
 import type { Project } from '@/api/client'
+import { useUserStore } from '@/stores/user'
+import { ROLE_ADMIN } from '@/types/role'
+
+// docs/design/42 §8 D1 / design/44 F3：项目创建收口给管理员——后端
+// POST /api/projects 已经要求 require_admin，这里同步隐藏按钮，不是
+// 唯一防线（服务端才是），是不让非管理员点了才被 403 拒绝。
+const userStore = useUserStore()
+const isAdmin = computed(() => userStore.userInfo?.role === ROLE_ADMIN)
 
 const data = ref<Project[]>([])
 const total = ref(0)
@@ -149,7 +157,7 @@ onMounted(fetchData)
         <div class="projects-page__subtitle">管理所有项目信息，支持修改名称、补充信息和删除</div>
       </div>
       <div class="flex gap-8">
-        <a-button type="primary" @click="openCreate">
+        <a-button v-if="isAdmin" type="primary" @click="openCreate">
           <template #icon><PlusOutlined /></template>
           新建项目
         </a-button>

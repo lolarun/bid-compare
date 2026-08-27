@@ -26,6 +26,7 @@ class ProjectUpdate(BaseModel):
 
 class ProjectOut(ProjectBase):
     id: int
+    created_by_user_id: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

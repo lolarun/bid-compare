@@ -97,6 +97,9 @@ export interface Project {
   location: string
   status: string
   remark: string
+  // docs/design/42 §8 D1 / design/44 F3：谁建的。存量项目和脚本写路径没有
+  // 这个信息，null 是诚实状态，不是缺陷。
+  created_by_user_id?: number | null
   created_at: string | null
   updated_at: string | null
 }

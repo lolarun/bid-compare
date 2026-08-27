@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
+from apps.api.core.security import require_admin
 from apps.api.models import Project
 from apps.api.schemas import ProjectCreate, ProjectUpdate, ProjectOut
 
@@ -152,8 +153,17 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
-def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
-    proj = Project(**body.model_dump())
+def create_project(
+    body: ProjectCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """docs/design/42 §8 D1 / design/44 F3：项目创建收口给管理员。
+
+    D-1 决策记录：F1 落地时按钮对所有比价角色开放，明说了"P3 上线后再收
+    权限"——这就是那个收权限的时刻，不是新决定。
+    """
+    proj = Project(**body.model_dump(), created_by_user_id=current_user.get("user_id"))
     db.add(proj)
     try:
         db.commit()
