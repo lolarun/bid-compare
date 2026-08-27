@@ -1,131 +1,175 @@
-# MEMPAS 部署指南（阿里云 ECS · 与 pixel-lora 共宿主 · GitHub Actions）
+# MEMPAS Deployment Guide (Alibaba Cloud ECS · co-hosted with pixel-lora · GitHub Actions)
 
-> **状态 — 2026-08-25：已落地并验证通过。** 访问地址
-> **<https://bid.hotcrp.cn/>**（HTTPS，不是原计划的 HTTP-only，见下方"与规划
-> 的三处出入"）。
+> **Status — 2026-08-25: shipped and verified.** Live at
+> **<https://bid.hotcrp.cn/>** (HTTPS, not the originally planned HTTP-only —
+> see "Three deviations from plan" below).
 >
-> 首次成功的部署：GitHub Actions run `32799699509`（2026-08-25 02:03 UTC）。
-> 在此之前该 workflow **连续失败 9 次**（2026-08-18 建立起从未成功过），根因
-> 全部是同一个——仓库的 GitHub Secrets 一个都没配，卡在 ACR 登录的
-> `Username and password required`。**不是代码问题，也不是 ECS 环境问题。**
+> First successful deployment: GitHub Actions run `32799699509`
+> (2026-08-25 02:03 UTC). Before that the workflow **failed 9 times in a
+> row** (never once succeeded since it was set up on 2026-08-18), all for
+> the same root cause — none of the repository's GitHub Secrets were
+> configured, so it stalled at `Username and password required` on ACR
+> login. **Not a code problem, not an ECS environment problem.**
 >
-> 验证结果（2026-08-25，浏览器实测，不是推断）：
+> Verification results (2026-08-25, measured in a real browser, not
+> inferred):
 >
-> | 检查项 | 结果 |
+> | Check | Result |
 > |---|---|
-> | 前端 <https://bid.hotcrp.cn/> | ✅ 登录页正常渲染 |
-> | 后端 <https://bid.hotcrp.cn/api/health> | ✅ `{"status":"ok","service":"mempas","llm_provider":"dashscope_ocr"}` |
-> | 镜像构建推送 ACR | ✅ mempas-api / mempas-www 双双成功 |
-> | SSH 部署（容器重建 + dist 提取 + nginx reload） | ✅ 全部完成 |
+> | Frontend <https://bid.hotcrp.cn/> | ✅ login page renders correctly |
+> | Backend <https://bid.hotcrp.cn/api/health> | ✅ `{"status":"ok","service":"mempas","llm_provider":"dashscope_ocr"}` |
+> | Image build + push to ACR | ✅ mempas-api / mempas-www both succeeded |
+> | SSH deploy (container rebuild + dist extraction + nginx reload) | ✅ all completed |
 >
-> ### 与规划的三处出入（都是实测发现，不是设计变更）
+> ### Three deviations from plan (all discovered by measurement, not design changes)
 >
-> 1. **实际走 HTTPS，不是原计划的 HTTP-only。** 原文说"暂时 HTTP-only、走 80
->    端口、443 留到后续"——实测 **80 端口被阿里云网关拦截**（`curl -I
->    http://bid.hotcrp.cn` 返回 403，响应头 `Server: Beaver`，那是阿里云的拦截
->    网关不是 nginx；直连 `106.14.113.209` 同样 403，说明请求根本没到服务器）。
->    典型的未备案域名 80 端口拦截。**443 反而是通的**，所以正式访问地址是
->    `https://`。§3.4 关于 HTTP-only 的描述已经不成立。
-> 2. **`deploy.sh` 的健康检查会误报失败。** 日志里出现
->    `⚠️ 健康检查未通过，看 docker compose logs backend`，但实测服务完全正常。
->    原因是脚本在容器 `Started` 后只 `sleep 5` 就探测，后端还没起完。**这行用了
->    `|| echo` 不会让部署失败**，所以它是噪声不是故障——但也意味着**真出问题时
->    同样不会让 workflow 变红**，看到这条警告不能当没事，要自己复核。
-> 3. **`ECS_SSH_KEY` 复用 pixel-lora 的部署密钥**：
->    `pixel-lora/infra/ssh/pixora_deploy`（不是 `~/.ssh/id_rsa`）。这把密钥本来
->    就是给 `106.14.113.209` 用的，两个项目共宿主，直接复用。
+> 1. **Actually running on HTTPS, not the originally planned HTTP-only.**
+>    The original plan said "HTTP-only for now, port 80, 443 later" —
+>    measurement showed **port 80 is blocked by the Alibaba Cloud gateway**
+>    (`curl -I http://bid.hotcrp.cn` returns 403 with response header
+>    `Server: Beaver`, which is Alibaba Cloud's blocking gateway, not nginx;
+>    connecting directly to `106.14.113.209` gives the same 403, meaning the
+>    request never reaches the server). This is the typical port-80 block
+>    for a domain without ICP filing. **Port 443 works fine**, so the actual
+>    live address is `https://`. §3.4's description of HTTP-only no longer
+>    holds.
+> 2. **`deploy.sh`'s health check can report a false failure.** The log line
+>    `⚠️ Health check did not pass, check docker compose logs backend` can
+>    appear even though the service is completely healthy. The cause is
+>    that the script only `sleep 5`s after the container reports `Started`
+>    before probing — the backend isn't finished starting yet. **This line
+>    uses `|| echo`, so it never fails the deployment** — it's noise, not a
+>    real failure — but that also means **a genuine failure won't turn the
+>    workflow red either**; seeing this warning is not something you can
+>    treat as "fine," it needs manual follow-up.
+> 3. **`ECS_SSH_KEY` reuses pixel-lora's deploy key**:
+>    `pixel-lora/infra/ssh/pixora_deploy` (not `~/.ssh/id_rsa`). That key
+>    was already provisioned for `106.14.113.209`; the two projects share
+>    the host, so it's reused directly.
 >
-> ### GitHub Secrets（这是唯一的前置条件，缺一不可）
+> ### GitHub Secrets (the one and only prerequisite — all five are required)
 >
-> 在 **bid-compare 仓库自己的** Settings → Secrets 里配。**GitHub Secrets 按
-> 仓库隔离，pixel-lora 配了不等于这边能用**，也无法跨仓库读取——这正是之前
-> 9 次失败的原因。
+> Configure these under **bid-compare's own repository** Settings → Secrets.
+> **GitHub Secrets are isolated per repository** — having them configured on
+> pixel-lora does not make them usable here, and there is no cross-repo
+> read access. This is exactly what caused the 9 earlier failures.
 >
-> | Secret | 值来源 |
+> | Secret | Where the value comes from |
 > |---|---|
-> | `ACR_REGISTRY` | `pixora-acr-registry.cn-shanghai.cr.aliyuncs.com`（与 pixel-lora 同一实例） |
-> | `ACR_USERNAME` | 阿里云容器镜像服务的访问凭证用户名 |
-> | `ACR_PASSWORD` | 同上的密码。**控制台不可查看、只能重置**；重置会让 pixel-lora 的同名 secret 失效，必须同步更新两个仓库 |
+> | `ACR_REGISTRY` | `pixora-acr-registry.cn-shanghai.cr.aliyuncs.com` (same instance as pixel-lora) |
+> | `ACR_USERNAME` | The access-credential username for Alibaba Cloud Container Registry |
+> | `ACR_PASSWORD` | The matching password. **Not viewable in the console, only resettable**; resetting it invalidates pixel-lora's identically-named secret too, so both repos must be updated together |
 > | `ECS_HOST` | `106.14.113.209` |
-> | `ECS_SSH_KEY` | `pixel-lora/infra/ssh/pixora_deploy` 的内容（PEM） |
+> | `ECS_SSH_KEY` | The contents (PEM) of `pixel-lora/infra/ssh/pixora_deploy` |
 >
 > ```bash
 > gh secret set ACR_REGISTRY --repo lolarun/bid-compare --body "pixora-acr-registry.cn-shanghai.cr.aliyuncs.com"
 > gh secret set ECS_HOST     --repo lolarun/bid-compare --body "106.14.113.209"
 > gh secret set ECS_SSH_KEY  --repo lolarun/bid-compare < ../pixel-lora/infra/ssh/pixora_deploy
-> gh secret set ACR_USERNAME --repo lolarun/bid-compare   # 交互粘贴
-> gh secret set ACR_PASSWORD --repo lolarun/bid-compare   # 交互粘贴
-> gh secret list --repo lolarun/bid-compare               # 确认 5 个都在
+> gh secret set ACR_USERNAME --repo lolarun/bid-compare   # paste interactively
+> gh secret set ACR_PASSWORD --repo lolarun/bid-compare   # paste interactively
+> gh secret list --repo lolarun/bid-compare               # confirm all 5 are present
 > ```
 >
-> ### 日常发布
+> ### Routine releases
 >
-> push 到 `main` 自动触发；也可手动：
+> Triggered automatically on push to `main`; can also be run manually:
 >
 > ```bash
 > gh workflow run build-and-deploy --repo lolarun/bid-compare
 > gh run list --repo lolarun/bid-compare --limit 1
 > ```
 >
-> 发布后**自己验证一遍**（因为健康检查会误报，见出入②）：
+> After releasing, **verify it yourself** (the health check can false-report,
+> see deviation ②):
 >
 > ```bash
-> curl -s https://bid.hotcrp.cn/api/health     # 期望 {"status":"ok",...}
+> curl -s https://bid.hotcrp.cn/api/health     # expect {"status":"ok",...}
 > ```
 >
-> ### 服务器上的 `.env`（不进版本库，与 GitHub Secrets 是两回事）
+> ### `.env` on the server (not version-controlled — a separate thing from GitHub Secrets)
 >
-> GitHub Secrets 只管**构建和推镜像**；ECS 上运行时另需两个文件：
+> GitHub Secrets only cover **building and pushing images**; the ECS runtime
+> needs two more files:
 >
-> - `/opt/mempas/.env` — `ACR_REGISTRY` / `TAG`，给 `docker-compose.prod.yml`
->   拼镜像地址（`deploy.sh` 第 25 行 `source .env`）
-> - `/opt/mempas/apps/api/.env` — 后端运行时密钥（`DASHSCOPE_API_KEY`、
->   `BAIDU_UNLIMITED_OCR_*` 等）。**新增可选项 `MIMO_API_KEY`**：配了才启用
->   design/41 的分类筛页，不配则该功能自动关闭、行为与接入前一致。
+> - `/opt/mempas/.env` — `ACR_REGISTRY` / `TAG`, used by
+>   `docker-compose.prod.yml` to assemble the image reference (`deploy.sh`
+>   line 25, `source .env`)
+> - `/opt/mempas/apps/api/.env` — backend runtime secrets
+>   (`DASHSCOPE_API_KEY`, `BAIDU_UNLIMITED_OCR_*`, etc.). **New optional
+>   entry `MIMO_API_KEY`**: enables design/41's page-classification filter
+>   only when set; unset, that feature stays off with behavior identical to
+>   before it was wired in.
 >
-> 下方一~八节是**旧版单机方案**（独立 ECS `101.37.166.68`，手动
-> `git pull && docker compose up -d --build`）。那台机器已废弃、连不上，
-> 内容仅供历史对照与回滚参考，**不是当前指引**。
+> The appendix below is the **legacy single-machine plan** (a standalone
+> ECS instance at `101.37.166.68`, manual `git pull && docker compose up -d
+> --build`). That machine has been decommissioned and is unreachable; the
+> content is kept for historical reference and rollback context only —
+> **it is not the current instructions.**
 
 
 
-## 目录
+## Table of contents
 
-- [一、迁移背景与决策](#一迁移背景与决策)
-- [二、目标架构](#二目标架构)
-- [三、需要新建/修改的文件](#三需要新建修改的文件)
-- [四、迁移步骤（首次切换）](#四迁移步骤首次切换)
-- [五、日常更新（迁移后）](#五日常更新迁移后)
-- [六、运维（备份/监控/回滚）](#六运维备份监控回滚)
-- [附录：旧版单机方案（已废弃，仅供历史对照）](#附录旧版单机方案已废弃仅供历史对照)
+- [1. Migration background and decisions](#1-migration-background-and-decisions)
+- [2. Target architecture](#2-target-architecture)
+- [3. Files to create/modify](#3-files-to-createmodify)
+- [4. Migration steps (first-time cutover)](#4-migration-steps-first-time-cutover)
+- [5. Routine updates (post-migration)](#5-routine-updates-post-migration)
+- [6. Operations (backup/monitoring/rollback)](#6-operations-backupmonitoringrollback)
+- [Appendix: legacy single-machine plan (deprecated, historical reference only)](#appendix-legacy-single-machine-plan-deprecated-historical-reference-only)
 
 ---
 
-## 一、迁移背景与决策
+## 1. Migration background and decisions
 
-| 项 | 旧方案 | 新方案 |
+| Item | Old plan | New plan |
 |---|---|---|
-| ECS | 独立一台，`101.37.166.68`（**已废弃，连不上，不再维护**） | 复用 pixel-lora 的 `106.14.113.209` |
-| 部署路径 | ECS 上 `/opt/mempas`，`git pull` 后本地 `docker compose up -d --build` | ECS 上 `/opt/mempas`（目录名不变），只 `docker compose pull` + `up -d`，不在 ECS 上跑 build |
-| 镜像仓库 | 无（本地 build，不走镜像仓库） | 复用 pixel-lora 现有的阿里云 ACR 实例，新建命名空间 `bidcom`（不是 pixel-lora 用的 `pixora`，镜像互不混淆） |
-| CI/CD | 无（纯手动 SSH） | GitHub Actions：push main → build → push ACR → SSH 触发 ECS 部署，结构照抄 pixel-lora 的 `deploy.yml` |
-| 反向代理 | bid-compare 自己的 nginx 容器独占 80/443 | **接入 pixel-lora 现有的共享 nginx 容器**，新增一个 server block（bid-compare 不再自带对外监听 80/443 的 nginx 容器，见 §2.2）——这是**唯一**要碰 pixel-lora 仓库的地方，且只做一次，之后的每次发布都不再涉及 |
-| 数据库 | SQLite，卷挂载在 `/opt/mempas/data/` | 不变——两个项目都不用 MySQL/RDS，SQLite 数据完全独立于 pixel-lora，物理上same host 但不共享任何数据 |
+| ECS | A standalone instance, `101.37.166.68` (**deprecated, unreachable, no longer maintained**) | Reuse pixel-lora's `106.14.113.209` |
+| Deploy path | `/opt/mempas` on the ECS; `git pull` then local `docker compose up -d --build` | `/opt/mempas` on the ECS (directory name unchanged), just `docker compose pull` + `up -d` — no build runs on the ECS |
+| Image registry | None (local build, no registry involved) | Reuse pixel-lora's existing Alibaba Cloud ACR instance, new namespace `bidcom` (not pixel-lora's `pixora`, so images never mix) |
+| CI/CD | None (pure manual SSH) | GitHub Actions: push to main → build → push to ACR → SSH-triggered ECS deploy, structure copied from pixel-lora's `deploy.yml` |
+| Reverse proxy | bid-compare's own nginx container solely owns 80/443 | **Plugs into pixel-lora's existing shared nginx container**, adding one server block (bid-compare no longer ships its own nginx container listening on 80/443 externally, see §2.2) — this is the **only** place that touches the pixel-lora repository, and only once; every release after that doesn't touch it again |
+| Database | SQLite, volume-mounted at `/opt/mempas/data/` | Unchanged — neither project uses MySQL/RDS; SQLite data stays fully independent of pixel-lora's, physically on the same host but sharing no data |
 
-**为什么复用 ACR 实例而不是新开一个**：pixel-lora 已经在付费维护一个 ACR 实例，多开一个命名空间几乎零边际成本；新开实例则是重复的固定月费。风险在于两个项目的镜像清理策略/配额要共享，§3.3 有对应处理。
+**Why reuse the ACR instance instead of opening a new one**: pixel-lora is
+already paying to maintain an ACR instance; adding one more namespace is
+near-zero marginal cost, whereas a new instance would be a duplicate fixed
+monthly fee. The risk is that the two projects' image cleanup
+policy/quota is shared — §3.3 handles that.
 
-**为什么复用同一台 ECS 而不是新开**：bid-compare 是内部工具（预估 ≤50 在线用户、5-10 OCR/分钟），资源需求远小于当初为它单独开的 4C8G。pixel-lora 的 ECS 是 8C16G，且推理/训练都在 PAI-EAS/PAI-DLC 上跑，ECS 本身只扛 nginx+API+两个轻量 worker，理论上有富余——**但这是理论评估，迁移前必须实机核实**（见 §4 步骤 1），不能假设。
+**Why reuse the same ECS instead of a new one**: bid-compare is an internal
+tool (an estimated ≤50 online users, 5–10 OCR calls/minute), needing far
+less than the 4C8G originally provisioned for it standalone. pixel-lora's
+ECS is 8C16G, and inference/training all run on PAI-EAS/PAI-DLC, so the ECS
+itself only carries nginx+API+two lightweight workers — in theory there's
+headroom. **But that's a theoretical estimate that had to be confirmed on
+the real machine before migrating** (see §4 step 1), not assumed.
 
-**两个项目独立到什么程度**（2026-08-18 确认）：镜像仓库（ACR 实例）和物理宿主机（ECS）共用，其余全部独立——各自的 GitHub 仓库、各自的 Actions workflow、各自的 `docker compose` 项目（`/opt/pixora` vs `/opt/mempas`）、各自的数据库，互不感知对方的部署节奏。**唯一的例外、也是唯一需要碰 pixel-lora 仓库的地方**：因为宿主机 80/443 端口只能被一个进程监听，现在是 pixel-lora 的 nginx 容器占着，`bid.hotcrp.cn` 要走标准 80 端口就必须在这个共享 nginx 里加一条路由规则。这是**一次性的最小改动**（§3.4 给的那个 server block，加一次就够）——加完之后，bid-compare 之后每次发布（改代码、加功能）都只触发自己仓库的 GitHub Actions，不会再产生任何新的 pixel-lora 仓库改动。
+**How independent the two projects actually are** (confirmed 2026-08-18):
+the image registry (ACR instance) and the physical host (ECS) are shared;
+everything else is fully independent — separate GitHub repositories,
+separate Actions workflows, separate `docker compose` projects
+(`/opt/pixora` vs `/opt/mempas`), separate databases, with neither aware of
+the other's release cadence. **The one exception, and the only place that
+needs to touch the pixel-lora repository**: since the host's 80/443 ports
+can only be listened on by one process, and pixel-lora's nginx container
+currently holds them, getting `bid.hotcrp.cn` onto the standard port 80
+requires adding one routing rule inside that shared nginx. This is a
+**one-time, minimal change** (the server block given in §3.4, added once
+and done) — after that, every subsequent bid-compare release (code change,
+new feature) only triggers its own repo's GitHub Actions and never touches
+the pixel-lora repository again.
 
-## 二、目标架构
+## 2. Target architecture
 
-### 2.1 整体拓扑
+### 2.1 Overall topology
 
 ```
-                     ECS 106.14.113.209（8C16G，与 pixel-lora 共宿主）
+                     ECS 106.14.113.209 (8C16G, co-hosted with pixel-lora)
                      ┌──────────────────────────────────────────────┐
-公网 ── 80/443 ──►   │  共享 nginx（pixel-lora 现有容器，本次只加配置）│
+Internet ── 80/443 ─►│  Shared nginx (pixel-lora's existing container,│
+                     │  this round only adds configuration)          │
                      │    ├─ server: aiguozhanbijin.com.cn      → pixora-www dist
                      │    ├─ server: mng.aiguozhanbijin.com.cn  → pixora-mng dist
                      │    ├─ server: api.aiguozhanbijin.com.cn  → pixora-api:8000
@@ -138,40 +182,90 @@
                      │              /opt/mempas/docker-compose.prod.yml
                      │              ┌──────────────────────────────┐
                      │              │  backend  (mempas-api)       │
-                     │              │  发布端口 172.18.0.1:8100→8000│
-                     │              │  卷: /opt/mempas/data         │
+                     │              │  publishes 172.18.0.1:8100→8000│
+                     │              │  volume: /opt/mempas/data     │
                      │              └──────────────────────────────┘
                      └──────────────────────────────────────────────┘
 ```
 
-**关键设计决策（2026-08-18 已用真实 ECS 数据核实，不再是推测）**：实测 pixel-lora 的共享 nginx 容器（真实名 `infra-nginx-1`，不是之前猜的 `pixora-nginx-1`——compose 项目名取自目录名 `infra/`）跑在标准 bridge 网络 `infra_default`，网关 `172.18.0.1`（`docker network inspect infra_default` 实测确认，非固定值，见下方"已知脆弱点"）。容器内的 `127.0.0.1` 指向容器自己，不是宿主机——一开始设想的"绑 127.0.0.1、靠回环互通"这条路**走不通**，已实测排除。
+**Key design decision (confirmed 2026-08-18 with real ECS data, no longer a
+guess)**: measurement showed pixel-lora's shared nginx container (real name
+`infra-nginx-1`, not the earlier guess `pixora-nginx-1` — the compose
+project name comes from the directory name `infra/`) runs on the standard
+bridge network `infra_default`, gateway `172.18.0.1` (confirmed via
+`docker network inspect infra_default`; not a fixed value, see "known
+fragility" below). `127.0.0.1` inside a container points at the container
+itself, not the host — the initially imagined "bind to 127.0.0.1, talk over
+the loopback" route **does not work**, and has been ruled out by testing.
 
-改为：bid-compare 的 backend 容器**绑定 `172.18.0.1:8100`**（docker bridge 网关地址，不是 `0.0.0.0`）。选它而不是 `0.0.0.0:8100` 的原因：ECS 上的 ufw 只放行了 22/80/443/2222（`ufw status` 实测确认），但 Docker 自己的转发规则（`DOCKER-FORWARD`/`DOCKER-USER` 链）默认不受 ufw INPUT 链约束，这是一个众所周知的 docker+ufw 坑——`0.0.0.0:8100` 有没有被真正挡在公网外**不能光看 ufw 的输出就下结论**。绑定到网关 IP 而不是 `0.0.0.0`，直接从监听地址层面排除了公网可达的可能，不依赖 ufw/iptables 规则对不对——更省心也更保险。
+Instead: bid-compare's backend container **binds to `172.18.0.1:8100`**
+(the docker bridge gateway address, not `0.0.0.0`). Why that instead of
+`0.0.0.0:8100`: the ECS's ufw only allows 22/80/443/2222 (confirmed via
+`ufw status`), but Docker's own forwarding rules (the `DOCKER-FORWARD`/
+`DOCKER-USER` chains) are, by default, not subject to ufw's INPUT chain —
+a well-known docker+ufw gotcha. Whether `0.0.0.0:8100` is actually blocked
+from the public internet **cannot be concluded from ufw's output alone**.
+Binding to the gateway IP instead of `0.0.0.0` rules out public
+reachability at the listen-address level itself, independent of whether
+the ufw/iptables rules happen to be correct — simpler and safer.
 
-跟"把 mempas 容器接进 pixora 的 docker network"比：绑网关 IP 不需要 bid-compare 的 compose 文件知道 pixel-lora 网络的名字，耦合更低；**已知脆弱点**：如果 pixel-lora 哪天完整 `docker compose down`（不只是 `up -d`）重建了 `infra_default` 网络，网关 IP 理论上可能变（实践中，宿主机上只有这一个自定义网络、没有其他网络抢网段，几乎总是分到同一个网段，但不是 100% 保证）。一旦真的变了，症状是 bid.hotcrp.cn 的 `/api/` 502，改 nginx.conf 里那一行 IP 就好，影响面很小、好排查——比绑定 `0.0.0.0` 赌 ufw/iptables 配置正确、或者把两个项目的 docker network 耦合在一起，风险都更低。
+Compared with "join the mempas container to pixora's docker network":
+binding to the gateway IP means bid-compare's compose file never needs to
+know pixel-lora's network name, which is lower coupling. **Known
+fragility**: if pixel-lora ever does a full `docker compose down` (not just
+`up -d`) that rebuilds the `infra_default` network, the gateway IP could in
+theory change (in practice, this is the only custom network on the host and
+nothing else contends for the subnet, so it almost always lands on the same
+one — but that's not a 100% guarantee). If it does change, the symptom is
+`bid.hotcrp.cn`'s `/api/` returning 502; fixing it is a one-line IP change
+in nginx.conf — small blast radius, easy to diagnose — a better trade-off
+than betting on ufw/iptables being configured correctly for `0.0.0.0`, or
+coupling the two projects' docker networks together.
 
-### 2.2 为什么 bid-compare 不能保留自己的 nginx 容器
+### 2.2 Why bid-compare can't keep its own nginx container
 
-`docker-compose.yml`（独立单机部署方案）里 frontend 服务发布 `80:80`，这在**独占一台 ECS**时没问题；共宿主后 80/443 已经被 pixel-lora 的 nginx 占用，两个 nginx 容器不能同时监听同一宿主端口。
+`docker-compose.yml` (the standalone single-machine plan) publishes the
+frontend service on `80:80`, which is fine when **owning an ECS
+exclusively**; once co-hosted, 80/443 are already held by pixel-lora's
+nginx, and two nginx containers can't both listen on the same host port.
 
-方案：仿照 pixel-lora 的 `www.Dockerfile`/`mng.Dockerfile` 模式——前端镜像只做"builder"，`CMD` 把 `dist/` 拷到挂载的 `/out`（宿主机目录），不再自带 nginx 运行时；静态文件由**共享 nginx** 读取。
+The approach: mirror pixel-lora's `www.Dockerfile`/`mng.Dockerfile`
+pattern — the frontend image is only a "builder"; its `CMD` copies `dist/`
+into a mounted `/out` (a host directory), and it no longer ships an nginx
+runtime of its own. Static files are served by the **shared nginx**.
 
-**2026-08-20 决策**：不单独维护一个 `Dockerfile.builder` 文件——直接改 `apps/www/Dockerfile` 本身，把原来的"Stage 2：nginx 运行时"注释掉（不是删掉），默认产物就是 builder-only 镜像。哪天 MEMPAS 脱离共宿主、重新独占一台 ECS，取消注释即可恢复。**代价**：这次改动之后 `docker-compose.yml`（独立单机方案，见附录）暂时用不了——它期望这个 Dockerfile 产出常驻监听 80 的 nginx 容器，现在默认产出的是构建完就退出的一次性 builder，两者不兼容。真要用回独立单机方案时，记得先取消注释 Stage 2。
+**Decision on 2026-08-20**: rather than maintaining a separate
+`Dockerfile.builder` file, `apps/www/Dockerfile` itself was modified — the
+former "Stage 2: nginx runtime" is commented out (not deleted), so the
+default build product is now a builder-only image. Whenever MEMPAS leaves
+the co-hosted setup and gets its own ECS again, uncommenting restores the
+old behavior. **Cost**: after this change, `docker-compose.yml` (the
+standalone plan, see appendix) **no longer works** — it expects this
+Dockerfile to produce a container that stays up listening on port 80, but
+the default product is now a one-shot builder that exits once the build is
+done; the two are incompatible. Switching back to the standalone plan
+requires uncommenting Stage 2 first.
 
-### 2.3 命名空间与镜像
+### 2.3 Namespace and images
 
-| bid-compare 镜像 | ACR 路径 |
+| bid-compare image | ACR path |
 |---|---|
-| 后端 | `<ACR_REGISTRY>/bidcom/mempas-api:latest` / `:<sha>` |
-| 前端（builder，产出 dist） | `<ACR_REGISTRY>/bidcom/mempas-www:latest` / `:<sha>` |
+| Backend | `<ACR_REGISTRY>/bidcom/mempas-api:latest` / `:<sha>` |
+| Frontend (builder, produces dist) | `<ACR_REGISTRY>/bidcom/mempas-www:latest` / `:<sha>` |
 
-`<ACR_REGISTRY>` 复用 pixel-lora 用的同一个实例地址（VPC 内网域名版本用于 ECS 拉镜像，公网版本用于 GitHub Actions 推镜像——具体两个地址值需要从 pixel-lora 的 GitHub Secrets `ACR_REGISTRY` 里取，我这边看不到实际值，只看到 workflow 里怎么引用它）。
+`<ACR_REGISTRY>` reuses the same instance address pixel-lora uses (a VPC
+internal-domain version is used by the ECS to pull images, a public
+version by GitHub Actions to push them — the actual values for both need
+to be taken from pixel-lora's GitHub Secret `ACR_REGISTRY`; this side can't
+see the actual value, only how the workflow references it).
 
-## 三、需要新建/修改的文件
+## 3. Files to create/modify
 
-### 3.1 `.github/workflows/deploy.yml`（新建，bid-compare 仓库）
+### 3.1 `.github/workflows/deploy.yml` (new, in the bid-compare repository)
 
-结构照抄 pixel-lora 的 `deploy.yml`，去掉它的 5 镜像 path-filter 矩阵（bid-compare 只有 2 个镜像，没必要那么复杂），简化成固定两镜像：
+Structure copied from pixel-lora's `deploy.yml`, with its 5-image
+path-filter matrix removed (bid-compare only has 2 images, no need for
+that complexity) — simplified to a fixed two-image build:
 
 ```yaml
 name: build-and-deploy
@@ -195,7 +289,7 @@ jobs:
           - image: mempas-api
             dockerfile: apps/api/Dockerfile
           - image: mempas-www
-            dockerfile: apps/www/Dockerfile   # Stage 2 已注释掉，默认产出 builder-only 镜像，见 §2.2
+            dockerfile: apps/www/Dockerfile   # Stage 2 commented out, default product is a builder-only image, see §2.2
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -231,18 +325,25 @@ jobs:
             bash scripts/deploy.sh
 ```
 
-**需要的 GitHub Secrets**（bid-compare 仓库自己的 Settings → Secrets，不是复用 pixel-lora 仓库的 secrets——两个仓库分开配，值可以相同）：
+**Required GitHub Secrets** (in bid-compare's own repository Settings →
+Secrets — not reused from pixel-lora's repository secrets; the two repos
+are configured separately, even though the values can be identical):
 
-| Secret | 说明 | 是否可直接复用 pixel-lora 的值 |
+| Secret | Description | Can it be copied directly from pixel-lora's value? |
 |---|---|---|
-| `ACR_REGISTRY` | 同一个 ACR 实例地址 | ✅ 直接抄 |
-| `ACR_USERNAME` / `ACR_PASSWORD` | ACR 访问凭证 | ✅ 直接抄（凭证是实例级别，命名空间级 RBAC 如果开了要单独确认 `bidcom` 命名空间有没有推送权限） |
+| `ACR_REGISTRY` | Same ACR instance address | ✅ copy directly |
+| `ACR_USERNAME` / `ACR_PASSWORD` | ACR access credentials | ✅ copy directly (the credential is instance-level; if namespace-level RBAC is enabled, separately confirm the `bidcom` namespace has push permission) |
 | `ECS_HOST` | `106.14.113.209` | ✅ |
-| `ECS_SSH_KEY` | SSH 私钥 | ⚠️ 可以复用 pixel-lora 的 `infra/ssh/pixora_deploy`，也可以新开一把专属 bid-compare 的 deploy key（更小权限面，推荐但非必须） |
+| `ECS_SSH_KEY` | SSH private key | ⚠️ can reuse pixel-lora's `infra/ssh/pixora_deploy`, or a dedicated bid-compare deploy key can be issued (smaller permission surface, recommended but not required) |
 
-### 3.2 `apps/www/Dockerfile`（修改，不新建独立文件）
+### 3.2 `apps/www/Dockerfile` (modified, no separate file created)
 
-2026-08-20 决策：不单独维护一个 `Dockerfile.builder`——直接改现有的 `apps/www/Dockerfile`，把"Stage 2：nginx 运行时"整段注释掉（保留在文件里，不删），默认 `docker build -f apps/www/Dockerfile .` 产出的就是 builder-only 镜像（Stage 1 加了一行 `CMD`，把 `dist/` 拷到挂载的 `/out`）：
+Decision on 2026-08-20: rather than maintaining a separate
+`Dockerfile.builder`, the existing `apps/www/Dockerfile` was modified
+directly — the entire "Stage 2: nginx runtime" section is commented out
+(kept in the file, not deleted), so `docker build -f apps/www/Dockerfile .`
+now produces a builder-only image by default (Stage 1 gained one `CMD`
+line that copies `dist/` into the mounted `/out`):
 
 ```dockerfile
 FROM node:20-alpine AS build
@@ -254,7 +355,7 @@ COPY apps/www/ ./
 RUN npm run build
 CMD ["sh", "-c", "rm -rf /out/* && cp -r /app/dist/. /out/ && echo 'mempas-www dist copied to /out'"]
 
-# ─── Stage 2: nginx runtime（已注释，独立单机部署时取消注释用）───────────
+# ─── Stage 2: nginx runtime (commented out; uncomment for standalone single-machine deploys) ───
 # FROM nginx:1.27-alpine AS runtime
 # COPY --from=build /app/dist /usr/share/nginx/html
 # COPY apps/www/nginx.conf /etc/nginx/conf.d/default.conf
@@ -263,18 +364,26 @@ CMD ["sh", "-c", "rm -rf /out/* && cp -r /app/dist/. /out/ && echo 'mempas-www d
 # EXPOSE 80
 ```
 
-**代价**（§2.2 已提过一次）：`docker-compose.yml`（独立单机部署方案，见附录）现在**用不了**——它期望这个文件产出常驻监听 80 的 nginx 容器，现在默认产出的是构建完就退出的 builder。真要切回独立单机方案，先取消注释 Stage 2。
+**Cost** (already mentioned once in §2.2): `docker-compose.yml` (the
+standalone single-machine plan, see appendix) **no longer works** — it
+expects this file to produce a container that stays up listening on port
+80; the default product now is a one-shot builder that exits once the
+build is done. Switching back to the standalone plan requires uncommenting
+Stage 2 first.
 
-### 3.3 `docker-compose.prod.yml`（已建成，bid-compare 仓库根目录）
+### 3.3 `docker-compose.prod.yml` (already built, in the bid-compare repository root)
 
-> 下面是**首次编写时**的版本，用来说明设计意图；实际文件后来加了
-> `reservations` 资源预留、注释也更新过。跟 §4 步骤 6 一样，**出入以仓库里
-> 的 `docker-compose.prod.yml` 本身为准**，这里不是权威副本。
+> What follows is the version from when it was **first written**, kept to
+> explain the design intent; the actual file has since gained a
+> `reservations` resource reservation and updated comments. As with §4
+> step 6, **the actual `docker-compose.prod.yml` in the repository is
+> authoritative when it differs from this** — this is not a canonical copy.
 
 ```yaml
-# 拉镜像版，不在 ECS 上 build——配合 GitHub Actions 产出的镜像使用。
-# 跟现有 docker-compose.yml（本地 build 版）并存，互不影响；`scripts/deploy.sh`
-# （§4 新建）用这个文件。
+# Pulls a pre-built image rather than building on the ECS — pairs with the
+# image GitHub Actions produces. Coexists with the existing docker-compose.yml
+# (local-build version), neither interferes with the other; scripts/deploy.sh
+# (created in §4) uses this file.
 services:
   backend:
     image: ${ACR_REGISTRY}/bidcom/mempas-api:${TAG:-latest}
@@ -289,10 +398,12 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      # 绑 pixel-lora 共享 nginx 所在 bridge 网络的网关地址——不是 0.0.0.0，
-      # 不依赖 ufw/iptables 配置对不对，从监听地址层面就排除了公网可达
-      # （实测值见 §2.1；如果 172.18.0.1 不再是 infra_default 的网关，
-      # `docker network inspect infra_default` 重新核实后改这里）。
+      # Bind to the gateway address of the bridge network pixel-lora's shared
+      # nginx lives on — not 0.0.0.0. This rules out public reachability at the
+      # listen-address level itself, independent of whether ufw/iptables rules
+      # are correct (measured value, see §2.1; if 172.18.0.1 is no longer
+      # infra_default's gateway, re-confirm with
+      # `docker network inspect infra_default` and update this).
       - "172.18.0.1:8100:8000"
     deploy:
       resources:
@@ -301,41 +412,55 @@ services:
           memory: 2.5G
 ```
 
-不再需要 `frontend` 服务——静态文件由 `scripts/deploy.sh`（§4）用一次性容器提取到共享 nginx 的挂载目录，不是常驻服务。
+The `frontend` service is no longer needed — static files are extracted by
+`scripts/deploy.sh` (§4) into the shared nginx's mounted directory using a
+one-shot container, not a long-running service.
 
-### 3.4 访问域名 —— `bid.hotcrp.cn`，实际走 HTTPS（本节原文已过时）
+### 3.4 Access domain — `bid.hotcrp.cn`, actually running on HTTPS (the original text of this section is stale)
 
-> **2026-08-25 订正：本节下面写的"暂时不配 SSL、走 80 端口 HTTP"已经不成立。**
-> 实测 80 端口被阿里云网关拦截（403 + `Server: Beaver`，直连 IP 同样如此，
-> 请求根本到不了服务器），而 **443 是通的**。线上正式地址是
-> **<https://bid.hotcrp.cn/>**。本节余下内容保留作历史对照，配置时以顶部
-> 状态横幅为准。
+> **Corrected 2026-08-25: the "SSL not configured for now, running on port
+> 80 HTTP" statement below no longer holds.** Measurement showed port 80 is
+> blocked by the Alibaba Cloud gateway (403 + `Server: Beaver`; connecting
+> directly to the IP gives the same result, meaning the request never
+> reaches the server), while **443 works fine**. The live production
+> address is **<https://bid.hotcrp.cn/>**. The rest of this section is kept
+> for historical reference; treat the status banner at the top of this
+> document as authoritative when configuring anything.
 
-### 3.4（原文，已过时）访问域名 —— 已定：`bid.hotcrp.cn`，暂 HTTP-only
+### 3.4 (original text, now stale) Access domain — decided: `bid.hotcrp.cn`, HTTP-only for now
 
-2026-08-18 确认：域名用 `bid.hotcrp.cn`，**暂时不配 SSL，走 80 端口 HTTP**（不是
-`.com.cn`，所以不是 pixel-lora `aiguozhanbijin.com.cn` 的子域名，是完全独立的
-域名——DNS 解析、ICP 备案要单独核实，不能借用 pixel-lora 那边已备案的身份）。
+Confirmed 2026-08-18: the domain is `bid.hotcrp.cn`, **no SSL for now, running
+on port 80 HTTP** (not `.com.cn`, so this is not a subdomain of pixel-lora's
+`aiguozhanbijin.com.cn` — it's a fully independent domain; DNS resolution
+and ICP filing need to be confirmed separately, and cannot borrow
+pixel-lora's already-filed identity).
 
-**遗留待办**（不阻塞当前部署，记在这里避免遗忘）：
-- 确认 `bid.hotcrp.cn` 的 DNS A 记录已指向 `106.14.113.209`（迁移前必须做，
-  否则域名访问不通）。
-- 确认这个域名走中国大陆 ECS 公网访问是否需要单独 ICP 备案（`docs/contract/
-  ICP备案材料及流程.md` 有材料清单，走的是新域名流程，不是子域名共享备案）。
-  HTTP-only 不代表不需要备案——备案要求跟是否有 SSL 无关，是"域名解析到大陆
-  服务器 + 公网可访问"就要备案。
-- 后续补 SSL：证书申请 + nginx 加 443 server block + `location / { return 301
-  https://$host$request_uri; }` 跳转，届时参照 pixel-lora `nginx.conf` 里
-  桌面端 server block 的写法（`docs/DEPLOY.md` 编写时已读过该文件）。
+**Outstanding items** (not blocking the current deployment, recorded here
+so they aren't forgotten):
+- Confirm `bid.hotcrp.cn`'s DNS A record points at `106.14.113.209` (must
+  be done before migrating, otherwise the domain won't resolve to
+  anything).
+- Confirm whether this domain, accessed over the public internet via a
+  mainland-China ECS, needs its own ICP filing (`docs/contract/ICP备案材料
+  及流程.md` has the materials checklist — this follows the new-domain
+  process, not the shared-subdomain-filing process). HTTP-only does not
+  mean filing isn't required — the filing requirement has nothing to do
+  with whether SSL is configured; it's triggered by "domain resolves to a
+  mainland server + is publicly reachable."
+- Add SSL later: certificate request + adding a 443 server block to nginx +
+  `location / { return 301 https://$host$request_uri; }` redirect, following
+  the pattern used in pixel-lora's `nginx.conf` desktop server block at
+  that time (already read when this document was originally written).
 
-对应的共享 nginx server block（§4 步骤 4 落地时用）：
+The corresponding shared-nginx server block (for use when §4 step 4 is
+carried out):
 
 ```nginx
 server {
     listen 80;
     server_name bid.hotcrp.cn;
 
-    client_max_body_size 100M;   # OCR 上传（现有 apps/www/nginx.conf 同款限制）
+    client_max_body_size 100M;   # OCR uploads (same limit as the existing apps/www/nginx.conf)
 
     location /api/ {
         proxy_pass         http://172.18.0.1:8100/api/;
@@ -356,20 +481,51 @@ server {
 }
 ```
 
-## 四、迁移步骤（首次切换）
+## 4. Migration steps (first-time cutover)
 
-> 步骤 1-2 已用真实 ECS 数据核实完成（结果已写进 §2.1，下面标 ✅）。
+> Steps 1–2 have been confirmed with real ECS data (results already written
+> into §2.1, marked ✅ below).
 
-1. ✅ **ECS 资源余量**：实测 8 vCPU / 14GB 可用，现有 5 个 pixel-lora 容器合计 CPU <1%、内存约 1GB，加 bid-compare 预估的 1.5C/2.5G 后完全在余量内。磁盘 118G 用 73G，41G 可用。
-2. ✅ **网络可达性**：已实测 §2.1 的结论——`infra_default` 网关 `172.18.0.1`，方案已定为绑网关 IP（不是回环地址方案，那个已被证实走不通）。
-3. **DNS**：确认 `bid.hotcrp.cn` 的 A 记录指向 `106.14.113.209`（§3.4 遗留待办第一条）——**这一步需要你在域名服务商那边操作，我这边看不到 DNS 控制台**。
-4. **【一次性】在 pixel-lora 仓库**新增/修改（这是唯一需要碰对方仓库的地方，见 §1"两个项目独立到什么程度"；改一次之后，bid-compare 之后所有发布都不会再触发这个仓库的任何改动）：
-   - `infra/nginx/nginx.conf`：新增 §3.4 给出的 `bid.hotcrp.cn` server block（`proxy_pass http://172.18.0.1:8100/api/;`，已用实测网关 IP，不用再改）。需要在 `docker-compose.prod.yml` 的 nginx 服务 `volumes` 里加一行 `./nginx/html/mempas:/usr/share/nginx/html/mempas:ro` 挂载。
-   - `scripts/deploy.sh`：加一段跟 www/mng/h5 一样的"pull mempas-www builder 镜像 → 提取 dist → nginx reload"逻辑——但这段其实应该放在 **bid-compare 自己的** `scripts/deploy.sh`（§4 步骤 6 新建）里更合理，因为 mempas 的发布节奏跟 pixora 的发布节奏是独立的，不应该耦合进 pixora 的部署脚本触发。**建议**：bid-compare 自己的 deploy.sh 提取 dist 到 `/opt/pixora/infra/nginx/html/mempas`（写到 pixora 的目录里）+ `docker exec` pixora 的 nginx 容器 reload——这样两边部署互相独立触发，只共享"nginx 读哪个目录"这一份配置。
-5. 在 GitHub 仓库 Settings 配置 §3.1 表格里的 4 个 Secrets。
-6. **`scripts/deploy.sh`**（bid-compare 仓库；已建成并跑通，下面是当前实际
-   内容，2026-08-27 核对过一致——**这段代码块会漂移，出入以仓库里的文件
-   本身为准，别改这里当权威**）：
+1. ✅ **ECS resource headroom**: measured 8 vCPU / 14GB available; the 5
+   existing pixel-lora containers together use <1% CPU and about 1GB
+   memory, so adding bid-compare's estimated 1.5C/2.5G stays comfortably
+   within headroom. Disk: 118G total, 73G used, 41G available.
+2. ✅ **Network reachability**: the §2.1 conclusion has been confirmed by
+   measurement — `infra_default`'s gateway is `172.18.0.1`; the chosen
+   approach is binding to the gateway IP (not the loopback-address
+   approach, which has been proven not to work).
+3. **DNS**: confirm `bid.hotcrp.cn`'s A record points at `106.14.113.209`
+   (§3.4's first outstanding item) — **this step has to be done at the
+   domain registrar; there's no visibility into the DNS console from
+   here.**
+4. **[One-time] In the pixel-lora repository**, add/modify (this is the
+   only place that touches that repository, see §1 "How independent the
+   two projects actually are"; after this one change, every subsequent
+   bid-compare release never touches the pixel-lora repository again):
+   - `infra/nginx/nginx.conf`: add the `bid.hotcrp.cn` server block given
+     in §3.4 (`proxy_pass http://172.18.0.1:8100/api/;`, already using the
+     measured gateway IP, no further changes needed). Also needs one line
+     added to the nginx service's `volumes` in `docker-compose.prod.yml`:
+     `./nginx/html/mempas:/usr/share/nginx/html/mempas:ro`.
+   - `scripts/deploy.sh`: add a "pull the mempas-www builder image →
+     extract dist → reload nginx" section, mirroring what's done for
+     www/mng/h5 — though this logic more properly belongs in
+     **bid-compare's own** `scripts/deploy.sh` (created in §4 step 6),
+     since mempas's release cadence is independent of pixora's and
+     shouldn't be coupled into pixora's deploy script trigger.
+     **Recommendation**: bid-compare's own deploy.sh extracts dist into
+     `/opt/pixora/infra/nginx/html/mempas` (writing into pixora's
+     directory) and `docker exec`s pixora's nginx container to reload —
+     that way the two sides' deployments trigger independently of each
+     other, sharing only the one piece of configuration for "which
+     directory nginx reads."
+5. Configure the 4 secrets from the §3.1 table in the GitHub repository's
+   Settings.
+6. **`scripts/deploy.sh`** (bid-compare repository; already built and
+   working — the following is its current actual content, cross-checked
+   for consistency on 2026-08-27 — **this code block will drift; when it
+   differs from the file in the repository, the file is authoritative, not
+   this copy**):
 
    ```bash
    #!/usr/bin/env bash
@@ -380,12 +536,12 @@ server {
    echo "=== pull backend image ==="
    docker compose -f docker-compose.prod.yml pull backend
 
-   echo "=== restart backend（含自动迁移，见下方注释）==="
+   echo "=== restart backend (includes automatic migration, see note below) ==="
    docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
    echo "=== wait api healthy ==="
    sleep 5
-   curl -sf http://172.18.0.1:8100/api/health || echo "⚠️  健康检查未通过，看 docker compose logs backend"
+   curl -sf http://172.18.0.1:8100/api/health || echo "⚠️  Health check did not pass, check docker compose logs backend"
 
    echo "=== pull + extract frontend dist ==="
    docker pull "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
@@ -393,100 +549,123 @@ server {
    docker run --rm -v /opt/pixora/infra/nginx/html/mempas:/out \
      "${ACR_REGISTRY}/bidcom/mempas-www:${TAG:-latest}"
 
-   echo "=== reload shared nginx（pixel-lora 的 infra-nginx-1 容器）==="
+   echo "=== reload shared nginx (pixel-lora's infra-nginx-1 container) ==="
    docker exec infra-nginx-1 nginx -s reload
 
    echo "=== prune dangling images ==="
    docker image prune -f
    ```
 
-   **没有单独一步 `alembic upgrade head`——这是有意的，不是漏了。** MEMPAS
-   的迁移是 `apps/api/core/database.py::init_db()` 在 FastAPI 启动时自动跑的
-   （程序化配置 Alembic，不依赖 `alembic.ini`），`docker compose up -d`
-   重启 backend 时就顺带跑完；镜像里也根本没拷 `alembic.ini`，单独跑
-   `alembic upgrade head` 的 CLI 命令会直接报 `FileNotFoundError`。这是
-   MEMPAS 自己的既有设计，跟 pixel-lora 那种"显式一次性迁移"的模式不同，
-   照抄 pixel-lora 的 deploy.sh 结构会跑不通。
+   **There is no separate `alembic upgrade head` step — this is
+   intentional, not an omission.** MEMPAS's migrations run automatically
+   inside `apps/api/core/database.py::init_db()` at FastAPI startup
+   (Alembic is configured programmatically, with no dependency on
+   `alembic.ini`), so they run as a side effect whenever
+   `docker compose up -d` restarts the backend; the image doesn't even
+   copy in `alembic.ini`, so running the `alembic upgrade head` CLI command
+   on its own would fail immediately with `FileNotFoundError`. This is
+   MEMPAS's own existing design, different from pixel-lora's "explicit
+   one-shot migration" pattern — copying pixel-lora's deploy.sh structure
+   here would not work.
 
-   容器名 `infra-nginx-1` 已在 ECS 上用 `docker ps` 核实过，是真实值（compose
-   项目名取自目录 `infra/`，不是仓库名 `pixora`），不是猜测。
-7. **首次手动跑一遍全流程**（不经 GitHub Actions，本地/ECS 上手动执行每一步），确认走通，再让 GitHub Actions 接管。
-8. 全部验证通过后，**退役** `101.37.166.68`（释放实例，若还在计费）。
+   The container name `infra-nginx-1` has been confirmed on the ECS with
+   `docker ps` — it's a real, measured value (the compose project name
+   comes from the directory `infra/`, not the repository name `pixora`),
+   not a guess.
+7. **Run through the entire flow manually once** (not via GitHub Actions —
+   execute every step by hand, locally/on the ECS) to confirm it works
+   before letting GitHub Actions take over.
+8. Once everything is verified, **decommission** `101.37.166.68` (release
+   the instance if it's still being billed).
 
-## 五、日常更新（迁移后）
+## 5. Routine updates (post-migration)
 
-跟 pixel-lora 一样：push 到 `main` 分支即自动构建+部署，不再需要手动 SSH：
+Same as pixel-lora: pushing to the `main` branch automatically builds and
+deploys — no more manual SSH needed:
 
 ```bash
 git push origin main
-# GitHub Actions 自动：build → 推 ACR → SSH 触发 ECS 跑 scripts/deploy.sh
+# GitHub Actions automatically: build → push to ACR → SSH-trigger the ECS to run scripts/deploy.sh
 ```
 
-手动强制重部署（比如只改了 `.env`、代码没变）：GitHub 仓库 Actions 页面手动触发 `workflow_dispatch`，或者直接 SSH 跑 `bash /opt/mempas/scripts/deploy.sh`。
+Manually forcing a redeploy (e.g. only `.env` changed, no code change):
+trigger `workflow_dispatch` manually from the GitHub repository's Actions
+page, or SSH in directly and run `bash /opt/mempas/scripts/deploy.sh`.
 
-## 六、运维（备份/监控/回滚）
+## 6. Operations (backup/monitoring/rollback)
 
-以下沿用旧方案，路径不变（`/opt/mempas/data/`）：
+The following carries over unchanged from the old plan, same paths
+(`/opt/mempas/data/`):
 
-- **备份**：cron `0 2 * * * cd /opt/mempas && cp data/mempas.db data/mempas-$(date +\%F).db.bak`，见附录原文。
-- **监控**：`GET /api/health`、`GET /api/health/queue`，阈值判断不变。
-- **回滚**：
-  - 代码：`git checkout <sha> && bash scripts/deploy.sh`，前提是对应 sha 的镜像还在 ACR 里没被清理——ACR 保留策略需要跟 pixel-lora 那边核对，共用实例意味着清理策略也是共用的，不能自己单独设置。
-  - 数据库：`cp data/mempas-<date>.db.bak data/mempas.db`，跟旧方案不变。
+- **Backup**: cron `0 2 * * * cd /opt/mempas && cp data/mempas.db data/mempas-$(date +\%F).db.bak`, see the appendix original.
+- **Monitoring**: `GET /api/health`, `GET /api/health/queue`, thresholds unchanged.
+- **Rollback**:
+  - Code: `git checkout <sha> && bash scripts/deploy.sh`, provided that
+    sha's image hasn't been cleaned up from ACR yet — the ACR retention
+    policy needs to be cross-checked with pixel-lora, since sharing the
+    instance means sharing the cleanup policy; it can't be set
+    independently for this project alone.
+  - Database: `cp data/mempas-<date>.db.bak data/mempas.db`, unchanged from
+    the old plan.
 
 ---
 
-## 附录：旧版单机方案（已废弃，仅供历史对照）
+## Appendix: legacy single-machine plan (deprecated, historical reference only)
 
-> 以下是 2026-05 版本的原始内容，**101.37.166.68 已废弃不再维护**，仅保留
-> 供历史对照、以及"共享 ECS 方案万一要回退到独立单机"时参考。ECS 选型的
-> 成本数字、SQLite 运维经验（WAL / 备份 / 升级触发点）依然有效，只是"部署
-> 到哪台机器、怎么构建镜像"这两件事已经被上面 §一~六 取代。
+> What follows is the original content from the 2026-05 version.
+> **`101.37.166.68` has been decommissioned and is no longer maintained** —
+> this is kept only for historical reference, and for reference if the
+> shared-ECS plan ever needs to be rolled back to a standalone machine. The
+> ECS sizing cost figures and the SQLite operational experience (WAL /
+> backup / upgrade triggers) are still valid; only "which machine to deploy
+> to" and "how to build the image" have been superseded by §1–6 above.
 
-### 原·零、日常快速更新（已废弃）
+### Original §0. Routine quick update (deprecated)
 
 ```bash
 ssh root@101.37.166.68 "cd /opt/mempas && git pull && docker compose up -d --build"
 ```
 
-### 原·一、ECS 选型（预算优化，数字依然有参考价值）
+### Original §1. ECS sizing (budget optimization — figures still have reference value)
 
-| 用户数 | ECS 规格 | 月成本（华东1，按量/包月） | 备注 |
+| User count | ECS spec | Monthly cost (East China 1, pay-as-you-go/annual) | Notes |
 |---|---|---|---|
-| ≤ 20 在线 / 1-3 OCR·min⁻¹ | `ecs.g7.xlarge` 4 vCPU / 8 GB | ~¥230/月 包年 | 独立部署时的起步规格 |
-| 30-50 在线 / 5-10 OCR·min⁻¹ | `ecs.g7.2xlarge` 8 vCPU / 16 GB | ~¥460/月 包年 | 同时多家上传 OCR 时升级 |
+| ≤ 20 online / 1–3 OCR·min⁻¹ | `ecs.g7.xlarge` 4 vCPU / 8 GB | ~¥230/mo annual | Starting spec for a standalone deployment |
+| 30–50 online / 5–10 OCR·min⁻¹ | `ecs.g7.2xlarge` 8 vCPU / 16 GB | ~¥460/mo annual | Upgrade when multiple suppliers upload OCR simultaneously |
 
-磁盘：50 GB ESSD，¥18/月。带宽：5 Mbps 按量，~¥30/月。
+Disk: 50 GB ESSD, ¥18/month. Bandwidth: 5 Mbps pay-as-you-go, ~¥30/month.
 
-### 原·三、目录结构（运行时，共宿主后依然适用）
+### Original §3. Directory structure (runtime — still applicable after co-hosting)
 
 ```
 /opt/mempas/
-├── apps/api/.env           ← 密钥（gitignored，必须手动 chmod 600）
-├── data/                   ← 持久卷（绑定到 backend 容器 /app/data）
-│   ├── mempas.db           ← SQLite 主库
+├── apps/api/.env           ← secrets (gitignored, must be manually chmod 600)
+├── data/                   ← persistent volume (bound to the backend container's /app/data)
+│   ├── mempas.db           ← SQLite main database
 │   ├── mempas.db-wal       ← SQLite WAL
-│   └── uploads/2026XXXX/   ← OCR 上传文件（按日期分目录）
+│   └── uploads/2026XXXX/   ← OCR upload files (organized by date)
 └── docker-compose.yml / docker-compose.prod.yml
 ```
 
-**关键**：`data/` 永远不要 commit，永远要备份。
+**Critical**: never commit `data/`, always back it up.
 
-### 原·六、容量与升级路径（判断标准依然适用）
+### Original §6. Capacity and upgrade path (criteria still applicable)
 
-监控 `GET /api/health/queue`：
+Monitor `GET /api/health/queue`:
 
-| 现象 | 处理 |
+| Symptom | Action |
 |---|---|
-| `queue_depth = 0` 长期 | 一切正常 |
-| `queue_depth = 1-3` 偶发 | 正常波动 |
-| `queue_depth > max_workers` 持续 5+ 分钟 | 升级方案（加 arq + Redis，同 ECS） |
-| backend 容器 CPU > 70% 持续 | 找 pixel-lora 商量 ECS 整体升级规格，不要单独升 bid-compare 这部分 |
+| `queue_depth = 0` sustained | everything normal |
+| `queue_depth = 1–3` occasional | normal fluctuation |
+| `queue_depth > max_workers` sustained for 5+ minutes | upgrade path (add arq + Redis, same ECS) |
+| backend container CPU > 70% sustained | discuss an overall ECS spec upgrade with pixel-lora, don't upgrade just bid-compare's slice alone |
 
-### 原·八、常见问题（不变）
+### Original §8. Common issues (unchanged)
 
-**Q: `llm_provider` 显示 `mock`？**
-A: API key 未加载。检查 `apps/api/.env` 是否存在且包含 `DASHSCOPE_API_KEY=sk-xxx`。
+**Q: `llm_provider` shows `mock`?**
+A: The API key didn't load. Check that `apps/api/.env` exists and contains `DASHSCOPE_API_KEY=sk-xxx`.
 
-**Q: SQLite 报 `database is locked`？**
-A: WAL 已开（`PRAGMA journal_mode=WAL`）。如果还出现，多半是有外部进程在写 DB（备份脚本？），或者真到 SQLite 的写并发瓶颈了。
+**Q: SQLite reports `database is locked`?**
+A: WAL is already on (`PRAGMA journal_mode=WAL`). If it still happens, most
+likely some external process is writing to the DB (a backup script?), or
+this has genuinely hit SQLite's write-concurrency limit.
