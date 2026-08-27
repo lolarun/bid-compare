@@ -226,6 +226,46 @@ def bid_matrix(body: BidMatrixRequest, db: Session = Depends(get_db)) -> BidMatr
         from apps.api.services.tender.tender_list import rebuild_anchors
         from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 
+        # docs/design/44 §4.4：查看某个具体轮次（通常已关闭）自己的历史矩阵。
+        # 独立分支，不复用下面那套"当前活跃状态"的硬闸门/finalize 快照逻辑
+        # ——那些判据问的是"现在这个 session 是否一致"，历史轮次的范围早就
+        # 冻结在 QuoteRound.used_submission_ids 上，不该被后续状态推翻。
+        if body.round_id:
+            from apps.api.models.quote_round import QuoteRound as _QR
+            from apps.api.models.tender_list_session import TenderListSession as _TLSRound
+
+            round_ = db.get(_QR, body.round_id)
+            if not round_ or round_.project_id != body.project_id:
+                raise HTTPException(404, "QuoteRound not found")
+            if not round_.tender_list_session_id:
+                raise HTTPException(
+                    409,
+                    "本轮尚未记录关联的采购清单版本，无法重建历史矩阵——"
+                    "本轮的 match 从未成功跑过。",
+                )
+            round_session = db.get(_TLSRound, round_.tender_list_session_id)
+            if not round_session or not round_session.anchors_json:
+                raise HTTPException(409, "本轮关联的采购清单版本已不可用")
+
+            round_anchors = rebuild_anchors(round_session)
+            result = build_anchor_matrix(
+                db,
+                anchors=round_anchors,
+                tender_list_session_id=round_session.id,
+                used_submission_ids=list(round_.used_submission_ids or []),
+                supplier_ids=body.supplier_ids,
+                submission_ids=[],
+                project_id=body.project_id,
+                category=body.category,
+                allowed_group_ids=None,
+                round_id=round_.id,
+            )
+            result["round_id"] = round_.id
+            result["round_seq"] = round_.seq
+            result["round_name"] = round_.name
+            result["round_readonly"] = True
+            return result
+
         session = get_current_confirmed_session(db, body.project_id, body.category)
         if session and session.anchors_json:
             anchors = rebuild_anchors(session)

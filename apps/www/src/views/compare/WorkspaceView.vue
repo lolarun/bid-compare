@@ -15,14 +15,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { Modal, message } from 'ant-design-vue'
 import {
   LoadingOutlined, HistoryOutlined, DownloadOutlined, SolutionOutlined, InboxOutlined,
+  RobotOutlined, BulbOutlined, CheckCircleOutlined, WarningOutlined,
 } from '@ant-design/icons-vue'
-import { projectApi, supplierApi, analysisApi, intakeApi, materialApi } from '@/api'
-import type { Supplier, TenderBidlistResult, BidMatrixResult, ExtractionJob } from '@/api/client'
+import { projectApi, supplierApi, analysisApi, intakeApi, materialApi, quoteRoundApi } from '@/api'
+import type { Supplier, TenderBidlistResult, BidMatrixResult, BidInsight, ExtractionJob, QuoteRound } from '@/api/client'
 import { useSupplierUpload, inferBidDocKind } from '@/composables/useSupplierUpload'
 import type { BatchFileEntry, BidDocKind } from '@/composables/useSupplierUpload'
 import { useDoubtInbox } from '@/composables/useDoubtInbox'
 import QuoteGrid from '@/components/QuoteGrid.vue'
 import BidMatrix from './components/BidMatrix.vue'
+import RoundTrendPanel from './components/RoundTrendPanel.vue'
 import IntakeUploader from '@/components/IntakeUploader.vue'
 import type { QuoteGridColumn, DoubtMark } from '@/univer/quoteGridController'
 import {
@@ -170,6 +172,152 @@ onMounted(async () => {
   allSuppliers.value = suppliers.items
 })
 
+// ─── 轮次栏（design/44 §4.1）：跟随现有品类上下文，不新增切换器（D-3）──────
+const rounds = ref<QuoteRound[]>([])
+const roundsLoading = ref(false)
+// 只读地查看某个已关闭轮次：selectedRoundId 非空且不是当前 open 轮时进入只读态。
+const selectedRoundId = ref<number | null>(null)
+
+const openRound = computed(() => rounds.value.find(r => r.status === 'open') ?? null)
+const selectedRound = computed(() =>
+  rounds.value.find(r => r.id === selectedRoundId.value) ?? openRound.value)
+const viewingClosedRound = computed(() =>
+  !!selectedRound.value && selectedRound.value.id !== openRound.value?.id)
+const finalBasisRound = computed(() => rounds.value.find(r => r.is_final_basis) ?? null)
+
+async function loadRounds() {
+  if (!projectId.value || !category.value) { rounds.value = []; return }
+  roundsLoading.value = true
+  try {
+    const { data } = await quoteRoundApi.list(projectId.value, category.value)
+    // 后端已按 seq desc 排；轮次栏想按时间正序展示（第1轮在左）。
+    rounds.value = [...data].sort((a, b) => a.seq - b.seq)
+    // 品类切换后，若之前选中的轮次不在新列表里，回到 open 轮（或 null）。
+    if (!rounds.value.some(r => r.id === selectedRoundId.value)) selectedRoundId.value = null
+  } catch {
+    rounds.value = []
+  } finally {
+    roundsLoading.value = false
+  }
+}
+watch([projectId, category], loadRounds, { immediate: true })
+
+function selectRound(round: QuoteRound) {
+  selectedRoundId.value = round.status === 'open' ? null : round.id
+}
+
+// design/44 §4.4：选中一个已关闭轮次时，直接拉那一轮自己冻结的矩阵——只读
+// 查看，不触发 alignSubmissions/match（那是当前轮次的动作）。回到当前轮次
+// 时不主动清空 matrixResult：让用户手动刷新前先看到上一次的正式结果，比
+// 切一下就空白更不突兀。
+watch(selectedRoundId, async (id) => {
+  if (id === null || !projectId.value) return
+  try {
+    const { data } = await analysisApi.bidMatrix({
+      project_id: projectId.value, supplier_ids: [], category: category.value, round_id: id,
+    })
+    matrixResult.value = data
+    goStage('compare')
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '加载该轮次的历史矩阵失败')
+  }
+})
+
+// ── 开启新一轮（design/44 §4.2）：design/42 P2 已落地，match 按轮次隔离，
+// 这里不需要任何"禁用/数据丢失警告"的过渡态（design/44 D-2）。──────────────
+const newRoundModalOpen = ref(false)
+const newRoundSaving = ref(false)
+const newRoundForm = reactive({ name: '', stage: 'formal' as 'pre_tender' | 'formal', remark: '' })
+
+function openNewRoundModal() {
+  const nextSeq = (openRound.value?.seq ?? rounds.value.length) + 1
+  newRoundForm.name = `第${nextSeq}轮`
+  newRoundForm.stage = 'formal'
+  newRoundForm.remark = ''
+  newRoundModalOpen.value = true
+}
+
+async function handleCreateRound() {
+  if (!projectId.value || !category.value) return
+  newRoundSaving.value = true
+  try {
+    await quoteRoundApi.create(projectId.value, {
+      category: category.value, name: newRoundForm.name,
+      stage: newRoundForm.stage, remark: newRoundForm.remark,
+    })
+    newRoundModalOpen.value = false
+    await loadRounds()
+    message.success(`已开启${newRoundForm.name}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '开启新一轮失败')
+  } finally {
+    newRoundSaving.value = false
+  }
+}
+
+const renamingRound = ref<QuoteRound | null>(null)
+const renameValue = ref('')
+function openRenameRound(round: QuoteRound) {
+  renamingRound.value = round
+  renameValue.value = round.name
+}
+async function handleRenameRound() {
+  if (!projectId.value || !renamingRound.value) return
+  try {
+    await quoteRoundApi.update(projectId.value, renamingRound.value.id, { name: renameValue.value })
+    renamingRound.value = null
+    await loadRounds()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '重命名失败')
+  }
+}
+
+async function handleCloseRound(round: QuoteRound) {
+  if (!projectId.value) return
+  try {
+    await quoteRoundApi.update(projectId.value, round.id, { status: 'closed' })
+    await loadRounds()
+    message.success(`已关闭${round.name}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '关闭失败')
+  }
+}
+
+// ─── 更新本轮报价（design/44 §4.3）：隐藏 input 复用给任意一张卡片 ──────────
+const updateFileInput = ref<HTMLInputElement | null>(null)
+const pendingUpdateEntry = ref<BatchFileEntry | null>(null)
+
+function triggerUpdateQuoteFile(entry: BatchFileEntry) {
+  pendingUpdateEntry.value = entry
+  updateFileInput.value?.click()
+}
+
+function onUpdateFileSelected(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  const entry = pendingUpdateEntry.value
+  if (file && entry) updateQuoteFile(entry, file)
+  pendingUpdateEntry.value = null
+  if (updateFileInput.value) updateFileInput.value.value = ''
+}
+
+async function handleSetFinalBasis(round: QuoteRound) {
+  if (!projectId.value) return
+  Modal.confirm({
+    title: '设为定标基准',
+    content: `将「${round.name}」设为定标基准后，正式评标/导出/推荐只认这一轮的结果；其它轮次仍可查看，但不再作为官方依据。确定吗？`,
+    okText: '确定', cancelText: '取消',
+    async onOk() {
+      try {
+        await quoteRoundApi.update(projectId.value!, round.id, { is_final_basis: true })
+        await loadRounds()
+        message.success(`已将「${round.name}」设为定标基准`)
+      } catch (e: any) {
+        message.error(e?.response?.data?.detail || '设置失败')
+      }
+    },
+  })
+}
+
 // ─── 供应商列表（useSupplierUpload 需要） ─────────────────────────────────
 const allSuppliers = ref<Supplier[]>([])
 
@@ -183,6 +331,7 @@ watch(category, (c) => { taskConfig.category = c }, { immediate: true })
 
 const {
   batchFiles, retryBatchFile, handleBatchFile, confirmBatchEntry, removeBatchEntry,
+  reRecognizeEntry, updateQuoteFile,
 } = useSupplierUpload({
   taskConfig,
   tenderCategory: category,
@@ -1154,7 +1303,62 @@ async function runAnalysis() {
   }
 }
 
+/** 识别时间的人话格式。今天的只显示时分，更早的带日期——用户关心的是
+ *  "这份结果是不是今天这一版代码跑出来的"，精确到秒没有意义。 */
+function formatRecognizedAt(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  if (sameDay) return `今天 ${hh}:${mm}`
+  return `${d.getMonth() + 1}-${d.getDate()} ${hh}:${mm}`
+}
+
 const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
+
+// ─── AI 综合分析（analysisApi.bidInsight）────────────────────────────────
+// 这一段在旧 5 步向导（IndexView.vue）里一直有，2026-08-14 退役旧向导
+// （commit 8092525 / design/27 步骤5）时随组件一起删掉，新工作台没接回来——
+// 不是新功能，是补回被一起删掉的既有功能。
+//
+// **只在正式比价段调用，预览段不调用。** 预览走的是报价派生轴、basis=preview，
+// 按 CLAUDE.md 的口径它不产出官方结论；在那一段挂一段 AI 总结，读者分不清
+// 看到的是"预览参考"还是"评标结论"。AI 的角色仍然只是解释既有确定性结果
+// （CLAUDE.md「LLM stays explanatory」），不重排候选、不定标。
+const insightResult = ref<BidInsight | null>(null)
+const insightLoading = ref(false)
+
+async function fetchInsight() {
+  const m = matrixResult.value
+  if (!m || m.rows.length === 0) return
+  insightLoading.value = true
+  insightResult.value = null
+  try {
+    // 行数截断控制请求体积；评标上下文（policy/排名/风险）随 matrix 一起带过去，
+    // AI 只据此解释。
+    const trimmed: BidMatrixResult = { ...m, rows: m.rows.slice(0, 50) }
+    const { data } = await analysisApi.bidInsight(trimmed)
+    insightResult.value = data
+  } catch (e: any) {
+    // AI 总结不是关键路径，失败不打断比价；但**把真实原因显示出来**，
+    // 不吞成空白面板——否则没配 API key 和模型调用失败长得一模一样。
+    const detail = e?.response?.data?.detail || e?.response?.data?.error || e?.message || '分析请求失败'
+    insightResult.value = { overall: '', recommendations: [], risks: [], error: detail }
+  } finally {
+    insightLoading.value = false
+  }
+}
+
+watch([matrixResult, stage], ([val, st]) => {
+  if (st !== 'compare') {
+    // 退出比价段时清掉，避免上一轮的结论挂在预览段下面。
+    insightResult.value = null
+    return
+  }
+  if (val && val.rows.length > 0 && !insightLoading.value) fetchInsight()
+})
 </script>
 
 <template>
@@ -1221,8 +1425,54 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </div>
     </div>
 
-    <!-- 上传段的行动按钮：直接进预览。放在卡片下方，跟"共 N 张卡片"同屏。 -->
-    <div v-if="stage === 'upload' && viewMode === 'overview' && docCards.length > 0"
+    <!-- 轮次栏（design/44 §4.1）：跟随上面已有的品类上下文，多品类项目切
+         品类时轮次栏跟着切（D-3），不新增切换器。没有品类时不显示——轮次
+         本来就是 (project, category) 维度的，没有品类无从谈起。 -->
+    <div v-if="category" class="round-bar">
+      <template v-if="rounds.length === 0 && !roundsLoading">
+        <span class="round-bar__hint">首轮将在首次确认报价时自动开启</span>
+      </template>
+      <template v-else>
+        <a-dropdown v-for="r in rounds" :key="r.id" trigger="contextmenu">
+          <span
+            class="round-bar__chip"
+            :class="{
+              'round-bar__chip--open': r.status === 'open',
+              'round-bar__chip--selected': selectedRound?.id === r.id,
+            }"
+            @click="selectRound(r)"
+          >
+            {{ r.name }}
+            <span class="round-bar__chip-status">{{ r.status === 'open' ? '收集中' : '已关闭' }}</span>
+            <a-tooltip v-if="r.is_final_basis" title="定标基准轮">
+              <span class="round-bar__chip-flag">⚑</span>
+            </a-tooltip>
+          </span>
+          <template #overlay>
+            <a-menu>
+              <a-menu-item @click="openRenameRound(r)">重命名</a-menu-item>
+              <a-menu-item v-if="r.status === 'open'" @click="handleCloseRound(r)">关闭本轮</a-menu-item>
+              <a-menu-item v-if="!r.is_final_basis" @click="handleSetFinalBasis(r)">设为定标基准</a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
+      </template>
+      <a-button size="small" type="dashed" @click="openNewRoundModal">
+        + 开启新一轮
+      </a-button>
+      <span class="round-bar__basis">
+        <template v-if="finalBasisRound">⚑ 定标基准：{{ finalBasisRound.name }}</template>
+        <template v-else>⚑ 定标基准：未设置</template>
+      </span>
+    </div>
+    <div v-if="viewingClosedRound" class="round-bar__readonly-banner">
+      正在查看已关闭的「{{ selectedRound?.name }}」· 只读
+      <a @click="selectedRoundId = null">返回当前轮次</a>
+    </div>
+
+    <!-- 上传段的行动按钮：直接进预览。放在卡片下方，跟"共 N 张卡片"同屏。
+         查看已关闭轮次时不显示——那一轮不接受新上传（design/44 §4.4）。 -->
+    <div v-if="!viewingClosedRound && stage === 'upload' && viewMode === 'overview' && docCards.length > 0"
          class="stage-actions stage-actions--upload">
       <a-button type="primary" :loading="analyzing" @click="runAnalysis">
         {{ canCompare ? '开始比价分析' : '先比价看看（预览）' }}
@@ -1247,7 +1497,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
          —— AntD v4 的 a-upload-dragger 外面还包了一个 .ant-upload-wrapper，
          我们的 class 落在内层元素上，它的 margin 撑不开外层。用一个自己的
          容器来管间距，不依赖组件库的内部结构。 -->
-    <div v-if="stage === 'upload' && viewMode === 'overview'" class="upload-zone">
+    <div v-if="!viewingClosedRound && stage === 'upload' && viewMode === 'overview'" class="upload-zone">
     <a-upload-dragger
       :show-upload-list="false" :multiple="true"
       accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
@@ -1399,6 +1649,29 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
                 <a-button type="primary" :loading="f.confirming" @click="confirmBatchEntry(f)">确认入库</a-button>
                 <a-button danger @click="removeBatchEntry(f)">移除</a-button>
               </div>
+              <!-- 识别时间 + 强制重新识别（2026-08-25）。
+                   `create_job` 的幂等键 `(file_hash, type, context_hash)` 里
+                   **没有代码版本**：识别逻辑改好之后重传同一份文件会命中旧
+                   job、拿回改动前的旧结果。此前用户唯一的出路是新建项目换掉
+                   context_hash——既不直观，也留一堆废项目。把识别时间摆出来
+                   （让人有依据判断"这数是不是老的"）+ 给一个显式的重跑入口。
+                   识别要花钱，所以只能由用户点，绝不自动触发。 -->
+              <div v-if="f.recognizedAt" class="entry-recognized-at">
+                <template v-if="f.updateCount > 0">
+                  已更新 · 替换过 {{ f.updateCount }} 次 · {{ formatRecognizedAt(f.recognizedAt) }}
+                </template>
+                <template v-else>
+                  识别于 {{ formatRecognizedAt(f.recognizedAt) }}
+                </template>
+                <a-button type="link" size="small" :loading="f.reRecognizing"
+                          @click="reRecognizeEntry(f)">重新识别</a-button>
+                <!-- design/44 §4.3：换一份新文件（问询函回复等场景），跟"重新
+                     识别"（同一份文件重跑）分开——按钮分开放，语义不容易混。
+                     查看历史轮次时不显示：那一轮不接受更新（design/44 §4.4）。 -->
+                <a-button v-if="!viewingClosedRound" type="link" size="small" :loading="f.updating"
+                          @click="triggerUpdateQuoteFile(f)">更新报价文件</a-button>
+                <span class="entry-recognized-at__hint">识别逻辑更新后，旧结果不会自动刷新</span>
+              </div>
               <!-- 只挂载当前激活 tab 的 QuoteGrid（每个都是一整个 Univer 引擎
                    实例）——AntD a-tabs 默认全量挂载所有 pane，不加这层 v-if
                    会导致 N 家供应商 = N 个并发 Univer 实例，这正是页面卡顿
@@ -1522,8 +1795,7 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
         </div>
       </template>
       <!-- design/32 §13：比价段（原"对比段"）= 正式口径 + 历史对比 + AI 总结。
-           AI 总结（analysisApi.bidInsight）**尚未接进来**——这里如实写明，
-           不放一个空面板假装有。 -->
+           AI 总结 2026-08-26 接回（见 script 段 fetchInsight 注释）。 -->
       <!-- 进得来、但还没有可比的东西时，**在这一页把原因说清楚**，而不是在上一页
            用一个灰按钮把人挡住（2026-08-23 用户定的口径）。文案说的是"卡在谁身上、
            下一步做什么"，不是检查项代号。 -->
@@ -1540,19 +1812,126 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
       </a-alert>
       <a-alert v-else-if="stage === 'compare'" type="info" show-icon banner
                class="preview-banner"
-               message="正式口径 · 只含已确认报价"
-               description="AI 总结尚未接入本段（接口已有 /analysis/bid-insight，未接线）。" />
+               message="正式口径 · 只含已确认报价" />
+
+      <!-- AI 综合分析建议：放在矩阵**上方**（2026-08-26 手工测试反馈：先看
+           结论，再看细节）。只在正式比价段出现（见 fetchInsight 注释）——
+           预览段没有结论可看，摆在这里的东西必须是"结论"，不能是占位空壳。
+           v-if 条件跟 fetchInsight 的触发条件（matrixResult 到手才会请求）
+           同步到手，不会出现"卡片先蹦出来、矩阵后到"的先后不一致。 -->
+      <a-card v-if="stage === 'compare' && (insightLoading || insightResult)"
+              class="insight-card" style="margin-top:16px">
+        <template #title>
+          <span style="display:flex;align-items:center;gap:8px">
+            <RobotOutlined style="color:#1677ff" />
+            <span style="font-size:15px;font-weight:600">AI 综合分析建议</span>
+            <a-tag color="blue" style="margin:0;font-weight:400">仅解释系统结果，不构成定标结论</a-tag>
+          </span>
+        </template>
+        <template #extra>
+          <a-button size="small" :loading="insightLoading" @click="fetchInsight">重新分析</a-button>
+        </template>
+        <a-spin :spinning="insightLoading" tip="正在分析比价数据...">
+          <template v-if="insightResult && !insightResult.error">
+            <div v-if="insightResult.overall" class="insight-section">
+              <h4 class="insight-section__title">
+                <BulbOutlined style="color:#faad14" /> 整体评估
+              </h4>
+              <p class="insight-section__text">{{ insightResult.overall }}</p>
+            </div>
+            <div v-if="insightResult.recommendations?.length" class="insight-section">
+              <h4 class="insight-section__title">
+                <CheckCircleOutlined style="color:#52c41a" /> 评标解读
+              </h4>
+              <ul class="insight-section__list">
+                <li v-for="(rec, i) in insightResult.recommendations" :key="i">{{ rec }}</li>
+              </ul>
+            </div>
+            <div v-if="insightResult.risks?.length" class="insight-section">
+              <h4 class="insight-section__title">
+                <WarningOutlined style="color:#ff4d4f" /> 风险提示
+              </h4>
+              <ul class="insight-section__list insight-section__list--risk">
+                <li v-for="(risk, i) in insightResult.risks" :key="i">{{ risk }}</li>
+              </ul>
+            </div>
+          </template>
+          <a-empty v-else-if="insightResult?.error" :description="insightResult.error" />
+          <!-- 骨架屏占位：卡片挪到矩阵上方后，这段空白撑住的高度直接决定了
+               矩阵会不会在结果落地时跳一下——加到 100px 比原来 60px 更贴近
+               实际内容高度，尽量让"占位 -> 填充"这一步肉眼不可见。 -->
+          <div v-else style="min-height:100px" />
+        </a-spin>
+      </a-card>
+
       <BidMatrix
         v-if="matrixResult"
         :suppliers="matrixSuppliers"
         :show-history="!previewResult"
+        :show-conclusions="!previewResult"
         :rows="matrixResult.rows"
         :totals="matrixResult.totals"
         :category="category"
         :project-id="projectId ?? undefined"
         style="margin-top:16px"
       />
+
+      <!-- design/44 §5：≥2 轮才有跨轮次可比数据；预览口径也不显示——预览
+           从不落对齐组，round_trend 读的是正式对齐结果。 -->
+      <a-card
+        v-if="rounds.length >= 2 && !previewResult && projectId && category"
+        title="轮次趋势" style="margin-top:16px"
+      >
+        <RoundTrendPanel :project-id="projectId" :category="category" />
+      </a-card>
     </div>
+
+    <!-- 开启新一轮（design/44 §4.2）：consequence statement 逐字放进弹窗，
+         不是塞进 tooltip 里希望用户自己找到。 -->
+    <a-modal
+      v-model:open="newRoundModalOpen"
+      title="开启新一轮"
+      :confirm-loading="newRoundSaving"
+      ok-text="开启"
+      cancel-text="取消"
+      @ok="handleCreateRound"
+    >
+      <a-form :label-col="{ span: 5 }" :wrapper-col="{ span: 18 }" style="margin-top:16px">
+        <a-form-item label="轮次名称" required>
+          <a-input v-model:value="newRoundForm.name" placeholder="如「第2轮」" />
+        </a-form-item>
+        <a-form-item label="阶段">
+          <a-radio-group v-model:value="newRoundForm.stage">
+            <a-radio value="pre_tender">询价</a-radio>
+            <a-radio value="formal">正式</a-radio>
+          </a-radio-group>
+        </a-form-item>
+        <a-form-item label="备注">
+          <a-textarea v-model:value="newRoundForm.remark" :rows="2" placeholder="可选" />
+        </a-form-item>
+      </a-form>
+      <a-alert
+        type="warning" show-icon
+        message="开启后：当前轮次将关闭，此后上传的报价全部归入新一轮。已关闭轮次的报价与结果保留，可随时查看。"
+      />
+    </a-modal>
+
+    <!-- design/44 §4.3：隐藏 input，「更新报价文件」按钮触发，不占版面。 -->
+    <input
+      ref="updateFileInput" type="file" accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
+      style="display:none" @change="onUpdateFileSelected"
+    />
+
+    <a-modal
+      :open="!!renamingRound"
+      title="重命名轮次"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="handleRenameRound"
+      @cancel="renamingRound = null"
+    >
+      <a-input v-model:value="renameValue" placeholder="轮次名称" style="margin-top:16px" />
+    </a-modal>
   </div>
 </template>
 
@@ -1570,6 +1949,24 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .workspace-header__meta { display: flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(0,0,0,0.45); margin-top: 4px; }
 .workspace-header__meta :deep(.ant-input)::placeholder { color: rgba(0,0,0,0.3); font-style: italic; }
 .workspace-header__meta-error { font-size: 12px; color: #cf1322; margin-top: 4px; }
+
+.round-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.round-bar__hint { font-size: 12px; color: rgba(0,0,0,0.45); }
+.round-bar__chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 14px; font-size: 12px; cursor: pointer;
+  background: #f5f5f5; color: rgba(0,0,0,0.65); border: 1px solid transparent;
+}
+.round-bar__chip--open { background: #e6f4ff; color: #1677ff; }
+.round-bar__chip--selected { border-color: #1677ff; }
+.round-bar__chip-status { opacity: 0.75; }
+.round-bar__chip-flag { color: #d4a017; }
+.round-bar__basis { margin-left: auto; font-size: 12px; color: rgba(0,0,0,0.45); }
+.round-bar__readonly-banner {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+  padding: 8px 14px; border-radius: 6px; background: #fffbe6; border: 1px solid #ffe58f;
+  font-size: 13px; color: rgba(0,0,0,0.75);
+}
 .workspace-header__actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* design/28 cut 5 自动分类拖拽区——视觉上比下方三张精确卡片更突出（更高、
@@ -1674,4 +2071,49 @@ const matrixSuppliers = computed(() => matrixResult.value?.suppliers ?? [])
 .stage-actions--upload { margin-bottom: 24px; }
 .stage-actions__hint { font-size: 12px; color: rgba(0,0,0,0.45); }
 .result-section { margin-top: 24px; padding-top: 16px; border-top: 1px solid #f0f0f0; }
+
+.entry-recognized-at {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: #8c8c8c;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.entry-recognized-at__hint {
+  color: #bfbfbf;
+}
+
+/* ─── AI 综合分析建议（2026-08-26 从旧向导接回）───────────────────────── */
+.insight-card :deep(.ant-card-head) { border-bottom: 1px solid #f0f0f0; }
+
+.insight-section:not(:last-child) {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px dashed #f0f0f0;
+}
+.insight-section__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.85);
+  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.insight-section__text {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+  line-height: 1.7;
+  margin: 0;
+}
+.insight-section__list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+  line-height: 1.8;
+}
+.insight-section__list li::marker { color: #52c41a; }
+.insight-section__list--risk li::marker { color: #ff4d4f; }
 </style>

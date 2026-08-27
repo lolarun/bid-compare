@@ -324,6 +324,12 @@ class BidMatrixRequest(BaseModel):
     submission_ids: list[int] = []
     material_ids: list[int] | None = None
     category: str | None = None
+    # docs/design/42 §4.1 (P2) / design/44 §4.4：查看某个具体轮次（通常是已
+    # 关闭轮次）自己的历史矩阵，而不是当前/最新状态。给了它就绕开下面那套
+    # "used_submission_ids 必须与当前 session 一致"的活跃性硬闸门——那道闸
+    # 是为"当前进行中的对齐"设的，历史轮次的范围早已冻结在 QuoteRound 自己
+    # 的 used_submission_ids 上，不该被后来的确认/未确认状态推翻。
+    round_id: int | None = None
 
 
 class SupplierLabel(BaseModel):
@@ -371,6 +377,12 @@ class BidMatrixResult(BaseModel):
     common_comparable: dict | None = None
     non_price_factors: list[dict] = Field(default_factory=list)
     comprehensive_recommendation_status: str | None = None
+    # docs/design/44 §4.4：本次矩阵是不是某个具体轮次的历史快照。round_id 为
+    # None 时其余三个字段无意义（当前/最新状态，不是某一轮的冻结视图）。
+    round_id: int | None = None
+    round_seq: int | None = None
+    round_name: str | None = None
+    round_readonly: bool = False
     # ── design/31 §3：这份矩阵是哪一种 ──────────────────────────────────
     # "official" = 只由已确认报价算出，可用于定标；
     # "preview"  = 含未确认草稿，**不得**用于定标、导出正式结论或写入历史价。

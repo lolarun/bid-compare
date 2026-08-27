@@ -280,6 +280,7 @@ export interface MatrixRow {
   material_name: string
   spec: string
   anchor_seq?: string | null       // v2.5: links row back to TenderAnchor.seq
+  anchor_uid?: string | null       // docs/design/42 §4.2: stable cross-round join key
   // 后端一直在传（`bid_matrix.py::build_anchor_matrix` 的 "quantity"/"unit"
   // 字段，预览的报价派生轴走的是同一个函数），只是这个类型和模板一直没接住。
   // 数量是比对单价的前提——不知道这行代表几件，¥93 和 ¥93×17 看起来一样。
@@ -442,6 +443,11 @@ export interface BidMatrixResult {
   // v2.5 meta
   anchor_matrix?: boolean
   not_finalized_warning?: string
+  // docs/design/44 §4.4：本次矩阵是不是某个具体轮次的历史快照。
+  round_id?: number | null
+  round_seq?: number | null
+  round_name?: string | null
+  round_readonly?: boolean
   matrix_distribution?: MatrixDistribution
   // Recommendation gate（兼容旧前端：仅 blocked 置 true）
   recommendation_blocked?: boolean
@@ -1098,6 +1104,105 @@ export interface AnchorMatchSummary {
   low_conf: number
   residue: number
   category?: string
+  // docs/design/42 §4.1 (P2)：本次 match 落在哪一轮（design/44 §4.2 用它显示
+  // "将归入：第N轮"）。round_id 恒非空——get_or_open_round 首轮隐式自动开。
+  round_id?: number | null
+  round_seq?: number | null
+  round_name?: string | null
+}
+
+// ─── QuoteRound（docs/design/42 P0, design/44）────────────────────────────
+
+export type QuoteRoundStage = 'pre_tender' | 'formal'
+export type QuoteRoundStatus = 'open' | 'closed'
+
+export interface QuoteRound {
+  id: number
+  project_id: number
+  category: string
+  seq: number
+  name: string
+  stage: QuoteRoundStage
+  status: QuoteRoundStatus
+  is_final_basis: boolean
+  tender_list_session_id: number | null
+  confirmed_supplier_ids: number[] | null
+  used_submission_ids: number[] | null
+  created_by: string | null
+  remark: string
+  opened_at: string | null
+  closed_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface ProjectsOverviewCategory {
+  category: string
+  current_round: {
+    id: number
+    seq: number
+    name: string
+    stage: QuoteRoundStage
+    status: QuoteRoundStatus
+  }
+  round_count: number
+  confirmed_supplier_count: number
+  final_basis_round: { id: number; seq: number; name: string } | null
+  last_activity: string | null
+}
+
+export interface ProjectsOverviewItem {
+  project: Project
+  categories: ProjectsOverviewCategory[]
+}
+
+export interface ProjectsOverviewResult {
+  total: number
+  page: number
+  page_size: number
+  items: ProjectsOverviewItem[]
+}
+
+// ─── Round trend（docs/design/42 §6）───────────────────────────────────────
+
+export interface RoundTrendRow {
+  anchor_uid: string
+  round_id: number
+  round_seq: number
+  supplier_id: number | null
+  supplier_name: string
+  participating: boolean
+  unit_price: number | null
+  total: number | null
+  price_basis: string | null
+  comparable_to_prev: boolean
+  round_over_round_discount_pct: number | null
+  comparable_to_first: boolean
+  cumulative_discount_pct: number | null
+  not_comparable_reason: string | null
+}
+
+export interface RoundTrendSupplier {
+  supplier_id: number | null
+  supplier_name: string
+  round_id: number
+  round_seq: number
+  total: number | null
+  round_over_round_discount_pct: number | null
+  cumulative_discount_pct: number | null
+  rank: number | null
+  rank_change: number | null
+  comparable_to_prev: boolean
+  not_comparable_reason: string | null
+}
+
+export interface RoundTrendResult {
+  project_id: number
+  category: string
+  round_ids: number[]
+  rows: RoundTrendRow[]
+  suppliers: RoundTrendSupplier[]
+  skipped_rounds: Array<{ round_id: number; seq: number; reason: string }>
 }
 
 export interface SupplierFillSummary {

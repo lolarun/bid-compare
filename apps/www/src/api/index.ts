@@ -13,6 +13,7 @@ import type {
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
   CompareStateResult, ClassifyTier0Result, SummarizeFactsResult,
+  QuoteRound, ProjectsOverviewResult, RoundTrendResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -73,6 +74,25 @@ export const projectApi = {
   /** 按 (name, code) 精确找已有项目；没有返回 null。见后端 find_project_exact。 */
   findExact: (name: string, code: string) =>
     api.get<Project | null>('/projects/find-exact', { params: { name, code } }),
+  /** 比价入口列表（design/44 §3.2）：项目 × 各品类轮次状态的只读聚合，
+   *  一次批量查询，不对每个项目单独拉 quote-rounds。 */
+  overview: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+    api.get<ProjectsOverviewResult>('/projects/overview', { params }),
+}
+
+// ─── Quote rounds（docs/design/42 P0, design/44）───────────────────────────
+
+export const quoteRoundApi = {
+  list: (projectId: number, category?: string) =>
+    api.get<QuoteRound[]>(`/projects/${projectId}/quote-rounds`, { params: { category } }),
+  /** 当前(project,category)的 open 轮次，没有则 null——只读，不会自动创建
+   *  （自动创建走上传/match 那条路径）。 */
+  current: (projectId: number, category: string) =>
+    api.get<QuoteRound | null>(`/projects/${projectId}/quote-rounds/current`, { params: { category } }),
+  create: (projectId: number, data: { category: string; name?: string; stage?: 'pre_tender' | 'formal'; remark?: string }) =>
+    api.post<QuoteRound>(`/projects/${projectId}/quote-rounds`, data),
+  update: (projectId: number, roundId: number, data: { name?: string; status?: 'open' | 'closed'; is_final_basis?: boolean }) =>
+    api.patch<QuoteRound>(`/projects/${projectId}/quote-rounds/${roundId}`, data),
 }
 
 // ─── Quotes ─────────────────────────────────────────────────────────────────
@@ -149,6 +169,11 @@ export const intakeApi = {
   // 超时给宽一点不花任何代价。
   getJob: (jobId: string) =>
     api.get<ExtractionJob>(`/intake/jobs/${jobId}`, { timeout: 60_000 }),
+  /** 拿这个 job 已存盘的原文件重新识别一遍，返回**新** job。
+   *  识别逻辑改动后旧结果不会自动更新（`create_job` 的幂等键里没有代码版本），
+   *  这是用户显式强制重跑的入口。识别要花钱，所以只能由用户点，不自动触发。 */
+  reRecognize: (jobId: string) =>
+    api.post<ExtractionJob>(`/intake/jobs/${jobId}/re-recognize`, {}, { timeout: 60_000 }),
   listJobs: (params?: Record<string, unknown>) =>
     api.get<{ items: ExtractionJob[]; total: number }>('/intake/jobs', { params }),
   enhance: (data: { job_id?: string; project_id?: number | null; items?: Array<Record<string, unknown>> }) =>
@@ -181,7 +206,7 @@ export const analysisApi = {
     api.post<SupplierScore>('/analysis/supplier-score', data),
   multiCompare: (data: { supplier_ids: number[]; category: string; project_id?: number }) =>
     api.post<MultiCompareResult>('/analysis/multi-compare', data),
-  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; submission_ids?: number[]; material_ids?: number[]; category?: string }) =>
+  bidMatrix: (data: { project_id?: number; supplier_ids: number[]; submission_ids?: number[]; material_ids?: number[]; category?: string; round_id?: number }) =>
     api.post<BidMatrixResult>('/analysis/bid-matrix', data),
   // design/31 cut 2b：先比价、后逐行确认。跑的是官方链路本身，只是不落库；
   // 入参跟 batchConfirm 同形状，因为预览与正式吃的就是同一份输入。沙箱里要
@@ -246,6 +271,9 @@ export const analysisApi = {
     api.post<{ ok: boolean; id: number; version: number }>('/analysis/bid-matrix/save', data),
   bidMatrixVersionApprove: (versionId: number, data: { note?: string; approved_by?: string }) =>
     api.post<{ ok: boolean; id: number; status: string }>(`/analysis/bid-matrix/versions/${versionId}/approve`, data),
+  // docs/design/42 §6/§7.1 (P2)：跨轮次折扣趋势。
+  roundTrend: (params: { project_id: number; category: string }) =>
+    api.get<RoundTrendResult>('/analysis/round-trend', { params }),
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────

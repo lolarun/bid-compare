@@ -134,15 +134,29 @@ const routes: RouteRecordRaw[] = [
       // missing_total_requires_review 两类阻断门禁的正确行为），见回归记录。
       {
         path: '/compare/:projectId/:step?',
-        redirect: (to) => ({ path: `/workspace/${to.params.projectId ?? ''}` }),
+        redirect: (to) =>
+          ({ path: to.params.projectId ? `/workspace/${to.params.projectId}` : '/workspace' }),
       },
+      // design/44 §3 —— 「招标比价分析」的落地页是比价项目列表，不是空工作台
+      // （旧行为：拖入第一份文档时懒建占位项目，2026-08-21 已停掉"打开页面即
+      // 建"那一半，这里把"入口该长什么样"补上）。/workspace/:projectId 现在
+      // 要求 projectId 非空——工作台只在带着具体项目时进入，见 EntryView.vue。
       {
-        path: '/workspace/:projectId?',
-        name: 'CompareWorkspace',
-        component: () => import('@/views/compare/WorkspaceView.vue'),
+        path: '/workspace',
+        name: 'CompareEntry',
+        component: () => import('@/views/compare/EntryView.vue'),
         meta: {
           title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能',
           public: false, roles: ['管理员', '比价员'] as Role[],
+        },
+      },
+      {
+        path: '/workspace/:projectId',
+        name: 'CompareWorkspace',
+        component: () => import('@/views/compare/WorkspaceView.vue'),
+        meta: {
+          title: '比价工作台', public: false, hideInMenu: true,
+          roles: ['管理员', '比价员'] as Role[],
         },
       },
       // design/27 §10 步骤4 —— 对齐核查独立视图（user decision D1），从工作台

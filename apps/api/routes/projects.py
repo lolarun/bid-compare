@@ -69,6 +69,80 @@ def list_projects(
     }
 
 
+@router.get("/overview", response_model=dict)
+def projects_overview(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """比价入口列表（docs/design/44 §3.2）—— 每个项目一行 + 各品类的轮次状态。
+
+    只读聚合，一次批量查询，不对每个项目单独调用 quote-rounds 接口
+    （N+1：项目一多就会拖垮页面）。「品类」的判据是 QuoteRound 存在过，不是
+    Project 本身的字段——rounds 天生按 (project, category) 分域
+    （docs/design/42 D2），一个项目下阀门/电缆各自走自己的轮次。
+
+    没有任何轮次的项目仍然出现在列表里（categories: []），前端据此显示
+    「首轮将在首次确认报价时自动开启」（design/44 §4.1）。
+    """
+    from apps.api.models.quote_round import QuoteRound
+
+    stmt = select(Project)
+    if keyword:
+        stmt = stmt.where(Project.name.contains(keyword) | Project.code.contains(keyword))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    projects = db.scalars(
+        stmt.order_by(Project.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    if not projects:
+        return {"total": total, "page": page, "page_size": page_size, "items": []}
+
+    pids = [p.id for p in projects]
+    rounds = db.scalars(
+        select(QuoteRound).where(QuoteRound.project_id.in_(pids))
+        .order_by(QuoteRound.project_id, QuoteRound.category, QuoteRound.seq.desc())
+    ).all()
+
+    by_project_cat: dict[tuple[int, str], list[QuoteRound]] = {}
+    for r in rounds:
+        by_project_cat.setdefault((r.project_id, r.category), []).append(r)
+
+    items = []
+    for proj in projects:
+        cats: dict[str, list[QuoteRound]] = {}
+        for (pid, cat), rs in by_project_cat.items():
+            if pid == proj.id:
+                cats[cat] = rs
+        category_summaries = []
+        for cat, rs in sorted(cats.items()):
+            # rs 已按 seq desc 排（同一 (project,category) 分组内），[0] 即最新轮
+            current = rs[0]
+            basis = next((r for r in rs if r.is_final_basis), None)
+            last_activity = max(
+                (r.updated_at for r in rs if r.updated_at is not None), default=None
+            )
+            category_summaries.append({
+                "category": cat,
+                "current_round": {
+                    "id": current.id, "seq": current.seq, "name": current.name,
+                    "stage": current.stage, "status": current.status,
+                },
+                "round_count": len(rs),
+                "confirmed_supplier_count": len(current.confirmed_supplier_ids or []),
+                "final_basis_round": (
+                    {"id": basis.id, "seq": basis.seq, "name": basis.name} if basis else None
+                ),
+                "last_activity": last_activity.isoformat() if last_activity else None,
+            })
+        items.append({
+            "project": ProjectOut.model_validate(proj).model_dump(),
+            "categories": category_summaries,
+        })
+
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
 @router.get("/{project_id}", response_model=ProjectOut)
 def get_project(project_id: int, db: Session = Depends(get_db)):
     proj = db.get(Project, project_id)

@@ -1,0 +1,147 @@
+"""docs/design/44 §4.4 — viewing a specific (usually closed) round's matrix.
+
+`POST /api/analysis/bid-matrix` with `round_id` set is a separate branch from
+the "current state" path: it reads `QuoteRound.used_submission_ids` (frozen
+at match time) instead of `TenderListSession.used_submission_ids` (shared,
+overwritten by whichever round matched most recently), and skips the
+active-state hard gates entirely — a closed round's scope was frozen when it
+closed, not something to re-validate against "what's confirmed right now".
+"""
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+from apps.api.models.extraction_job import ExtractionJob
+from apps.api.routes.quotes import BatchConfirmRequest
+from apps.api.services.alignment.anchor_match import import_and_match
+from apps.api.services.submission.quote_confirmation_service import confirm_batch
+from apps.api.services.tender import quote_round_service as svc
+from apps.api.services.tender import tender_session_service as tls_svc
+from apps.api.services.tender.tender_list import rebuild_anchors
+
+ANCHORS_JSON = [
+    {"seq": "1", "name": "闸阀DN100", "spec": "Z45X-16Q", "unit": "个", "qty": 10},
+    {"seq": "2", "name": "闸阀DN50", "spec": "Z45X-16Q", "unit": "个", "qty": 5},
+]
+
+
+@pytest.fixture
+def client(temp_db, auth_override):
+    from apps.api.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+def _confirm(db, project_id: int, category: str, round_id: int, supplier: str,
+             price100: float) -> int:
+    j = ExtractionJob(
+        id=uuid.uuid4().hex, type="quote", status="done", filename=f"{supplier}.png",
+        result={"items": [
+            {"material": "闸阀DN100", "spec": "Z45X-16Q", "unit": "个", "qty": 10,
+             "unit_price": price100, "total_price": price100 * 10, "category": category},
+            {"material": "闸阀DN50", "spec": "Z45X-16Q", "unit": "个", "qty": 5,
+             "unit_price": 80.0, "total_price": 400.0, "category": category},
+        ]},
+    )
+    db.add(j)
+    db.flush()
+    db.commit()
+    out = confirm_batch(db, BatchConfirmRequest(
+        job_id=j.id, supplier_name=supplier, project_id=project_id,
+        category=category, round_id=round_id,
+    ))
+    return out["submission_id"]
+
+
+def _run_round(db, project_id, category, round_id, session_id, sub_ids):
+    session = tls_svc.get_current_session_any_status(db, category, project_id=project_id)
+    anchors = rebuild_anchors(session)
+    import_and_match(
+        db, None, project_id, category, submission_ids=sub_ids, anchors=anchors,
+        tender_list_session_id=session_id, round_id=round_id,
+    )
+    svc.record_round_scope(db, round_id, sorted(sub_ids), None, tender_list_session_id=session_id)
+
+
+def test_round_id_returns_that_rounds_own_frozen_scope(client, db_session):
+    proj = client.post("/api/projects", json={"name": "历史矩阵项目", "code": "RV1"}).json()
+    session = tls_svc.save_session(db_session, proj["id"], "阀门", "v1.xlsx", ANCHORS_JSON, "tester")
+    db_session.commit()
+
+    r1 = svc.create_round(db_session, proj["id"], "阀门", name="第一轮")
+    db_session.commit()
+    sub1 = _confirm(db_session, proj["id"], "阀门", r1.id, "供应商A", price100=100.0)
+    _run_round(db_session, proj["id"], "阀门", r1.id, session.id, [sub1])
+    svc.close_round(db_session, r1.id)
+
+    r2 = svc.create_round(db_session, proj["id"], "阀门", name="第二轮")
+    db_session.commit()
+    sub2 = _confirm(db_session, proj["id"], "阀门", r2.id, "供应商A", price100=90.0)
+    _run_round(db_session, proj["id"], "阀门", r2.id, session.id, [sub2])
+
+    resp = client.post("/api/analysis/bid-matrix", json={
+        "project_id": proj["id"], "supplier_ids": [], "category": "阀门", "round_id": r1.id,
+    })
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["round_id"] == r1.id
+    assert data["round_readonly"] is True
+    # Round 1's own price (100.0), not round 2's (90.0) — proves it's reading
+    # r1's frozen used_submission_ids, not "whatever is confirmed right now".
+    cell = data["rows"][0]["suppliers"][0]
+    assert cell["price"] == pytest.approx(100.0)
+
+
+def test_round_id_view_bypasses_the_active_state_hard_gate(client, db_session):
+    """A closed round with no live TenderListSession.used_submission_ids
+    consistency (because round 2 has since overwritten it) must still be
+    viewable — that's the entire point of design/42 §3.1."""
+    proj = client.post("/api/projects", json={"name": "闸门旁路项目", "code": "RV2"}).json()
+    session = tls_svc.save_session(db_session, proj["id"], "阀门", "v1.xlsx", ANCHORS_JSON, "tester")
+    db_session.commit()
+
+    r1 = svc.create_round(db_session, proj["id"], "阀门", name="第一轮")
+    db_session.commit()
+    sub1 = _confirm(db_session, proj["id"], "阀门", r1.id, "供应商A", price100=100.0)
+    _run_round(db_session, proj["id"], "阀门", r1.id, session.id, [sub1])
+    svc.close_round(db_session, r1.id)
+
+    r2 = svc.create_round(db_session, proj["id"], "阀门", name="第二轮")
+    db_session.commit()
+    sub2 = _confirm(db_session, proj["id"], "阀门", r2.id, "供应商B", price100=95.0)
+    _run_round(db_session, proj["id"], "阀门", r2.id, session.id, [sub2])
+    # TenderListSession.used_submission_ids now reflects round 2, not round 1
+    # (record_submission_scope's legacy write) — the "current state" path
+    # would 409 for round 1's own submission_ids not matching. round_id
+    # sidesteps it entirely.
+
+    resp = client.post("/api/analysis/bid-matrix", json={
+        "project_id": proj["id"], "supplier_ids": [], "category": "阀门", "round_id": r1.id,
+    })
+    assert resp.status_code == 200, resp.text
+
+
+def test_round_without_match_ever_run_returns_409_not_empty_matrix(client, db_session):
+    proj = client.post("/api/projects", json={"name": "无匹配轮次项目", "code": "RV3"}).json()
+    tls_svc.save_session(db_session, proj["id"], "阀门", "v1.xlsx", ANCHORS_JSON, "tester")
+    db_session.commit()
+    r1 = svc.create_round(db_session, proj["id"], "阀门", name="第一轮")
+    db_session.commit()
+
+    resp = client.post("/api/analysis/bid-matrix", json={
+        "project_id": proj["id"], "supplier_ids": [], "category": "阀门", "round_id": r1.id,
+    })
+    assert resp.status_code == 409
+
+
+def test_unknown_round_id_returns_404(client, db_session):
+    proj = client.post("/api/projects", json={"name": "假轮次项目", "code": "RV4"}).json()
+
+    resp = client.post("/api/analysis/bid-matrix", json={
+        "project_id": proj["id"], "supplier_ids": [], "category": "阀门", "round_id": 999999,
+    })
+    assert resp.status_code == 404

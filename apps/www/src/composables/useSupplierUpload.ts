@@ -84,6 +84,18 @@ export interface BatchFileEntry {
   confirmedSubmissionId: number | null  // always set on confirm success
   confirmed: boolean
   confirming: boolean   // R1 止血：校对入库请求进行中——双击守卫，防止重复提交
+  // 这份结果是**什么时候识别出来的**（job.created_at）。识别逻辑改动后旧结果
+  // 不会自动更新——`create_job` 的幂等键 (file_hash, type, context_hash) 里
+  // **没有代码版本**，重传同一份文件会命中旧 job 拿回旧结果。把识别时间摆在
+  // 卡片上，用户才有依据判断"这个数是不是老的、要不要重新识别"。
+  recognizedAt: string | null
+  reRecognizing: boolean   // 强制重新识别请求进行中——双击守卫，同 confirming
+  // design/44 §4.3：这张卡片被「更新报价文件」替换过几次（0 = 从未替换过，
+  // 即最初上传的那份）。**不是**"重新识别"（同一份文件重跑，见 reRecognizing）
+  // ——这是换了一份新文件。卡片据此显示"已更新·替换 N 次"而不是"识别于"，
+  // 让用户分得清"重跑同一份"和"换了一份"这两件事。
+  updateCount: number
+  updating: boolean   // 更新报价文件请求进行中——双击守卫，同 confirming/reRecognizing
   error: string
   pollTimer: ReturnType<typeof setInterval> | null
 }
@@ -307,7 +319,8 @@ export function useSupplierUpload(deps: {
       confirmedSupplierId: null,
       confirmedSubmissionId: null,
       confirmed: false,
-      confirming: false,
+      confirming: false, recognizedAt: null, reRecognizing: false,
+      updateCount: 0, updating: false,
       error: '',
       pollTimer: null,
     }
@@ -481,6 +494,9 @@ export function useSupplierUpload(deps: {
     entry.status = 'done'
     entry.stage = '已识别'
     entry.progressPct = 100
+    // 识别时间摆到卡片上（见 BatchFileEntry.recognizedAt 的说明）：识别逻辑
+    // 改动后旧结果不会自动更新，用户需要一个依据判断这个数是不是老的。
+    entry.recognizedAt = job.created_at || null
     const shape = asQuoteShape(job.result)
     entry.items = shape.items
     entry.quality = asQualityMeta(job.result)
@@ -546,7 +562,8 @@ export function useSupplierUpload(deps: {
         declaredTotal: null,
         confirmedSupplierId: s.supplier_id,
         confirmedSubmissionId: s.submission_id,
-        confirmed: true, confirming: false, error: '', pollTimer: null,
+        confirmed: true, confirming: false, recognizedAt: null, reRecognizing: false,
+        updateCount: 0, updating: false, error: '', pollTimer: null,
       })
     }
     for (const j of data.inflight_jobs) {
@@ -565,7 +582,8 @@ export function useSupplierUpload(deps: {
         quality: null,
         declaredTotal: null,
         confirmedSupplierId: null, confirmedSubmissionId: null,
-        confirmed: false, confirming: false, error: '', pollTimer: null,
+        confirmed: false, confirming: false, recognizedAt: null, reRecognizing: false,
+        updateCount: 0, updating: false, error: '', pollTimer: null,
       })
     }
     batchFiles.value = restored
@@ -660,6 +678,82 @@ export function useSupplierUpload(deps: {
       }
     } finally {
       entry.confirming = false
+    }
+  }
+
+  /** 强制重新识别：拿服务端已存盘的原文件重跑，返回新 job，卡片就地接管。
+   *
+   *  **不是重新上传**——重传同一份文件会再次命中同一个幂等键
+   *  `(file_hash, type, context_hash)`，拿回的还是旧结果。后端
+   *  `/intake/jobs/{id}/re-recognize` 走 `force=True` 跳过幂等命中。
+   *
+   *  识别是要花钱的，所以这个动作只能由用户点，绝不自动触发。
+   */
+  async function reRecognizeEntry(entry: BatchFileEntry) {
+    if (!entry.jobId || entry.reRecognizing) return
+    entry.reRecognizing = true
+    try {
+      const { data } = await intakeApi.reRecognize(entry.jobId)
+      entry.jobId = data.id
+      entry.status = 'processing'
+      entry.stage = '重新识别中'
+      entry.progressPct = 0
+      entry.error = ''
+      // 旧的确认状态必须清掉——结果换了，之前基于旧结果的"已入库"不再成立。
+      entry.confirmed = false
+      entry.confirmedSubmissionId = null
+      startBatchPolling(entry)
+      message.success('已开始重新识别')
+    } catch (e: unknown) {
+      message.error(extractErrMsg(e, '重新识别失败'))
+    } finally {
+      entry.reRecognizing = false
+    }
+  }
+
+  /** 更新本轮报价（design/44 §4.3）：换一份新文件，替换这张卡片当前的报价。
+   *
+   *  跟「重新识别」（reRecognizeEntry）不是一回事——那是**同一份文件**重跑；
+   *  这是**新文件**。旧的已确认报价（若有）先 supersede（保留可复活），
+   *  再走跟首次上传一样的识别管线，就地接管同一张卡片（不新开一张），
+   *  供应商归属（finalSupplierName/matchedSupplierId）原样保留，不用户
+   *  重新填一遍。结果留在"待确认"——跟 reRecognizeEntry 一致，识别和确认
+   *  分两步，不擅自替用户点确认。
+   */
+  async function updateQuoteFile(entry: BatchFileEntry, file: File) {
+    if (entry.updating || entry.reRecognizing) return
+    entry.updating = true
+    try {
+      if (entry.confirmed && entry.confirmedSubmissionId != null) {
+        await quoteApi.supersedeSubmission(entry.confirmedSubmissionId)
+      }
+    } catch (e: unknown) {
+      message.error(extractErrMsg(e, '更新报价文件失败：无法替换旧版本'))
+      entry.updating = false
+      return
+    }
+    if (entry.pollTimer) { clearInterval(entry.pollTimer); entry.pollTimer = null }
+    entry.filename = file.name
+    entry.status = 'uploading'
+    entry.stage = '准备上传'
+    entry.stageDetail = ''
+    entry.progressPct = 1
+    entry.uploadPct = 1
+    entry.jobId = null
+    entry.items = []
+    entry.quality = null
+    entry.declaredTotal = null
+    entry.confirmed = false
+    entry.confirmedSupplierId = null
+    entry.confirmedSubmissionId = null
+    entry.recognizedAt = null
+    entry.error = ''
+    entry.updateCount += 1
+    try {
+      await uploadBatchFile(entry, file)
+      message.success('已上传新文件，识别完成后请重新核对入库')
+    } finally {
+      entry.updating = false
     }
   }
 
@@ -781,6 +875,8 @@ export function useSupplierUpload(deps: {
     batchStepState,
     confirmBatchEntry,
     removeBatchEntry,
+    reRecognizeEntry,
+    updateQuoteFile,
     removeAllBatchEntries,
     restoreBatchFiles,
     clearAllBatchFiles,
