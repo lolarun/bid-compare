@@ -641,7 +641,7 @@ App.vue (ConfigProvider + theme)
 
 ### 7.1 Development environment
 
-> Note (corrected 2026-06-23): `--reload` is now prohibited per `CLAUDE.md` §3; on a port conflict, kill the existing process and restart on the same fixed port (backend 8000, frontend 3000). The command below retains `--reload` as written in the v2 original.
+> Note (corrected 2026-06-23, ports updated 2026-08-26): `--reload` is now prohibited per `CLAUDE.md` §3; on a port conflict, kill the existing process and restart on the same fixed port. The fixed ports are now **backend 8020, frontend 5120** — `CLAUDE.md` §3 is authoritative. The commands below retain `--reload` and the old 8000/3000 as written in the v2 original.
 
 ```bash
 # Backend
