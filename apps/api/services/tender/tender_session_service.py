@@ -22,12 +22,54 @@ Naming distinction (intentional, both kept):
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from apps.api.models.tender_list_session import TenderListSession
+
+
+def _anchor_identity(a: dict) -> tuple[str, str]:
+    """(name, spec), stripped — the content key used to carry anchor_uid across
+    list revisions. Intentionally NOT seq: rows shift position when earlier
+    rows are inserted/removed, and seq-based matching would treat every row
+    after the edit point as "changed" even though nothing about them changed.
+    """
+    return (str(a.get("name") or "").strip(), str(a.get("spec") or "").strip())
+
+
+def _assign_anchor_uids(anchors_json: list, previous_anchors_json: list | None) -> list:
+    """docs/design/42 P1 — give each anchor a stable id that survives a list
+    revision, so cross-round trend data (P2) has something to join on.
+
+    A row carries its anchor_uid forward when (name, spec) matches a row in
+    the immediately-previous version, exactly once each (first match wins,
+    so duplicate name+spec pairs don't all collapse onto one previous uid).
+    Anything else — new row, or a row whose name AND spec both changed —
+    gets a fresh uid. This is the safe default from docs/design/42 §9: a
+    wrong carry-over fabricates a discount figure, a missed carry-over only
+    restarts one row's trend, so ambiguous cases resolve to "new".
+    """
+    prev_by_identity: dict[tuple[str, str], list[str]] = {}
+    for pa in (previous_anchors_json or []):
+        if not isinstance(pa, dict):
+            continue
+        uid = str(pa.get("anchor_uid") or "")
+        if not uid:
+            continue
+        prev_by_identity.setdefault(_anchor_identity(pa), []).append(uid)
+
+    out: list = []
+    for a in anchors_json:
+        if not isinstance(a, dict):
+            out.append(a)
+            continue
+        candidates = prev_by_identity.get(_anchor_identity(a)) or []
+        uid = candidates.pop(0) if candidates else uuid.uuid4().hex
+        out.append({**a, "anchor_uid": uid})
+    return out
 
 
 def get_current_confirmed_session(db: Session, project_id: int, category: str):
@@ -92,6 +134,7 @@ def save_session(
         .order_by(TenderListSession.version.desc())
     )
     new_version = (last.version + 1) if last else 1
+    anchors_json = _assign_anchor_uids(anchors_json, last.anchors_json if last else None)
 
     session = TenderListSession(
         project_id=project_id,

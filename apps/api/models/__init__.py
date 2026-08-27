@@ -18,6 +18,7 @@ from apps.api.models.tender_list_session import TenderListSession
 from apps.api.models.alignment_finalization import AlignmentFinalization
 from apps.api.models.bid_matrix_version import BidMatrixVersion
 from apps.api.models.anchor_missing_ack import AnchorMissingAck
+from apps.api.models.quote_round import QuoteRound
 
 from apps.api.core.config import (
     PROFESSION_ABBR, CATEGORY_ABBR, PROFESSION_MAP,
@@ -31,7 +32,7 @@ __all__ = [
     "BidAlignmentGroup", "BidAlignmentItem",
     "BidSubmission", "BidQuoteLine",
     "TenderListSession", "AlignmentFinalization", "BidMatrixVersion",
-    "AnchorMissingAck",
+    "AnchorMissingAck", "QuoteRound",
     "PROFESSION_ABBR", "CATEGORY_ABBR", "PROFESSION_MAP",
     "DEFAULT_SCORING_WEIGHTS", "DEFAULT_THRESHOLDS",
 ]

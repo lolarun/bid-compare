@@ -34,6 +34,9 @@ class BidSubmission(Base):
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
     supplier_raw_name = Column(String(200), nullable=False, default="")  # OCR 原始名 / 显示名，必填
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    # docs/design/42: 本次报价属于哪一轮。nullable 是存量兼容——迁移会为既有
+    # submission 回填到合成的「第一轮」，新写入路径应始终显式赋值。
+    round_id = Column(Integer, ForeignKey("quote_rounds.id"), nullable=True, index=True)
     batch_id = Column(String(100), nullable=False, unique=True)  # 幂等键
     status = Column(String(30), nullable=False, default="pending")
     bid_status = Column(String(30), nullable=False, default="")  # confirming / confirmed 等
@@ -43,6 +46,7 @@ class BidSubmission(Base):
     lines = relationship(
         "BidQuoteLine", back_populates="submission", cascade="all, delete-orphan"
     )
+    round = relationship("QuoteRound", back_populates="submissions")
 
     def __repr__(self) -> str:
         return f"<BidSubmission id={self.id} supplier_id={self.supplier_id} status={self.status!r}>"

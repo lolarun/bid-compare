@@ -857,13 +857,24 @@ def import_and_match(
     anchors: list[TenderAnchor] | None = None,
     tender_list_session_id: int | None = None,
     brand_ctx: tuple[set, dict] | None = None,
+    round_id: int | None = None,
 ) -> tuple[MatchSummary, dict]:
-    """解析清单 + 嵌入匹配 + 落 BidAlignmentGroup。幂等:先清同 (project,category) 旧组。
+    """解析清单 + 嵌入匹配 + 落 BidAlignmentGroup。
+
+    幂等范围（docs/design/42 §4.1，P2）：round_id 给定时，只清同
+    (project, category, round_id) 的旧组——重跑本轮 match 不会波及其它轮次。
+    round_id 为 None 时保留旧行为：清同 (project, category) 的全部旧组，
+    不区分轮次（生产入口 routes/analysis.py::tender_list_match 恒定会传
+    round_id；None 只是给未接入轮次概念的调用方——如 preview_service.py，
+    整个调用跑在会回滚的沙箱事务里——保留的兼容路径，不是生产默认）。
 
     xlsx_bytes: raw xlsx content; ignored when anchors is provided.
     anchors: pre-built TenderAnchor list (from TenderListSession); takes priority.
     brand_ctx: (allowed_aliases, supplier_expected_aliases) 来自招标文件第13页，
         用于品牌硬信号校验（冲突→pending）。None 时跳过品牌校验。
+    round_id: 本次匹配归属的 QuoteRound.id。写入每个新建 BidAlignmentGroup.round_id，
+        且限定本次 wipe-and-rebuild 的范围——这是修复"开第二轮后 match 删掉
+        第一轮对齐组"那个潜伏 bug 的地方。
 
     Returns:
         (MatchSummary, per_supplier_stats)
@@ -1031,11 +1042,15 @@ def import_and_match(
     # 预载有效 supplier_id 集合，避免向已删除供应商插外键
     valid_sids: set[int] = set(db.scalars(select(Supplier.id)).all())
 
-    # 幂等:清掉本 (project,category) 既有对齐组(及级联 items)
-    old = db.scalars(select(BidAlignmentGroup).where(
+    # 幂等:清掉本次范围内既有对齐组(及级联 items)。round_id 给定时按轮次隔离
+    # （design/42 §4.1）；round_id=None 时保留旧的无轮次范围，见函数 docstring。
+    _wipe_scope = [
         BidAlignmentGroup.project_id == project_id,
         BidAlignmentGroup.category == category,
-    )).all()
+    ]
+    if round_id is not None:
+        _wipe_scope.append(BidAlignmentGroup.round_id == round_id)
+    old = db.scalars(select(BidAlignmentGroup).where(*_wipe_scope)).all()
     for g in old:
         db.delete(g)
     db.flush()
@@ -1101,6 +1116,8 @@ def import_and_match(
             status="confirmed",
             tender_list_session_id=tender_list_session_id,
             anchor_seq=str(a.seq),
+            round_id=round_id,
+            anchor_uid=(a.anchor_uid or None),
         )
         db.add(group)
         db.flush()

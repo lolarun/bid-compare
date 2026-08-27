@@ -50,6 +50,9 @@ class BatchConfirmRequest(BaseModel):
     project_id: int | None = None
     project_name: str = ""                    # 查找现有 project（不自动创建）
     category: str = ""
+    # docs/design/42：这份报价归属哪一轮。省略时落到 (project, category) 当前
+    # 打开的轮次，没有则自动开第一轮——旧调用方不用改就落到单轮行为。
+    round_id: int | None = None
     overrides: list[dict[str, Any]] | None = None
     bid_status: str = ""
     # design/24 B3：预演——跑一遍完全相同的判据，从不写库，把这份文档所有的

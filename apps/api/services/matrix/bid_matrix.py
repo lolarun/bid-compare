@@ -407,6 +407,7 @@ def build_anchor_matrix(
     allowed_group_ids: set[int] | None = None,
     used_submission_ids: list[int] | None = None,
     submission_ids: list[int] | None = None,
+    round_id: int | None = None,
 ) -> dict:
     """Build the bid matrix anchored to ALL tender list items (v2.5).
 
@@ -422,6 +423,15 @@ def build_anchor_matrix(
     - When used_submission_ids or submission_ids is non-empty: columns keyed by BidSubmission.id.
       Supports unknown suppliers (supplier_id nullable). Column "id" = submission_id.
     - Otherwise: fallback to supplier_id columns (backward compat for LLM fill internal call).
+
+    round_id (docs/design/42 §4.1, P2, additive — default None preserves the
+    exact prior behavior for every existing caller): when given, restricts
+    the alignment-group query to that round's own groups instead of "every
+    confirmed group in this (project, category)". This is what makes a
+    **specific, closed round's** matrix reproducible — the caller must also
+    pass that round's own `used_submission_ids` (from `QuoteRound`, not
+    `TenderListSession`, which is shared across all rounds and gets
+    overwritten by whichever round matched most recently).
     """
     from apps.api.models.bid_submission import BidSubmission
 
@@ -499,6 +509,9 @@ def build_anchor_matrix(
     if tender_list_session_id is not None:
         # Strict: only groups that were created by this specific session
         q = q.where(BidAlignmentGroup.tender_list_session_id == tender_list_session_id)
+    if round_id is not None:
+        # Strict: only groups matched under this specific round (design/42 §4.1)
+        q = q.where(BidAlignmentGroup.round_id == round_id)
     if allowed_group_ids is not None:
         q = q.where(BidAlignmentGroup.id.in_(allowed_group_ids))
     all_groups: list[BidAlignmentGroup] = db.scalars(q).all()
@@ -611,6 +624,10 @@ def build_anchor_matrix(
             "materials": anchor.material_text() if hasattr(anchor, "material_text") else "",
             "brand": getattr(anchor, "brand", "") or "",
             "anchor_seq": str(anchor.seq),
+            # docs/design/42 §4.2/§6：跨轮次趋势的连接键，空字符串表示该锚点
+            # 早于 P1（还没有 anchor_uid）——round_trend 遇到空值必须按
+            # anchor_seq 兜底或直接标 not-comparable，不能当成两个不同锚点。
+            "anchor_uid": getattr(anchor, "anchor_uid", "") or "",
             "unit": a_unit,
             "quantity": anchor_qty,
             "historical_avg": historical_avg,

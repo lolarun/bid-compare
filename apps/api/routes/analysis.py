@@ -29,6 +29,7 @@ from apps.api.schemas import (
     CompareStateResult,
     LlmFillResult,
     TenderMatchResult,
+    RoundTrendResult,
     BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
     BidMatrixVersionApproveResult,
     AnchorMissingAckRequest, AnchorMissingAckResult,
@@ -1452,6 +1453,12 @@ def tender_list_match(
                 },
             )
 
+    # docs/design/42 §4.1 (P2)：本次 match 归属哪一轮，决定 wipe-and-rebuild 的
+    # 隔离范围——不传 round_id 会导致开第二轮后重跑 match 删掉第一轮的对齐组。
+    # get_or_open_round 首轮隐式自动开（未显式建过轮次的项目也有 round_id 可用）。
+    from apps.api.services.tender import quote_round_service
+    _round = quote_round_service.get_or_open_round(db, project_id, category)
+
     try:
         summary, per_supplier = import_and_match(
             db, content, project_id, category, sids,
@@ -1459,6 +1466,7 @@ def tender_list_match(
             anchors=prebuilt_anchors,
             tender_list_session_id=_tls_id,
             brand_ctx=brand_ctx,
+            round_id=_round.id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1511,20 +1519,36 @@ def tender_list_match(
         r = assess_readiness(stat_key, sup_name, stats, doc_meta=dm)
         readiness_list.append(r.as_dict())
 
-    # v2.7+: persist used_submission_ids on TenderListSession
+    # submission_ids 显式传入时精确写入，保证 Gate 一致性；
+    # 否则从 per_supplier keys 推导（旧兼容路径）
+    resolved_sub_ids = sorted(sub_ids) if sub_ids else sorted(
+        k for k in per_supplier.keys() if k in sub_records
+    )
+    resolved_supplier_ids = sorted(set(sids)) if sids else None
+
+    # v2.7+: persist used_submission_ids on TenderListSession（沿用作矩阵/导出
+    # 当前硬闸门的读取源，尚未切到 QuoteRound——design/42 §7.1 P2 遗留项）
     if _tls_id:
         from apps.api.services.tender.tender_session_service import record_submission_scope
-        # submission_ids 显式传入时精确写入，保证 Gate 一致性；
-        # 否则从 per_supplier keys 推导（旧兼容路径）
-        resolved_sub_ids = sorted(sub_ids) if sub_ids else sorted(
-            k for k in per_supplier.keys() if k in sub_records
-        )
-        record_submission_scope(db, _tls_id, resolved_sub_ids, sorted(set(sids)) if sids else None)
+        record_submission_scope(db, _tls_id, resolved_sub_ids, resolved_supplier_ids)
+
+    # docs/design/42 §3.1：本轮自己的范围副本，供 round_trend 和未来的历史轮次
+    # 矩阵查询使用，不依赖 TenderListSession（后者是全项目共享，晚一轮会覆盖早
+    # 一轮）。与上面 TenderListSession 写入并存，是过渡期的双写，不是替代。
+    # tender_list_session_id 一并写：round_trend 靠它重建本轮的锚点，不传就永远
+    # skip 这一轮（round_trend.compute_round_trend 的 skipped_rounds 会如实报）。
+    quote_round_service.record_round_scope(
+        db, _round.id, resolved_sub_ids, resolved_supplier_ids,
+        tender_list_session_id=_tls_id,
+    )
 
     result = summary.as_dict()
     result["readiness_list"] = readiness_list
     result["per_supplier_stats"] = per_supplier
     result["category"] = category  # 回传品类（category 为 None 时已从 session 推导）
+    result["round_id"] = _round.id
+    result["round_seq"] = _round.seq
+    result["round_name"] = _round.name
     return result
 
 
@@ -2343,6 +2367,23 @@ def tender_list_current(
         "created_at": session.created_at,
         "used_submission_ids": session.used_submission_ids or [],
     }
+
+
+@router.get("/round-trend", response_model=RoundTrendResult)
+def round_trend(
+    project_id: int = Query(...),
+    category: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """轮次价格趋势（docs/design/42 §6/§7.1，P2）—— 消费每一轮各自的
+    build_anchor_matrix 结果、按 anchor_uid 和 Supplier.id 跨轮次对齐，本身
+    不重算矩阵语义。口径不同的一对（税基不同/任一轮无有效总价）不给折扣数字，
+    只给 not_comparable_reason；缺席的供应商是 participating=False，不是 0。
+    """
+    from apps.api.services.matrix.round_trend import compute_round_trend, round_trend_to_dict
+
+    result = compute_round_trend(db, project_id, category)
+    return round_trend_to_dict(result)
 
 
 @router.get("/compare-state", response_model=CompareStateResult)

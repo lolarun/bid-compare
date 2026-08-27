@@ -280,6 +280,7 @@ class MatrixRow(BaseModel):
     material_name: str
     spec: str
     anchor_seq: str | None = None  # v2.5: TenderAnchor.seq
+    anchor_uid: str | None = None  # docs/design/42 §4.2: stable cross-round join key
     historical_avg: HistoricalAvg | None
     reasonable_low: ReasonableLowInfo | None = None
     spec_baseline: HistoricalAvg | None = None
@@ -966,6 +967,64 @@ class TenderMatchResult(BaseModel):
     category: str | None = None
     readiness_list: list[dict] = []
     per_supplier_stats: dict = {}
+    # docs/design/42 §4.1 (P2)：本次 match 落在哪一轮，供前端轮次栏显示
+    # "将归入：第N轮"（design/44 §4.2）。round_id 恒非空——get_or_open_round
+    # 首轮隐式自动开。
+    round_id: int | None = None
+    round_seq: int | None = None
+    round_name: str | None = None
+    model_config = {"extra": "ignore"}
+
+
+# ─── /api/analysis/round-trend ──────────────────────────────────────────────
+# docs/design/42 §6/§7.1 (P2). Mirrors apps/api/services/matrix/round_trend.py's
+# dataclasses field-for-field — see that module for what each figure means and
+# why `comparable`/`participating` gate every discount number (R3/R4).
+
+class RoundTrendRow(BaseModel):
+    anchor_uid: str
+    round_id: int
+    round_seq: int
+    supplier_id: int | None = None
+    supplier_name: str = ""
+    participating: bool = True
+    unit_price: float | None = None
+    total: float | None = None
+    price_basis: str | None = None
+    comparable_to_prev: bool = False
+    round_over_round_discount_pct: float | None = None
+    comparable_to_first: bool = False
+    cumulative_discount_pct: float | None = None
+    not_comparable_reason: str | None = None
+
+
+class RoundTrendSupplier(BaseModel):
+    supplier_id: int | None = None
+    supplier_name: str = ""
+    round_id: int
+    round_seq: int
+    total: float | None = None
+    round_over_round_discount_pct: float | None = None
+    cumulative_discount_pct: float | None = None
+    rank: int | None = None
+    rank_change: int | None = None
+    comparable_to_prev: bool = False
+    not_comparable_reason: str | None = None
+
+
+class RoundTrendSkip(BaseModel):
+    round_id: int
+    seq: int
+    reason: str
+
+
+class RoundTrendResult(BaseModel):
+    project_id: int
+    category: str
+    round_ids: list[int] = []
+    rows: list[RoundTrendRow] = []
+    suppliers: list[RoundTrendSupplier] = []
+    skipped_rounds: list[RoundTrendSkip] = []
     model_config = {"extra": "ignore"}
 
 

@@ -37,6 +37,16 @@ class BidAlignmentGroup(Base):
     tender_list_session_id = Column(Integer, ForeignKey("tender_list_sessions.id"), nullable=True)   # §11.2
     anchor_seq = Column(String(20), nullable=True)            # TenderAnchor.seq (stringified)
 
+    # docs/design/42 §4.1 (P2): group identity becomes (project_id, category,
+    # round_id, anchor_uid). round_id makes the match wipe-and-rebuild
+    # round-scoped — matching round 2 no longer deletes round 1's groups.
+    # Nullable: legacy groups (pre-P2) and callers that don't pass a round
+    # (e.g. preview_service.py, sandboxed and rolled back) keep round_id=NULL.
+    # anchor_uid is the cross-round join key for round_trend — provenance,
+    # not row identity within a round; empty when the anchor predates P1.
+    round_id = Column(Integer, ForeignKey("quote_rounds.id"), nullable=True, index=True)
+    anchor_uid = Column(String(64), nullable=True, index=True)
+
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

@@ -491,6 +491,15 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
         if cached is not None:
             return cached
 
+    # ── QuoteRound（docs/design/42 P0）──────────────────────────────────────────
+    # 省略 round_id 时落到 (project, category) 当前打开的轮次，没有就自动开
+    # 第一轮——单轮项目因此不用改调用方就落到旧行为。project 为空时（陌生上下文，
+    # 连项目都没定）没有 (project, category) 可挂，round_id 留空，不强求。
+    round_id: int | None = getattr(body, "round_id", None)
+    if round_id is None and project is not None:
+        from apps.api.services.tender.quote_round_service import get_or_open_round
+        round_id = get_or_open_round(db, project.id, default_category).id
+
     # ── 幂等：BidSubmission.batch_id 检查（一个 job 最多一条 BidSubmission）────────
     batch_id = f"BID-{job.id}"
     prior_submission = db.scalar(select(BidSubmission).where(BidSubmission.batch_id == batch_id))
@@ -591,6 +600,8 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
             prior_submission.supplier_raw_name = display_name
         if body.bid_status:
             prior_submission.bid_status = body.bid_status
+        if round_id is not None:
+            prior_submission.round_id = round_id
         submission = prior_submission
     else:
         submission = BidSubmission(
@@ -598,6 +609,7 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
             supplier_id=supplier.id if supplier else None,
             supplier_raw_name=display_name,
             project_id=project.id if project else None,
+            round_id=round_id,
             batch_id=batch_id,
             status="pending",
             bid_status=body.bid_status,

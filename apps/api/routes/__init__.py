@@ -13,6 +13,7 @@ from apps.api.routes.invite import router as invite_router
 from apps.api.routes.export import router as export_router
 from apps.api.routes.users import router as users_router
 from apps.api.routes.logs import router as logs_router
+from apps.api.routes.quote_rounds import router as quote_rounds_router
 
 all_routers = [
     auth_router,
@@ -28,11 +29,13 @@ all_routers = [
     export_router,
     users_router,
     logs_router,
+    quote_rounds_router,
 ]
 
 __all__ = [
     "materials_router", "suppliers_router", "projects_router",
     "quotes_router", "analysis_router", "config_router",
     "brand_tiers_router", "auth_router", "intake_router", "invite_router",
-    "export_router", "users_router", "logs_router", "all_routers",
+    "export_router", "users_router", "logs_router", "quote_rounds_router",
+    "all_routers",
 ]

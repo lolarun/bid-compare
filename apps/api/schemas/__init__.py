@@ -20,6 +20,7 @@ from apps.api.schemas.quote import (
     ArchivePricesSkippedLineOut, ArchivePricesResult,
 )
 from apps.api.schemas.user import UserCreate, UserUpdate, UserOut
+from apps.api.schemas.quote_round import QuoteRoundCreate, QuoteRoundUpdate, QuoteRoundOut
 from apps.api.schemas.analysis import (
     PriceCompareRequest, PriceCompareResult,
     SupplierScoreRequest, SupplierScoreResult,
@@ -53,6 +54,7 @@ from apps.api.schemas.analysis import (
     CompareStateSubmissionOut, CompareStateInflightJobOut, CompareStateResult,
     SupplierFillSummaryOut, LlmFillReadinessOut, LlmFillResult,
     TenderMatchResult,
+    RoundTrendRow, RoundTrendSupplier, RoundTrendSkip, RoundTrendResult,
     BatchConfirmErrorOut, BatchConfirmResult,
     BidMatrixSaveResult, BidMatrixVersionListItem, BidMatrixVersionDetail,
     BidMatrixVersionApproveResult,
@@ -85,4 +87,5 @@ __all__ = [
     "TreeChild", "TreeNode", "DashboardHeatmapData",
     "BubbleChild", "BubbleItem", "DashboardBubbleData",
     "UserCreate", "UserUpdate", "UserOut",
+    "QuoteRoundCreate", "QuoteRoundUpdate", "QuoteRoundOut",
 ]

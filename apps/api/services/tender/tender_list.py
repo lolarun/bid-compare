@@ -70,6 +70,11 @@ class TenderAnchor:
 
     canonical: dict = field(default_factory=dict)  # valve canonical key for hard-filter matching
 
+    # docs/design/42 P1：跨清单版本稳定的锚点身份。由 tender_session_service.
+    # save_session 在确认时赋值/继承——新解析出的 TenderAnchor（未落库）该字段
+    # 为空，只有从已确认 TenderListSession 重建（rebuild_anchors）时才有值。
+    anchor_uid: str = ""
+
     def material_text(self) -> str:
         """材质拼成单串(供匹配/展示)。"""
         return "/".join(v for v in self.materials.values() if v)
@@ -98,6 +103,7 @@ def rebuild_anchors(session) -> list[TenderAnchor]:
             profession=str(a.get("profession") or ""),
             remark=str(a.get("remark") or ""),
             source_ref=dict(a.get("source_ref") or {}),
+            anchor_uid=str(a.get("anchor_uid") or ""),
         )
         stored_canon = a.get("canonical")
         if stored_canon and isinstance(stored_canon, dict) and stored_canon.get("valve_type"):
