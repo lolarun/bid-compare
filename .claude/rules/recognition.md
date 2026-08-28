@@ -39,15 +39,19 @@ paths:
   而是换平台决策**，不要当收尾任务排期。
   `provider` 不具备 `vl_extract_csv` 时直接报错，不做能力探测后的静默降级
   （`pipeline.py` 的 `hasattr` 检查是防御性守卫，不是路径选择）。
-- 招标文件另有**文档级**文字层直抽（`tender_text_layer.py`，docs/design/25 轨A）：
+- 招标文件另有**文档级**文字层直抽（`tender_text_layer.py`，原 docs/design/25 轨A，
+  现整理进 `docs/spec/TECHNICAL.md` §3.2）：
   原生 PDF 检测到可用文字层且清单表可确定性抽取时**整份**走直抽、完全不调用视觉
   模型；检测失败或抽取不可信时**整份**回落 VL-direct。这与上一条禁止的双路径不冲突
   ——被禁止的是"同一份文档内按表复杂度分流 + 能力探测静默降级"，允许的是文档级
   二选一且来源诚实标注（`input_mode="text_layer"`，不冒充 `vl_direct`）。不得把它
   演化成文档内混合抽取。
-- **模型供应商由两个开关决定，不是散落在各调用点（docs/design/41，2026-08-24）。**
+- **模型供应商由两个开关决定，不是散落在各调用点**（原 docs/design/41 相关记录已并入
+  `docs/spec/TECHNICAL.md` §4，2026-08-24 起）。
   文本类走 `domain_config.TEXT_CLIENT_VENDOR`、视觉类走 `VISION_CLIENT_VENDOR`
-  （`'dashscope'`|`'mimo'`，**默认都是 dashscope**）。文本类的客户端一律从
+  （`'dashscope'`|`'mimo'`，**2026-08-27 起默认都是 mimo**——用户明确要求"全部切换
+  为 mimo"；此前默认停在 dashscope 是漏了一步，不是用户认可过的决定，见
+  `apps/api/tests/test_text_client_switch.py`）。文本类的客户端一律从
   `services/llm_provider.get_text_client()` 取——**禁止在调用点写死模型名**
   （此前 `bid_insight` 写死 `"qwen-plus"`、`block_alignment` 默认参数又写死一次，
   换供应商要改四处、漏一处就造成"大部分切了、有一处还在老家"的分裂状态）。
@@ -57,7 +61,8 @@ paths:
   一次性接受两种风险。配了 mimo 却没有 `MIMO_API_KEY` 时**明确回落并记日志**，
   不静默降级。**embedding 无法迁移**——mimo 没有 embedding 接口，对齐兜底
   （`anchor_match._embed`）只能留在 dashscope，这是硬约束不是遗漏。
-- **列→角色映射允许用模型，行→行对齐不允许（docs/design/40，2026-08-23 已实现）。**
+- **列→角色映射允许用模型，行→行对齐不允许**（原 docs/design/40，2026-08-23 已实现，
+  现整理进 `docs/spec/TECHNICAL.md` §3.7）。
   判"哪一列是数量/单价/合价/税率"是**表结构解释**，一张表问一次，且产出必须过
   `intelligence/column_roles.verify_roles` 这道确定性验证（数值列能否解析成数、
   名称列是不是文本、**同税基**下 `数量×单价≈合价` 闭不闭合）才准采纳——猜错有独立
@@ -68,8 +73,9 @@ paths:
   词表已认出的角色），并以 `_doc_meta.column_source` 留痕，不是靠假装能验。
   **行对齐不走这条路**：数量序列已能确定性解到 100%（design/39），且行级错配没有
   独立证据可以证伪——那正是 CLAUDE.md「LLM 不得重排候选」守的东西。
-- **空格子补位是上一条的唯一例外（docs/design/33，2026-08-22 用户批准，
-  2026-08-23 已实现：`intelligence/gap_fill.py`，**默认关闭**、由调用方注入
+- **空格子补位是上一条的唯一例外**（原 docs/design/33，2026-08-22 用户批准，
+  2026-08-23 已实现：`intelligence/gap_fill.py`，现整理进 `docs/spec/TECHNICAL.md`
+  §3.4，**默认关闭**、由调用方注入
   filler，`gap_filler=None` 时七份快照回放指标逐字节不变）。** 允许在主路径**什么都没返回**
   的格子上跑第二个模型，四个条件同时成立才算数，缺一条就不是这个例外：
   ① 只补 `AMOUNT_EMPTY`（读不到），**不得碰任何已有值**——覆盖已识别值是 CLAUDE.md §4

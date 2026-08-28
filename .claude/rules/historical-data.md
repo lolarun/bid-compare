@@ -26,4 +26,5 @@ paths:
 - 历史价格基准必须匹配可解释的同规格口径，至少考虑材料族、DN/规格、单位、税价口径；样本不足返回无基准，不得退化为全品类最低价。
 - 比价、邀标、供应商匹配和品牌匹配通过业务服务读取历史数据，不得在路由中拼接临时查询。
 - 导入必须 dry-run、守恒报告、批次隔离和可回滚；禁止把当前比价结果自动归档为正式历史。
-- 详细流程以 `docs/design/11-historical-price-governance.md` 为准。
+- 详细流程以 `docs/spec/FUNCTIONAL.md` §10 为准（原 `docs/design/11-historical-price-governance.md`，
+  2026-08-27 并入，原文存档于 `archive/design/`）。

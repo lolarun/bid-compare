@@ -6,28 +6,17 @@
 
 ## 设计文档
 
-系统设计文档，位于 `design/` 目录。
-
-> 设计文档现为英文（权威）。每篇含「Status — audited 2026-06-23」状态横幅。早期一次性分析/计划报告已移入 `design/archive/`（保持中文，冻结不维护）。
-
-| # | 文档 | 说明 |
-|---|------|------|
-| 01 | [material-master-data-standard](design/01-material-master-data-standard.md) | 专业→品类→子类分类体系、Layer 1/2/3 属性定义、编码规则 |
-| 02 | [comparison-weight-design](design/02-comparison-weight-design.md) | 供应商评分模型、权重配置、匹配/差异属性规则（现为 4 维，品牌维度已于 2026-06-06 移除） |
-| 04 | [unified-recognition-pipeline](design/04-unified-recognition-pipeline.md) | 识别分析总流水线：页面角色分类 → 抽取 → 校验 → 锚点对齐 → 矩阵 |
-| 05 | [bid-comparison-intelligence-layers](design/05-bid-comparison-intelligence-layers.md) | 比价流程智能化分层（§9 为对齐主流程，被代码引用） |
-| 06 | [functional-design-v2](design/06-functional-design-v2.md) | 系统功能模块定义（部分被后续重构取代） |
-| 06 | [bid-flow-v2.3-rework](design/06-bid-flow-v2.3-rework.md) | 比价流程 v2.3 重构决策记录 |
-| 07 | [technical-design-v2](design/07-technical-design-v2.md) | 技术架构、数据库、API、核心算法（部分被 09/12/13 取代） |
-| 07 | [procurement-list-category-recognition](design/07-procurement-list-category-recognition.md) | 采购清单品类识别 + 多品类拆分 + match 自动落 session |
-| 08 | [tender-pdf-recognition-generalization](design/08-tender-pdf-recognition-generalization.md) | 招标 PDF 识别通用化（设计草案，多数未实现） |
-| 09 | [p0-data-model-write-path-rework](design/09-p0-data-model-write-path-rework.md) | P0 数据模型与写链路重构 |
-| 10 | [unified-table-recognition-base](design/10-unified-table-recognition-base.md) | 统一表格识别基座（采购清单 + 报价清单共用） |
-| 11 | [historical-price-governance](design/11-historical-price-governance.md) | 历史采购价格治理与业务服务 |
-| 12 | [bid-backend-audit-remediation](design/12-bid-backend-audit-remediation.md) | 招标比价后端独立审计与整改（TODO.md 的权威依据） |
-| 13 | [alembic-migration-introduction](design/13-alembic-migration-introduction.md) | Alembic 版本化迁移引入（Plan B） |
-| 14 | [domain-operation-audit](design/14-domain-operation-audit.md) | 领域操作审计（P1-4 已落地，部分待排期） |
-| — | [archive/](design/archive/) | 早期一次性报告：现有资料清单(00)、数据分析计划(03)、数据分析报告(05)、用户反馈分析报告(08) |
+> **2026-08-27 起，当前权威内容在 [`spec/FUNCTIONAL.md`](spec/FUNCTIONAL.md)
+> （产品/业务行为）和 [`spec/TECHNICAL.md`](spec/TECHNICAL.md)
+> （架构/实现）两个文件里** —— 从原先 40 篇编号 design 文档
+> （`01`–`44`）+ 根目录 `TODO.md`/`HANDOFF.md` 合并整理而来，只保留各文档
+> 状态横幅标注为"当前为真"的内容，供 Claude/Codex 等 agent 单次读取即可
+> 掌握现状，不必再爬 40 篇按时间顺序写的文档。
+>
+> 原始 40 篇（含完整背景、实测数据、被否决的方案、撤回记录）连同
+> `TODO.md`/`HANDOFF.md` 一并移入 [`archive/design/`](../archive/design/)，
+> 保留 git 历史，仅供追溯"为什么"——不再维护，不代表当前状态。
+> `spec/*.md` 里的 `[design/NN]` 标记指向这些原始文档。
 
 ### v2 主要变更（2025-05-19）
 
@@ -52,7 +41,7 @@
 - **物料去重**：按 (category, standard_name, spec) 去重，导入不再重复入库
 - **OCR 提取流程**：`/api/intake/upload` + 异步 job polling + `ExtractionEditor` 人工核对
 - **认证**：`POST /api/auth/login`（JWT，环境变量 `JWT_SECRET`）
-- 待实现：配电箱 BOM 拆分、用户/日志 API、路由权限守卫 → 见 [TODO.md](TODO.md)
+- 待实现：配电箱 BOM 拆分、用户/日志 API、路由权限守卫 → 见 [spec/FUNCTIONAL.md §12](spec/FUNCTIONAL.md)
 
 ## 数据资产
 
@@ -93,7 +82,8 @@
 
 | 文件 | 说明 |
 |------|------|
-| [**TODO.md**](TODO.md) | 待办事项（P1/P2/P3 优先级分类 + 待一建确认事项） |
+| [spec/FUNCTIONAL.md §12](spec/FUNCTIONAL.md) | 待办事项与待客户决策（原 TODO.md，2026-08-27 并入） |
+| [archive/design/TODO.md](../archive/design/TODO.md) | 原始待办清单存档，仅供追溯 |
 
 ## 其他文档
 

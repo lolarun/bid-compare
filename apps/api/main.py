@@ -30,6 +30,25 @@ from apps.api.services.ingestion.document_ingestion import DocumentIngestionServ
 
 log = logging.getLogger("mempas")
 
+# 2026-08-27：项目159三份文件在"补读缺失金额"卡了7-9分钟、日志上却什么都没有
+# ——不是没打日志，是 apps.api.* 的 logger 从没配过 handler/level，INFO 消息
+# 走到 root 的 lastResort handler（只认 WARNING+）直接被吞。只给 apps.api 这
+# 一支命名空间开 INFO，不动全局 root（不想连 httpx/openai 库自己的调试日志一起
+# 打开）。用 `getattr` 判断避免重复 addHandler（uvicorn 无 --reload 时本模块只
+# 导入一次，但测试可能多次 import，这里保证幂等）。
+_APPS_API_LOG = logging.getLogger("apps.api")
+if not getattr(_APPS_API_LOG, "_mempas_configured", False):
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _APPS_API_LOG.addHandler(_handler)
+    _APPS_API_LOG.setLevel(logging.INFO)
+    # propagate 保持默认 True——不是留漏洞：root 一旦在这条链上遇到过 handler
+    # 就不会再补 lastResort，不会重复打印；关掉反而会打断 pytest `caplog`
+    # （它挂在 root 上收集记录），两个 test_text_client_switch.py 用例已用
+    # 这条实测证实过。
+    _APPS_API_LOG._mempas_configured = True
+
 # AUDIT-FIX C3: periodic stuck-job recovery beyond the startup pass.
 # Background task runs every STUCK_JOB_SWEEP_S and flips any RUNNING job
 # whose updated_at is older than the recovery threshold to FAILED.

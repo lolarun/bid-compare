@@ -3,14 +3,17 @@
 This file is loaded into **every** session, so it stays short and only holds what applies
 **everywhere**: project orientation, how to run things, and the cross-cutting invariants that
 have no narrower home. Per-domain detail lives in the path-scoped rules under `.claude/rules/`
-(loaded automatically when you touch matching files) and the design rationale in `docs/design/`.
+(loaded automatically when you touch matching files); current product/architecture state lives
+in `docs/spec/FUNCTIONAL.md` and `docs/spec/TECHNICAL.md`; the *why* behind it lives in the
+archived numbered docs under `archive/design/`.
 
-**Single source of truth.** If a rule here and a rule in `.claude/rules/` or `docs/design/`
+**Single source of truth.** If a rule here and a rule in `.claude/rules/` or `docs/spec/`
 disagree, fix the documents — never keep two contradicting requirements. Do not restate
 per-domain rules here; link to them instead.
 
-> Note: `docs/design/*.md` are in English (authoritative). `.claude/rules/*.md` remain in
-> Chinese and are authoritative for their path-scoped areas; this charter is the English entry point.
+> Note: `docs/spec/*.md` and `archive/design/*.md` are in English (authoritative).
+> `.claude/rules/*.md` remain in Chinese and are authoritative for their path-scoped areas;
+> this charter is the English entry point.
 
 ---
 
@@ -40,10 +43,11 @@ apps/api/            FastAPI backend (Python >=3.11), app object: apps.api.main:
   intelligence/      Recognition pipeline: OCR, page-role classification, table extraction, LLM
   models/            SQLAlchemy models
   schemas/           Pydantic schemas
-  migrations/        Alembic migrations (see docs/design/13)
+  migrations/        Alembic migrations (see docs/spec/TECHNICAL.md §7)
   tests/             pytest (unit + replay + fresh E2E)
 apps/www/            Frontend: Vue 3 + Vite + Pinia + Ant Design Vue + ECharts
-docs/design/         Design docs / rationale (authoritative; numbered)
+docs/spec/           Current-state spec: FUNCTIONAL.md (product/business) + TECHNICAL.md (architecture) — read these first
+archive/design/ Archived numbered design docs — rationale, measurements, retraction history behind docs/spec/
 docs/data/           Governed historical-price data (raw/ and curated/)
 tests/fixtures/documents/  E2E fixtures (tender/tender_list/bid/bid_list PDFs+Excel, see MANIFEST.md)
 scripts/             One-off / batch / audit scripts (must be parameterized — see rules)
@@ -123,16 +127,19 @@ These apply across the whole repo. Domain specifics live in the linked rules.
 - **Respect the workspace.** Do not modify or roll back workspace changes the user did not
   authorize.
 
-## 5. Detailed rules (path-scoped) and design docs
+## 5. Detailed rules (path-scoped) and specs
 
 Each rule file auto-loads when you edit a file it covers; read it before changing that area.
+The "Spec section" column points into `docs/spec/TECHNICAL.md` (architecture) /
+`docs/spec/FUNCTIONAL.md` (product); those sections cite the original `archive/design/`
+doc(s) for full rationale.
 
-| Area | Rule file | Primary design doc |
+| Area | Rule file | Spec section |
 |------|-----------|--------------------|
-| Recognition pipeline (OCR / page roles / table extraction / fallback / bbox / rendering) | `.claude/rules/recognition.md` | `04-unified-recognition-pipeline`, `08-tender-pdf-recognition-generalization`, `10-unified-table-recognition-base` |
-| Bid-compare backend (alignment / matrix / evaluation policy / readiness) | `.claude/rules/bid-compare-backend.md` | `05-bid-comparison-intelligence-layers`, `06-bid-flow-v2.3-rework`, `12-bid-backend-audit-remediation` |
-| Historical prices & supplier/brand evidence | `.claude/rules/historical-data.md` | `11-historical-price-governance` |
-| Database & repair-script safety | `.claude/rules/database-safety.md` | `13-alembic-migration-introduction` |
+| Recognition pipeline (OCR / page roles / table extraction / fallback / bbox / rendering) | `.claude/rules/recognition.md` | `TECHNICAL.md` §3 |
+| Bid-compare backend (alignment / matrix / evaluation policy / readiness) | `.claude/rules/bid-compare-backend.md` | `TECHNICAL.md` §5, `FUNCTIONAL.md` §7 |
+| Historical prices & supplier/brand evidence | `.claude/rules/historical-data.md` | `FUNCTIONAL.md` §10 |
+| Database & repair-script safety | `.claude/rules/database-safety.md` | `TECHNICAL.md` §7 |
 | Tests & acceptance | `.claude/rules/tests.md` | — |
 
 ## 6. Development workflow

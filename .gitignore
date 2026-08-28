@@ -18,7 +18,6 @@ data/*.db-shm
 data/uploads/
 
 # Environment files (contain secrets)
-.env
 apps/api/.env
 apps/www/.env
 *.env.local

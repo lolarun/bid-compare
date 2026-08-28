@@ -1,0 +1,399 @@
+# MEMPAS — Functional Specification
+
+> Consolidated 2026-08-27 from 40 numbered `docs/design/*.md` documents plus
+> `TODO.md` and `HANDOFF.md`. Each statement below is what a design document's
+> own status banner marked **current truth** at consolidation time — not
+> every idea ever proposed. The originals are preserved under
+> `archive/design/` with their full rationale, experiment data, and
+> retraction history; this file exists so an agent (or a person) can learn
+> **current product behavior** without reading 40 chronological documents.
+> A bracketed tag like `[design/32]` means "see the archived original for
+> the reasoning and measurements behind this."
+>
+> For architecture / implementation, see `docs/spec/TECHNICAL.md`.
+
+---
+
+## 1. What the product does
+
+MEMPAS is a bid-comparison (比价) system. The core pipeline:
+
+```
+Tender document / procurement list
+  → confirm TenderAnchor (the row axis)
+  → recognize N supplier BidSubmission quotes, with human review
+  → align supplier rows to the anchor
+  → resolve pending / missing / excluded rows
+  → produce the comparison matrix, exports, and evaluation explanations
+```
+
+A comparison always has exactly one row axis, and every result states which
+kind it is (`axis_kind`):
+
+- **Anchor mode** (`tender_anchor`) — rows come from a confirmed procurement
+  list. This is the default and the *only* kind official alignment,
+  evaluation totals, exports, and recommendations may use.
+- **Quote-derived mode** (`quote_derived`) — when no confirmed procurement
+  list exists, one supplier's own item rows (the one with the most rows)
+  serve as the reference axis; other suppliers align to it positionally,
+  confirmed by quantity. This axis may feed **only the preview lane**, never
+  an official result — it can show suppliers priced the same row
+  differently, but never that a supplier omitted a tender-required item,
+  because nothing states what was required `[design/32]`.
+
+Production deployment: **`https://bid.hotcrp.cn/`** (first verified deploy
+2026-08-25). Two operational gotchas: port 80 is blocked by the Aliyun
+gateway (must use HTTPS), and `deploy.sh`'s health check can false-negative
+(sleeps 5s before probing) — always curl `/api/health` manually after a
+deploy. Full detail: `docs/DEPLOY.md`.
+
+---
+
+## 2. Material master data
+
+Materials are classified in a three-level hierarchy mirroring SAP
+MTART>MATKL>MATNR: **Profession** (8 defined, 4 confirmed in use: Electrical,
+Plumbing & Drainage, HVAC, Fire Protection) → **Category** (阀门/桥架/etc.,
+10 total, see §4) → **Sub-category**. Material coding is
+`{PROF}-{CAT}-{SEQ}` `[design/01]`.
+
+Name/spec standardization matches in priority order: exact match > rule
+match > AI semantic match > manual confirmation, covering spec synonyms,
+name synonyms, category synonyms, dimension format, and type synonyms
+`[design/01]`.
+
+Extended attributes are category-specific (e.g. valves carry
+`valve_type`/`pressure`/`body_material`/`connection`), each attribute marked
+either a **match** role (must agree for two quotes to be "the same item") or
+a **difference** role (may legitimately vary, shown as a remark, not a
+mismatch) `[design/01]`.
+
+---
+
+## 3. Supplier scoring & comparison weights
+
+Two independent weight layers `[design/02]`:
+
+- **Layer A — supplier composite score** ("which supplier to choose"): 4
+  dimensions — price competitiveness 45%, history cooperation 25%, quote
+  completeness 15%, commercial terms 15%. (A 5th dimension, brand/standard
+  compliance, was removed 2026-06-06 because manual bid comparison never
+  actually scored by brand tier; its 15% weight was redistributed to price
+  +5% and history +5%.)
+- **Layer B — per-item price deviation tolerance** ("is this quote
+  anomalous"): deviation is measured against **reasonable historical low**
+  (IQR-filtered minimum: `min(price where price ≥ Q1 − 1.5×IQR)`), not mean
+  or median. This replaced an earlier mean/median baseline and a 4-level
+  green/yellow/red/blue alarm scheme, per direct 一建 user feedback (May
+  2026) — deviation is now shown as a value + 2-color flag only
+  (≤5% none / 5–10% yellow / >10% red, configurable per category); Modified
+  Z-score outlier detection was explicitly cancelled `[design/02][design/06-functional-design-v2]`.
+- History-cooperation scoring bands: ≥5 wins → 100 pts, 3–4 → 80, 1–2 → 60,
+  0 → 40 pts.
+- Weights and thresholds are configurable by an administrator (must sum to
+  100%; per-category deviation tolerance individually settable).
+
+---
+
+## 4. Procurement list / tender handling
+
+**Category vs. profession**: category (10 defined: 阀门, 桥架, etc.), not
+profession, is what material matching and session grouping actually use.
+Category is inferred from item name/content — never from the Excel
+"profession" column, which frequently doesn't match the 10 category dropdown
+options `[design/07]`.
+
+**Multi-category lists** are split into one `TenderListSession` per detected
+category, each independently versioned; the UI exposes a category switcher.
+Uploading/matching without an explicit prior list-confirmation
+self-heals — the backend auto-creates the needed session(s) rather than
+409ing `[design/07]`.
+
+**Multi-sheet Excel**: every list-like sheet in a procurement workbook is
+merged (not just the largest sheet), sheets that are entirely footer/total
+rows are excluded as non-item, and original per-sheet numbering is preserved
+alongside a renumbered global `seq` `[design/39]`.
+
+**Text-layer PDFs** (born-digital tender documents with a usable embedded
+text layer): procurement list, cover-page scalars, and brand requirements
+are extracted via fast deterministic text parsing (~20–25× faster than the
+vision model), with automatic, logged fallback to the vision path for
+scanned PDFs or text layers that don't parse cleanly `[design/25]`.
+
+**Closed-roster invitation** (design intent, verify shipped status before
+relying on this in production): when a tender document is itself an
+invitation naming allowed bidders, that named list becomes a confirmed
+closed roster. Automatic supplier creation is forbidden in this mode; the
+bid matrix's columns are driven by roster membership (an invited supplier
+with no submission shows "未响应", not absent); binding a supplier outside
+the roster requires an explicit action that flips the case to an "exception"
+state with an audit log entry. Public tenders / ad-hoc quotes stay in open
+mode (today's default, unchanged) `[design/18]`.
+
+---
+
+## 5. Document upload & classification
+
+Users drop all files at once (tender / procurement list / bid / quote list,
+any mix); the system classifies each and shows the derived structure for
+confirmation before commit. Classification is always editable and may
+honestly say "不确定" — filename is a hint, never decisive `[design/28]`.
+
+Classification runs a three-tier ladder, cheapest first: instant
+extension/header-based rules → post-recognition cover-scalar/table-shape
+signals → (residual cases only) a narrow LLM multiple-choice call. On the
+measured corpus, residue reaching the LLM tier was 0, so that tier was never
+built `[design/28]`.
+
+When same-supplier duplicates exist (PDF + Excel both present), Excel is
+primary and the PDF becomes a cross-check; there's no dedicated arbitration
+UI — the user re-assigns on the confirmation screen if needed `[design/28]`.
+
+Scanned PDFs are classified by a real vision-model call (live, not paused);
+native PDFs route via a zero-model-call keyword judge. A genuinely uncertain
+Excel currently pops a binary modal (招标文件/投标文件) — **known bug**:
+dismissing the modal (Escape/mask-click) is silently treated as "投标文件"
+rather than leaving the file unrouted `[design/29][design/38]`.
+
+Each dropped file becomes one status card, cycling 分析中 → one of four
+categories (招标文件/采购清单/投标文件/报价清单); the card shows unit name
+(招标单位/投标单位, distinct from project name), item counts always in 项
+(never 行) regardless of source format, and two separate totals — 明细合计
+(computed) vs. 文件声明总价 (declared) — never merged into one number
+`[design/29]`.
+
+---
+
+## 6. Recognition (what the system extracts from a document)
+
+PDF recognition — for both procurement lists and supplier quotes — produces
+an **unconfirmed** `ExtractionDraft` for human review; domain objects
+(`TenderAnchor`, `BidQuoteLine`) are created only after user confirmation.
+Recognition never writes the database directly `[design/10]`.
+
+Every document gets a quality tier:
+
+- **PASS** — structure/amounts/source/completeness all check out; may enter
+  official alignment.
+- **REVIEW** — the system pre-fills and surfaces doubts; excluded from
+  official quotes, totals, and recommendations until a human confirms
+  (conditional explanations allowed, final procurement confirmation is not).
+- **BLOCKED** — severe page loss, no reliable structure, a key-amount
+  conflict, or no valid quote at all; nothing is stored, aligned, or
+  recommended.
+
+Pseudo-complete results (silently filling in defaults) are forbidden;
+page-count conservation is a hard constraint — fixed page numbers or
+supplier-specific logic are never used to locate data `[design/10]`.
+
+**Known, currently-unfixed recognition defects** (surfaced as flagged rows
+in the doubt/preview UI, not silently absorbed):
+
+- A 4-row loss of `total_price_incl_tax` on one real document (2.74%
+  checksum gap, correctly still red — do not fix by loosening the
+  threshold) `[TODO §-1.1]`.
+- A column-shift on one row (spec text spilling into the `unit` column,
+  losing `qty`) that ingests fine but silently disappears from the
+  comparison matrix with no on-screen indication — "89 ingested rows, 88
+  matrix rows," the missing ¥3,460 currently invisible `[TODO §-1.2]`.
+
+**Gap-fill** (narrow, deliberate exception to "no mixed extraction within
+one document"): when a table column clearly exists but the engine returned
+nothing for a cell (`AMOUNT_EMPTY`), a second model re-reads just that cell.
+Four conditions, all required: only genuinely empty cells (never overwrites
+a present value); every filled value is tagged with its source
+(`field_sources[field]="llm"`); the filled row must pass an arithmetic
+identity check or the fill is discarded entirely; and quality tier is
+**never** raised by a fill — a row that was REVIEW stays REVIEW
+`[design/33]`. Filled amounts are excluded from the declared-total checksum,
+since that checksum is supposed to be independent evidence recognition was
+complete. **Known UI gap**: filled cells don't yet render visually distinct
+in the grid, despite being spec'd to.
+
+**Column-shift refusal**: when a numeric column instead holds free text (not
+a number, not a "not quoted" marker like `/`/`无`), the row is flagged
+`column_shift` and its `qty`/`unit_price`/`tax` fields are refused rather
+than stored wrong — the `total` field is often still recoverable and is,
+under narrow conditions. Shifted rows stay REVIEW at the row level; a whole
+submission is only blocked when shifted rows exceed a ratio/count threshold
+`[design/34]`. (The exact thresholds are flagged as possibly miscalibrated
+for this newer detector — open, unresolved.)
+
+Suppliers quoting only part of the procurement list is treated as normal
+business behavior, not corruption — unquoted anchors are truthfully
+reported as unquoted, never invented or zero-filled `[design/39]`.
+
+---
+
+## 7. Alignment & comparison review
+
+The LLM's role across the entire flow is exactly one thing: eliminate
+expression differences by normalizing to a canonical representation.
+Bid-comparison itself is pure deterministic math — the LLM never re-ranks
+candidates, splits line items, awards a bid, or fabricates evaluation facts
+`[design/05]` (this rule is also stated as a repo-wide invariant in
+CLAUDE.md §4).
+
+Review is staged in gates: automated code validation (free, deterministic,
+live) → LLM adversarial review (designed, not implemented) → human review
+(final authority). Review concentrates at the matching boundary, not on
+every individual attribute `[design/05]`.
+
+A reviewer can mark a "no quote for this anchor" cell as explicitly
+acknowledged ("已确认无报价") — a real, persisted, audit-logged action, not
+mere UI suppression. Acknowledging does not change the cell's evaluability
+or pricing status; a missing cell stays excluded from totals regardless of
+ack `[design/23]`.
+
+**Preview comparison** can run before every supplier is confirmed — computed
+through the exact same business services as the official path (never a
+second implementation), writing nothing (it runs, then rolls back). It shows
+no recommendation and no award. A per-supplier gate failure (e.g. checksum)
+no longer blocks the whole preview — it downgrades to an advisory note on
+that supplier only, while the official confirm path stays strict
+`[design/31][design/32]`. Preview has no export — a "non-official" label
+can't travel with an exported file, so the surface simply isn't offered.
+
+For anchors still unresolved during confirmation, the UI shows an advisory
+(never certain) impact estimate computed from peer suppliers' prices for the
+same row — explicitly `estimated` (≥2 peers) or `unbounded` (fewer peers, or
+missing quantity); the tool never claims ranking can't flip when any row is
+`unbounded` `[design/31]`.
+
+**Preview screen UX (current)**: `showConclusions` hides
+★最低/highlight/recommendation columns in the preview lane specifically
+("look before you commit," not a conclusion); unit price and total price are
+now separate columns everywhere; the AI summary card sits above the matrix
+in the formal lane only `[design/36 §7]`. Known, still-unfixed problems in
+the preview lane: 「纳入」/「排除」 buttons are inert there (can't work,
+since the preview sandbox rolls back); doubt notes still expose internal
+check names rather than plain-language consequences; there's no visible path
+from preview into 正式比价 `[design/36]`.
+
+---
+
+## 8. Multi-round quoting
+
+A project/category can have multiple named, staff-created **rounds**
+(pre_tender or formal stage; open or closed status). Only a round explicitly
+flagged `is_final_basis` may produce an official conclusion — other rounds
+are explanatory only. The first round auto-opens implicitly on first upload;
+no ceremony needed `[design/42]`.
+
+**Current state (2026-08-27)**: round storage and identity exist and are
+tested; round-scoped alignment/comparison/trend views do **not** exist yet.
+Running match for a second round today still destroys round 1's alignment
+result — a known, live hazard, not yet fixed (fix is scheduled as backend
+work "B0" ahead of any round UI, per design/44's D-2 decision)
+`[design/42][design/44]`.
+
+**Designed, not yet built** `[design/44]`: `/workspace` becomes a project
+list screen (distinct from `/projects`'s master-data view); a round bar in
+the workspace header with round chips and an explicit "开启新一轮" modal
+that states the consequence of closing the current round; an explicit
+"更新报价文件" action to replace a file within the current round (distinct
+from re-recognition); read-only viewing of closed rounds with a historical
+matrix and a trend tab. Project creation stays open to all compare-capable
+roles until a later phase restricts it to 管理员 only.
+
+Business rules for trend comparison (not yet enforced by working code beyond
+storage): a round is one complete, self-consistent quote set, never mixed
+with another; a trend figure requires matching item identity + tax basis +
+quantity or is marked not-comparable, never guessed; a supplier absent from
+a round reports "not participating," never zero-filled or interpolated; the
+procurement list stays editable across rounds via a stable per-row identity
+that survives list revisions.
+
+---
+
+## 9. Brand recommendation
+
+When a user uploads a tender document, the system infers procurement
+categories and recommends **approved** brands (must have
+`is_approved=True`), ranked by an explainable composite score — not a hard
+tier cutoff, so a well-documented domestic brand can outrank an
+undocumented joint-venture brand. The LLM may only explain the deterministic
+score, never re-rank candidates. This is a per-category recommendation,
+independent of the supplier composite score in §3 `[design/15]`.
+
+---
+
+## 10. Historical price governance
+
+Historical procurement prices are governed as reviewed business facts, not
+arbitrary queries `[design/11]`:
+
+- Test / E2E / demo / ad-hoc-repair data must never enter the production
+  price baseline or supplier/brand evidence.
+- Staging a bid submission does **not** automatically become historical
+  price — archiving to history is a separate, explicit user action.
+- Raw supplier/brand names in uploaded files must never auto-create or
+  auto-merge supplier master data; "a supplier once quoted a brand" is not
+  the same fact as "this supplier holds formal agency authorization" for
+  that brand.
+- A price baseline must be computed over genuinely similar
+  material/spec/unit/tax-basis/time-range; when the sample is insufficient,
+  the correct answer is **no baseline**, never a silent fallback to an
+  all-category minimum.
+
+---
+
+## 11. Users & roles
+
+Three roles `[design/16]`:
+
+| Role | Access |
+|---|---|
+| 管理员 (admin) | everything — user management, system settings, logs, all business ops |
+| 比价员 (buyer) | business ops — invite, compare, import, data edit, export |
+| 查看者 (viewer) | read-only — dashboard, materials/suppliers/projects view only |
+
+A default admin is auto-seeded on first login when the users table is empty.
+The header shows a read-only role tag; the sidebar menu filters items by
+role; a router guard redirects to `/403` on insufficient role.
+
+---
+
+## 12. Known limitations & open product decisions
+
+These are not bugs to silently work around — they're honestly-tracked gaps
+or decisions genuinely waiting on the customer/business owner, not
+engineering.
+
+- **Weighted attribute-based comparison** — customer wants it, but
+  structured data today only reliably supports brand as a comparable
+  attribute; data source and scope unconfirmed `[TODO §4]`.
+- **Phase B-1 deterministic TableGrid shadow mode** — validated in shadow
+  (zero row loss on the tested document), awaiting a user go/no-go to switch
+  it on `[TODO §4]`.
+- **Baseline + recommendation redesign** (same-spec baseline / checksum
+  semantics / three-state gating / deterministic primary supplier / AI only
+  explains) — implementation finalization/confirmation still pending
+  `[TODO §4]`.
+- **sub18/sub19 data repair** — unverified/unaccepted; sub18 shows only
+  ¥124k against a known ¥1.07M, with `source_ref` carrying only a page
+  number, no row `[TODO §4]`.
+- **qwen retention** — whether to delete the qwen model dependency entirely
+  or keep it as a third-tier pixel-reread fallback on `BLOCKED` documents is
+  suspended pending a user call, informed by real BLOCKED-rate evidence from
+  manual testing `[TODO §5]`. See `docs/spec/TECHNICAL.md` for the two
+  candidate technical shapes and their required safety constraints.
+- Two known recognition defects (§6 above) are deliberately left unfixed
+  this round, tracked, and visible as doubts rather than silently absorbed.
+- The comparison-page AI summary panel is not wired up yet — it shows an
+  explicit "not implemented" message rather than a blank space.
+
+---
+
+## 13. Explicitly out of scope (recorded so it isn't re-proposed)
+
+- ERP, purchase orders, contracts, automatic award, automatic master-data
+  creation `[design/17][design/18]`.
+- Arbitrary skew/scan-tilt correction beyond the four right angles;
+  clarification/amendment documents that modify the tender list
+  `[design/19]`.
+- BOM-level component splitting for switchgear cabinets — horizontal
+  comparison only, cancelled 2026-05-20 `[design/06-functional-design-v2]`.
+- Excel report export (F6.4) and the to-do queue (F1.4) were never built in
+  the original historical-price product surface and were superseded by the
+  anchor-based flow before being revisited.

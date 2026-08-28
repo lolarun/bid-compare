@@ -260,18 +260,28 @@ PAGE_FILTER_MODEL: str = "mimo-v2.5"
 PAGE_FILTER_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
 # 一个 8 页窗口要输出 8 行判定；实测 reasoning_tokens≈0，4000 足够有余。
 PAGE_FILTER_MAX_TOKENS: int = 4000
+# mimo 视觉调用（补位 gap_fill、招标 VL-direct 回落）的单次请求超时。之前没配，
+# 2026-08-27 项目159 三份文件卡在"补读缺失金额"7-9 分钟无任何日志后被孤儿任务
+# 清扫杀掉——openai SDK 不设超时时默认等 600s，一页三个方向顺序试，足够拖到
+# 清扫线。跟 paddle_doc_meta.py 的文本调用同一个 60s 惯例对齐；给视觉留 30s
+# 余量（多张图 + 更大 prompt），不是另起一套阈值。
+MIMO_VISION_TIMEOUT_S: int = 90
 
 # 文本类调用（封面标量、招标要求、卡片概述）走哪家。design/41 的调查里 mimo
-# 在同等条件下准确率不输 qwen 且订阅制成本近乎为零，但**这三项的失败后果各不
-# 相同**（概述错了只是文案难看，封面标量错了会影响声明总价核对门），所以给一个
-# 开关逐项切、而不是一次性硬换。默认 `dashscope` = 现状，改这个值前先跑
-# `test_text_client_switch.py`。
-TEXT_CLIENT_VENDOR: str = "dashscope"        # 'dashscope' | 'mimo'
+# 在同等条件下准确率不输 qwen 且订阅制成本近乎为零，这三项失败后果各不相同
+# （概述错了只是文案难看，封面标量错了会影响声明总价核对门），所以是一个开关
+# 逐项切、而不是一次性硬换。**2026-08-27 由 dashscope 改为 mimo 默认**——用户
+# 明确要求"全部切换为 mimo"（9 处依赖里 8 处已实测验证过，见
+# docs/spec/TECHNICAL.md §4「Vendor / provider switches」），此前只做了"能切"没有真的切，是漏了
+# 一步而非用户认可的决定。没有 MIMO_API_KEY 时仍然回落 dashscope 并记日志
+# （`test_text_client_switch.py` 断言这条不能变成静默降级）。
+TEXT_CLIENT_VENDOR: str = "mimo"        # 'dashscope' | 'mimo'
 # 视觉类调用（扫描件招/投标判定、空格子补位、招标 VL-direct 回落）走哪家。
 # 跟文本分开一个开关：两类调用的失败后果、验证方式都不同，捆在一起切换等于
 # 逼人一次性接受两种风险。**embedding 不在这两个开关的管辖范围**——mimo 没有
-# embedding 接口，对齐兜底（`anchor_match._embed`）只能是 dashscope，那是硬约束。
-VISION_CLIENT_VENDOR: str = "dashscope"      # 'dashscope' | 'mimo'
+# embedding 接口，对齐兜底（`anchor_match._embed`）只能是 dashscope，那是硬约束，
+# 这一条切不了、也不该被这次改动误当成遗漏。同样 2026-08-27 改为 mimo 默认。
+VISION_CLIENT_VENDOR: str = "mimo"      # 'dashscope' | 'mimo'
 
 # ── 列→角色映射的确定性验证（design/40 §5.1）────────────────────────────────
 # 见 `intelligence/column_roles.verify_roles`。这三个阈值是**模型提议能否被采纳**

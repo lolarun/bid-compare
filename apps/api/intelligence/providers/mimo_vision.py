@@ -26,6 +26,7 @@ import base64
 import json
 import logging
 import re
+import time
 
 log = logging.getLogger(__name__)
 
@@ -57,11 +58,25 @@ class MimoVisionProvider:
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{b64}"}})
         content.append({"type": "text", "text": prompt})
-        resp = self._client.chat.completions.create(
-            model=model or self._model,
-            messages=[{"role": "user", "content": content}],
-            temperature=temperature, max_tokens=self._max_tokens,
-        )
+        # 之前这里没配超时：openai SDK 默认等 600s，一次挂起的调用能悄无声息拖
+        # 到后台孤儿任务清扫线（30 分钟）都不报错，日志上看跟"根本没在跑"一样。
+        # 显式超时 + 前后各一行日志，让"卡住"和"慢但活着"从日志上能分清。
+        from apps.api.core.domain_config import MIMO_VISION_TIMEOUT_S
+
+        started = time.monotonic()
+        try:
+            resp = self._client.chat.completions.create(
+                model=model or self._model,
+                messages=[{"role": "user", "content": content}],
+                temperature=temperature, max_tokens=self._max_tokens,
+                timeout=MIMO_VISION_TIMEOUT_S,
+            )
+        except Exception:
+            log.warning("mimo 视觉调用失败，耗时 %.1fs（超时=%ss）",
+                        time.monotonic() - started, MIMO_VISION_TIMEOUT_S,
+                        exc_info=True)
+            raise
+        log.info("mimo 视觉调用完成，耗时 %.1fs", time.monotonic() - started)
         return resp.choices[0].message.content or ""
 
     @staticmethod

@@ -645,7 +645,7 @@ def generate_report(results: list[dict]) -> str:
     lines = [
         "# 数据分析报告",
         "",
-        "> 基于 `docs/data/` 中10个品类的原始CSV数据，按 `docs/design/archive/03-数据分析计划.md` 框架分析。",
+        "> 基于 `docs/data/` 中10个品类的原始CSV数据，按 `archive/design/03-数据分析计划.md` 框架分析。",
         "",
         "## 0. 数据来源",
         "",

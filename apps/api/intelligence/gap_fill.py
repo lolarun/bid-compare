@@ -324,6 +324,7 @@ def fill_gaps(
             report.outcomes.append(outcome)
             continue
 
+        log.info("补位第 %d 页开始，待补 %d 行，方向顺序 %s", page, len(idxs), list(angles))
         for angle in angles:
             outcome.angles_tried.append(angle)
             # **旋转失败和调用失败要分开归因。** 前者是我们自己的 bug（图片坏了、
@@ -336,6 +337,10 @@ def fill_gaps(
                 log.warning("补位第 %d 页旋转 %d° 失败（这是本地缺陷，不是模型问题）：%s",
                             page, angle, exc)
                 continue
+            # 2026-08-27：这里之前完全没有"开始调用"这条日志——一次调用卡住时，
+            # 日志上跟"这一页还没轮到"长得一模一样。有了这行，进程还活着但某次
+            # 调用挂起 vs. 整个任务已经死了，从日志时间戳上能分清。
+            log.info("补位第 %d 页 %d° 调用模型…", page, angle)
             try:
                 answer = _parse_fill_csv(filler(image))
             except Exception as exc:                               # noqa: BLE001

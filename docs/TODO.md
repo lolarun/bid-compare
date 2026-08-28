@@ -1,8 +1,10 @@
 # MEMPAS TODO
 
 > **本文件已冻结于 2026-05-29 / v0.2.1，此后的产品/UI/客户反馈待办不再记录在
-> 这里，改记在 [`HANDOFF.md`](../HANDOFF.md)（按时间倒序，新章节置顶，失效
-> 内容有横幅标注）。下面内容仅供历史参照，条目是否仍待排期以 HANDOFF 为准。**
+> 这里。2026-08-27 起，当前待办与待客户决策统一记在
+> [`spec/FUNCTIONAL.md` §12](../spec/FUNCTIONAL.md)；原始 `HANDOFF.md` 已存档于
+> [`archive/design/HANDOFF.md`](../archive/design/HANDOFF.md)，仅供追溯。
+> 下面内容仅供历史参照，条目是否仍待排期以 `spec/FUNCTIONAL.md` 为准。**
 
 ---
 
