@@ -19,9 +19,12 @@ import apps.api.core.domain_config as dc
 from apps.api.intelligence import paddle_doc_meta as pdm
 
 
-def test_default_is_still_dashscope():
-    """**默认不变**。切换必须是显式决定，不能因为配了 MIMO_API_KEY 就悄悄改道。"""
-    assert dc.TEXT_CLIENT_VENDOR == "dashscope"
+def test_default_is_mimo():
+    """**2026-08-27 起默认 mimo**——用户明确要求"全部切换为 mimo"（design/41
+    的 9 处依赖里 8 处已实测验证），此前默认停在 dashscope 是漏了一步，不是
+    用户认可过的决定。没有 MIMO_API_KEY 时仍然回落 dashscope 并记日志，见
+    test_mimo_without_key_falls_back_loudly——"默认是 mimo"不等于"没有兜底"。"""
+    assert dc.TEXT_CLIENT_VENDOR == "mimo"
 
 
 def test_mimo_selected_when_configured(monkeypatch):
@@ -73,8 +76,10 @@ def test_mimo_without_key_falls_back_loudly(monkeypatch, caplog):
 # 跟文本开关**分开**是有意的：两类调用的失败后果和验证方式都不同，捆在一起
 # 切换等于逼人一次性接受两种风险。
 
-def test_vision_default_is_still_dashscope():
-    assert dc.VISION_CLIENT_VENDOR == "dashscope"
+def test_vision_default_is_mimo():
+    """2026-08-27 起默认 mimo，跟文本开关同一次改动——理由见
+    test_default_is_mimo。"""
+    assert dc.VISION_CLIENT_VENDOR == "mimo"
 
 
 def test_vision_mimo_selected_when_configured(monkeypatch):

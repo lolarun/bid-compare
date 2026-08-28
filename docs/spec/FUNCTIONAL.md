@@ -120,10 +120,17 @@ are extracted via fast deterministic text parsing (~20–25× faster than the
 vision model), with automatic, logged fallback to the vision path for
 scanned PDFs or text layers that don't parse cleanly `[design/25]`.
 
-**Closed-roster invitation** (design intent, verify shipped status before
-relying on this in production): when a tender document is itself an
-invitation naming allowed bidders, that named list becomes a confirmed
-closed roster. Automatic supplier creation is forbidden in this mode; the
+**Closed-roster invitation** — **not built** (checked in code 2026-08-28;
+the 2026-08-27 consolidation left this as "verify shipped status", so here is
+the verification). `roster_mode`, `invited_suppliers`, and design/18's
+`BidInvitation` shape have zero occurrences outside the design doc, and
+migration `0006_procurement_case` is an explicit **tombstone** — a no-op kept
+only so already-stamped databases still resolve. The `BidInvitation` model
+that does exist is the older brand/supplier *recommendation* invitation
+(`rank`-carrying, used by `routes/invite.py`), a different feature. Everything
+below is design intent for if design/18 is ever adopted, not current
+behavior: when a tender document is itself an invitation naming allowed
+bidders, that named list becomes a confirmed closed roster. Automatic supplier creation is forbidden in this mode; the
 bid matrix's columns are driven by roster membership (an invited supplier
 with no submission shows "未响应", not absent); binding a supplier outside
 the roster requires an explicit action that flips the case to an "exception"
@@ -264,11 +271,19 @@ missing quantity); the tool never claims ranking can't flip when any row is
 ★最低/highlight/recommendation columns in the preview lane specifically
 ("look before you commit," not a conclusion); unit price and total price are
 now separate columns everywhere; the AI summary card sits above the matrix
-in the formal lane only `[design/36 §7]`. Known, still-unfixed problems in
-the preview lane: 「纳入」/「排除」 buttons are inert there (can't work,
-since the preview sandbox rolls back); doubt notes still expose internal
-check names rather than plain-language consequences; there's no visible path
-from preview into 正式比价 `[design/36]`.
+in the formal lane only `[design/36 §7]`.
+
+Two problems design/36 recorded here are **fixed** (re-verified against code
+2026-08-28): doubt notes now go through a plain-language mapping table
+(`apps/www/src/utils/doubtCopy.ts::translateReason`), and there is an
+explicit 「进入正式比价」 button in the preview lane. One is **worse than
+design/36 recorded**: the 「纳入」/「排除」 buttons on pending cells are dead
+in **both** lanes, not only preview — `BidMatrix.vue` has exactly one parent
+(`WorkspaceView.vue`) and that parent does not listen to the component's
+`confirmItem` emit, while the buttons' `v-if` only checks `cell.item_id`.
+Clicking them does nothing anywhere. Pending rows are still resolvable, but
+only on the separate `/workspace/:projectId/align` screen
+(`AnchorReviewMatrix.vue`), which wires the same two actions correctly.
 
 ---
 
@@ -280,21 +295,28 @@ flagged `is_final_basis` may produce an official conclusion — other rounds
 are explanatory only. The first round auto-opens implicitly on first upload;
 no ceremony needed `[design/42]`.
 
-**Current state (2026-08-27)**: round storage and identity exist and are
-tested; round-scoped alignment/comparison/trend views do **not** exist yet.
-Running match for a second round today still destroys round 1's alignment
-result — a known, live hazard, not yet fixed (fix is scheduled as backend
-work "B0" ahead of any round UI, per design/44's D-2 decision)
-`[design/42][design/44]`.
+**Current state (re-verified against code 2026-08-28 — the 2026-08-27
+consolidation understated this, because it was synthesized from the design
+docs' own status banners and those banners predated commits `57cf535` /
+`fc023e9`, which had already landed):**
 
-**Designed, not yet built** `[design/44]`: `/workspace` becomes a project
-list screen (distinct from `/projects`'s master-data view); a round bar in
-the workspace header with round chips and an explicit "开启新一轮" modal
-that states the consequence of closing the current round; an explicit
-"更新报价文件" action to replace a file within the current round (distinct
-from re-recognition); read-only viewing of closed rounds with a historical
-matrix and a trend tab. Project creation stays open to all compare-capable
-roles until a later phase restricts it to 管理员 only.
+Built and shipped:
+- **Round-scoped match (design/44's "B0")** — running match for round 2 no
+  longer destroys round 1. `import_and_match(round_id=...)` scopes its
+  wipe-and-rebuild by round, and `BidAlignmentGroup` carries
+  `round_id`+`anchor_uid` (migration `0011_alignment_round_scope`, which
+  also backfills pre-round groups onto round 1).
+- **Trend computation** — `services/matrix/round_trend.py`, exposed as
+  `GET /api/analysis/round-trend`, rendered by
+  `apps/www/src/views/compare/components/RoundTrendPanel.vue` (shown only
+  when ≥2 rounds exist and not in the preview lane).
+- **The whole design/44 round UI** — `/workspace` is a project list screen
+  (`compare/EntryView.vue`, route name `CompareEntry`); the round bar with
+  round chips, the "开启新一轮" modal that states the closing consequence
+  verbatim, the "更新报价文件" per-file action, and read-only viewing of a
+  closed round's frozen matrix all exist in `WorkspaceView.vue`.
+- **Project creation restricted to 管理员** (commit `79c7bd3`), i.e. the
+  "later phase" design/44 deferred has also happened.
 
 Business rules for trend comparison (not yet enforced by working code beyond
 storage): a round is one complete, self-consistent quote set, never mixed
@@ -360,6 +382,44 @@ These are not bugs to silently work around — they're honestly-tracked gaps
 or decisions genuinely waiting on the customer/business owner, not
 engineering.
 
+> **Calibration note (2026-08-28).** This file was consolidated on
+> 2026-08-27 from the design docs' own status banners, without re-reading
+> the code. Several banners were stale, so the original consolidation both
+> **understated what was built** (§7 preview fixes, all of §8's round work)
+> and **missed real gaps** (the four launch items listed immediately below).
+> Everything in §7, §8, §4's closed-roster paragraph, and this section has
+> since been re-verified against code. Treat any *other* "not built" claim
+> in this file as unverified until someone greps for it.
+
+**Launch-blocking, found by code audit 2026-08-28 — engineering, not
+customer decisions:**
+
+- **`MIMO_API_KEY` is absent from every deployment artifact.** The default
+  vendor for both text and vision calls is now `mimo`
+  (`domain_config.TEXT_CLIENT_VENDOR` / `VISION_CLIENT_VENDOR`, changed
+  2026-08-27), but the key that makes it work was absent from
+  `apps/api/.env.example` and `docker-compose.prod.yml` entirely, and
+  `docs/DEPLOY.md` described it as an *optional* entry that "only enables
+  design/41's page filter" — true when written, wrong after the default
+  flipped. Production therefore runs the logged dashscope fallback on all 8
+  migrated call sites: the "switch everything to mimo" decision has no
+  effect in production, and nothing surfaces that except a log line.
+  **Fixed 2026-08-28** in all three artifacts.
+- **One env var silently decides two unrelated things.** Page-filter
+  cost-reduction is enabled purely by `MIMO_API_KEY` being present
+  (`page_filter.get_production_classifier`). Setting the key to make the
+  mimo default take effect therefore *also* switches on the page filter —
+  whose cost/speed tradeoff (79% cheaper, 33% slower end-to-end) is listed
+  in `TECHNICAL.md` §8 as an explicitly undecided product question that
+  "currently ships default-off". **Fixed 2026-08-28**: the filter now has
+  its own switch, `domain_config.PAGE_FILTER_ENABLED` (default `False`);
+  the key remains necessary but is no longer sufficient, pinned by
+  `test_page_filter.py::test_enabled_flag_is_independent_of_the_mimo_credential`.
+- **Matrix 「纳入」/「排除」 buttons are dead app-wide** — see §7.
+- **HEAD's test suite is red on its own change.** Commit `49b4c17` flipped
+  the vendor defaults to `mimo` but left `test_text_client_switch.py`
+  asserting `dashscope`.
+
 - **Weighted attribute-based comparison** — customer wants it, but
   structured data today only reliably supports brand as a comparable
   attribute; data source and scope unconfirmed `[TODO §4]`.
@@ -380,8 +440,17 @@ engineering.
   candidate technical shapes and their required safety constraints.
 - Two known recognition defects (§6 above) are deliberately left unfixed
   this round, tracked, and visible as doubts rather than silently absorbed.
-- The comparison-page AI summary panel is not wired up yet — it shows an
-  explicit "not implemented" message rather than a blank space.
+- ~~The comparison-page AI summary panel is not wired up yet.~~
+  **Retracted 2026-08-28 — it is wired.** `analysisApi.bidInsight` →
+  `POST /api/analysis/bid-insight` → `services/matrix/bid_insight.py`,
+  rendered above the matrix in the formal lane only (reconnected
+  2026-08-26). The claim came from a design-doc banner written before that.
+- **A quote workbook priced excluding tax can still be blocked.**
+  `BidQuoteLine` has `unit_price_excl_tax` but no `total_price_excl_tax`, so
+  a submission whose totals are excl-tax trips `systematic_vat_mismatch` and
+  stays out of official comparison. A real fix needs a new column plus a
+  migration; an earlier column-preference workaround was tried and reverted
+  because it fixed one sample by breaking another.
 
 ---
 

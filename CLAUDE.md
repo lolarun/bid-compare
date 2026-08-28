@@ -81,7 +81,8 @@ python -m pytest apps/api/tests -q
 
 # Frontend type-check and unit tests
 npm --prefix apps/www run type-check        # vue-tsc
-npm --prefix apps/www test                  # vitest
+npm --prefix apps/www run test:unit          # vitest（脚本名是 test:unit，
+                                            #  没有 `npm test`）
 
 # Database migrations (Alembic)
 alembic upgrade head

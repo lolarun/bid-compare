@@ -1869,6 +1869,7 @@ watch([matrixResult, stage], ([val, st]) => {
         :suppliers="matrixSuppliers"
         :show-history="!previewResult"
         :show-conclusions="!previewResult"
+        :preview="!!previewResult"
         :rows="matrixResult.rows"
         :totals="matrixResult.totals"
         :category="category"

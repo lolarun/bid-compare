@@ -256,6 +256,14 @@ SUBSEQ_TIEBREAK_MARGIN: float = 0.15
 # 只把"真的是报价清单"的页送去 Paddle（¥0.09/页）。分类侧走小米 MiMo 订阅制，
 # 实测泰科龙 53 页分类耗 46,232 token ≈ ¥0.0004，相对 Paddle 可忽略。
 # 阈值/模型集中在这里，不散落在 intelligence 里（CLAUDE.md §4「阈值集中」）。
+# **显式开关，跟凭据分开**（2026-08-28）。此前"默认关闭"的实现方式就是
+# `MIMO_API_KEY` 没配——可是 2026-08-27 起 TEXT/VISION_CLIENT_VENDOR 默认也是
+# mimo，两者读同一个环境变量：为了让厂商默认真正生效而配上 key 的那一刻，会连
+# 带把筛页一起打开，而筛页的取舍（省 79% Paddle 费用、端到端慢 33%）在
+# docs/spec/TECHNICAL.md §8 里是**尚未做出的产品决策**。一个环境变量不能替用户
+# 决定两件不相干的事，所以开关独立出来，默认 False；key 仍是必要条件（没 key
+# 分类器就是 None，整份送，逐字节等于接入前）。
+PAGE_FILTER_ENABLED: bool = False
 PAGE_FILTER_MODEL: str = "mimo-v2.5"
 PAGE_FILTER_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
 # 一个 8 页窗口要输出 8 行判定；实测 reasoning_tokens≈0，4000 足够有余。

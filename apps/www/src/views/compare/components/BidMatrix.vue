@@ -22,7 +22,14 @@ const props = defineProps<{
   projectId?: number
   supplierIds?: number[]
   anchorMatrix?: boolean          // v2.5: true when anchor-full-axis mode
-  pendingItemLoading?: Record<number, boolean>
+  /**
+   * 预览口径（basis='preview'）。跟 showConclusions 恰好同时为 true/false，
+   * 但**语义不同**，不合并：showConclusions 管"要不要呈现结论"，这个管
+   * "这批数据是不是沙箱里的、回滚后就不存在"。待确认格子的处置入口只能靠
+   * 后者判断——预览的 item_id 随事务一起回滚，拿它去调确认接口必然指向不
+   * 存在的行。
+   */
+  preview?: boolean
   /**
    * design/36 §4.1：是否显示历史相关的列（历史均价 / 最低偏差）。
    * （原注释误引"design/32 §12"——design/32 从未有过 §12，2026-08-26 核对
@@ -66,10 +73,6 @@ const tailCols = computed(() => historyCols.value + recCols.value)
 const totalCols = computed(
   () => leadCols.value + props.suppliers.length * PRICE_COLS_PER_SUPPLIER + tailCols.value,
 )
-
-const emit = defineEmits<{
-  (e: 'confirmItem', itemId: number, action: 'align' | 'exclude'): void
-}>()
 
 // B3 兼容期收尾（design/22 §B3）：列身份 join 原先按 t.supplier_id === s.id，
 // 现改用 submission_id（legacy 模式下为 null，退回通用列身份键 id——此时
@@ -138,11 +141,6 @@ function cellClass(cell: SupplierCell): Record<string, boolean> {
     'bid-matrix__cell-pending': status === 'pending',
     'bid-matrix__cell-excluded': status === 'excluded',
   }
-}
-
-function isPendingLoading(itemId: number | null | undefined): boolean {
-  if (!itemId || !props.pendingItemLoading) return false
-  return !!props.pendingItemLoading[itemId]
 }
 
 /* ---------- virtual scroll ---------- */
@@ -352,22 +350,26 @@ async function handleExport() {
                         </span>
                         <span class="bid-matrix__pending-badge">待确认</span>
                       </div>
-                      <!-- Inline confirm buttons (only if parent listens to confirmItem) -->
-                      <div v-if="cell.item_id" class="bid-matrix__pending-actions">
-                        <a-button
-                          type="primary"
-                          size="small"
-                          style="font-size:10px;height:20px;padding:0 6px"
-                          :loading="isPendingLoading(cell.item_id)"
-                          @click.stop="emit('confirmItem', cell.item_id!, 'align')"
-                        >纳入</a-button>
-                        <a-button
-                          danger size="small"
-                          style="font-size:10px;height:20px;padding:0 6px"
-                          :loading="isPendingLoading(cell.item_id)"
-                          @click.stop="emit('confirmItem', cell.item_id!, 'exclude')"
-                        >排除</a-button>
-                      </div>
+                      <!--
+                        2026-08-28：这里原本是一对「纳入」/「排除」按钮，注释写
+                        着"只在父组件监听 confirmItem 时出现"，但 v-if 只判断了
+                        cell.item_id，而本组件全仓唯一的父组件 WorkspaceView.vue
+                        并不监听那个事件——所以两个按钮在**正式段和预览段都点了
+                        没反应**，比 design/36 记的"预览段失效"更糟。
+
+                        预览段本来也修不好：沙箱事务回滚后 item_id 指向的行不存
+                        在。而正式段并不缺这个能力，只是入口在别处——
+                        /workspace/:projectId/align 的 AnchorReviewMatrix.vue 把
+                        同样两个动作接得好好的。所以这里不重复实现一套，改成指
+                        路：正式段给一个跳过去的入口，预览段只留"待确认"徽标，
+                        不假装能处置。
+                      -->
+                      <router-link
+                        v-if="!preview && projectId"
+                        class="bid-matrix__pending-link"
+                        :to="`/workspace/${projectId}/align`"
+                        @click.stop
+                      >去复核 →</router-link>
                     </div>
                   </td>
                 </template>
@@ -723,10 +725,14 @@ async function handleExport() {
     // container
   }
 
-  &__pending-actions {
-    display: flex;
-    gap: 4px;
+  // 2026-08-28：&__pending-actions（两个失效按钮的容器）随按钮一并删除，
+  // 换成一个指向 /workspace/:id/align 的入口。
+  &__pending-link {
+    display: inline-block;
     margin-top: 4px;
+    font-size: 10px;
+    line-height: 16px;
+    white-space: nowrap;
   }
 
   &__deviation-pill {

@@ -96,10 +96,23 @@
 >   `docker-compose.prod.yml` to assemble the image reference (`deploy.sh`
 >   line 25, `source .env`)
 > - `/opt/mempas/apps/api/.env` — backend runtime secrets
->   (`DASHSCOPE_API_KEY`, `BAIDU_UNLIMITED_OCR_*`, etc.). **New optional
->   entry `MIMO_API_KEY`**: enables design/41's page-classification filter
->   only when set; unset, that feature stays off with behavior identical to
->   before it was wired in.
+>   (`DASHSCOPE_API_KEY`, `BAIDU_UNLIMITED_OCR_*`, etc.).
+>
+>   **`MIMO_API_KEY` — required as of 2026-08-27, and this entry's earlier
+>   description ("optional; only enables design/41's page filter") is now
+>   wrong on both counts.** It is the credential for the *default* text and
+>   vision vendor: `domain_config.TEXT_CLIENT_VENDOR` and
+>   `VISION_CLIENT_VENDOR` both default to `'mimo'`. Unset, every migrated
+>   call site falls back to DashScope and logs a warning — safe, but
+>   invisible: the deployment runs the old vendor and only a log line says
+>   so. Either set it, or change those two switches back to `'dashscope'`
+>   deliberately.
+>
+>   It no longer controls the page filter. That is a separate product
+>   decision behind its own switch, `domain_config.PAGE_FILTER_ENABLED`
+>   (default `False`, 2026-08-28) — previously the two shared this one
+>   variable, so setting the key would have silently switched the filter on
+>   as well.
 >
 > The appendix below is the **legacy single-machine plan** (a standalone
 > ECS instance at `101.37.166.68`, manual `git pull && docker compose up -d

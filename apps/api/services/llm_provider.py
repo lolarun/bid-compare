@@ -44,8 +44,11 @@ def get_text_client() -> "tuple[OpenAI, str] | None":
     而且很容易漏掉一处、造成"大部分切了、有一处还在老供应商上"的分裂状态。
 
     切换靠 `domain_config.TEXT_CLIENT_VENDOR`（`'dashscope'` | `'mimo'`），
-    **默认 `dashscope` = 现状**。配 `mimo` 但没有 `MIMO_API_KEY` 时**明确回落
-    并记日志**，不静默降级（`.claude/rules/recognition.md`）。
+    **2026-08-27 起默认 `mimo`**（此前是 `dashscope`；这段注释一度没跟着改，
+    2026-08-28 订正）。配 `mimo` 但没有 `MIMO_API_KEY` 时**明确回落并记日志**，
+    不静默降级（`.claude/rules/recognition.md`）——回落是安全网，不是"配不配都
+    一样"：不配 key 就等于整个部署还跑在旧厂商上，只有日志能看出来，所以
+    `apps/api/.env.example` 把它列成必填项。
 
     **嵌入（embedding）不走这里**：mimo 没有 embedding 接口，对齐兜底
     （`anchor_match._embed`）必须继续用 dashscope，那是硬约束不是遗漏。

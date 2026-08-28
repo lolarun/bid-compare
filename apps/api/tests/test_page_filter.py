@@ -45,6 +45,31 @@ def test_no_classifier_sends_everything():
     assert ledger.skipped == [] and ledger.enabled is False
 
 
+def test_enabled_flag_is_independent_of_the_mimo_credential(monkeypatch):
+    """**开关和凭据是两件事**（2026-08-28）。
+
+    此前"默认关闭"就是"没配 `MIMO_API_KEY`"。但 2026-08-27 起 TEXT/VISION
+    厂商默认也是 mimo、读同一个变量，于是"配 key 让厂商默认生效"会顺带打开
+    筛页——而筛页的取舍（省 79% Paddle 费、端到端慢 33%）在
+    docs/spec/TECHNICAL.md §8 是尚未做出的产品决策。把它钉住：光有 key 不够。
+    """
+    import apps.api.core.domain_config as dc
+
+    monkeypatch.setenv("MIMO_API_KEY", "sk-present-but-irrelevant")
+    monkeypatch.setattr(dc, "PAGE_FILTER_ENABLED", False)
+    assert pf.get_production_classifier() is None
+
+
+def test_credential_is_still_required_when_enabled(monkeypatch):
+    """反向也钉住：开了开关但没凭据，仍然返回 None（整份送），
+    **不做能力探测后的静默降级**。"""
+    import apps.api.core.domain_config as dc
+
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.setattr(dc, "PAGE_FILTER_ENABLED", True)
+    assert pf.get_production_classifier() is None
+
+
 # ── 防线一：多轮取并集 ──────────────────────────────────────────────────────
 
 def test_union_across_rounds_rescues_a_flaky_miss():

@@ -12,6 +12,17 @@
 > For product/business behavior, see `docs/spec/FUNCTIONAL.md`. Repo layout,
 > dev commands, and cross-cutting invariants are in `CLAUDE.md` — not
 > repeated here.
+>
+> **Calibration pass 2026-08-28.** The 2026-08-27 consolidation trusted each
+> design doc's own status banner without re-reading the code, and several
+> banners were stale. §2 (round scoping, trend service, closed roster,
+> statistics filter), §3.3, §3.4, §4, §5, §7, and §8 have since been
+> re-verified against the tree and corrected in place. Claims elsewhere in
+> this file have **not** been re-verified — grep before relying on any
+> "not built" statement.
+>
+> Every correction below is stated as what the code does today, with the
+> superseded claim named, so nobody re-plans work that already shipped.
 
 ---
 
@@ -46,10 +57,14 @@ idempotent-by-`archived_quote_id` action: `POST /api/quotes/archive-prices`
 - Shared valid-quote filter: `valid_quote_filters()` /
   `valid_quote_query(db)` (`services/history/quote_filters.py`) — excludes
   `bid_status IN ('polluted','excluded_from_ref')` and requires
-  `Supplier.merge_status=='active'`. **Known gap**: the dashboard
-  heatmap/bubble queries in `statistics.py` do not apply this filter (only
-  filter on `bid_status != "未中标"`) — inconsistent with the unified-filter
-  rule `[design/11]`.
+  `Supplier.merge_status=='active'`. **Known gap, still open (re-checked
+  2026-08-28)**: `services/history/statistics.py` applies
+  `valid_quote_filters()` in 8 of its 10 query sites, but
+  `get_dashboard_heatmap` and `get_dashboard_bubble` still filter only on
+  `Quote.unit_price > 0, Quote.bid_status != "未中标"`. Excluded/polluted
+  quotes and merged-away suppliers therefore reach the dashboard's two
+  charts — a direct violation of CLAUDE.md §4's isolation invariant, in the
+  one surface where nobody would think to check `[design/11]`.
 - `suppliers` carries `merge_status` (active/merged/inactive) +
   `merged_into_supplier_id`.
 
@@ -64,18 +79,37 @@ idempotent-by-`archived_quote_id` action: `POST /api/quotes/archive-prices`
   matching; retired rows stay visible in rounds that used them.
 - **Corrected data model** (this superseded the original plan mid-build):
   one `BidAlignmentGroup` per `(round_id, anchor_uid)`, not one group shared
-  across rounds — because `import_and_match`'s wipe-and-rebuild is currently
-  scoped only to `(project_id, category)` with no round awareness. **This is
-  not yet fixed**: running match for round 2 today still destroys round 1's
-  groups. The fix (round-scoping the rebuild, adding
-  `round_id`+`anchor_uid` to `BidAlignmentGroup`, re-pointing
-  `record_submission_scope` and the `used_submission_ids` gates onto
-  `QuoteRound`) is scheduled but unbuilt ("P2"/"B0").
-- Trend computation is planned as a new read-only service `round_trend.py`
-  consuming `BidMatrixService` output per round — not built.
+  across rounds. **Built** (migration `0011_alignment_round_scope`, commit
+  `57cf535`) — the 2026-08-27 consolidation said "not yet fixed", which was
+  already wrong at consolidation time. `import_and_match(round_id=...)`
+  appends `BidAlignmentGroup.round_id == round_id` to its wipe scope
+  ([`anchor_match.py:1051`](../../apps/api/services/alignment/anchor_match.py)),
+  so re-running match for round 2 no longer deletes round 1's groups. The
+  migration backfills every pre-round group onto round 1 of its own
+  `(project_id, category)`. `round_id=None` deliberately keeps the old
+  scope-wide behavior for callers with no round concept (e.g.
+  `preview_service.py`).
+- Trend computation: `services/matrix/round_trend.py`
+  (`compute_round_trend` / `round_trend_to_dict`) — **built**, exposed as
+  `GET /api/analysis/round-trend`, covered by `tests/test_round_trend.py`,
+  rendered by `apps/www/src/views/compare/components/RoundTrendPanel.vue`
+  (only when ≥2 rounds exist, and never in the preview lane, since preview
+  writes no alignment groups). Rounds whose `tender_list_session_id` was
+  never recorded are reported in `skipped_rounds` rather than guessed at.
 
-**Closed-roster invitation** (design intent — verify shipped status)
-`[design/18]`:
+**Closed-roster invitation** — **not built** (verified in code 2026-08-28;
+this is the "verify shipped status" the 2026-08-27 consolidation asked for).
+`roster_mode` / `invited_suppliers` have zero occurrences in `models/`,
+`schemas/`, `routes/`, `services/`, or `intelligence/`, and migration
+`0006_procurement_case` is an explicit **tombstone**: its `upgrade()` is a
+no-op, kept on disk only because databases are already stamped at it and
+deleting the file would make `alembic current` unresolvable. Its docstring
+instructs that adoption must add a *new* idempotent revision rather than
+resurrect it. On already-stamped databases the `procurement_cases` table and
+`procurement_case_id` columns physically remain, unreferenced and inert. The
+`BidInvitation` model that exists today is the older recommendation-invitation
+feature used by `routes/invite.py`, not design/18's roster. The shape below is
+design intent only `[design/18]`:
 - Draft extraction fields: `invited_suppliers: [{raw_name, source_ref}]`
   (literal text, no guessing) and `price_basis: {tax_included, tax_rate,
   currency}` (tri-state true/false/null, never defaulted).
@@ -157,7 +191,18 @@ run on every page (`table_recognizer._classify_pages`,
 
 **Page-filter cost-reduction** (`intelligence/page_filter.py` +
 `pipeline.py`) — classifies pages and sends only quote pages to Paddle.
-**Default off**, no-op unless `MIMO_API_KEY` is set. Three test-pinned
+**Default off** — but "off" is not an independent switch: the classifier is
+`None` (hence "send everything", byte-for-byte the pre-feature path) **iff
+`MIMO_API_KEY` is unset** (`page_filter.get_production_classifier`). Since
+2026-08-27 that same variable is what makes the now-default `mimo` text/vision
+vendors work at all (§4), so **setting the key to fix the vendor default also
+silently switches this on** — turning an explicitly undecided product tradeoff
+(§8) into a side effect of an unrelated deploy fix. **Fixed 2026-08-28**:
+`domain_config.PAGE_FILTER_ENABLED` (default `False`) is now a separate,
+required condition — the key stays necessary but is no longer sufficient.
+Both directions are test-pinned in `test_page_filter.py`
+(`test_enabled_flag_is_independent_of_the_mimo_credential`,
+`test_credential_is_still_required_when_enabled`). Three test-pinned
 defenses: (1) multi-round union voting (`FILTER_ROUNDS=2` — single-round
 classification has measured real run-to-run false negatives); (2) "when in
 doubt, send" (any failure/ambiguity counts as send, never as skip); (3)
@@ -192,9 +237,14 @@ fails → discarded, not stored; (4) quality tier never rises from a fill
 - Measured payoff: on one document, 9 gap rows recovered = 100% of that
   doc's −26.22% total deviation; ~96%/~67% of two other documents' gaps
   similarly explained.
-- **Known gap**: `field_sources`/`gap_filled` is computed but discarded
-  before reaching `job.result` — the frontend `QuoteGrid` doesn't render
-  filled cells as visually distinct despite the spec requiring it.
+- **Known gap, confirmed still open 2026-08-28**: `field_sources` /
+  `gap_filled` never leave the backend's internals. `field_sources` has zero
+  occurrences in `routes/`, `schemas/`, or `services/`; `gap_filled` survives
+  only as one `validation_flags` read inside
+  `quote_confirmation_service.py:878`. `apps/www/src/components/QuoteGrid.vue`
+  references neither, so a model-filled amount is pixel-identical to a
+  directly-extracted one on screen — the provenance the four binding
+  conditions exist to preserve is discarded at the last hop.
 
 ### 3.5 Column-shift detection
 
@@ -307,7 +357,8 @@ enforced at the schema layer, not by service code remembering to behave:
   whether a gate failure aborts. Preview = sandbox write (rolled back) +
   advisory gates; official path keeps both strict.
 
-**Block-level alignment** (`services/block_alignment.py`) — two-level:
+**Block-level alignment** (`services/alignment/block_alignment.py` — the
+path in the original text was stale) — two-level:
 block correspondence via quantity-sequence key (LLM only when the
 deterministic key can't decide, order-preserving fallback otherwise), then
 in-block order-preserving alignment; conflicting rows go to `pending`
@@ -316,7 +367,10 @@ the original tuning round are self-labeled as offline-prototype data on a
 since-abandoned qwen3.7-plus pipeline — only the *methodology*
 (quantity-sequence block keying, no-golden self-check via a document total
 row) is durable; the numbers are not `[HANDOFF, topically owned by design/32]`.
-Not yet done: wiring `block_alignment` into `anchor_match`'s production path
+Not yet done (re-checked 2026-08-28: `block_alignment` has **zero call
+sites** in `services/` or `routes/` — it is reachable only from its own
+tests, i.e. dead code carrying a live maintenance cost): wiring
+`block_alignment` into `anchor_match`'s production path
 (current sequential-direct-connect requires `dn_cov ≥ 0.90`, a valve-specific
 threshold that doesn't generalize to e.g. cable categories).
 
@@ -381,8 +435,22 @@ would force accepting both risks at once.
 - Vision-vendor mimo path is `providers/mimo_vision.MimoVisionProvider`
   (OpenAI-compatible `chat.completions`, structurally different protocol
   from dashscope's private SDK — not just a base_url swap).
+- **Both switches default to `mimo` since 2026-08-27** (`domain_config.py`
+  lines 278/284). Two consequences the change did not carry through, both
+  open as of 2026-08-28:
+  - `MIMO_API_KEY` was missing from `apps/api/.env.example` and
+    `docker-compose.prod.yml` outright, and `docs/DEPLOY.md` documented it as
+    an *optional* entry that "only enables design/41's page filter" — accurate
+    when written, wrong once the default flipped. Production therefore takes
+    the dashscope fallback branch on every migrated call site, so the switch
+    has no production effect and nothing but a log line says so.
+    **Fixed 2026-08-28** in all three artifacts.
+  - `services/llm_provider.get_text_client`'s docstring still asserts
+    "**默认 `dashscope` = 现状**", contradicting the code it documents.
 - Configured `mimo` with no `MIMO_API_KEY` → explicit, logged fallback to
-  dashscope, never silent (test-pinned both sides).
+  dashscope, never silent (test-pinned both sides). Note this fallback is
+  what makes the missing-key situation above *safe* rather than broken — but
+  also what makes it invisible.
 - **Embedding cannot migrate** — mimo has no embedding API;
   `anchor_match._embed` is hard-locked to dashscope. This is documented as a
   hard constraint (asserted by a test that the docstring says so), not an
@@ -433,14 +501,18 @@ after, meta}`), 7 instrumented event types: `bql_confirm`,
 
 **Known, not-yet-done structural debt** (still real, per `TODO.md` §0–§2):
 
-- `routes/analysis.py` is ~2470 lines / 31 routes across 5 concerns — a
-  pure file split (Plan A, no URL change) is designed but not executed; a
-  URL-prefix rename (Plan B) is deliberately deferred as accepted debt
-  (breaking change, needs front+back coordination).
+- `routes/analysis.py` is **2767 lines / 37 routes** across 5 concerns
+  (measured 2026-08-28; it was ~2470/31 when the debt was first recorded, so
+  it is still growing) — a pure file split (Plan A, no URL change) is
+  designed but not executed; a URL-prefix rename (Plan B) is deliberately
+  deferred as accepted debt (breaking change, needs front+back
+  coordination).
 - Two "fat" routes (`tender_list_match`, `tender_list_llm_fill`) still hold
-  real business logic in the route layer rather than a service — proposed
-  extraction (`MatchOrchestrationService`) not started; must not be folded
-  into a mechanical file-split, needs its own design-first pass.
+  real business logic in the route layer rather than a service —
+  `tender_list_match` alone spans `analysis.py:1135`–`1859`, ~720 lines in a
+  single function. Proposed extraction (`MatchOrchestrationService`) not
+  started; must not be folded into a mechanical file-split, needs its own
+  design-first pass.
 - Domain-normalization logic (valve family/DN) is duplicated across the
   canonical service, `anchor_match`'s coarse classifier, and prompt rules —
   a unifying `MaterialIdentityService` is proposed, not built.
@@ -483,9 +555,14 @@ authority), which remains an undone future option `[design/13]`.
 - All idempotency guards use `sa.inspect`-based existence checks
   (`_has_column`); one narrow exception (`0004_soft_fk._fk_exists`) wraps a
   presence check, not a DDL-error swallow.
-- Revisions shipped: `0002_bql_updated_at`, `0003_audit_fields`,
-  `0004_soft_fk`, `0007_anchor_missing_ack`, `0009_quote_rounds`,
-  `0010_anchor_uid`.
+- Revisions shipped (full list on disk, `apps/api/migrations/versions/`,
+  re-read 2026-08-28 — the earlier list omitted five):
+  `0002_bql_updated_at`, `0003_audit_fields`, `0004_soft_fk`,
+  `0005_tender_recommendation_snapshot`, `0006_procurement_case` (**tombstone
+  no-op**, see §2), `0007_anchor_missing_ack`, `0008_stage_progress`,
+  `0009_quote_rounds`, `0010_anchor_uid`, `0011_alignment_round_scope`,
+  `0012_project_created_by`, plus the non-numeric
+  `9f343f645e1f_brand_tier_approved_canonical`.
 
 ---
 
@@ -508,6 +585,10 @@ authority), which remains an undone future option `[design/13]`.
        silent.
 - **Page-filter cost/speed tradeoff** (79% cheaper, 33% slower
   end-to-end) — not yet decided, currently ships default-off `[design/41]`.
+  **Blocked on a code fix first**: "default-off" is currently implemented as
+  "`MIMO_API_KEY` is unset" (§3.3), and that same variable now gates the
+  default vendor (§4), so the decision cannot actually be held open until the
+  two are separated.
 - **Column-shift recovery thresholds** (2%/3-row) — inherited from an older
   detector, flagged as possibly too strict for the current type-based
   detector, not recalibrated.

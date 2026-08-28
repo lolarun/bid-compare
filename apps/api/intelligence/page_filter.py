@@ -264,11 +264,20 @@ def build_subset_pdf(file_path: str, pages: Sequence[int], out_path: str) -> str
 
 
 def get_production_classifier():
-    """生产用分类器：`(images, prompt, labels=) -> 文本`。没配 key 时返回 None，
-    调用方据此整体关闭筛页——**不做能力探测后的静默降级**，筛不了就整份送。
+    """生产用分类器：`(images, prompt, labels=) -> 文本`。关掉或没配 key 时返回
+    None，调用方据此整体关闭筛页——**不做能力探测后的静默降级**，筛不了就整份送。
+
+    **两个条件，缺一不可**（2026-08-28 拆开）：`PAGE_FILTER_ENABLED` 是产品决策
+    开关，`MIMO_API_KEY` 是凭据。此前只看 key，而 key 同时又是 mimo 厂商默认
+    （domain_config §厂商开关）的凭据，于是"配 key 让厂商默认生效"会顺手把筛页
+    也打开——把一个未决的产品取舍变成了另一件事的副作用。
     """
     import os
 
+    from apps.api.core.domain_config import PAGE_FILTER_ENABLED
+
+    if not PAGE_FILTER_ENABLED:
+        return None
     key = (os.environ.get("MIMO_API_KEY") or "").strip()
     if not key:
         return None

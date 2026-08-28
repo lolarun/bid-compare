@@ -17,7 +17,9 @@ services:
     container_name: mempas-api
     restart: unless-stopped
     env_file:
-      # 密钥（DASHSCOPE_API_KEY 等）——不 commit，见 apps/api/.env.example
+      # 密钥——不 commit，见 apps/api/.env.example。**必须含 MIMO_API_KEY**：
+      # 2026-08-27 起文本/视觉厂商默认都是 mimo，缺 key 会回落 dashscope 并记
+      # 日志（安全但看不见），等于这次切换在生产上没生效。
       - apps/api/.env
     environment:
       UPLOAD_DIR: /app/data/uploads
