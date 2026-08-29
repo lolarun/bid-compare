@@ -87,10 +87,13 @@
 
 ## 其他文档
 
+> 2026-08-28：早期功能/技术展示材料（`MEMPAS_功能原型.pptx`、
+> `MEMPAS_项目说明_V1.0/V1.1.pptx/.pdf`）已移入
+> [`archive/product-docs/`](../archive/product-docs/README.md)，理由同
+> `archive/design/` —— 不再与 `spec/*.md` 并列充当"当前状态"的来源。
+> `功能点.xlsx`（早期功能点梳理）已删除。
+
 | 文件 | 说明 |
 |------|------|
-| [功能点.xlsx](功能点.xlsx) | 早期功能点梳理（Excel） |
-| [MEMPAS_项目说明_V1.1.pptx](MEMPAS_项目说明_V1.1.pptx) | 项目说明 PPT（V1.1） |
-| [MEMPAS_项目说明_V1.1.pdf](MEMPAS_项目说明_V1.1.pdf) | 项目说明 PDF |
 | `poc/v1/` | 前端原型 V1（单页 HTML） |
 | `poc/v2/` | 前端原型 V2（单页 HTML） |
