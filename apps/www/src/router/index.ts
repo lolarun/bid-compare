@@ -1,12 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-import NProgress from 'nprogress'
-import 'nprogress/nprogress.css'
 import BasicLayout from '@/layouts/BasicLayout.vue'
 import { useUserStore } from '@/stores/user'
 import type { Role } from '@/types/role'
-
-NProgress.configure({ showSpinner: false })
 
 /** Routes rendered inside BasicLayout (sidebar menu)
  *  group meta drives sidebar grouping; icon is an @ant-design/icons-vue component name.
@@ -194,7 +190,6 @@ const whiteList = ['Login', 'NotFound', 'Forbidden']
 let refreshedToken = ''
 
 router.beforeEach(async (to) => {
-  NProgress.start()
   document.title = `${to.meta?.title || ''} - MEMPAS`.replace(/^ - /, '')
 
   const token = localStorage.getItem('mempas_token')
@@ -227,10 +222,6 @@ router.beforeEach(async (to) => {
   }
 
   return true
-})
-
-router.afterEach(() => {
-  NProgress.done()
 })
 
 export default router
