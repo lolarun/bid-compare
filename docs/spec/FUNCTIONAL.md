@@ -97,11 +97,14 @@ Two independent weight layers `[design/02]`:
 
 ## 4. Procurement list / tender handling
 
-**Category vs. profession**: category (10 defined: 阀门, 桥架, etc.), not
-profession, is what material matching and session grouping actually use.
-Category is inferred from item name/content — never from the Excel
-"profession" column, which frequently doesn't match the 10 category dropdown
-options `[design/07]`.
+**Category vs. profession**: category (11 defined as of `config.py`'s
+`PROFESSION_MAP` — corrected 2026-08-28, was recorded as 10; 电缆/cable was
+added after the 10-category dataset this section's number traces back to:
+阀门, 桥架, 母线槽, 配电箱, 电缆, 不锈钢管, 水箱, 潜水泵, 风口风阀, 风机盘管,
+空调泵), not profession, is what material matching and session grouping
+actually use. Category is inferred from item name/content — never from the
+Excel "profession" column, which frequently doesn't match the category
+dropdown options `[design/07]`.
 
 **Multi-category lists** are split into one `TenderListSession` per detected
 category, each independently versioned; the UI exposes a category switcher.
@@ -112,7 +115,13 @@ self-heals — the backend auto-creates the needed session(s) rather than
 **Multi-sheet Excel**: every list-like sheet in a procurement workbook is
 merged (not just the largest sheet), sheets that are entirely footer/total
 rows are excluded as non-item, and original per-sheet numbering is preserved
-alongside a renumbered global `seq` `[design/39]`.
+alongside a renumbered global `seq` `[design/30][design/39]` (design/30
+measured the silent-truncation defect and specified this fix; design/39
+implemented it, plus the matching fix that gave the tabular/CSV quote
+column table the same tax-basis roles — `unit_price_incl_tax`/`_excl_tax`,
+`total_price_incl_tax`/`_excl_tax` — the PDF path already had, and gave the
+xlsx tender-anchor parser the same 材质 sub-column parity the PDF path
+already had).
 
 **Text-layer PDFs** (born-digital tender documents with a usable embedded
 text layer): procurement list, cover-page scalars, and brand requirements
@@ -273,17 +282,22 @@ missing quantity); the tool never claims ranking can't flip when any row is
 now separate columns everywhere; the AI summary card sits above the matrix
 in the formal lane only `[design/36 §7]`.
 
-Two problems design/36 recorded here are **fixed** (re-verified against code
-2026-08-28): doubt notes now go through a plain-language mapping table
-(`apps/www/src/utils/doubtCopy.ts::translateReason`), and there is an
-explicit 「进入正式比价」 button in the preview lane. One is **worse than
-design/36 recorded**: the 「纳入」/「排除」 buttons on pending cells are dead
-in **both** lanes, not only preview — `BidMatrix.vue` has exactly one parent
-(`WorkspaceView.vue`) and that parent does not listen to the component's
-`confirmItem` emit, while the buttons' `v-if` only checks `cell.item_id`.
-Clicking them does nothing anywhere. Pending rows are still resolvable, but
-only on the separate `/workspace/:projectId/align` screen
-(`AnchorReviewMatrix.vue`), which wires the same two actions correctly.
+Three problems design/36 recorded here are **fixed** (re-verified against
+code 2026-08-28): doubt notes now go through a plain-language mapping table
+(`apps/www/src/utils/doubtCopy.ts::translateReason`); there is an explicit
+「进入正式比价」 button in the preview lane; and the 「纳入」/「排除」
+buttons on pending cells — which this file said were dead **app-wide** (see
+§12's former launch-blocker bullet, now removed) — were fixed the same day,
+in the same commit (`bd33e4d`) that made the app-wide-dead finding. `BidMatrix.vue`
+no longer has those buttons at all: the formal lane shows a 「去复核 →」
+link to `/workspace/:projectId/align` (`AnchorReviewMatrix.vue`, which
+already handled confirm/exclude correctly); the preview lane shows only the
+待确认 badge, no fake action, gated by an explicit `preview` prop instead of
+reusing `showConclusions`'s semantics.
+
+Still open from design/36 §4 (not yet built): a bulk "校对入库" action that
+names outstanding suppliers by name, and moving doubt-copy phrasing from a
+frontend-only mapping table to a backend-authored `user_message` field.
 
 ---
 
@@ -318,13 +332,16 @@ Built and shipped:
 - **Project creation restricted to 管理员** (commit `79c7bd3`), i.e. the
   "later phase" design/44 deferred has also happened.
 
-Business rules for trend comparison (not yet enforced by working code beyond
-storage): a round is one complete, self-consistent quote set, never mixed
-with another; a trend figure requires matching item identity + tax basis +
-quantity or is marked not-comparable, never guessed; a supplier absent from
-a round reports "not participating," never zero-filled or interpolated; the
-procurement list stays editable across rounds via a stable per-row identity
-that survives list revisions.
+Business rules for trend comparison — **corrected 2026-08-28: these are
+enforced, not merely stored**, by `services/matrix/round_trend.py`
+(`compute_round_trend`), which this section previously didn't cite at all: a
+trend figure requires matching item identity + tax basis + quantity or is
+marked `not_comparable_reason` rather than guessed; a supplier absent from a
+round is `participating=False`, never zero-filled or interpolated as a
+-100% discount; a round that can't be reconstructed (no
+`tender_list_session_id` recorded) is reported in `skipped_rounds`, not
+silently dropped. The procurement list stays editable across rounds via
+`anchor_uid`, a stable per-row identity that survives list revisions.
 
 ---
 
@@ -358,6 +375,18 @@ arbitrary queries `[design/11]`:
   the correct answer is **no baseline**, never a silent fallback to an
   all-category minimum.
 
+**Current remediation state** (measured 2026-08-28 against the live DB,
+following up on `archive/design/data-audit-and-remediation-plan.md`'s
+2026-07-10 audit): partial. `materials` fell from the audited 8,303 rows to
+6,288, and the audited 363-row duplicate set (same
+category/standard_name/spec/unit) no longer exists — that part of
+remediation happened. Two of the audit's five problems have **not**:
+`quotes.supplier_id` is still `NULL` for all rows in the table (supplier
+linkage was never done), and `docs/data/curated/` — the cleaned-data layer
+this section's governance rules assume exists — still does not exist on
+disk; raw imports write straight to the production tables the same way they
+did at audit time.
+
 ---
 
 ## 11. Users & roles
@@ -382,50 +411,63 @@ These are not bugs to silently work around — they're honestly-tracked gaps
 or decisions genuinely waiting on the customer/business owner, not
 engineering.
 
-> **Calibration note (2026-08-28).** This file was consolidated on
+> **Calibration note (2026-08-28, two passes).** This file was consolidated
 > 2026-08-27 from the design docs' own status banners, without re-reading
-> the code. Several banners were stale, so the original consolidation both
-> **understated what was built** (§7 preview fixes, all of §8's round work)
-> and **missed real gaps** (the four launch items listed immediately below).
-> Everything in §7, §8, §4's closed-roster paragraph, and this section has
-> since been re-verified against code. Treat any *other* "not built" claim
-> in this file as unverified until someone greps for it.
+> the code. Pass 1 (same day) re-verified §7, §8, and §4's closed-roster
+> paragraph, and found both **understated** work (§7 preview fixes, all of
+> §8's round work) and **missed** gaps (the four items below, all fixed by
+> the end of pass 1's session). **Pass 2** ran six parallel code-verification
+> agents over all 53 `archive/design/*.md` docs (not just the handful pass 1
+> happened to touch) and caught something pass 1 itself got wrong within the
+> same session: two of the four "launch-blocking" items below were already
+> fixed by the time pass 1 ended, but the fix was never reflected in this
+> section — the exact "spec currency" lapse CLAUDE.md §6 now has a rule
+> against. Everything below is current as of pass 2. Any claim elsewhere in
+> this file not touched by either pass is still unverified until grepped.
 
-**Launch-blocking, found by code audit 2026-08-28 — engineering, not
-customer decisions:**
+**Launch items found by code audit 2026-08-28 — all four resolved the same
+day, listed here so the fix is traceable, not because they're still open:**
 
-- **`MIMO_API_KEY` is absent from every deployment artifact.** The default
-  vendor for both text and vision calls is now `mimo`
+- **`MIMO_API_KEY` was absent from every deployment artifact.** The default
+  vendor for both text and vision calls became `mimo`
   (`domain_config.TEXT_CLIENT_VENDOR` / `VISION_CLIENT_VENDOR`, changed
   2026-08-27), but the key that makes it work was absent from
   `apps/api/.env.example` and `docker-compose.prod.yml` entirely, and
   `docs/DEPLOY.md` described it as an *optional* entry that "only enables
   design/41's page filter" — true when written, wrong after the default
-  flipped. Production therefore runs the logged dashscope fallback on all 8
-  migrated call sites: the "switch everything to mimo" decision has no
-  effect in production, and nothing surfaces that except a log line.
-  **Fixed 2026-08-28** in all three artifacts.
-- **One env var silently decides two unrelated things.** Page-filter
-  cost-reduction is enabled purely by `MIMO_API_KEY` being present
+  flipped. Production ran the logged dashscope fallback on all 8 migrated
+  call sites: the "switch everything to mimo" decision had no effect in
+  production, and nothing surfaced that except a log line. **Fixed** in all
+  three artifacts.
+- **One env var silently decided two unrelated things.** Page-filter
+  cost-reduction was enabled purely by `MIMO_API_KEY` being present
   (`page_filter.get_production_classifier`). Setting the key to make the
-  mimo default take effect therefore *also* switches on the page filter —
+  mimo default take effect therefore *also* switched on the page filter —
   whose cost/speed tradeoff (79% cheaper, 33% slower end-to-end) is listed
   in `TECHNICAL.md` §8 as an explicitly undecided product question that
-  "currently ships default-off". **Fixed 2026-08-28**: the filter now has
-  its own switch, `domain_config.PAGE_FILTER_ENABLED` (default `False`);
-  the key remains necessary but is no longer sufficient, pinned by
+  "currently ships default-off". **Fixed**: the filter now has its own
+  switch, `domain_config.PAGE_FILTER_ENABLED` (default `False`); the key
+  remains necessary but is no longer sufficient, pinned by
   `test_page_filter.py::test_enabled_flag_is_independent_of_the_mimo_credential`.
-- **Matrix 「纳入」/「排除」 buttons are dead app-wide** — see §7.
-- **HEAD's test suite is red on its own change.** Commit `49b4c17` flipped
+- **Matrix 「纳入」/「排除」 buttons were dead app-wide.** **Fixed** the same
+  day, in the same commit (`bd33e4d`) that first wrote this bullet — see §7
+  for what changed. Pass 1 never went back to update this section after its
+  own fix landed; pass 2 caught it.
+- **HEAD's test suite was red on its own change.** Commit `49b4c17` flipped
   the vendor defaults to `mimo` but left `test_text_client_switch.py`
-  asserting `dashscope`.
+  asserting `dashscope`. **Fixed** the same session.
 
 - **Weighted attribute-based comparison** — customer wants it, but
   structured data today only reliably supports brand as a comparable
   attribute; data source and scope unconfirmed `[TODO §4]`.
-- **Phase B-1 deterministic TableGrid shadow mode** — validated in shadow
-  (zero row loss on the tested document), awaiting a user go/no-go to switch
-  it on `[TODO §4]`.
+- ~~**Phase B-1 deterministic TableGrid shadow mode** — validated in shadow,
+  awaiting a user go/no-go to switch it on.~~ **Moot, found 2026-08-28**:
+  the TableGrid engine this shadow mode was built on top of was physically
+  deleted 2026-08-11 (`[design/21]`, commit `c60217f`) before any go/no-go
+  decision was made — `table_recognizer.py` and the rest of the legacy
+  OCR→HTML→TableGrid chain no longer exist; current source comments refer
+  to it only as "已删除的 legacy TableGrid 链路." There is nothing left to
+  switch on; this line item is retired, not decided.
 - **Baseline + recommendation redesign** (same-spec baseline / checksum
   semantics / three-state gating / deterministic primary supplier / AI only
   explains) — implementation finalization/confirmation still pending

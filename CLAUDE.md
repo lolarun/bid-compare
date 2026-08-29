@@ -44,7 +44,10 @@ apps/api/            FastAPI backend (Python >=3.11), app object: apps.api.main:
   models/            SQLAlchemy models
   schemas/           Pydantic schemas
   migrations/        Alembic migrations (see docs/spec/TECHNICAL.md §7)
-  tests/             pytest (unit + replay + fresh E2E)
+  tests/             pytest (unit + replay + fresh E2E) — the only test-code
+                     root (2026-08-28: merged the former root-level tests/,
+                     which now holds only tests/fixtures/, a data corpus, see
+                     below)
 apps/www/            Frontend: Vue 3 + Vite + Pinia + Ant Design Vue + ECharts
 docs/spec/           Current-state spec: FUNCTIONAL.md (product/business) + TECHNICAL.md (architecture) — read these first
 archive/design/ Archived numbered design docs — rationale, measurements, retraction history behind docs/spec/
@@ -76,7 +79,7 @@ Server lifecycle: **do not use `--reload`.** On a port conflict, kill the existi
 first, then restart on the same fixed port. Do not start ad-hoc ports.
 
 ```powershell
-# Backend tests (unit + replay; testpaths = apps/api/tests, tests)
+# Backend tests (unit + replay; testpaths = apps/api/tests)
 python -m pytest apps/api/tests -q
 
 # Frontend type-check and unit tests
@@ -156,6 +159,12 @@ After changing code:
    evidence is required.
 3. Report the actual scope run, pass/fail, items not run, and residual risk.
 4. Never exclude directly relevant tests and then claim "all green" or "production-ready".
+5. **Spec currency.** If this change flips a `docs/spec/FUNCTIONAL.md` /
+   `docs/spec/TECHNICAL.md` claim — "not built" becomes shipped, or the reverse —
+   update that section in the *same* commit, not a later audit. A stale claim there
+   is worse than an out-of-date `archive/design/` doc: it reads as current and gets
+   trusted without a code check (see `docs/spec/*.md`'s 2026-08-28 calibration note
+   for a real case where a synthesis-time claim was already wrong).
 
 ## 7. Reporting format
 

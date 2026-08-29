@@ -126,13 +126,24 @@ design intent only `[design/18]`:
 
 ### 3.1 Shared skeleton
 
-`apps/api/intelligence/extraction_draft.py` / `table_recognizer.py` — one
-shared skeleton (`recognize_tables`) drives both the tender/procurement-list
-side and the quote side via adapters (TenderAdapter, QuoteAdapter). Shared
-dataclasses: `SourceRef` (incl. `tile_bbox`), `DraftRow` (`field_sources`,
-`extra_fields`, `parser_mode`), `ExtractionDraft` (`review_candidates` —
-isolated from `rows`), `QualityReport` (page accounting, arithmetic-mismatch
-gate, `failed_target_pages`) `[design/10]`.
+**Corrected 2026-08-28 (three independent verification passes caught this
+the same day it was first written — the original 2026-08-27 consolidation
+trusted design/10's "implemented" banner without checking the file still
+exists):** `table_recognizer.py` and its `recognize_tables()` skeleton /
+`TenderAdapter` / `QuoteAdapter` dispatch **do not exist** — physically
+deleted 2026-08-11 once it was confirmed the legacy TableGrid path was
+unreachable in production (`[design/21]`; commit `c60217f`, "F1+F2+F4
+legacy 识别链物理删除"). `grep -r "recognize_tables\|TenderAdapter\|QuoteAdapter"`
+across the whole tree returns zero hits.
+
+What survives: the shared dataclasses `SourceRef` (incl. `tile_bbox`),
+`DraftRow` (`field_sources`, `extra_fields`, `parser_mode`),
+`ExtractionDraft` (`review_candidates` — isolated from `rows`),
+`QualityReport` (page accounting, arithmetic-mismatch gate,
+`failed_target_pages`) still live in `apps/api/intelligence/extraction_draft.py`
+`[design/10]`. But the entry point that fed them is now `paddle_vl.py` /
+`paddle_tender.py`, wired through `pipeline.py`, as §3.2 below describes —
+not the shared-skeleton architecture this section originally named.
 
 Centralized thresholds (`domain_config.py`, bottom of `extraction_draft.py`):
 `_EXPECTED_ROWS_MIN_RATIO=0.70`, `_DECLARED_TOTAL_DIFF_BLOCKED=500.0`,
@@ -180,14 +191,28 @@ column-count mismatch) — **not pursued further**; recommendation is not to
 pursue engine replacement without a stronger reason than cost
 `[design/41]`.
 
+**Since fixed** (`[design/21]` §2.2/§2.3 flagged these as "silently inert"
+on the VL quote path in 2026-08-11; closed since): `vl_quote.py` now passes
+`supplier_name`/`declared_total` through to `build_draft()`
+(`vl_quote.py:700-701`), and `document_ingestion.py` populates
+`merged["_doc_meta"]` from the pipeline's `doc_meta` output
+(`document_ingestion.py:89-90`, `pipeline.py:370`).
+
 ### 3.3 Page classification
 
 Production page classification uses **visual** models on rendered
 thumbnails: `qwen3-vl-flash` (flash pass) + `qwen3-vl-plus` (review pass),
-run on every page (`table_recognizer._classify_pages`,
-`dashscope_ocr.classify_pages_visual`/`review_pages_visual`). A rule-on-HTML
-/ text-LLM classifier survives only as a coarse fallback
-(`page_classifier.classify_page`) `[design/04]`.
+run on every page (`apps/api/intelligence/providers/dashscope_ocr.py`'s
+`classify_pages_visual`/`review_pages_visual` — corrected 2026-08-28: the
+call site is not `table_recognizer._classify_pages`, which is dead code per
+§3.1, and the module path is `providers/dashscope_ocr.py`, not
+`dashscope_ocr.py`). **There is currently no rule-based fallback
+classifier** — `page_classifier.py` (the "coarse fallback" `[design/04]`
+described) was deleted in the same 2026-08-11 legacy-chain removal as
+`table_recognizer.py` (`[design/21]`) and was never recreated; `grep -rn
+"classify_page\b" apps/api/` outside tests/`__pycache__` returns nothing.
+Page-role classification today is visual-model-only, or a hardcoded
+`role="quote_table"` on the VL quote path (§3.2).
 
 **Page-filter cost-reduction** (`intelligence/page_filter.py` +
 `pipeline.py`) — classifies pages and sends only quote pages to Paddle.
@@ -472,7 +497,9 @@ suite at time of migration: 1136 passed / 18 skipped / 0 failed.
 Seven authoritative services extracted `[design/12]`: `TenderSessionService`,
 `SubmissionScopeService` (`bid_submission_resolve`), `QuoteConfirmationService`,
 `AlignmentService`, `BidMatrixService`, `EvaluationPolicyService`,
-`BidExportService`.
+`BidExportService`. `services/` has since been subpackaged by bounded
+context per design/12 §10.1's own recommendation: `alignment/`, `history/`,
+`ingestion/`, `matrix/`, `submission/`, `supplier/`, `tender/`.
 
 `EvaluationPolicy`: `get_evaluation_policy(project_id)` currently returns
 `UNKNOWN_EVALUATION_POLICY` (method/award_mode unknown,
@@ -494,10 +521,11 @@ modern identity field (null in legacy mode). All join sites now use
 Audit events: `services/audit.py::write_domain_event()` (no auto-commit —
 caller commits in the same transaction as the business write) — single
 JSON `payload` column on `OperationLog` (`{event_type, identity, before,
-after, meta}`), 7 instrumented event types: `bql_confirm`,
-`tender_session_confirm`, `alignment_group_confirm`, `alignment_item_confirm`,
-`alignment_bulk_confirm`, `alignment_finalize`, `llm_fill_persist`
-`[design/14]`.
+after, meta}`), 8 instrumented event types (corrected 2026-08-28, was
+listed as 7): `bql_confirm`, `tender_session_confirm`,
+`alignment_group_confirm`, `alignment_item_confirm`, `alignment_bulk_confirm`,
+`alignment_finalize`, `llm_fill_persist` `[design/14]`, plus
+`anchor_missing_ack` `[design/23]`.
 
 **Known, not-yet-done structural debt** (still real, per `TODO.md` §0–§2):
 
@@ -523,6 +551,31 @@ after, meta}`), 7 instrumented event types: `bql_confirm`,
   coverage) — declared a **permanent, ongoing product goal**
   (backfillable downstream), not a bug; quality reports must say "no
   row-level pixel positioning," never claim full pixel traceability.
+- **Category generalization gap** (verified 2026-08-28, `[design/08]`):
+  `tender_pdf.py::_score_page` still hardcodes valve keywords
+  (工作压力/阀体/密封圈/DN\d) for page-location scoring, and
+  `extract_valve_canonical` is called unconditionally by both anchor
+  builders regardless of category. No `CATEGORY_PROMPT_MAP`/
+  `CATEGORY_SCHEMA_MAP`/category-aware dispatch exists. Uploading a
+  non-valve category (cable tray, panel, pipe, pump, HVAC diffuser) risks
+  near-zero page-location scores or field misalignment — a direct
+  contradiction of CLAUDE.md §1's "never trade generality... for a
+  single-sample layout" invariant that predates this file.
+- **No production LLM/OCR response cache and no LLM-path rate-limit
+  protection** (verified 2026-08-28, `archive/design/code-review-e2e-efficiency.md`
+  2026-07-10, both still open): every re-upload of an identical document
+  re-runs the full model chain — no content-hash cache exists anywhere in
+  `apps/api/`. Separately, the LLM supplier-fill path
+  (`services/supplier/supplier_fill_llm.py`, `routes/analysis.py:1938`) has
+  no 429/rate-limit retry and only uses the first configured API key even
+  when `DASHSCOPE_API_KEYS` lists several — unlike the OCR provider path,
+  which rotates keys and handles rate limits.
+- **Async routes doing blocking work** (`[design/29] §18`): several routes
+  under `intake.py`/`analysis.py` were declared `async def` while doing
+  synchronous blocking work (file hashing, real vision/LLM calls), which
+  stalls the whole event loop under concurrent uploads. Fixed by converting
+  to plain `def` so FastAPI dispatches them to the thread pool; pinned by a
+  dedicated test asserting the affected routes are not `async def`.
 
 ---
 
@@ -584,15 +637,34 @@ authority), which remains an undone future option `[design/13]`.
     3. Must carry a `parser_mode` label, document-level either/or, never
        silent.
 - **Page-filter cost/speed tradeoff** (79% cheaper, 33% slower
-  end-to-end) — not yet decided, currently ships default-off `[design/41]`.
-  **Blocked on a code fix first**: "default-off" is currently implemented as
-  "`MIMO_API_KEY` is unset" (§3.3), and that same variable now gates the
-  default vendor (§4), so the decision cannot actually be held open until the
-  two are separated.
+  end-to-end) — still not decided, still ships default-off `[design/41]`.
+  The blocking issue this bullet used to flag — "default-off" being
+  implemented as merely "`MIMO_API_KEY` is unset," the same variable that
+  gates the vendor default (§4) — was **fixed 2026-08-28**: see §3.3,
+  `domain_config.PAGE_FILTER_ENABLED` is now the independent switch. The
+  product decision itself is still open; only the code coupling that made
+  it un-decidable is resolved.
 - **Column-shift recovery thresholds** (2%/3-row) — inherited from an older
   detector, flagged as possibly too strict for the current type-based
   detector, not recalibrated.
-- **Preview-lane confirm buttons** — proposal to remove them entirely
-  (structurally can't work under the rollback sandbox) plus a real
-  「校对入库」 action routing to the supplier tab — designed, not built
-  `[design/36]`.
+- ~~**Preview-lane confirm buttons** — proposal to remove them entirely...
+  designed, not built `[design/36]`.~~ **Built 2026-08-28** (commit
+  `bd33e4d`, the same commit that last edited this file — the code changed
+  after this sentence was written and nobody reconciled the two until this
+  pass): the inert buttons were removed from `BidMatrix.vue`; the formal
+  lane now shows a 「去复核 →」 link to `/workspace/:id/align`
+  (`AnchorReviewMatrix.vue`, which already handled confirm/exclude
+  correctly); the preview lane shows only the 待确认 badge with no fake
+  action, gated by a new `preview` prop. Still open from `[design/36]` §4: a
+  bulk "校对入库" action naming outstanding suppliers, and moving doubt-copy
+  phrasing to a backend `user_message` field (the frontend mapping table
+  exists — see FUNCTIONAL.md §7 — but backend-authored phrasing does not).
+- **Preview-sandbox lock risk under embedding fallback** (`[design/31]` §7,
+  never closed, not previously carried into this file): the write-then-
+  rollback sandbox measures safe (~0.05s) for pure DB writes, but
+  `import_and_match`'s embedding-based alignment fallback
+  (`anchor_match._embed_client()`, real HTTP, ~350 texts/batch) can run
+  *inside* the sandbox's write transaction — a concurrent real confirm can
+  then hit SQLite's lock timeout and fail with "database is locked." Two
+  options recorded, neither implemented: do the embedding call before
+  opening the sandbox, or raise the busy-timeout.
