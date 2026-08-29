@@ -34,7 +34,11 @@ dev = [
 mempas = "uvicorn:main"
 
 [tool.pytest.ini_options]
-testpaths = ["apps/api/tests", "tests"]
+# 2026-08-28：测试单根合并，root tests/ 的测试代码已并入 apps/api/tests/
+# （文件名碰撞的一个改名保留，冲突的旧夹具改名后一并搬入 conftest.py）。
+# `tests/` 目录本身仍在——`tests/fixtures/documents/` 是共享 E2E 语料，不是
+# 测试代码，pytest 不会从中收集用例（没有 test_*.py），保留不影响单根。
+testpaths = ["apps/api/tests"]
 pythonpath = ["."]
 addopts = "-m 'not e2e'"
 markers = [

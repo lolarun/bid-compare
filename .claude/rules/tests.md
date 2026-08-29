@@ -1,7 +1,6 @@
 ---
 paths:
   - "apps/api/tests/**/*.py"
-  - "tests/**/*.py"
 ---
 
 # 测试与验收规则
