@@ -31,7 +31,13 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.25.0",
-    "httpx>=0.28.0",
+    # 2026-08-29: starlette 1.6.0's TestClient prefers httpx2, falling back to
+    # classic httpx only with a deprecation warning (see
+    # .venv/Lib/site-packages/starlette/testclient.py's module-level try/except
+    # import). This repo has zero direct `import httpx` calls of its own — the
+    # dependency exists solely to give TestClient (used by nearly every route
+    # test) something to run on — so there's nothing else to migrate.
+    "httpx2>=2.0.0",
 ]
 
 [project.scripts]
