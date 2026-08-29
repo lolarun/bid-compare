@@ -15,7 +15,11 @@ dependencies = [
     "xlrd>=2.0.2",
     "numpy>=2.0.0",
     "python-multipart>=0.0.18",
-    "openai>=1.30.0",
+    # <3.6.0: 2026-08-29 部署镜像的 pip 源（阿里云 PyPI 镜像，见
+    # apps/api/Dockerfile）还没同步到 3.6.0，uv 在本地解析用的是官方 PyPI，
+    # 两边索引不一致导致 CI 构建报 "No matching distribution"（build 33240594361）。
+    # 镜像追上后可以去掉这个上限。
+    "openai>=1.30.0,<3.6.0",
     "pypdfium2>=4.30.0",
     "pdfplumber>=0.11.0",
     "Pillow>=10.0.0",
@@ -32,6 +36,18 @@ dev = [
 
 [project.scripts]
 mempas = "uvicorn:main"
+
+[tool.uv]
+# 2026-08-29：部署镜像的 pip 源（阿里云 PyPI 镜像，见 apps/api/Dockerfile）比
+# 官方 PyPI（uv 本地解析用的索引）落后几天——本地能解析出的最新版本，镜像上
+# 常常还没有。约束表只用来压住这类刚发布、镜像未同步的传递依赖版本，不是长期
+# 策略；镜像追上后应该整体清空重新解析一次，删掉这个表。
+constraint-dependencies = [
+    "platformdirs<4.11.5",
+    "pydantic<2.13.5",
+    "typer<0.27.2",
+    "wcwidth<0.8.3",
+]
 
 [tool.pytest.ini_options]
 # 2026-08-28：测试单根合并，root tests/ 的测试代码已并入 apps/api/tests/
