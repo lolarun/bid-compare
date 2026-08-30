@@ -13,7 +13,7 @@ import type {
   AnchorMatchSummary, AnchorReviewResult, AnchorReviewMatrixResult, TenderPreviewResult,
   TenderListConfirmSession, TenderListCurrentSession, SourceReconcileResult,
   CompareStateResult, ClassifyTier0Result, SummarizeFactsResult,
-  QuoteRound, ProjectsOverviewResult, RoundTrendResult,
+  QuoteRound, ProjectsOverviewResult, ProjectOverviewResult, RoundTrendResult,
 } from './client'
 
 // ─── Materials ──────────────────────────────────────────────────────────────
@@ -76,8 +76,15 @@ export const projectApi = {
     api.get<Project | null>('/projects/find-exact', { params: { name, code } }),
   /** 比价入口列表（design/44 §3.2）：项目 × 各品类轮次状态的只读聚合，
    *  一次批量查询，不对每个项目单独拉 quote-rounds。 */
-  overview: (params?: { page?: number; page_size?: number; keyword?: string }) =>
+  overview: (params?: {
+    page?: number; page_size?: number; keyword?: string; include_empty?: boolean
+  }) =>
     api.get<ProjectsOverviewResult>('/projects/overview', { params }),
+  /** 项目概述页聚合（design/45 §6）：项目 + 每品类的清单/轮次/报价/下一步动作。
+   *  **不含任何评标结论**——排名与三态门禁走 analysisApi.bidMatrix 懒加载，
+   *  两处必须是同一份业务结果（CLAUDE.md §4）。 */
+  projectOverview: (projectId: number) =>
+    api.get<ProjectOverviewResult>(`/projects/${projectId}/overview`),
 }
 
 // ─── Quote rounds（docs/design/42 P0, design/44）───────────────────────────

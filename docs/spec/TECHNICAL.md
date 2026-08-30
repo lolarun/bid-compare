@@ -527,7 +527,55 @@ listed as 7): `bql_confirm`, `tender_session_confirm`,
 `alignment_finalize`, `llm_fill_persist` `[design/14]`, plus
 `anchor_missing_ack` `[design/23]`.
 
+**Project overview aggregation** (`services/tender/project_overview.py`, added
+2026-08-30 `[design/45]`) — one read-only service shared by both entry points so
+they cannot answer the same question differently:
+
+- `GET /api/projects/overview` (list) gained `include_empty` (default `False`,
+  applied **before** pagination so `total` matches `items`) plus per-category
+  `has_confirmed_list` / `submission_count` / `next_action`, and a project-level
+  `pending_intake_count`.
+- `GET /api/projects/{id}/overview` (new) returns project scalars + per-category
+  list/rounds/suppliers/next_action in one batched pass. It **computes no
+  matrix**: ranking and the three-state gate require `import_and_match`, so the
+  overview page lazy-loads `POST /api/analysis/bid-matrix` — the same endpoint
+  the matrix page uses (CLAUDE.md §4 "one business result"). A test asserts the
+  overview response carries no `recommendation_level` / `evaluated_total` /
+  `ranking` / `recommended_supplier` key, so a cheap second opinion cannot grow
+  there later.
+- Route order matters: `/{project_id}/overview` is declared **before**
+  `/{project_id}`.
+
+Two data-semantics facts this work established, both previously undocumented and
+both easy to get wrong:
+
+- **`BidSubmission.status` is always `"pending"`.** `confirm_batch` writes
+  `status="pending"` at creation (`quote_confirmation_service.py:614`) and never
+  updates it, so it is *not* a review marker — using it as one makes every
+  project read "awaiting review". The real signal is `ExtractionJob.lifecycle`
+  (`active` = recognized, awaiting confirm; `confirmed` = ingested; `removed`).
+  Live DB at time of writing: 58 `confirmed` jobs ↔ 58 submissions, 1:1.
+- **`pending_intake_count` is project-scoped, not per-category, on purpose.** A
+  job carries no reliable category — it either has not finished recognition or
+  offers only a guessed `detected_category`. Attributing by a guess makes the
+  number change by itself once recognition lands.
+
 **Known, not-yet-done structural debt** (still real, per `TODO.md` §0–§2):
+
+- **Closed-round matrices are recomputed, not frozen** (found 2026-08-30,
+  `[design/45]` §2.1). `WorkspaceView.vue`'s round selector comments say it
+  loads 「那一轮自己**冻结的**矩阵」, but it calls `POST /bid-matrix` with
+  `round_id` — only the `BidAlignmentGroup` set is round-scoped (migration
+  `0011`); the matrix itself is rebuilt on read and can drift when the
+  procurement list is revised, suppliers are merged, or the price baseline
+  changes. `close_round()` (`quote_round_service.py:125`) stores no snapshot,
+  and `BidMatrixVersion` — which already has `matrix_json` / `readiness_json` /
+  `recommended_supplier` / approval state — has **no `round_id` column** and 0
+  rows in the live DB. Tolerable today because nothing presents historical-round
+  conclusions as standing facts (design/45 D-2 keeps closed rounds to a quote
+  roster for exactly this reason). The fix, if historical conclusions are ever
+  wanted, is `BidMatrixVersion.round_id` + a snapshot on close — not a second
+  snapshot mechanism.
 
 - `routes/analysis.py` is **2767 lines / 37 routes** across 5 concerns
   (measured 2026-08-28; it was ~2470/31 when the debt was first recorded, so

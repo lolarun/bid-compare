@@ -1139,24 +1139,47 @@ export interface QuoteRound {
   updated_at: string | null
 }
 
+/** design/45 §4.3 —— 下一步动作。是状态读数，不是建议：每个 code 对应一个
+ *  库里已经成立的事实，由后端 `derive_next_action` 唯一裁定，前端不得自算。 */
+export type NextActionCode =
+  | 'pending_upload'      // 还没有报价，也没有在途识别
+  | 'list_unconfirmed'    // 有报价，但采购清单还没确认
+  | 'pending_intake'      // 有识别完待校对入库的报价件（count 为份数）
+  | 'ready_to_compare'    // 都齐了，还没设定标基准
+  | 'basis_set'           // 已设定标基准轮
+
+export interface NextAction {
+  code: NextActionCode
+  label: string
+  count: number | null
+}
+
 export interface ProjectsOverviewCategory {
   category: string
+  /** design/45 §4.3：品类集合取 轮次 ∪ 清单会话，所以「有清单、还没开轮」
+   *  的品类会以 current_round=null 出现——这正是新项目最常见的状态。 */
   current_round: {
     id: number
     seq: number
     name: string
     stage: QuoteRoundStage
     status: QuoteRoundStatus
-  }
+  } | null
   round_count: number
   confirmed_supplier_count: number
   final_basis_round: { id: number; seq: number; name: string } | null
   last_activity: string | null
+  has_confirmed_list: boolean
+  submission_count: number
+  next_action: NextAction
 }
 
 export interface ProjectsOverviewItem {
   project: Project
   categories: ProjectsOverviewCategory[]
+  /** 待校对入库的报价件数，**项目粒度**：job 上没有可靠品类，硬分到品类会让
+   *  数字在识别完成后自己跳动（后端 `load_pending_intake_counts` 有详述）。 */
+  pending_intake_count: number
 }
 
 export interface ProjectsOverviewResult {
@@ -1164,6 +1187,81 @@ export interface ProjectsOverviewResult {
   page: number
   page_size: number
   items: ProjectsOverviewItem[]
+}
+
+// ─── 项目概述页（docs/design/45 §6）────────────────────────────────────────
+
+/** 一份已入库报价在概述页上的摘要。列身份是 `submission_id`，不是
+ *  `supplier_id`（CLAUDE.md §4：同一供应商可以有多份报价）。 */
+export interface OverviewSubmission {
+  submission_id: number
+  supplier_id: number | null
+  supplier_name: string
+  round_id: number | null
+  line_count: number
+  /** 明细合计：`SUM(bid_quote_lines.total_price)`，系统算出来的。 */
+  detail_total: number
+  /** 文件声明总价：文件封面自己写的；文件没写就是 null，**不是 0**。
+   *  两个数永远分开显示——合并就把"识别是否完整"的独立证据抹掉了
+   *  （FUNCTIONAL §5）。 */
+  declared_total: number | null
+  submitted_at: string | null
+}
+
+export interface OverviewRound {
+  id: number
+  seq: number
+  name: string
+  stage: QuoteRoundStage
+  status: QuoteRoundStatus
+  is_final_basis: boolean
+  opened_at: string | null
+  closed_at: string | null
+  submissions: OverviewSubmission[]
+}
+
+/** 采购清单摘要。**没有金额字段**：采购清单是给投标方填价的空表，
+ *  `TenderAnchor` 本身不含价格（design/45 §5.2 B）。 */
+export interface OverviewList {
+  session_id: number
+  confirmed: boolean
+  anchor_count: number
+  version: number
+  source_type: string
+  file_name: string
+  confirmed_at: string | null
+  confirmed_by: string | null
+  brand_requirement: { brand_en?: string; brand_cn?: string }[]
+}
+
+export interface ProjectOverviewCategory {
+  category: string
+  /** `tender_anchor` 才允许出正式结论；`quote_derived` 只能进预览通道
+   *  （design/45 约束 C3）。两者都谈不上时为 null。 */
+  axis_kind: 'tender_anchor' | 'quote_derived' | null
+  list: OverviewList | null
+  /** 当前轮。有清单但还没开轮时为 null（design/45 §4.3）。
+   *  比 OverviewRound 少一个 submissions——那份清单在 `rounds` 里。 */
+  current_round: Omit<OverviewRound, 'submissions' | 'opened_at' | 'closed_at'> | null
+  rounds: OverviewRound[]
+  suppliers: OverviewSubmission[]
+  final_basis_round: { id: number; seq: number; name: string } | null
+  has_confirmed_list: boolean
+  submission_count: number
+  next_action: NextAction
+}
+
+export interface ProjectOverviewResult {
+  project: {
+    id: number
+    name: string
+    code: string
+    status: string
+    location: string | null
+    remark: string | null
+  }
+  categories: ProjectOverviewCategory[]
+  pending_intake_count: number
 }
 
 // ─── Round trend（docs/design/42 §6）───────────────────────────────────────

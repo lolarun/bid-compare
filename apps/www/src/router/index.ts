@@ -146,8 +146,21 @@ const routes: RouteRecordRaw[] = [
           public: false, roles: ['管理员', '比价员'] as Role[],
         },
       },
+      // design/45 §5.1 —— 进入项目先看**项目概述**（只读落地页），三阶段
+      // 工作台移到 /compare 子路由。原先 /workspace/:projectId 一进去就是拖拽
+      // 上传框，项目级的"这是什么、到哪了"没有任何落脚处。概述页只读，所有
+      // 写操作链去既有页面（WorkspaceView 已经 2000+ 行，不能再长第二个）。
       {
         path: '/workspace/:projectId',
+        name: 'ProjectOverview',
+        component: () => import('@/views/compare/ProjectOverviewView.vue'),
+        meta: {
+          title: '项目概述', public: false, hideInMenu: true,
+          roles: ['管理员', '比价员'] as Role[],
+        },
+      },
+      {
+        path: '/workspace/:projectId/compare',
         name: 'CompareWorkspace',
         component: () => import('@/views/compare/WorkspaceView.vue'),
         meta: {

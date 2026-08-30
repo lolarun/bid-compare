@@ -81,7 +81,9 @@ async function ensureProject(): Promise<number> {
       name: placeholderName, code: projectCode.value, location: '', status: 'active', remark: '',
     })
     projectId.value = data.id
-    router.replace(`/workspace/${data.id}`)
+    // design/45 §5.1：必须带 /compare——/workspace/:id 现在是只读概述页，
+    // replace 到那里会把正在上传的用户从工作台踢走。
+    router.replace(`/workspace/${data.id}/compare`)
     return data.id
   } finally {
     bootstrapping.value = false
@@ -135,6 +137,8 @@ async function offerExistingProject() {
       + '打开它可以接着上次的结果；留在当前工作台的话，请改个名称或编号再保存。',
     okText: `打开 #${existing.id}`,
     cancelText: '留在当前工作台',
+    // 概述页正是这里该去的地方：用户要判断的是"上次比到哪了"，那是概述页
+    // 回答的问题；要接着传文件，从概述页一键进工作台。
     onOk: () => { router.push(`/workspace/${existing!.id}`) },
   })
 }

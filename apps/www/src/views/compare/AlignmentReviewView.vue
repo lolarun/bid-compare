@@ -26,7 +26,10 @@ const submissionIds = computed(() => {
 })
 
 function backToWorkspace() {
-  router.push(`/workspace/${projectId.value}`)
+  // design/45 §5.1：/workspace/:id 现在是只读的项目概述，工作台在 /compare
+  // 子路由。按钮写的是「返回工作台」，就得真回工作台——把人送到概述页会让
+  // 他刚才在核查的那份矩阵消失。
+  router.push(`/workspace/${projectId.value}/compare`)
 }
 </script>
 

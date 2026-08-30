@@ -299,6 +299,61 @@ Still open from design/36 §4 (not yet built): a bulk "校对入库" action that
 names outstanding suppliers by name, and moving doubt-copy phrasing from a
 frontend-only mapping table to a backend-authored `user_message` field.
 
+### 7.1 Project entry and overview (shipped 2026-08-30, `[design/45]`)
+
+**Entry list** (`/workspace`, `compare/EntryView.vue`): each project card's
+right column is the status column, carrying **one row per category** — round
+number and state, confirmed-quote count, and a deterministic **next-action**
+label. The label is a state readout, never advice: five branches, first match
+wins (`待上传报价` → `清单未确认` → `待校对入库 N 份` → `已定标基准：第N轮` →
+`可出比价`), all derived from rows that already exist in the database, with no
+model call. Backend `services/tender/project_overview.py::derive_next_action`
+is the single authority; the frontend renders `next_action.label` verbatim so
+the list and the overview page cannot phrase the same state two ways.
+
+Empty projects (**no round, no submission, no list session**) are hidden by
+default, with a non-persisted 「显示空项目」 toggle. The filter is **semantic,
+never name-based** — matching the auto-generated `新比价项目-<timestamp>` shape
+would both swallow legitimately-named projects and miss differently-named
+shells; a test pins that no application code matches that pattern.
+数据管理 → 项目管理 (`/projects`) is unchanged and still lists everything.
+
+**Project overview** (`/workspace/:projectId`,
+`compare/ProjectOverviewView.vue`) is the new **read-only** landing page; the
+three-stage workspace moved to `/workspace/:projectId/compare`. One status card
+per category (rounds/axes/matrices are all `(project, category)`-scoped, so a
+single project-level round number would lie about a multi-category project),
+each carrying:
+
+- **采购概述 / 采购清单** — anchor count, version, source (Excel vs tender PDF),
+  confirm time, brand requirements. A procurement list carries **no amounts** —
+  `TenderAnchor` has no price fields at all, by design (it is the blank form
+  bidders fill in).
+- **供应商与轮次** — per supplier: row count and the two totals **kept
+  separate**, 明细合计 (computed from the detail lines) vs. 文件声明总价
+  (what the document declared; `null`, never `0`, when the document declared
+  none). Closed rounds list **only** their quote roster — no totals, no
+  ranking, no recommendation.
+- **当前轮比价建议** — lazy, rendered only for `axis_kind='tender_anchor'`,
+  and fetched from the *same* `POST /api/analysis/bid-matrix` the matrix page
+  uses, so the two surfaces cannot drift. It shows 评标总价排名 (explicitly a
+  price ranking, never an official evaluation score), the three-state
+  `recommendation_level` (all three states render, `blocked` included — it
+  explains the block), excluded/undecided rows **with their monetary impact**
+  rather than a bare count, and 「综合评审待评标小组确认」 whenever non-price
+  factors carry no weights — which, given `UNKNOWN_EVALUATION_POLICY` (§7,
+  `TECHNICAL.md` §5), is currently always. **It never names a winner.**
+
+The page is read-only by construction: every action links out to the surface
+that owns it (workspace, alignment review, round bar).
+
+**Root cause left unfixed, deliberately**: the 61 placeholder projects that
+motivated the filter are produced by `WorkspaceView.vue::ensureProject()`,
+which still lazy-creates a project named `新比价项目-<timestamp>` on first
+drag-in. The default filter treats the symptom; removing lazy creation is
+recorded as out of scope in `[design/45]` §9 and pinned by a test so a second
+producer cannot appear unnoticed.
+
 ---
 
 ## 8. Multi-round quoting
