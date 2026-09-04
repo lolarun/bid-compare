@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.api.core.config import get_settings
-from apps.api.core.database import SessionLocal, init_db
+from apps.api.core.database import init_db
 from apps.api.core.errors import register_exception_handlers
 from apps.api.core.runtime import (
     get_pool_stats,
@@ -140,7 +140,16 @@ async def lifespan(app: FastAPI):
     # 后台识别任务无法跨进程重启续跑：启动时任何 RUNNING/PENDING 的 job 都是上次进程
     # 崩溃/重启遗留的孤儿，必须无视年龄全部回收为 FAILED，否则上传幂等会把这条孤儿
     # 原样返回，用户重传也拿不到新识别（会一直卡在"处理中"）。周期清扫仍用年龄阈值。
-    db = SessionLocal()
+    # 晚绑定 SessionLocal，理由与下面周期清扫处相同：conftest 打的是
+    # `apps.api.core.database.SessionLocal` 这个**模块属性**，而本文件顶层的
+    # `from ... import SessionLocal` 在导入时就绑好了名字，早于打桩——于是这次
+    # 启动扫描会连到真实库而不是测试临时库。本机有 data/mempas.db（表齐全）时
+    # 看不出问题；CI 上没有那个文件，sqlite 现连现建出一个空库，于是每个
+    # TestClient 启动都炸 `no such table: extraction_jobs`
+    # （2026-09-04 CI run 33857363480：24 failed / 130 errors）。
+    from apps.api.core import database as _db_mod
+
+    db = _db_mod.SessionLocal()
     try:
         recovered = DocumentIngestionService.recover_stuck_jobs(
             db,
