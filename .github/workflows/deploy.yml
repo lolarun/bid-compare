@@ -28,6 +28,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # 2026-09-04（用户决策）：测试红了**不阻断部署**。
+    #
+    # 背景：这道 test 闸门是新加的，从未通过过——一批用例（test_bql_e2e、
+    # test_scenarios_e2e、test_compare_integration）要打真实 embedding 接口，
+    # 而 CI 没有 DASHSCOPE_API_KEY，`get_dashscope_client()` 返回 None，
+    # 于是 anchor_match 直接 AttributeError。本地有 key 所以全绿。
+    #
+    # 这是**临时**状态，不是长期方案：闸门形同虚设，红了没人会注意到。
+    # 两个正解二选一，尽快落一个：
+    #   a) 把那批用例标成 e2e（仓库对 e2e 的定义就是"打真实 Qwen-VL 接口，
+    #      opt-in"，它们现在只是漏标了），CI 跳过、本地照跑；
+    #   b) 给 CI 配 DASHSCOPE_API_KEY secret，让它们真跑。
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
