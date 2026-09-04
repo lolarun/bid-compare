@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import {
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   BellOutlined,
   FullscreenOutlined,
   FullscreenExitOutlined,
@@ -13,23 +11,16 @@ import {
   SearchOutlined,
   QuestionCircleOutlined,
 } from '@ant-design/icons-vue'
-import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { ROLE_TAG_COLOR } from '@/types/role'
 import { ref } from 'vue'
 
-const route = useRoute()
 const router = useRouter()
-const appStore = useAppStore()
 const userStore = useUserStore()
 
-const breadcrumbs = computed(() => {
-  const crumbs: { title: string; path?: string }[] = []
-  const group = route.meta?.group as string | undefined
-  if (group) crumbs.push({ title: group })
-  if (route.meta?.title) crumbs.push({ title: route.meta.title as string })
-  return crumbs
-})
+// 混合布局（2026-09-04 用户按范例定案）：顶栏**通栏**，左侧承载 Logo，
+// 但**不放任何导航、也不放折叠钮**——菜单全部在侧栏（SiderMenu），折叠钮只留
+// 侧栏底部那一个。面包屑在内容区顶部（ContentBreadcrumb.vue）。
 
 const isFullscreen = ref(false)
 
@@ -61,17 +52,12 @@ function handleLogout() {
 
 <template>
   <a-layout-header class="header-view">
-    <div class="header-view__left">
-      <component
-        :is="appStore.collapsed ? MenuUnfoldOutlined : MenuFoldOutlined"
-        class="header-view__trigger"
-        @click="appStore.toggleCollapsed"
-      />
-      <a-breadcrumb class="header-view__breadcrumb">
-        <a-breadcrumb-item v-for="(b, idx) in breadcrumbs" :key="idx">
-          {{ b.title }}
-        </a-breadcrumb-item>
-      </a-breadcrumb>
+    <div class="header-view__logo" @click="router.push('/dashboard')">
+      <div class="header-view__logo-icon">M</div>
+      <div class="header-view__logo-text">
+        <div class="header-view__logo-title">MEMPAS</div>
+        <div class="header-view__logo-subtitle">机材比价</div>
+      </div>
     </div>
 
     <div class="header-view__search">
@@ -147,33 +133,58 @@ function handleLogout() {
   display: flex;
   align-items: center;
   gap: 16px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  // 通栏顶栏的底部投影要压在侧栏之上：侧栏是 fixed / z-index 10 且 top=48，
+  // 顶栏若比它低，投影在左侧 220px 会被侧栏盖掉，只在内容区那段可见——看起来
+  // 就不像一条通栏的投影（2026-09-04 用户指出）。
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
   position: sticky;
   top: 0;
-  z-index: 9;
+  z-index: 11;
 
-  &__left {
+
+
+
+  // Logo 占据侧栏那一格的宽度，让它和下面的侧栏左对齐
+  &__logo {
+    width: @sider-width - 32px;
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-width: 0;
-  }
-
-  &__trigger {
-    font-size: 16px;
+    gap: 10px;
     cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
-    color: @text-color-secondary;
-    transition: background 0.2s;
-  }
-  &__trigger:hover {
-    background: rgba(0, 0, 0, 0.04);
-    color: @primary-color;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  &__breadcrumb {
-    font-size: 13px;
+  &__logo-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: @primary-color;
+    color: #fff;
+    font-size: 18px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  &__logo-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+  }
+
+  &__logo-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: @heading-color;
+    letter-spacing: 0.5px;
+  }
+
+  &__logo-subtitle {
+    font-size: 11px;
+    color: @text-color-tertiary;
   }
 
   &__search {

@@ -36,7 +36,9 @@ function makeOption(items: BubbleItem[]) {
     },
     legend: { bottom: 4, icon: 'circle', textStyle: { fontSize: 12 } },
     grid: { top: 20, left: 80, right: 24, bottom: 40 },
-    xAxis: { type: 'value' as const, show: false },
+    // 固定 0~100 的值域：不固定的话，某一行只有一条数据时 x 值域会塌成一个点，
+    // 三行的气泡全叠在同一条竖线上（实测：每个专业各 1 条时就是这样）。
+    xAxis: { type: 'value' as const, show: false, min: 0, max: 100 },
     yAxis: {
       type: 'category' as const,
       data: professions,
@@ -50,7 +52,9 @@ function makeOption(items: BubbleItem[]) {
         name: d.name,
         profession: d.profession,
         amount: d.amount,
-        value: [i * 1.5 + 1, p],
+        // 每行内均匀铺开：1 条居中(50)，3 条落在 25/50/75。原来是 `i*1.5+1`
+        // ——按组内序号定位，一条数据时恒为 1，所有气泡挤在最左边。
+        value: [((i + 1) / (grouped[idx].length + 1)) * 100, p],
       })),
       symbolSize: (val: number[], row: { data: { amount: number } }) =>
         18 + ((row?.data?.amount ?? val[0]) / maxAmt) * 60,
@@ -78,9 +82,22 @@ function ensure() {
 
 function onResize() { chart.value?.resize() }
 
-onMounted(() => { ensure(); window.addEventListener('resize', onResize) })
+// 只听 window.resize 不够：折叠左侧导航时容器变宽，但窗口尺寸没变，
+// 画布会一直保持旧宽度（用户 2026-09-04 报的"宽度不够"就是这个）。
+let ro: ResizeObserver | null = null
+
+onMounted(() => {
+  ensure()
+  window.addEventListener('resize', onResize)
+  if (chartEl.value && typeof ResizeObserver !== 'undefined') {
+    ro = new ResizeObserver(onResize)
+    ro.observe(chartEl.value)
+  }
+})
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  ro?.disconnect()
+  ro = null
   chart.value?.dispose()
   chart.value = null
 })

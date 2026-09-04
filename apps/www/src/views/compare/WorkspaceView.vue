@@ -41,7 +41,11 @@ const router = useRouter()
 const projectId = ref<number | null>(route.params.projectId ? Number(route.params.projectId) : null)
 const projectName = ref('')
 const projectCode = ref('')
-const category = ref('')
+// 品类从 URL 播种（2026-09-04）：概述页按品类进来时带 `?category=`，工作台不读
+// 就等于把上下文丢在门口——用户明明正看着「阀门」，进来却要在下拉里再选一次，
+// 而轮次栏是 `v-if="category"`，品类为空时整条不显示，于是"这次上传归哪一轮"
+// 在页面上完全无从得知。`goAlign` 早就是这个写法，这里补齐。
+const category = ref(typeof route.query.category === 'string' ? route.query.category : '')
 
 // 品类选择器的选项。懒加载（聚焦时才拉）——大多数场景品类会被招标识别或报价
 // 投票自动填好，用户根本不会点开这个下拉，没必要每次进页面都请求一次。
@@ -232,6 +236,17 @@ watch(selectedRoundId, async (id) => {
 const newRoundModalOpen = ref(false)
 const newRoundSaving = ref(false)
 const newRoundForm = reactive({ name: '', stage: 'formal' as 'pre_tender' | 'formal', remark: '' })
+
+// 概述页可以带 `?newRound=1` 直接把用户送到这个弹窗前（design：不在概述页
+// 复制第二套轮次管理 UI——开新轮的后果说明只在这一个弹窗里写着）。
+onMounted(async () => {
+  if (route.query.newRound !== '1' || !category.value) return
+  // 必须等轮次加载完再开弹窗：`openNewRoundModal` 的默认名是
+  // `(openRound?.seq ?? rounds.length) + 1` 算出来的，rounds 还空着时会算成
+  // 「第1轮」——而第 1 轮明明已经存在，用户会建出一个重名轮次。
+  await loadRounds()
+  openNewRoundModal()
+})
 
 function openNewRoundModal() {
   const nextSeq = (openRound.value?.seq ?? rounds.value.length) + 1
@@ -1502,6 +1517,16 @@ watch([matrixResult, stage], ([val, st]) => {
          我们的 class 落在内层元素上，它的 margin 撑不开外层。用一个自己的
          容器来管间距，不依赖组件库的内部结构。 -->
     <div v-if="!viewingClosedRound && stage === 'upload' && viewMode === 'overview'" class="upload-zone">
+    <!-- 归属横幅（2026-09-04）：在**放文件的那一刻**说清这次上传归哪一轮。
+         用户原话："上传的是更新第一轮报价，还是第二轮报价" —— 以前页面上
+         没有任何地方回答得了。 -->
+    <div v-if="category && openRound" class="upload-attribution">
+      本次上传将归入 <b>{{ openRound.name }}</b>（收集中）。
+      <a-button type="link" size="small" @click="openNewRoundModal">改为开启新一轮…</a-button>
+    </div>
+    <div v-else-if="category" class="upload-attribution upload-attribution--muted">
+      本品类尚未开轮——首轮将在首次确认报价时自动开启。
+    </div>
     <a-upload-dragger
       :show-upload-list="false" :multiple="true"
       accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg"
@@ -1979,6 +2004,21 @@ watch([matrixResult, stage], ([val, st]) => {
 /* 24px 而不是跟卡片之间一样的 16px：这里分隔的是「上传区」和「结果区」
    两个功能块，比同类卡片之间的间距大一档，层次才读得出来。间距挂在自己的
    容器上，不挂在 dragger 上（见模板里的注释）。 */
+/* 这个 style 块是纯 CSS（没有 lang="less"），不能用 & 嵌套 */
+.upload-attribution {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+  font-size: 13px;
+}
+.upload-attribution--muted {
+  background: #fafafa;
+  border-color: #f0f0f0;
+  color: rgba(0, 0, 0, 0.55);
+}
+
 .upload-zone { margin-bottom: 24px; }
 .auto-classify-dragger { margin-bottom: 0; border-color: #91caff; background: #f0f7ff; }
 .auto-classify-dragger :deep(.ant-upload-drag-icon) { margin-bottom: 6px; }

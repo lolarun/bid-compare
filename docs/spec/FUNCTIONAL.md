@@ -301,29 +301,104 @@ frontend-only mapping table to a backend-authored `user_message` field.
 
 ### 7.1 Project entry and overview (shipped 2026-08-30, `[design/45]`)
 
-**Entry list** (`/workspace`, `compare/EntryView.vue`): each project card's
-right column is the status column, carrying **one row per category** — round
-number and state, confirmed-quote count, and a deterministic **next-action**
-label. The label is a state readout, never advice: five branches, first match
-wins (`待上传报价` → `清单未确认` → `待校对入库 N 份` → `已定标基准：第N轮` →
+**Entry list** (`/workspace`, `compare/EntryView.vue`): one row per project,
+carrying project-level summary only (see **Entry list layout** below for the
+columns and for what the 2026-09-03 rework deliberately stopped showing). Every
+row ends in a deterministic **next-action** label. The label is a state readout,
+never advice: five branches, first match wins (`待上传报价` → `清单未确认` → `待校对入库 N 份` → `已定标基准：第N轮` →
 `可出比价`), all derived from rows that already exist in the database, with no
 model call. Backend `services/tender/project_overview.py::derive_next_action`
 is the single authority; the frontend renders `next_action.label` verbatim so
 the list and the overview page cannot phrase the same state two ways.
 
-Empty projects (**no round, no submission, no list session**) are hidden by
-default, with a non-persisted 「显示空项目」 toggle. The filter is **semantic,
-never name-based** — matching the auto-generated `新比价项目-<timestamp>` shape
-would both swallow legitimately-named projects and miss differently-named
-shells; a test pins that no application code matches that pattern.
+Empty projects (**no round, no submission, no list session**) can be filtered
+out with a non-persisted 「显示空项目」 toggle, but the toggle is **on by
+default**. The filter itself is **semantic, never name-based** — matching the
+auto-generated `新比价项目-<timestamp>` shape would both swallow
+legitimately-named projects and miss differently-named shells; a test pins that
+no application code matches that pattern.
 数据管理 → 项目管理 (`/projects`) is unchanged and still lists everything.
+
+> **Retracted 2026-09-03 — `[design/45]` §4.4 decision D-3 ("hidden by
+> default") no longer holds.** D-3's premise was that an empty project is an
+> auto-generated shell and therefore a useless card. Those shells came from the
+> lazy "create on page open" behaviour, which was **stopped 2026-08-21**. Under
+> the actual division of labour — a project administrator creates each tender
+> project (at that moment it is a title and nothing else), and the project team
+> then uploads quotes to compare — an empty project is the normal starting
+> state and precisely what the project team must find in order to begin. Hiding
+> it emptied the entry list exactly when it was needed most, and the empty state
+> claimed 「还没有项目」 while the database held several. Default flipped to
+> show; the empty states now distinguish "filtered out", "no keyword match" and
+> "genuinely no projects".
+
+**Entry list layout** (reworked 2026-09-03, user decision): the card list became
+a **table**, one row per project carrying summary columns only (项目名称 /
+项目编号 / 品类 / 待办 / 待校对入库 / 最近活动). Per-category detail — each
+category's round and intake counts — is no longer on the list; it lives on the
+project overview page. The 待办 column de-duplicates categories by
+`next_action.code` and, when several categories share a code, shows the category
+count instead of summing their `count` fields — summing would fabricate a number
+the backend never adjudicated.
 
 **Project overview** (`/workspace/:projectId`,
 `compare/ProjectOverviewView.vue`) is the new **read-only** landing page; the
-three-stage workspace moved to `/workspace/:projectId/compare`. One status card
-per category (rounds/axes/matrices are all `(project, category)`-scoped, so a
-single project-level round number would lie about a multi-category project),
-each carrying:
+three-stage workspace moved to `/workspace/:projectId/compare`. Reworked
+**2026-09-03** (user decision): a project-level `a-descriptions` overview
+(code / location / category count / project-scoped pending-intake count) sits
+above a **left category navigator** (one card per category, each carrying its
+current round and a mini progress track) with the selected category's detail on
+the right — previously one stacked status card per category, which made a
+multi-category project scroll for pages and left the project's own facts with
+nowhere to live. An intermediate tabs version was replaced the same day: tabs
+crowd once a project has 6+ categories. Per-category scoping is unchanged
+(rounds/axes/matrices are all `(project, category)`-scoped, so a single
+project-level round number would lie about a multi-category project); only the
+arrangement changed, from stacked cards to tabs.
+
+Inside a category tab, a five-step pipeline (`上传识别 → 确认采购清单 → 报价入库
+→ 校对确认 → 定标基准`) shows where that category stands. The current step is a
+**pure display mapping** from the backend's `next_action.code`
+(`utils/pipeline.ts`, unit-tested): the frontend never re-derives progress from
+"is there a list / how many quotes", because `derive_next_action` is the single
+authority and a second derivation would drift — and drift in the direction of
+looking more complete than it is. An unknown code falls back to step 0, never to
+"done". Loading and load-failure now have their own branches (skeleton, and an
+`a-result` with retry); previously both rendered as a blank page.
+
+The selected category's rounds render as a **descending list of round cards**
+(current round highlighted and expanded to its supplier table; closed rounds
+collapsed to a supplier-name line). Rounds are a time series, so they are shown
+in full rather than folded behind a 当前轮/历史轮 tab. Round **stage**
+(`pre_tender`/`formal`, the only two values `models/quote_round.py::STAGES`
+accepts) is rendered separately from the round's free-text **name**, so a name
+like 「最终澄清报价」 can never be mistaken for a stage the system gates on.
+
+Per-round money is listed **per submission only — no cross-supplier aggregate of
+any kind** (retracted 2026-09-03: an earlier same-day version showed a
+「明细合计区间」 min~max, which real material proved misleading — see below), and
+never 评标总价. The overview endpoint
+[does not compute the matrix](../../apps/api/routes/projects.py); an evaluation
+total requires `import_and_match`, the three-state gate and an anchor axis, and
+computing a cheap lookalike here is how a project ends up with two different
+answers to "who is cheaper".
+
+> **Comparability is not established by the system yet.** Real tender material
+> (`docs/test2`, 临港中科院) shows that within one round, one supplier quoted
+> 「不含安装」 (827,034) while the other three quoted 「含安装」, and all four
+> quoted against *different* copper benchmarks (77,540 / 76,600 / 77,470 /
+> 77,680 元/吨, unified to 73,410 only in round 2). A price range over those four
+> numbers presents non-comparable figures as a comparable spread. Until the
+> system models 交付范围 / 原材料价格基准 / 付款条件 (see
+> `.claude/plans/comparability-basis-dimensions.md`), rounds carry a standing
+> caution instead of an aggregate. The `remark` field that carries these facts
+> exists on `BidQuoteLine`, `TenderAnchor` and `Quote`, but is referenced **zero
+> times** in `services/matrix/`. The project header also carries **建档时间/建档人**
+(`created_at` / `created_by`, added 2026-09-03 — the data was already on
+`projects`, it just wasn't exposed; the name falls back nickname → username and
+is null when the creating user is gone, rather than inventing 「未知用户」).
+
+Each category carries:
 
 - **采购概述 / 采购清单** — anchor count, version, source (Excel vs tender PDF),
   confirm time, brand requirements. A procurement list carries **no amounts** —
@@ -361,8 +436,18 @@ producer cannot appear unnoticed.
 A project/category can have multiple named, staff-created **rounds**
 (pre_tender or formal stage; open or closed status). Only a round explicitly
 flagged `is_final_basis` may produce an official conclusion — other rounds
-are explanatory only. The first round auto-opens implicitly on first upload;
-no ceremony needed `[design/42]`.
+are explanatory only. The first round auto-opens implicitly — no ceremony
+needed `[design/42]`.
+
+> **Corrected 2026-09-03.** This paragraph used to say the first round opens
+> "on first upload". It does not: `get_or_open_round` is called from
+> `services/submission/quote_confirmation_service.py` (the confirm path) and
+> from `routes/analysis.py`'s matrix entry, never from the upload/recognition
+> path — pinned by `tests/test_confirm_batch_round_attach.py`. The round opens
+> at **first quote confirmation**, which is also what the UI says
+> (「首轮将在首次确认报价时自动开启」). The distinction is not cosmetic: a file
+> that is still being recognized, or that comes back BLOCKED and never gets
+> confirmed, must not leave an empty round behind.
 
 **Current state (re-verified against code 2026-08-28 — the 2026-08-27
 consolidation understated this, because it was synthesized from the design

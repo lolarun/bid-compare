@@ -142,7 +142,7 @@ const routes: RouteRecordRaw[] = [
         name: 'CompareEntry',
         component: () => import('@/views/compare/EntryView.vue'),
         meta: {
-          title: '招标比价分析', icon: 'LineChartOutlined', group: '业务功能',
+          title: '招标比价', icon: 'LineChartOutlined', group: '业务功能',
           public: false, roles: ['管理员', '比价员'] as Role[],
         },
       },

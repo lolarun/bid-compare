@@ -3,28 +3,33 @@
 import re as _re
 import string
 from dataclasses import dataclass
-from sqlalchemy import func, select
+
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.enums import (
-    CELL_QUOTED, CELL_AGGREGATED, CELL_PENDING, CELL_EXCLUDED, CELL_MISSING,
+    CELL_AGGREGATED,
+    CELL_EXCLUDED,
+    CELL_MISSING,
+    CELL_PENDING,
+    CELL_QUOTED,
     REC_BLOCKED,
 )
 from apps.api.core.errors import ConflictError, ValidationError
-from apps.api.services.matrix.bid_evaluation import (
-    _anchor_spec, _canon_family, _pending_is_qty_only, _evaluate_cell, _EVAL_QTY_TOL,
-)
-from apps.api.services.matrix.bid_recommendation import _compute_recommendation
-from apps.api.models import Material, Quote, Supplier, Project, BrandTier
+from apps.api.models import Material, Quote, Supplier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.extraction_job import ExtractionJob
 from apps.api.services.history.comparison import (
-    compute_reasonable_low,
-    compute_baseline,
-    determine_alert,
-    get_category_thresholds,
     build_spec_price_index,
+    compute_baseline,
+    compute_reasonable_low,
+    get_category_thresholds,
 )
+from apps.api.services.matrix.bid_evaluation import (
+    _anchor_spec,
+    _evaluate_cell,
+)
+from apps.api.services.matrix.bid_recommendation import _compute_recommendation
 from apps.api.services.matrix.evaluation_policy import get_evaluation_policy
 
 
@@ -480,6 +485,9 @@ def build_anchor_matrix(
                 or (i.submission_id is None and actual_supplier_id and i.supplier_id == actual_supplier_id)
             ]
         sub_actual_sids = {sub.id: sub.supplier_id for sub in subs}
+        # 被比较的这些 submission 各自属于哪些轮次（多轮项目的关键，见下面
+        # group 查询处的注释）。
+        _round_scope = {sub.round_id for sub in subs if sub.round_id is not None}
     else:
         # Legacy supplier-id columns
         supplier_labels = []
@@ -498,6 +506,8 @@ def build_anchor_matrix(
         def _items_for_col(items, col_id: int, actual_supplier_id):
             return [i for i in items if i.supplier_id == col_id]
         sub_actual_sids = {}
+        # supplier_id 兜底路径（LLM 填表内部调用）不做轮次收窄，行为逐字不变。
+        _round_scope = set()
 
     # ── Load groups: when session is known, ONLY load that session's groups ──
     # Prevents cross-session contamination when re-running match after a bad round.
@@ -512,6 +522,25 @@ def build_anchor_matrix(
     if round_id is not None:
         # Strict: only groups matched under this specific round (design/42 §4.1)
         q = q.where(BidAlignmentGroup.round_id == round_id)
+    elif _round_scope:
+        # 2026-09-04 修复：调用方没给 round_id 时，把范围收到**被比较的这些
+        # submission 自己所属的轮次**上。
+        #
+        # 原来的行为在多轮项目上是错的：不加轮次过滤会把各轮的 group 全部载入，
+        # 而下面的 `seq_to_group` 按 anchor_seq **先到先得**建索引——第 1 轮的
+        # 89 个 group 先占满全部 anchor_seq，第 2 轮的同名 group 被静默丢弃。
+        # 于是比第 2 轮时它的对齐项一条都查不到，89 行全变成"未报价"，而库里
+        # 明明躺着 89 条 action='align' 的对齐项。
+        # （真实复现：project 58 第 2 轮，0/89 有单价。）
+        # **必须放行 round_id 为 NULL 的组**：预览通道（quote_derived 轴）和
+        # 轮次功能之前的历史数据建的组都没有轮次归属，一并滤掉会让预览整片
+        # 变成"未报价"（test_preview_service 抓到过这个回归）。
+        q = q.where(
+            or_(
+                BidAlignmentGroup.round_id.in_(_round_scope),
+                BidAlignmentGroup.round_id.is_(None),
+            )
+        )
     if allowed_group_ids is not None:
         q = q.where(BidAlignmentGroup.id.in_(allowed_group_ids))
     all_groups: list[BidAlignmentGroup] = db.scalars(q).all()
@@ -682,7 +711,9 @@ def build_anchor_matrix(
         t["basis_confirmed"] = se.get("basis_confirmed")
         t["eligible_for_ranking"] = se.get("eligible_for_ranking")
 
-    from apps.api.services.matrix.matrix_stats import build_matrix_distribution_from_rows
+    from apps.api.services.matrix.matrix_stats import (
+        build_matrix_distribution_from_rows,
+    )
     matrix_distribution = build_matrix_distribution_from_rows(rows, col_ids)
 
     blocked = rec["recommendation_level"] == REC_BLOCKED
@@ -822,7 +853,9 @@ def build_anchor_review_matrix(
     """
     from apps.api.models.bid_submission import BidSubmission
     from apps.api.services.tender.tender_list import rebuild_anchors
-    from apps.api.services.tender.tender_session_service import get_current_confirmed_session
+    from apps.api.services.tender.tender_session_service import (
+        get_current_confirmed_session,
+    )
 
     # 评审 E1：与 bid_export_service.py 的"无已确认采购清单"是同一语义，统一 409
     # （此前这里是裸 ValueError，被路由的 except ValueError 统一映射成 409——
@@ -1006,7 +1039,9 @@ def build_anchor_review_matrix(
         })
 
     # Compute matrix_distribution — convert to format expected by helper
-    from apps.api.services.matrix.matrix_stats import build_matrix_distribution_from_rows
+    from apps.api.services.matrix.matrix_stats import (
+        build_matrix_distribution_from_rows,
+    )
     fake_rows = [
         {
             "suppliers": [

@@ -31,3 +31,16 @@
 .sider-menu.ant-layout-sider-collapsed .ant-menu-item-group-title {
   display: none;
 }
+
+// 折叠态图标居中（2026-09-04 用户报"图标没有居中"）。
+// 上面那条 `margin: 4px 12px; width: calc(100% - 24px)` 是按 220px 侧栏定的，
+// 侧栏收成 64px 后会把图标顶偏。这里**只中和我们自己的覆盖**，把居中交还给
+// antd 自带的 `padding: 0 calc(50% - …)` 算法——不要再自己写 padding/flex：
+// 试过 `padding: 0 !important` + flex 居中，反而把图标推到侧栏外面（x=-2）。
+.sider-menu.ant-layout-sider-collapsed .ant-menu-light .ant-menu-item {
+  margin-inline: 0;
+  width: 100%;
+  border-radius: 0;
+}
+
+

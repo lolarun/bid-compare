@@ -1,4 +1,4 @@
-"""项目概述聚合（docs/design/45）。
+"""项目概述聚合（archive/design/45；当前口径见 docs/spec）。
 
 两个消费者共用这里的口径，不各算各的：
   - `GET /api/projects/overview`（比价入口列表，design/45 §4）
@@ -245,6 +245,14 @@ def build_project_overview(db: Session, project_id: int) -> dict:
     if proj is None:
         return {}
 
+    created_by_name: str | None = None
+    if proj.created_by_user_id is not None:
+        from apps.api.models.user import User
+
+        creator = db.get(User, proj.created_by_user_id)
+        if creator is not None:
+            created_by_name = creator.nickname or creator.username
+
     pids = [project_id]
     rounds = load_rounds_by_project(db, pids).get(project_id, [])
     confirmed_cats = {c for (_p, c) in load_confirmed_list_categories(db, pids)}
@@ -334,6 +342,18 @@ def build_project_overview(db: Session, project_id: int) -> dict:
         if cat is not None:
             subs_by_cat.setdefault(cat, []).append(row)
 
+    # 各轮口径体检。一次性算完：check_round_basis 每次都要查 submission_basis，
+    # 放进下面的推导循环里就是每品类每轮各查一次。
+    from apps.api.services.matrix.basis_consistency import check_round_basis
+
+    _basis_reports: dict[int, dict] = {}
+    for _r in rounds:
+        _pairs = [
+            (row["submission_id"], row["supplier_name"] or f"#{row['submission_id']}")
+            for row in subs_by_round.get(_r.id, [])
+        ]
+        _basis_reports[_r.id] = check_round_basis(db, _pairs).as_dict()
+
     categories = sorted(set(round_cat.values()) | all_list_cats)
     out_cats = []
     for cat in categories:
@@ -367,6 +387,9 @@ def build_project_overview(db: Session, project_id: int) -> dict:
                     "opened_at": r.opened_at.isoformat() if r.opened_at else None,
                     "closed_at": r.closed_at.isoformat() if r.closed_at else None,
                     "submissions": subs_by_round.get(r.id, []),
+                    # 口径体检（P1）：随轮次一起给，页面不必为每一轮再发一次请求。
+                    # 判定本身在 services/matrix/basis_consistency.py，确定性、无模型。
+                    "basis": _basis_reports.get(r.id, {"comparable": True, "conflicts": [], "unresolved": []}),
                 }
                 for r in sorted(rs, key=lambda x: x.seq)
             ],
@@ -392,6 +415,11 @@ def build_project_overview(db: Session, project_id: int) -> dict:
             "status": proj.status,
             "location": proj.location,
             "remark": proj.remark,
+            # 2026-09-03：概述页页眉要回答"这项目是谁什么时候建的"。数据本来就在
+            # `projects` 表上，只是没往外给。建档人取 nickname/username，取不到
+            # （用户已删）就是 None——不编一个"未知用户"当人名。
+            "created_at": proj.created_at.isoformat() if proj.created_at else None,
+            "created_by": created_by_name,
         },
         "categories": out_cats,
         "pending_intake_count": pending_intake,

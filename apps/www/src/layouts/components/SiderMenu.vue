@@ -1,79 +1,28 @@
+<!--
+  侧边导航：**全部菜单都在这里**（分组一次铺完），顶栏不放任何导航。
+
+  混合布局（2026-09-04 用户按范例定案）：顶栏通栏且承载 Logo，所以侧栏从
+  顶栏下方开始（`top: @header-height`），自己不再画 Logo 块。
+  2026-09-03 那版"把一级分组搬进顶栏"是理解错了，已收回。
+
+  菜单始终由路由表推导（`useAppMenu` 读 `router.getRoutes()`），没有第二份
+  菜单配置：加一个页面只需在 router/index.ts 写 meta.title + meta.group。
+-->
 <script setup lang="ts">
 import { computed, h, type VNode } from 'vue'
-import { useRoute, useRouter, type RouteRecordRaw } from 'vue-router'
 import * as Icons from '@ant-design/icons-vue'
-import { useUserStore } from '@/stores/user'
-import type { Role } from '@/types/role'
+import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons-vue'
+import { useRouter } from 'vue-router'
+import { useAppMenu } from '@/composables/useAppMenu'
+import { useAppStore } from '@/stores/app'
 
-const props = defineProps<{
+defineProps<{
   collapsed: boolean
 }>()
 
 const router = useRouter()
-const route = useRoute()
-const userStore = useUserStore()
-
-interface MenuItem {
-  key: string
-  title: string
-  icon?: string
-  group: string
-}
-
-interface MenuGroup {
-  title: string
-  items: MenuItem[]
-}
-
-const GROUP_ORDER = ['工作台', '业务功能', '数据管理', '系统管理'] as const
-
-function hasRouteAccess(routeRoles: unknown): boolean {
-  if (!routeRoles || !Array.isArray(routeRoles) || routeRoles.length === 0) return true
-  const userRole = userStore.userInfo?.role
-  if (!userRole) return false
-  return (routeRoles as Role[]).includes(userRole as Role)
-}
-
-const groups = computed<MenuGroup[]>(() => {
-  const layoutRoute = router.getRoutes().find((r) => r.name === 'Layout')
-  if (!layoutRoute) return []
-  const children = collectLeafRoutes(layoutRoute.children ?? [])
-  const map = new Map<string, MenuItem[]>()
-  for (const r of children) {
-    if (!r.meta?.title || r.meta?.hideInMenu) continue
-    // Role-based filtering: skip routes the user can't access
-    if (!hasRouteAccess(r.meta.roles)) continue
-    const group = (r.meta.group as string) || '其他'
-    const path = r.path.startsWith('/') ? r.path : `/${r.path}`
-    const item: MenuItem = {
-      key: path,
-      title: r.meta.title as string,
-      icon: r.meta.icon as string | undefined,
-      group,
-    }
-    const list = map.get(group) ?? []
-    list.push(item)
-    map.set(group, list)
-  }
-  const ordered = [...GROUP_ORDER, ...[...map.keys()].filter((g) => !GROUP_ORDER.includes(g as typeof GROUP_ORDER[number]))]
-  return ordered
-    .filter((g) => map.has(g))
-    .map((g) => ({ title: g, items: map.get(g)! }))
-})
-
-function collectLeafRoutes(routes: readonly RouteRecordRaw[]): RouteRecordRaw[] {
-  const out: RouteRecordRaw[] = []
-  for (const r of routes) {
-    if (r.children && r.children.length > 0) {
-      out.push(...collectLeafRoutes(r.children))
-    } else {
-      out.push(r)
-    }
-  }
-  return out
-}
-
-const selectedKeys = computed(() => [route.path])
+const appStore = useAppStore()
+const { groups, selectedKeys } = useAppMenu()
 
 function renderIcon(name?: string): VNode {
   if (!name) return h(Icons.AppstoreOutlined)
@@ -82,6 +31,7 @@ function renderIcon(name?: string): VNode {
   return C ? h(C) : h(Icons.AppstoreOutlined)
 }
 
+/** 分组标题 + 叶子，一次铺完。 */
 const menuItems = computed(() =>
   groups.value.map((group) => ({
     key: `group-${group.title}`,
@@ -109,24 +59,26 @@ function handleClick({ key }: { key: string }) {
     theme="light"
     class="sider-menu"
   >
-    <div class="sider-menu__logo">
-      <div class="sider-menu__logo-icon">M</div>
-      <transition name="sider-fade">
-        <div v-if="!collapsed" class="sider-menu__logo-text">
-          <div class="sider-menu__logo-title">MEMPAS</div>
-          <div class="sider-menu__logo-subtitle">机材比价</div>
-        </div>
-      </transition>
-    </div>
     <a-menu
       mode="inline"
       theme="light"
       :selected-keys="selectedKeys"
       :items="menuItems"
-      :inline-collapsed="collapsed"
       class="sider-menu__list"
       @click="handleClick"
     />
+
+    <!-- 底部折叠钮（2026-09-04 用户要求）：跟顶栏那个是同一个 store 开关，
+         不是第二套状态——两处点哪个都一样。 -->
+    <button
+      type="button"
+      class="sider-menu__collapse"
+      :class="{ 'sider-menu__collapse--collapsed': collapsed }"
+      :title="collapsed ? '展开菜单' : '收起菜单'"
+      @click="appStore.toggleCollapsed"
+    >
+      <component :is="collapsed ? MenuUnfoldOutlined : MenuFoldOutlined" />
+    </button>
   </a-layout-sider>
 </template>
 
@@ -135,62 +87,62 @@ function handleClick({ key }: { key: string }) {
 
 .sider-menu {
   background: @layout-sider-bg;
-  height: 100vh;
   position: fixed;
   left: 0;
-  top: 0;
+  top: @header-height;   // 顶栏通栏，侧栏从它下面开始
   bottom: 0;
   z-index: 10;
-  overflow: hidden;
+  overflow: hidden auto;
   border-right: 1px solid @border-color-split;
 
-  &__logo {
-    height: @header-height;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 16px;
-    border-bottom: 1px solid @border-color-split;
-    white-space: nowrap;
-  }
 
-  &__logo-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 6px;
-    background: @primary-color;
-    color: #fff;
-    font-size: 18px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
 
-  &__logo-text {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.2;
-    overflow: hidden;
-  }
 
-  &__logo-title {
-    font-size: 15px;
-    font-weight: 700;
-    color: @heading-color;
-    letter-spacing: 0.5px;
-  }
 
-  &__logo-subtitle {
-    font-size: 11px;
-    color: @text-color-tertiary;
-  }
+
+
+
+
+
 
   &__list {
     background: @layout-sider-bg;
     border-right: none;
     padding: 8px 0;
+    // 给底部折叠条留位置，否则菜单长了会被压在按钮下面看不见
+    padding-bottom: 48px;
+  }
+
+  // 只放图标，不带文字（照用户给的范例：左下角一个小图标）
+  &__collapse {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding-left: 22px;
+    font-size: 16px;
+    border: none;
+    border-top: 1px solid @border-color-split;
+    background: @layout-sider-bg;
+    color: @text-color-secondary;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+
+    &:hover {
+      color: @primary-color;
+      background: @sider-item-hover-bg;
+    }
+  }
+
+  // 折叠态没有文字可对齐，图标居中
+  &__collapse--collapsed {
+    justify-content: center;
+    padding-left: 0;
   }
 }
 
@@ -203,4 +155,3 @@ function handleClick({ key }: { key: string }) {
   opacity: 0;
 }
 </style>
-

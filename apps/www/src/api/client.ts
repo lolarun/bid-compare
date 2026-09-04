@@ -854,6 +854,13 @@ export interface LogEntry {
   remark: string
 }
 
+/** Module filter vocabulary served by GET /logs/modules — `value` is the slug
+ *  stored in operation_logs.module, `label` its display name. */
+export interface LogModuleOption {
+  value: string
+  label: string
+}
+
 // ─── Invite ──────────────────────────────────────────────────────────────────
 
 export interface InviteRecommendation {
@@ -1189,7 +1196,7 @@ export interface ProjectsOverviewResult {
   items: ProjectsOverviewItem[]
 }
 
-// ─── 项目概述页（docs/design/45 §6）────────────────────────────────────────
+// ─── 项目概述页（archive/design/45 §6；当前口径见 docs/spec）──────────────
 
 /** 一份已入库报价在概述页上的摘要。列身份是 `submission_id`，不是
  *  `supplier_id`（CLAUDE.md §4：同一供应商可以有多份报价）。 */
@@ -1208,6 +1215,23 @@ export interface OverviewSubmission {
   submitted_at: string | null
 }
 
+/** 一个口径维度上的取值分布。至少两个不同键才算冲突。 */
+export interface BasisConflict {
+  /** delivery_scope | commodity_benchmark | payment_terms */
+  dim: string
+  /** {归一值 → [供应商名, ...]}；`__not_declared__` 表示"原文里没有声明" */
+  values: Record<string, string[]>
+}
+
+/** 一轮的口径体检（P1）。`comparable=false` 时**不得**出总价排名。
+ *  判定在后端 services/matrix/basis_consistency.py，确定性、无模型调用。 */
+export interface RoundBasisReport {
+  comparable: boolean
+  conflicts: BasisConflict[]
+  /** 口径还没确认的报价。未知 ≠ 一致，有未决项时 comparable 一律 false。 */
+  unresolved: { submission_id: number; supplier_name: string }[]
+}
+
 export interface OverviewRound {
   id: number
   seq: number
@@ -1218,6 +1242,7 @@ export interface OverviewRound {
   opened_at: string | null
   closed_at: string | null
   submissions: OverviewSubmission[]
+  basis: RoundBasisReport
 }
 
 /** 采购清单摘要。**没有金额字段**：采购清单是给投标方填价的空表，
@@ -1259,6 +1284,10 @@ export interface ProjectOverviewResult {
     status: string
     location: string | null
     remark: string | null
+    /** 建档时间/建档人（2026-09-03 补）。建档人取 nickname/username；用户已删
+     *  时为 null——不编一个"未知用户"当人名。 */
+    created_at: string | null
+    created_by: string | null
   }
   categories: ProjectOverviewCategory[]
   pending_intake_count: number
