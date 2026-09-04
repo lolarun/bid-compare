@@ -14,7 +14,6 @@ Test plan:
 from __future__ import annotations
 
 import csv
-import io
 import os
 import tempfile
 
@@ -173,7 +172,6 @@ def test_csv_with_tax_incl_total_row_checksum():
 
 def test_validation_warning_on_arithmetic_mismatch():
     """Explicit total_price column that disagrees with qty×unit_price → validation_warning."""
-    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
 
     # Header includes a total_price column that we will fill inconsistently
     # import_service._COLUMN_PATTERNS doesn't have a direct "total_price" key,

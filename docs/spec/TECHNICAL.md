@@ -32,9 +32,50 @@ FastAPI ≥0.115, SQLAlchemy ≥2.0, SQLite (WAL), Pydantic ≥2.10, pandas/nump
 `uv`; Vue 3 ≥3.5, Vite ≥8, Ant Design Vue 4.x, Pinia, Axios
 `[design/07-technical-design-v2]`.
 
+**Quality gates (added 2026-09-02).** Both CI (`.github/workflows/deploy.yml`)
+and the local `.githooks/pre-commit` now run **ruff** on `apps/` + `scripts/`;
+CI additionally runs **mypy**. Before this the backend had no lint and no type
+check at all, while the frontend had been gated by `vue-tsc` in both places —
+the asymmetry was the reason, not a new-tool preference.
+
+- ruff's ruleset is deliberately narrow (`E9,F,I,UP`, minus `UP042`). ~147
+  further findings (`B008` FastAPI `Depends()`, `E402`, `E702`, `B905`, …) are
+  listed with counts and reasons in `pyproject.toml` as **deferred, not
+  unnoticed**. Adoption fixed 482 findings automatically plus 17 by hand;
+  those 17 included 7 annotations naming types the module never imported
+  (`OpenAI`, `ExtractionDraft` — harmless at runtime under
+  `from __future__ import annotations`, but unresolvable for any checker) and
+  6 dead assignments.
+- mypy runs at **default leniency**, via `uv run` so it can see the real
+  third-party types. It is gated against the 115 modules that are already
+  clean; the 46 that still carry 167 pre-existing errors are listed under
+  `[[tool.mypy.overrides]]` as a debt list that may only shrink.
+
 ---
 
 ## 2. Data model & write path
+
+**Declaration style: SQLAlchemy 2.0 typed declarative (migrated 2026-09-02).**
+All 297 columns across the 21 model classes moved from `x = Column(...)` to
+`x: Mapped[T] = mapped_column(...)`; `Base` was already `DeclarativeBase` and the
+query layer already 2.0-only (zero `Session.query()` in `apps/api/`, ~229
+`select()` sites). Only the declarations lagged, and that lag is what kept the
+entire ORM surface typed as `Column[Any]` and therefore invisible to any checker.
+
+- **Nullability came from `Base.metadata`, never from the source text.** Plain
+  `Column(String)` defaults to `nullable=True`, whereas `mapped_column` derives
+  nullability from the *annotation* — so a literal transcription would have
+  silently flipped columns to `NOT NULL`. Existing databases would not show it
+  (`create_all` skips existing tables); a freshly created one — which is what
+  every test uses — would start rejecting inserts.
+- The guard was a full `CreateTable`/`CreateIndex` dump taken before and after:
+  **21 tables / 461 lines, byte-identical**. Any future bulk change to the model
+  layer should be held to the same check rather than to a code review of 297
+  diff hunks.
+- `JSON` columns are annotated `Mapped[Any]`, not `Mapped[dict]`: several hold
+  lists (`recommended_brands`, `confirmed_supplier_ids`). Since `Any` cannot
+  carry nullability, those columns get an explicit `nullable=`.
+- The 17 `relationship()` declarations were **left untyped** in this pass.
 
 **Staging never pollutes master data.** Uploading and staging supplier PDFs
 writes `BidSubmission` + `BidQuoteLine` rows only — `suppliers` / `materials`
@@ -716,3 +757,33 @@ authority), which remains an undone future option `[design/13]`.
   then hit SQLite's lock timeout and fail with "database is locked." Two
   options recorded, neither implemented: do the embedding call before
   opening the sandbox, or raise the busy-timeout.
+- **`materials` has no uniqueness constraint on its de-dup key** (recorded
+  2026-09-02, not built). A candidate migration `0013_material_unique_key`
+  would add a unique index on
+  `(category, standard_name, spec, unit)` — the same 4-tuple that
+  `scripts/import_historical.py`'s find-or-create already treats as a
+  material's identity. Today `models/material.py.__table_args__` carries
+  only `ix_mat_prof_cat`, so nothing at the schema level stops the
+  structural duplication that was cleaned up once already (8,303 → 6,288
+  materials, a one-off `remediate_materials.py` on a since-deleted branch;
+  the live DB re-measures 0 duplicate groups today, and the branch has been
+  deleted because the historical-import path no longer produces them).
+  **This is not a one-line migration** — two write paths would have to change
+  in the same commit, and neither was written against this key:
+  - `routes/materials.py::create_material` (`POST /api/materials`) inserts
+    unconditionally with no duplicate check; under the constraint it would
+    raise `IntegrityError` and surface as a 500. It needs an explicit
+    conflict response (409 with the existing material) before the index can
+    land. `update_material` (`PUT`) can likewise mutate a row into a
+    colliding tuple.
+  - `services/ingestion/import_service.py::_get_or_create_material` matches
+    on `(category, standard_name, spec)` — **a different, looser key**: it
+    ignores `unit` entirely, and drops the `spec` predicate altogether when
+    `spec` is empty, so it can bind a quote to a material whose unit or spec
+    does not match. Reconciling it with the historical-import key is a
+    prerequisite, and is a correctness question in its own right
+    independent of whether the index is ever added.
+  Open question for whoever picks this up: whether the constraint should
+  include `status`, since the de-dup key is scoped to `status='active'` in
+  both the cleanup script and the measurements above, while a unique index
+  would apply to soft-deleted rows too.

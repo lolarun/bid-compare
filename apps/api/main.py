@@ -12,20 +12,20 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.api.core.config import get_settings
-from apps.api.core.database import init_db, SessionLocal
+from apps.api.core.database import SessionLocal, init_db
 from apps.api.core.errors import register_exception_handlers
 from apps.api.core.runtime import (
     get_pool_stats,
     set_runtime_pipeline,
     shutdown_runtime,
 )
-from apps.api.intelligence.pipeline import ExtractionPipeline
-from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
+from apps.api.core.security import get_current_user
 from apps.api.intelligence.base import ProviderError
+from apps.api.intelligence.pipeline import ExtractionPipeline
+from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
+from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.routes import all_routers
 from apps.api.routes.auth import router as auth_router
-from apps.api.core.security import get_current_user
 from apps.api.services.ingestion.document_ingestion import DocumentIngestionService
 
 log = logging.getLogger("mempas")
@@ -113,7 +113,7 @@ async def _periodic_stuck_job_sweep(stop_event: asyncio.Event) -> None:
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=main_mod.STUCK_JOB_SWEEP_S)
             return  # event set → exit
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         db = db_mod.SessionLocal()
         try:
@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
         stop_event.set()
         try:
             await asyncio.wait_for(sweep_task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             sweep_task.cancel()
         # Shuts down ThreadPoolExecutor + clears pipeline singleton
         shutdown_runtime()

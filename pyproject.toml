@@ -38,6 +38,15 @@ dev = [
     # dependency exists solely to give TestClient (used by nearly every route
     # test) something to run on — so there's nothing else to migrate.
     "httpx2>=2.0.0",
+    # mypy 必须跑在**装了项目依赖的环境**里。放进 dev extra 而不是用 `uvx mypy`：
+    # uvx 的隔离环境里没有 sqlalchemy/fastapi/pydantic，配上 --ignore-missing-imports
+    # 之后它们全变成 Any——2026-09-02 实测过一次，同一份代码"403 错误"被测成"73
+    # 错误"，因为大部分检查压根没发生。这个坑不写下来一定会有人再踩。
+    "mypy>=1.11",
+    # ① 并行执行。1384 个用例大多是 CPU-bound 的文档解析，串行跑等于浪费多核。
+    # 测试本身天然可并行：每个用例用 tmp_path 建自己的临时库、用 monkeypatch
+    # 打补丁，彼此不共享状态。
+    "pytest-xdist>=3.6",
 ]
 
 [project.scripts]
@@ -55,6 +64,111 @@ constraint-dependencies = [
     "wcwidth<0.8.3",
 ]
 
+[tool.ruff]
+target-version = "py311"
+# 只排除生成物；scripts/ 和 apps/api/ 都要管。
+extend-exclude = [".venv", "apps/api/migrations/versions"]
+
+[tool.ruff.lint]
+# **刻意不启用 E501（行长）**：全仓 3,666 行超过 100 列，其中大量是本仓库
+# 特有的中文长注释——那些注释记的是判断依据和撤回历史，按列宽硬折反而更难读。
+# ruff 的默认选择集（E4/E7/E9 + F）本身就把 E501 排除在外，这里沿用。
+# 首轮**刻意只收这四类**：语法错(E9)、真实缺陷与死代码(F)、import 顺序(I)、
+# 过时写法(UP)——它们要么可自动修，要么改动无歧义，能一次到绿。
+select = ["E9", "F", "I", "UP"]
+ignore = [
+    # UP042：把 `class X(str, Enum)` 换成 `enum.StrEnum` **会改变取值**——
+    # 实测 `str(X.A)` 从 "X.A" 变成 "a"，而 `JobStatus` 的取值是要落库的
+    # （extraction_jobs.status）。这不是现代化写法，是一次静默的数据格式变更。
+    "UP042",
+]
+# 下面这些实测过、**有意暂缓**，不是没想到（数字为接入当天全仓实测）：
+#   B008(131) FastAPI 的 `Depends()` 就写在默认参数位上，是框架惯用法不是缺陷，
+#             这一条永远不该开。
+#   E402(45)  scripts/ 里先改 sys.path 再 import，属必要顺序。
+#   E702(43)  `import os, sys, time` 这类一行多语句，纯风格。
+#   B905(17)  给 zip() 补 strict= 会**改变运行时行为**，得逐处判断，不能顺手修。
+#   E741(14) / B007(13) / B904(11) / B023(4) 各需逐处判断。
+# 合计约 147 处需要人来判断的改动。要开哪条，先把那条的改动单独跑一轮，
+# 不要连同别的规则一起塞进某次无关提交。
+
+[tool.ruff.lint.per-file-ignores]
+# `__init__.py` 的 import 是对外再导出，不是"未使用"。
+"__init__.py" = ["F401"]
+# 测试里 `assert` 绑一个变量再断言、夹具重名遮蔽，都是常见且无害的写法。
+"apps/api/tests/*" = ["F811", "F841"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["apps", "scripts"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["apps/api"]
+exclude = "^apps/api/(tests|migrations)/"
+# 第三方包缺 stub 不算本仓库的错。
+ignore_missing_imports = true
+# 保持**默认宽松档**（不开 strict / disallow_untyped_defs）。理由：本仓库的函数
+# 签名大多已经带注解，真正的收益来自 ORM 侧——models 已于 2026-09-02 全量迁到
+# `Mapped[]`/`mapped_column`（297 列，迁移前后 DDL 逐字节相同），mypy 从此看得见
+# 每个字段的类型和**可空性**。迁移当天实测：403 → 167 errors，其中 207 条
+# `Column[X] vs X` 的伪错直接归零，同时新暴露出 11 条 `None` 参与算术的真实风险。
+
+# ── 待清理清单（只许缩短，不许加长）───────────────────────────────────────
+# 下面这些模块**还有存量 mypy 错误**，暂时豁免，好让门禁对其余 114 个干净模块
+# 立刻生效——否则 167 条存量会让 CI 永远是红的，然后没人再看它。
+# 规矩：修完一个模块就把它从这里删掉。**不要往里加新模块**——新写的代码没有
+# 存量可言，加进来等于给自己开豁免。清单是 2026-09-02 实测生成的。
+[[tool.mypy.overrides]]
+ignore_errors = true
+module = [
+    "apps.api.intelligence.column_roles",  # 1
+    "apps.api.intelligence.document_classify",  # 3
+    "apps.api.intelligence.document_loader",  # 6
+    "apps.api.intelligence.excel_reconcile",  # 1
+    "apps.api.intelligence.extraction_draft",  # 3
+    "apps.api.intelligence.paddle_doc_meta",  # 1
+    "apps.api.intelligence.paddle_tender",  # 1
+    "apps.api.intelligence.page_filter",  # 2
+    "apps.api.intelligence.providers.dashscope_ocr",  # 15
+    "apps.api.intelligence.providers.mimo_vision",  # 2
+    "apps.api.intelligence.scanned_pdf_classify",  # 1
+    "apps.api.intelligence.tender_text_layer",  # 2
+    "apps.api.intelligence.vl_quote",  # 5
+    "apps.api.main",  # 1
+    "apps.api.routes.analysis",  # 29
+    "apps.api.routes.auth",  # 1
+    "apps.api.routes.export",  # 3
+    "apps.api.routes.intake",  # 3
+    "apps.api.routes.invite",  # 2
+    "apps.api.routes.materials",  # 1
+    "apps.api.routes.projects",  # 2
+    "apps.api.routes.quotes",  # 1
+    "apps.api.services.alignment.anchor_match",  # 7
+    "apps.api.services.alignment.bid_alignment",  # 2
+    "apps.api.services.history.comparison",  # 1
+    "apps.api.services.history.comparison_profiles",  # 1
+    "apps.api.services.history.scoring",  # 6
+    "apps.api.services.ingestion.document_ingestion",  # 6
+    "apps.api.services.ingestion.draft_integrity",  # 5
+    "apps.api.services.ingestion.import_service",  # 1
+    "apps.api.services.ingestion.tabular_ingestion",  # 1
+    "apps.api.services.matrix.bid_matrix",  # 14
+    "apps.api.services.matrix.bid_recommendation",  # 3
+    "apps.api.services.matrix.preview_service",  # 1
+    "apps.api.services.matrix.quote_derived_axis",  # 2
+    "apps.api.services.matrix.round_trend",  # 5
+    "apps.api.services.submission.quote_confirmation_service",  # 1
+    "apps.api.services.supplier.brand_recommend",  # 3
+    "apps.api.services.supplier.supplier_fill_llm",  # 4
+    "apps.api.services.supplier.supplier_recommend",  # 1
+    "apps.api.services.supplier.supplier_resolve",  # 2
+    "apps.api.services.tender.project_overview",  # 5
+    "apps.api.services.tender.quote_round_service",  # 1
+    "apps.api.services.tender.tender_list",  # 3
+    "apps.api.services.tender.tender_pdf",  # 2
+    "apps.api.services.tender.tender_session_service",  # 4
+]
+
 [tool.pytest.ini_options]
 # 2026-08-28：测试单根合并，root tests/ 的测试代码已并入 apps/api/tests/
 # （文件名碰撞的一个改名保留，冲突的旧夹具改名后一并搬入 conftest.py）。
@@ -62,7 +176,17 @@ constraint-dependencies = [
 # 测试代码，pytest 不会从中收集用例（没有 test_*.py），保留不影响单根。
 testpaths = ["apps/api/tests"]
 pythonpath = ["."]
-addopts = "-m 'not e2e'"
+# 默认排除 e2e（真实模型调用）和 slow（整份文档解析/快照回放）。
+# **CI 不用这个默认值**——`.github/workflows/deploy.yml` 显式传 `-m "not e2e"`，
+# 把 slow 那批跑全。所以这条是"研发循环快一点"，不是"门禁少测一点"：
+# 部署闸门的覆盖面一行没减。本地想跑全量：`pytest -m "not e2e"`。
+# `--dist loadfile`：按**文件**分发，同一个文件的用例留在同一个 worker 上并保持
+# 顺序。默认的 `--dist load` 打散到不同进程，`test_bql_e2e.py` 就会红——那一整个文件
+# 是前面的用例建数据、后面的用例读，**耦合跨类**（先试 loadscope 按类分发，仍有 2 个
+# 红在不同类里），所以必须按文件。这是 xdist 暴露出来的既有耦合，不是它引入的：
+# 串行时靠"恰好按顺序跑"掩盖着。真要解耦是另一件事，别顺手塞进这轮。
+addopts = "-m 'not e2e and not slow' -n auto --dist loadfile"
 markers = [
     "e2e: end-to-end tests against real Qwen-VL API (opt-in: pass -m e2e or --override-ini)",
+    "slow: parses whole documents or replays Paddle snapshots — minutes, not seconds",
 ]

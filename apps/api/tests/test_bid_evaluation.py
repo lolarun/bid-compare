@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 from apps.api.services.history.comparison import spec_baseline_from_index
-from apps.api.services.matrix.bid_matrix import _evaluate_cell, _compute_recommendation
 from apps.api.services.matrix.bid_insight import _build_matrix_text
-from apps.api.services.matrix.evaluation_policy import DEFAULT_EVALUATION_POLICY as POLICY
+from apps.api.services.matrix.bid_matrix import _compute_recommendation, _evaluate_cell
+from apps.api.services.matrix.evaluation_policy import (
+    DEFAULT_EVALUATION_POLICY as POLICY,
+)
 
 _THR = {"yellow": 0.05, "red": 0.10}
 

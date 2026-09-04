@@ -5,7 +5,7 @@ import type {
   DashboardSummary, PriceCompareResult, SupplierScore,
   StandardizeResult, ExtendedAttrSchema, ImportResult,
   QuoteStats, CategoryDetailStats, MultiCompareResult,
-  BidMatrixResult, BidMatrixPreviewResult, BidInsight, BrandTier, User, LogEntry,
+  BidMatrixResult, BidMatrixPreviewResult, BidInsight, BrandTier, User, LogEntry, LogModuleOption,
   ExtractionJob, RecommendResponse, BatchConfirmResult,
   SaveInvitationsResponse,
   DashboardHeatmapData, DashboardBubbleData,
@@ -342,6 +342,7 @@ export const userApi = {
 export const logApi = {
   list: (params?: Record<string, unknown>) =>
     api.get<PaginatedResponse<LogEntry>>('/logs', { params }),
+  modules: () => api.get<LogModuleOption[]>('/logs/modules'),
   export: (params?: Record<string, unknown>) =>
     api.get('/logs/export', { params, responseType: 'blob' }),
 }

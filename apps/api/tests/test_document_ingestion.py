@@ -2,14 +2,12 @@
 
 import io
 import os
-from unittest.mock import patch
+from datetime import UTC
 
 import pytest
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
-from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.models import ExtractionJob
 from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
@@ -123,21 +121,21 @@ class TestRunJob:
 
 class TestStuckJobRecovery:
     def test_recovers_old_running_jobs(self, db_session):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
 
         old = ExtractionJob(
             id="old-1",
             type="tender",
             status=JobStatus.RUNNING.value,
             file_path="/dev/null",
-            updated_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+            updated_at=datetime.now(UTC) - timedelta(minutes=10),
         )
         fresh = ExtractionJob(
             id="fresh-1",
             type="tender",
             status=JobStatus.RUNNING.value,
             file_path="/dev/null",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
         db_session.add_all([old, fresh])
         db_session.commit()
@@ -152,15 +150,15 @@ class TestStuckJobRecovery:
     def test_startup_recovers_all_running_and_pending_regardless_of_age(self, db_session):
         """启动语义（max_age_minutes=0, include_pending=True）：刚崩溃的孤儿（年龄<阈值）
         与 PENDING 都必须回收——否则上传幂等把孤儿原样返回，重传也卡死（复现真实 bug）。"""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         fresh_running = ExtractionJob(
             id="orphan-running", type="quote", status=JobStatus.RUNNING.value,
-            file_path="/dev/null", updated_at=datetime.now(timezone.utc),  # 刚刚，年龄≈0
+            file_path="/dev/null", updated_at=datetime.now(UTC),  # 刚刚，年龄≈0
         )
         fresh_pending = ExtractionJob(
             id="orphan-pending", type="quote", status=JobStatus.PENDING.value,
-            file_path="/dev/null", updated_at=datetime.now(timezone.utc),
+            file_path="/dev/null", updated_at=datetime.now(UTC),
         )
         db_session.add_all([fresh_running, fresh_pending])
         db_session.commit()

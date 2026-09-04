@@ -13,7 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.services.tender.tender_list import (
-    list_tender_sheets, parse_tender_xlsx, pick_default_sheet,
+    list_tender_sheets,
+    parse_tender_xlsx,
+    pick_default_sheet,
 )
 
 

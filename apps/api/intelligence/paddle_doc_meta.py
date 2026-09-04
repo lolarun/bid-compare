@@ -36,8 +36,9 @@ qwen 兜底（`.claude/rules/recognition.md` 禁的是"视觉识别能力探测�
 from __future__ import annotations
 
 import logging
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
+from apps.api.intelligence.vl_quote import parse_quote_meta
 from apps.api.intelligence.vl_tender import (
     _META_KEYS,
     TenderRequirement,
@@ -45,7 +46,6 @@ from apps.api.intelligence.vl_tender import (
     parse_requirements,
     parse_tender_meta,
 )
-from apps.api.intelligence.vl_quote import parse_quote_meta
 
 log = logging.getLogger(__name__)
 
@@ -88,15 +88,19 @@ def get_text_client_call() -> TextCall | None:
             from openai import OpenAI
 
             from apps.api.core.domain_config import (
-                PAGE_FILTER_BASE_URL, PAGE_FILTER_MODEL,
+                LLM_MAX_RETRIES,
+                LLM_TIMEOUT_S,
+                PAGE_FILTER_BASE_URL,
+                PAGE_FILTER_MODEL,
             )
-            client = OpenAI(api_key=mimo_key, base_url=PAGE_FILTER_BASE_URL)
+            client = OpenAI(api_key=mimo_key, base_url=PAGE_FILTER_BASE_URL,
+                            max_retries=LLM_MAX_RETRIES)
 
             def _mimo_call(prompt: str) -> str:
                 resp = client.chat.completions.create(
                     model=PAGE_FILTER_MODEL,
                     messages=[{"role": "user", "content": prompt}],
-                    timeout=60,
+                    timeout=LLM_TIMEOUT_S,
                 )
                 return resp.choices[0].message.content or ""
 

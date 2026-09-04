@@ -1,10 +1,18 @@
 """Quote CRUD API endpoints."""
 
 import logging
-import re
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -13,19 +21,26 @@ log = logging.getLogger(__name__)
 
 from apps.api.core.database import get_db
 from apps.api.models import (
+    BidQuoteLine,
+    BidSubmission,
     ExtractionJob,
     Material,
     Project,
     Quote,
     Supplier,
-    BidSubmission,
-    BidQuoteLine,
 )
 from apps.api.schemas import (
-    QuoteCreate, QuoteUpdate, QuoteOut, ImportResult, BatchConfirmResult,
-    QuoteListResult, QuoteBatchListResult, QuoteStatsResult, ArchivePricesResult,
+    ArchivePricesResult,
+    BatchConfirmResult,
+    ImportResult,
+    QuoteBatchListResult,
+    QuoteCreate,
+    QuoteListResult,
+    QuoteOut,
+    QuoteStatsResult,
+    QuoteUpdate,
 )
-from apps.api.services.ingestion.import_service import import_csv_data, _gen_code
+from apps.api.services.ingestion.import_service import import_csv_data
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
 
@@ -315,7 +330,10 @@ def create_quote(body: QuoteCreate, db: Session = Depends(get_db)):
     # 偏差率 & 色标（使用合理史低）
     ref = mat.ref_price_reasonable_low or mat.ref_price_median
     if quote.unit_price and ref and ref > 0:
-        from apps.api.services.history.comparison import get_category_thresholds, determine_alert
+        from apps.api.services.history.comparison import (
+            determine_alert,
+            get_category_thresholds,
+        )
         quote.deviation_pct = round((quote.unit_price - ref) / ref, 4)
         thresholds = get_category_thresholds(db, mat.category)
         quote.alert_level = determine_alert(quote.deviation_pct, thresholds)

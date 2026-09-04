@@ -14,12 +14,14 @@ import pytest
 from sqlalchemy import select
 
 from apps.api.core.errors import ConflictError
-from apps.api.models import Project, Supplier, TenderListSession, ExtractionJob
-from apps.api.models.bid_submission import BidSubmission
+from apps.api.models import ExtractionJob, Project, Supplier, TenderListSession
 from apps.api.models.anchor_missing_ack import AnchorMissingAck
-from apps.api.services.alignment.anchor_missing_ack import set_missing_ack, get_missing_ack_set
+from apps.api.models.bid_submission import BidSubmission
+from apps.api.services.alignment.anchor_missing_ack import (
+    get_missing_ack_set,
+    set_missing_ack,
+)
 from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
-
 
 CATEGORY = "阀门"
 
@@ -223,8 +225,9 @@ def test_unack_reverts_flag(scope):
 @pytest.fixture
 def api_client(scope):
     from fastapi.testclient import TestClient
-    from apps.api.main import app
+
     from apps.api.core.database import get_db
+    from apps.api.main import app
     from apps.api.routes.auth import get_current_user
 
     def override_db():

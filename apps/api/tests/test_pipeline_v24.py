@@ -16,12 +16,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  1-8: canonical.py
 # ─────────────────────────────────────────────────────────────────────────────
-
-from apps.api.services.ingestion.canonical import canonical_match_score, extract_valve_canonical
+from apps.api.services.ingestion.canonical import (
+    canonical_match_score,
+    extract_valve_canonical,
+)
 
 
 def test_canonical_basic():
@@ -110,7 +111,10 @@ def test_canonical_score_one_sided_valve_type():
 #  8b: valve_type family normalization (P0 deterministic-gate fix)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.ingestion.canonical import normalize_valve_family, valve_type_compatible
+from apps.api.services.ingestion.canonical import (
+    normalize_valve_family,
+    valve_type_compatible,
+)
 
 
 def test_valve_family_normalize():
@@ -176,7 +180,7 @@ def test_canonical_score_family_blocks_real_conflicts():
 #  anchor_match.match_anchors canonical hard-filter
 # ─────────────────────────────────────────────────────────────────────────────
 
-from apps.api.services.alignment.anchor_match import match_anchors, SIM_THRESHOLD
+from apps.api.services.alignment.anchor_match import match_anchors
 from apps.api.services.tender.tender_list import TenderAnchor
 
 
@@ -322,7 +326,10 @@ def test_readiness_checksum_shares_the_ingest_gate_threshold():
     等于**下游默默推翻了上游要求的人工判断**。
     """
     from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
-    from apps.api.services.submission.quote_readiness import _CHECKSUM_TOLERANCE, _compute_checksum
+    from apps.api.services.submission.quote_readiness import (
+        _CHECKSUM_TOLERANCE,
+        _compute_checksum,
+    )
 
     assert _CHECKSUM_TOLERANCE == CHECKSUM_BLOCK_DELTA_RATIO, "两道门必须共用同一个阈值"
 

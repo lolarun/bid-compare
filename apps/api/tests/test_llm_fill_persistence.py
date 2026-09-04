@@ -9,10 +9,7 @@ Covers:
 """
 from __future__ import annotations
 
-import pytest
-
 from apps.api.models.bid_alignment import BidAlignmentGroup
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -92,7 +89,10 @@ class TestReplaceSupersedes:
 
     def test_new_groups_written_as_confirmed(self, db_session):
         """Groups written by the new LLM-fill run have status='confirmed'."""
-        from apps.api.services.supplier.supplier_fill_llm import SupplierFillResult, FillCell
+        from apps.api.services.supplier.supplier_fill_llm import (
+            FillCell,
+            SupplierFillResult,
+        )
 
         cell = FillCell(
             anchor_seq=5, quote_id=99, supplier_id=7, status="quoted", action="align",

@@ -4,13 +4,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from apps.api.core.config import (
+    CATEGORY_ABBR,
+    EXTENDED_ATTR_SCHEMAS,
+    NAMING_STANDARDS,
+    PROFESSION_ABBR,
+    PROFESSION_MAP,
+)
 from apps.api.core.database import get_db
-from apps.api.core.config import PROFESSION_ABBR, CATEGORY_ABBR, PROFESSION_MAP, EXTENDED_ATTR_SCHEMAS, NAMING_STANDARDS
 from apps.api.models import Material
 from apps.api.schemas import (
-    MaterialCreate, MaterialUpdate, MaterialOut,
-    StandardizeRequest, StandardizeResult,
     ExtendedAttrSchema,
+    MaterialCreate,
+    MaterialOut,
+    MaterialUpdate,
+    StandardizeRequest,
+    StandardizeResult,
 )
 from apps.api.services.ingestion.standardize import standardize_name
 

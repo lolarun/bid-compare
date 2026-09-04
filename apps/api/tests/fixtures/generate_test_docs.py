@@ -16,7 +16,6 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
-
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent.parent
 DATA_DIR = REPO_ROOT / "docs" / "data"

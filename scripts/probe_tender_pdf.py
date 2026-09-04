@@ -59,13 +59,13 @@ def main() -> None:
     recon = result.get("reconcile") or {}
 
     # ── 1. 页定位 ────────────────────────────────────────────────────
-    print(f"\n[页定位]")
+    print("\n[页定位]")
     print(f"  brand_page    : {result['detected_pages']['brand']}")
     print(f"  bidlist_pages : {result['detected_pages']['bidlist']}")
     print(f"  source_type   : {result['source_type']}")
 
     # ── 2. TableGrid 使用率 ───────────────────────────────────────────
-    print(f"\n[TableGrid 使用率]")
+    print("\n[TableGrid 使用率]")
     tg = qm["table_grid_pages"]
     fb = qm["html_fallback_pages"]
     total_pages = len(result["page_diagnostics"])
@@ -83,7 +83,7 @@ def main() -> None:
         )
 
     # ── 3. 行数 & seq 范围 ────────────────────────────────────────────
-    print(f"\n[行数 & seq]")
+    print("\n[行数 & seq]")
     all_seqs = [str(it.get("seq", "")).strip() for it in result["items"] if it.get("seq")]
     numeric_seqs = sorted(int(s) for s in all_seqs if s.isdigit())
     seq_range = f"{numeric_seqs[0]}..{numeric_seqs[-1]}" if numeric_seqs else "n/a"
@@ -94,14 +94,14 @@ def main() -> None:
     print(f"  by_page        : {qm['row_count_by_page']}")
 
     # ── 4. 字段覆盖率 ────────────────────────────────────────────────
-    print(f"\n[字段覆盖率]")
+    print("\n[字段覆盖率]")
     print(f"  material_columns : {_pct(qm['material_columns_filled_rate'])}")
     print(f"  brand            : {_pct(qm['brand_filled_rate'])}")
     print(f"  source_ref       : {_pct(qm['source_ref_coverage'])}")
     print(f"  qty_parse        : {_pct(qm['qty_parse_success_rate'])}")
 
     # ── 5. 品牌表 ────────────────────────────────────────────────────
-    print(f"\n[品牌表]")
+    print("\n[品牌表]")
     print(f"  material_class   : {result['material_class']}")
     for b in result["brand_requirement"]:
         print(f"  品牌要求: {b['brand_en']} / {b['brand_cn']}")
@@ -109,7 +109,7 @@ def main() -> None:
         print(f"  供应商品牌: {sb['supplier_name'][:12]}  → {sb['brand']}")
 
     # ── 6. Excel vs PDF 对账 ─────────────────────────────────────────
-    print(f"\n[Excel vs PDF 对账]")
+    print("\n[Excel vs PDF 对账]")
     if recon and "error" not in recon:
         print(f"  xlsx_count         : {recon['xlsx_count']}")
         print(f"  pdf_count          : {recon['pdf_count']}")
@@ -130,7 +130,7 @@ def main() -> None:
 
     # ── 7. 前6行样例 ─────────────────────────────────────────────────
     items = result["items"]
-    print(f"\n[前6行样例]")
+    print("\n[前6行样例]")
     for it in items[:6]:
         mat_str = "|".join(f"{k}:{v}" for k, v in (it.get("materials") or {}).items()) or "(无材质)"
         print(f"  seq={it['seq']:>3} {it['name']:<12} {it.get('spec',''):<8}  {mat_str}")

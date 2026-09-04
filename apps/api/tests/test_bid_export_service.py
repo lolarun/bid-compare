@@ -12,8 +12,8 @@ Regression coverage for two defects found during the review:
 from __future__ import annotations
 
 import pytest
-from apps.api.core.errors import ConflictError
 
+from apps.api.core.errors import ConflictError
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.services.matrix import bid_export_service
 

@@ -41,7 +41,9 @@ def set_missing_ack(
     这里不重复 build_anchor_review_matrix 已经做过的那层会话解析，避免
     两处判定漂移。
     """
-    from apps.api.services.tender.tender_session_service import get_current_confirmed_session
+    from apps.api.services.tender.tender_session_service import (
+        get_current_confirmed_session,
+    )
 
     session = get_current_confirmed_session(db, project_id, category)
     if not session:

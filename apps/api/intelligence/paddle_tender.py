@@ -45,12 +45,9 @@ import logging
 
 from apps.api.core.utils import parse_num as _num_or_none
 from apps.api.intelligence.copy_detect import detect_copies
-from apps.api.intelligence.extraction_draft import ExtractionDraft
 from apps.api.intelligence.paddle_vl import (
-    _PCT_RE,
     _is_divider_row,
     _locate_tax_rate_idx,
-    _looks_like_wrap_continuation,
     _merge_wrapped_rows,
     _resolve_matrix,
     _split_header_and_rows,
@@ -287,13 +284,18 @@ def parse_tender_document_paddle(
     `extract_tender_requirements` 失败不拖垮清单同一个约定。
     """
     from apps.api.core.domain_config import (
-        PADDLE_EXPECTED_SECONDS_PER_PAGE, PADDLE_PROGRESS_ESTIMATE_CAP,
+        PADDLE_EXPECTED_SECONDS_PER_PAGE,
+        PADDLE_PROGRESS_ESTIMATE_CAP,
     )
     from apps.api.intelligence.paddle_doc_meta import (
-        extract_meta_from_text, extract_requirements_from_text,
+        extract_meta_from_text,
+        extract_requirements_from_text,
     )
     from apps.api.intelligence.vl_tender import (
-        DEFAULT_TENDER_REQUIREMENTS, META_PAGES, TenderParseResult, _META_KEYS,
+        _META_KEYS,
+        DEFAULT_TENDER_REQUIREMENTS,
+        META_PAGES,
+        TenderParseResult,
     )
 
     # 阶段命名/进度估算跟 paddle_vl.recognize_quote_paddle 同一套（design/27

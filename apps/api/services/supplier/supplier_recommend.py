@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Quote, Supplier, PROFESSION_MAP
+from apps.api.models import PROFESSION_MAP, Material, Quote, Supplier
 from apps.api.services.history import scoring
 from apps.api.services.history.quote_filters import valid_quote_filters
 
@@ -188,7 +188,7 @@ def _aggregate_supplier_stats(
     The fallback runs inside SQL via CASE so we get correct averages without
     N+1 round-trips.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Computed deviation: prefer Quote.deviation_pct; else compute from
     # the cached Material ref_price_reasonable_low / ref_price_median when
@@ -261,7 +261,7 @@ def _aggregate_supplier_stats(
                     continue
                 # Normalize to UTC-naive comparison
                 if d.tzinfo is None:
-                    d_aware = d.replace(tzinfo=timezone.utc)
+                    d_aware = d.replace(tzinfo=UTC)
                 else:
                     d_aware = d
                 age_days = max(0.0, (now - d_aware).total_seconds() / 86400.0)

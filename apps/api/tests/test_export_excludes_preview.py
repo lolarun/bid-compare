@@ -15,18 +15,16 @@
 """
 from __future__ import annotations
 
-import io
-
-from PIL import Image
 from sqlalchemy import func, select
 
 from apps.api.models.bid_submission import BidSubmission
-from apps.api.routes.quotes import BatchConfirmRequest
 from apps.api.services.matrix.bid_export_service import get_bid_matrix_for_export
 from apps.api.services.matrix.preview_service import build_preview_matrix
-
 from apps.api.tests.test_compare_integration import compare_client  # noqa: F401
-from apps.api.tests.test_preview_service import _setup_unconfirmed, _upload_quote  # noqa: F401
+from apps.api.tests.test_preview_service import (  # noqa: F401
+    _setup_unconfirmed,
+    _upload_quote,
+)
 
 
 def test_export_sees_nothing_after_a_preview(compare_client, temp_db):

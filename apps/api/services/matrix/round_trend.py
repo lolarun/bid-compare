@@ -101,10 +101,10 @@ def compute_round_trend(db: Session, project_id: int, category: str) -> RoundTre
     §3.1 moved this data off of), then stitches rows across rounds by
     `anchor_uid` and suppliers by `Supplier.id`.
     """
+    from apps.api.models.tender_list_session import TenderListSession
+    from apps.api.services.matrix.bid_matrix import build_anchor_matrix
     from apps.api.services.tender import quote_round_service
     from apps.api.services.tender.tender_list import rebuild_anchors
-    from apps.api.services.matrix.bid_matrix import build_anchor_matrix
-    from apps.api.models.tender_list_session import TenderListSession
 
     rounds = sorted(
         quote_round_service.list_rounds(db, project_id, category),

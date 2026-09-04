@@ -1,6 +1,5 @@
 """Tests for material name standardization service."""
 
-import pytest
 from apps.api.services.ingestion.standardize import standardize_name
 
 

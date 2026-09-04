@@ -16,7 +16,6 @@ import re
 
 from apps.api.services.ingestion.standardize import standardize_name
 
-
 # ── Valve type keywords (LONGER/MORE-SPECIFIC forms first) ─────────────────
 _VALVE_TYPES = [
     "Y型过滤器",

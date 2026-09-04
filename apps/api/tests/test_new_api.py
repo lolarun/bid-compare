@@ -2,9 +2,8 @@
 multi-compare, category-stats, multi-baseline."""
 
 import io
-import pytest
-from apps.api.models import Material, Supplier, Quote, Project
 
+from apps.api.models import Quote, Supplier
 
 # ─── Standardize endpoint ───────────────────────────────────────────────────
 

@@ -17,7 +17,10 @@ from sqlalchemy import func, select
 
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.routes.quotes import BatchConfirmRequest
-from apps.api.services.matrix.preview_service import PreviewNotReady, build_preview_matrix
+from apps.api.services.matrix.preview_service import (
+    PreviewNotReady,
+    build_preview_matrix,
+)
 
 # 复用既有集成夹具：同一套 mock provider + TestClient，别另起一套。
 from apps.api.tests.test_compare_integration import compare_client  # noqa: F401
@@ -258,8 +261,8 @@ def _blow_the_checksum(client, job_id: str) -> None:
 
     这正是 2026-08-22 手测撞到的形状：凯硕新正的合计行被当成第 90 条报价行，
     明细之和 = 真实总额 × 2，声明总价闭环门判 fail。"""
-    from apps.api.models.extraction_job import ExtractionJob
     from apps.api.core.database import SessionLocal
+    from apps.api.models.extraction_job import ExtractionJob
     with SessionLocal() as s:
         job = s.get(ExtractionJob, job_id)
         res = dict(job.result or {})
@@ -290,9 +293,9 @@ def test_a_supplier_failing_the_checksum_gate_still_enters_preview(compare_clien
 
 def test_official_path_still_blocks_on_the_same_gate(compare_client, temp_db):
     """预览放行不等于官方路径也放行——门对正式入库一点没松。"""
+    from apps.api.core.database import SessionLocal
     from apps.api.core.errors import ReviewRequiredError
     from apps.api.services.submission.quote_confirmation_service import confirm_batch
-    from apps.api.core.database import SessionLocal
 
     state = _setup_unconfirmed(compare_client)
     body = state["confirmations"][0]
@@ -310,8 +313,8 @@ def test_aggregate_row_is_excluded_and_reported(compare_client, temp_db):
 
     形状取自真实数据（凯硕新正 PDF 第 90 行）：标签串进名称/规格/单位三列。
     """
-    from apps.api.models.extraction_job import ExtractionJob
     from apps.api.core.database import SessionLocal
+    from apps.api.models.extraction_job import ExtractionJob
     from apps.api.services.submission.quote_confirmation_service import confirm_batch
 
     state = _setup_unconfirmed(compare_client)
@@ -351,8 +354,8 @@ def test_a_real_item_missing_quantity_is_still_stored(compare_client, temp_db):
     实测这种行真实存在（识别串列导致 qty 丢失，但金额是真的）。判据要是写成
     "无数量即丢弃"，这里就会静默少一条报价、少一笔钱。
     """
-    from apps.api.models.extraction_job import ExtractionJob
     from apps.api.core.database import SessionLocal
+    from apps.api.models.extraction_job import ExtractionJob
     from apps.api.services.submission.quote_confirmation_service import confirm_batch
 
     state = _setup_unconfirmed(compare_client)

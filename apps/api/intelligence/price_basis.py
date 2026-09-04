@@ -21,7 +21,6 @@ from typing import Any
 
 from apps.api.core.utils import parse_num
 
-
 PRICE_BASIS_INCL = "incl_tax"
 PRICE_BASIS_EXCL = "excl_tax"
 PRICE_BASIS_DUAL = "dual_tax"

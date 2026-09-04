@@ -15,11 +15,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from apps.api.services.alignment.block_alignment import (          # noqa: E402
-    DETERMINISTIC, Row, align_quote_to_anchors,
+from apps.api.services.alignment.block_alignment import (  # noqa: E402
+    Row,
+    align_quote_to_anchors,
 )
-from scripts.cable_diff_report import (                  # noqa: E402
-    DOCS, load_golden, load_vl, select_copy, split_rows,
+from scripts.cable_diff_report import (  # noqa: E402
+    DOCS,
+    load_golden,
+    load_vl,
+    select_copy,
+    split_rows,
 )
 
 

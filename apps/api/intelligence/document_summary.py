@@ -13,7 +13,8 @@ Prompt 明确约束"只能用给定事实，不能推测、不能加判断"—�
 from __future__ import annotations
 
 import logging
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 log = logging.getLogger(__name__)
 

@@ -102,7 +102,7 @@ def main() -> None:
             orphan_jobs.append(jid)
     print(f"  extraction_jobs(孤儿)        -> {len(orphan_jobs)} / {len(job_ids)} 个")
 
-    print(f"\n=== 项目记录 ===")
+    print("\n=== 项目记录 ===")
     print(f"  删除 projects: {DELETE_PROJECTS}")
     print(f"  保留 projects(清空数据): {CLEAR_PROJECTS}")
 

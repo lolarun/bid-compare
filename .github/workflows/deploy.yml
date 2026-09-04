@@ -25,7 +25,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install backend dependencies
+        run: uv sync --locked --extra dev
+
+      # ruff 放在测试之前：它秒级返回，没必要让一个 import 顺序问题等完整个测试套件。
+      # 规则集与豁免见 pyproject.toml 的 [tool.ruff.lint]。
+      - name: Lint backend (ruff)
+        run: uvx ruff check apps scripts
+
+      # `uv run` 而不是 `uvx`：mypy 必须看得见 sqlalchemy/fastapi/pydantic 的类型，
+      # 否则它们退化成 Any，检查形同虚设（见 pyproject.toml dev 依赖处的注释）。
+      # 门禁范围 = 全部 apps/api 减去 [[tool.mypy.overrides]] 里的存量待清理清单。
+      - name: Type-check backend (mypy)
+        run: uv run mypy
+
+      # 显式 `-m "not e2e"` 覆盖 pyproject 里的本地默认值——那个默认值还排除了
+      # `slow`（整份文档解析/快照回放），是给研发循环用的。**门禁必须把 slow 跑全**：
+      # 本地 1328 例，这里 1384 例。改这一行等于悄悄缩小部署闸门。
+      - name: Run backend tests
+        run: uv run pytest apps/api/tests -q -m "not e2e" -n auto --dist loadfile
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/www/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/www
+
+      - name: Type-check frontend
+        run: npm --prefix apps/www run type-check
+
+      - name: Run frontend unit tests
+        run: npm --prefix apps/www run test:unit
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

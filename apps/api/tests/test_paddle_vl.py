@@ -448,7 +448,10 @@ def test_parse_csv_drops_page_end_smaller_than_page():
 # ——它紧邻备注、在位移点右侧，按锚点右移回去必对。所以救合价、不救数量单价。
 
 def test_recover_shifted_total_uses_free_text_as_anchor():
-    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+    from apps.api.intelligence.paddle_vl import (
+        _classify_columns,
+        _recover_shifted_total,
+    )
 
     header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
     # 少了"数量"那一格 → 单价/合价/备注整体左移一位，末尾补空
@@ -460,7 +463,10 @@ def test_recover_shifted_total_uses_free_text_as_anchor():
 def test_recover_shifted_total_refuses_when_value_smeared_from_previous_row():
     """同一个值在相邻行的同一格重复 = 纵向游程平滑涂下来的，不是这行自己的数。
     救回一个被污染的合价比留空更糟——留空看得见，错值看不见。"""
-    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+    from apps.api.intelligence.paddle_vl import (
+        _classify_columns,
+        _recover_shifted_total,
+    )
 
     header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
     prev = ["3", "阀门", "DN50", "个", "150009.49", "150009.49", "见附注A", ""]
@@ -472,7 +478,10 @@ def test_recover_shifted_total_refuses_when_value_smeared_from_previous_row():
 
 def test_recover_shifted_total_refuses_when_more_than_one_dirty_slot():
     """脏槽位不止一个 = 乱得不止一处位移，位移量算不准，宁可整行留空。"""
-    from apps.api.intelligence.paddle_vl import _classify_columns, _recover_shifted_total
+    from apps.api.intelligence.paddle_vl import (
+        _classify_columns,
+        _recover_shifted_total,
+    )
 
     header = ["序号", "名称", "规格", "单位", "数量", "单价", "合价", "备注"]
     row = ["3", "阀门", "DN50", "个", "见附注A", "见附注B", "1666013.63", ""]

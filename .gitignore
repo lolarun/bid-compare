@@ -50,6 +50,11 @@ e2e_*.log
 e2e_out*.txt
 *.log
 
+# Uncurated customer corpus drop. This 1 GB working copy contains archives,
+# extracted duplicates, and DWG files; only a reviewed, manifested fixture
+# subset may move into tests/fixtures/documents/.
+docs/test2/
+
 # API / dev server temp output
 api.out
 api.err

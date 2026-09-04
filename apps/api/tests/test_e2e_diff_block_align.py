@@ -29,7 +29,6 @@ from e2e_diff import (  # noqa: E402
     _content_match_blocked,
     _match_blocks,
     _name_sim,
-    _row_name,
     _split_blocks_by_name,
 )
 

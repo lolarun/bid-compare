@@ -10,15 +10,15 @@ Key fixes vs v1:
 
 import io
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Supplier, Quote, Project, BrandTier
-from apps.api.core.config import PROFESSION_MAP, PROFESSION_ABBR, CATEGORY_ABBR
+from apps.api.core.config import CATEGORY_ABBR, PROFESSION_ABBR, PROFESSION_MAP
+from apps.api.models import BrandTier, Material, Project, Quote, Supplier
 from apps.api.services.ingestion.standardize import standardize_name
 
 
@@ -45,7 +45,7 @@ def _gen_code(db: Session, profession: str, category: str) -> str:
 
 
 def _generate_batch_id() -> str:
-    return f"IMP-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    return f"IMP-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
 
 
 def _get_or_create_supplier(db: Session, name: str) -> Supplier | None:

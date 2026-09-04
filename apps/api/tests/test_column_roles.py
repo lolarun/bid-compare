@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from apps.api.intelligence.column_roles import (
-    ROLE_LABELS, _parse_llm_roles, propose_by_llm, verify_roles,
+    ROLE_LABELS,
+    _parse_llm_roles,
+    propose_by_llm,
+    verify_roles,
 )
 
 REPO = Path(__file__).resolve().parents[3]
@@ -183,7 +186,9 @@ def _renamed_csv(tmp_path: Path) -> Path:
 def test_keyword_table_really_fails_on_unknown_headers(tmp_path):
     """先证明这份夹具**确实**难倒了词表——否则下一条测试就是在自说自话。"""
     from apps.api.services.ingestion.tabular_ingestion import (
-        _detect_tabular_columns, _load_dataframe, _sample_rows,
+        _detect_tabular_columns,
+        _load_dataframe,
+        _sample_rows,
     )
     df = _load_dataframe(str(_renamed_csv(tmp_path)))
     cols = [str(c) for c in df.columns.tolist()]

@@ -23,15 +23,19 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from apps.api.core.config import get_settings
 from apps.api.core.utils import parse_num
-from apps.api.intelligence.base import LLMProvider, ExtractionResponse
+from apps.api.intelligence.base import ExtractionResponse, LLMProvider
 from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE
-from apps.api.intelligence.quote_fact import build_canonical, apply_arithmetic_validation
 from apps.api.intelligence.price_basis import derive_price_basis
+from apps.api.intelligence.quote_fact import (
+    apply_arithmetic_validation,
+    build_canonical,
+)
 
 log = logging.getLogger(__name__)
 
@@ -263,7 +267,10 @@ class ExtractionPipeline:
         目录，不污染上传目录，也不进版本库。
         """
         from apps.api.intelligence.page_filter import (
-            build_subset_pdf, get_production_classifier, select_pages, PageFilterLedger,
+            PageFilterLedger,
+            build_subset_pdf,
+            get_production_classifier,
+            select_pages,
         )
 
         classifier = get_production_classifier()
@@ -438,7 +445,8 @@ class ExtractionPipeline:
             # 不报价行当成缺陷，422 逼用户编一个金额。故在还看得到原始文本的这一层
             # 判定一次，用布尔标记随行带走。
             from apps.api.services.ingestion.draft_integrity import (
-                AMOUNT_NOT_QUOTED, classify_amount_cell,
+                AMOUNT_NOT_QUOTED,
+                classify_amount_cell,
             )
             not_quoted = any(
                 classify_amount_cell(it.get(k)) == AMOUNT_NOT_QUOTED
@@ -530,7 +538,9 @@ class ExtractionPipeline:
         # ——招标文件不带采购清单时品类恒为空，`batch-confirm` 逐份拒收，而界面上
         # 没有手动选品类的控件，用户到这一步是死路（design/32 的报价派生轴因此
         # 不可达）。判据与招标侧同源，把握不足返回 "" 交人工，不猜。
-        from apps.api.services.ingestion.category_classify import detect_category_from_items
+        from apps.api.services.ingestion.category_classify import (
+            detect_category_from_items,
+        )
 
         return {
             "supplier_name": (data.get("supplier_name") or "").strip(),

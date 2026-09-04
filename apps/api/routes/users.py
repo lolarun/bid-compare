@@ -5,11 +5,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
-from apps.api.core.enums import ROLE_ADMIN
-from apps.api.core.security import get_current_user, require_role
+from apps.api.core.enums import LOG_MODULE_USER, ROLE_ADMIN
+from apps.api.core.security import require_role
 from apps.api.models.user import User
 from apps.api.routes.logs import write_log
-from apps.api.schemas.user import UserCreate, UserUpdate, UserOut
+from apps.api.schemas.user import UserCreate, UserOut, UserUpdate
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -58,7 +58,7 @@ def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
-    write_log(db, user=current_user["sub"], module="用户管理", action="新增用户", target=body.username)
+    write_log(db, user=current_user["sub"], module=LOG_MODULE_USER, action="新增用户", target=body.username)
     return UserOut.from_user(user).model_dump()
 
 
@@ -82,7 +82,7 @@ def update_user(
 
     db.commit()
     db.refresh(user)
-    write_log(db, user=current_user["sub"], module="用户管理", action="编辑用户", target=user.username)
+    write_log(db, user=current_user["sub"], module=LOG_MODULE_USER, action="编辑用户", target=user.username)
     return UserOut.from_user(user).model_dump()
 
 
@@ -99,7 +99,7 @@ def toggle_status(
     user.status = "停用" if user.status == "启用" else "启用"
     db.commit()
     db.refresh(user)
-    write_log(db, user=current_user["sub"], module="用户管理", action=f"{user.status}账号", target=user.username)
+    write_log(db, user=current_user["sub"], module=LOG_MODULE_USER, action=f"{user.status}账号", target=user.username)
     return UserOut.from_user(user).model_dump()
 
 
@@ -118,4 +118,4 @@ def delete_user(
     username = user.username
     db.delete(user)
     db.commit()
-    write_log(db, user=current_user["sub"], module="用户管理", action="删除用户", target=username)
+    write_log(db, user=current_user["sub"], module=LOG_MODULE_USER, action="删除用户", target=username)

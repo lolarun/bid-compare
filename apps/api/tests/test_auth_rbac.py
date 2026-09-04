@@ -19,9 +19,13 @@ from sqlalchemy.orm import sessionmaker
 
 from apps.api.core import database as db_mod
 from apps.api.core.enums import ROLE_ADMIN, ROLE_BUYER, ROLE_VIEWER
-from apps.api.core.security import hash_password, verify_password, create_access_token, decode_access_token
+from apps.api.core.security import (
+    create_access_token,
+    decode_access_token,
+    hash_password,
+    verify_password,
+)
 from apps.api.models.user import User
-
 
 # ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -37,8 +41,15 @@ def temp_engine(tmp_path, monkeypatch):
 
     # Ensure all models are loaded
     from apps.api.models import (  # noqa: F401
-        Material, Supplier, Project, Quote, AnalysisConfig, BrandTier,
-        ExtractionJob, TenderDocument, BidInvitation,
+        AnalysisConfig,
+        BidInvitation,
+        BrandTier,
+        ExtractionJob,
+        Material,
+        Project,
+        Quote,
+        Supplier,
+        TenderDocument,
     )
     db_mod.Base.metadata.create_all(bind=engine)
     return engine, SessionLocal

@@ -38,11 +38,15 @@ sys.path.insert(0, str(REPO / "scripts"))
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
+from e2e_diff import diff_doc  # noqa: E402
+from try_paddleocr_vl import (  # noqa: E402 复用同一套文档清单，不重复定义
+    DOCS,
+    SEVEN_QUOTE_DOCS,
+)
+
 from apps.api.intelligence.paddle_vl import build_quote_csv  # noqa: E402
 from apps.api.intelligence.providers import paddle_ocr  # noqa: E402
 from apps.api.intelligence.vl_quote import build_draft  # noqa: E402
-from e2e_diff import diff_doc  # noqa: E402
-from try_paddleocr_vl import DOCS, SEVEN_QUOTE_DOCS  # noqa: E402 复用同一套文档清单，不重复定义
 
 OUT_DIR = REPO / "outputs" / "paddle_p2"
 

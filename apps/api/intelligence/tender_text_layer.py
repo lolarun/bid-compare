@@ -23,6 +23,11 @@
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 仅供注解；运行时由调用方传入已构造好的 draft
+    from apps.api.intelligence.extraction_draft import ExtractionDraft
+
 import logging
 import re
 from dataclasses import dataclass
@@ -294,7 +299,7 @@ def build_brand_requirements(pdf) -> tuple[list[dict], list[dict], int | None]:
 class TextLayerTenderResult:
     """跟 vl_tender.TenderParseResult 的 draft/meta/requirements/rotations/
     unresolved_pages 字段一一对应——extract_bidlist 消费两者不需要区分来源。"""
-    draft: "ExtractionDraft"
+    draft: ExtractionDraft
     meta: dict
     requirements: dict
     rotations: dict
@@ -311,10 +316,14 @@ def parse_tender_document_text_layer(
     不做方向预检（原生 PDF 天然不存在"扫描件歪了"的问题，见 §标头）。
     """
     import pdfplumber
+
     from apps.api.intelligence.document_loader import DocumentLoader
     from apps.api.intelligence.extraction_draft import ExtractionDraft  # noqa: F401
     from apps.api.intelligence.vl_tender import (
-        _META_KEYS, META_PAGES, build_tender_draft, extract_tender_meta,
+        _META_KEYS,
+        META_PAGES,
+        build_tender_draft,
+        extract_tender_meta,
     )
 
     def _notify(stage: str, pct: int) -> None:

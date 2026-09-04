@@ -17,7 +17,6 @@ from __future__ import annotations
 import io
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -31,9 +30,9 @@ def _png() -> bytes:
 
 
 def _mk_client(monkeypatch, tmp_path, canned: dict):
+    from apps.api.intelligence.base import ExtractionResponse
     from apps.api.intelligence.pipeline import ExtractionPipeline
     from apps.api.intelligence.providers.mock import MockProvider
-    from apps.api.intelligence.base import ExtractionResponse
 
     class _Provider(MockProvider):
         def extract(self, images, schema, prompt, timeout=90, **kwargs):

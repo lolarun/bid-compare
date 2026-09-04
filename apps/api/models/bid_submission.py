@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, Integer, Float, String, Text, DateTime, JSON, ForeignKey
-from sqlalchemy.orm import relationship
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -28,20 +31,20 @@ class BidSubmission(Base):
 
     __tablename__ = "bid_submissions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    job_id = Column(String(36), ForeignKey("extraction_jobs.id"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("extraction_jobs.id"), nullable=False, index=True)
     # 弱关联：supplier_id 可为 NULL（陌生供应商可完成比价，归档时才要求绑定正式供应商）
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
-    supplier_raw_name = Column(String(200), nullable=False, default="")  # OCR 原始名 / 显示名，必填
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    supplier_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
+    supplier_raw_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")  # OCR 原始名 / 显示名，必填
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     # docs/design/42: 本次报价属于哪一轮。nullable 是存量兼容——迁移会为既有
     # submission 回填到合成的「第一轮」，新写入路径应始终显式赋值。
-    round_id = Column(Integer, ForeignKey("quote_rounds.id"), nullable=True, index=True)
-    batch_id = Column(String(100), nullable=False, unique=True)  # 幂等键
-    status = Column(String(30), nullable=False, default="pending")
-    bid_status = Column(String(30), nullable=False, default="")  # confirming / confirmed 等
-    created_at = Column(DateTime, default=_now)
-    updated_at = Column(DateTime, default=_now, onupdate=_now)
+    round_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("quote_rounds.id"), nullable=True, index=True)
+    batch_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)  # 幂等键
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    bid_status: Mapped[str] = mapped_column(String(30), nullable=False, default="")  # confirming / confirmed 等
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now, onupdate=_now)
 
     lines = relationship(
         "BidQuoteLine", back_populates="submission", cascade="all, delete-orphan"
@@ -64,46 +67,46 @@ class BidQuoteLine(Base):
 
     __tablename__ = "bid_quote_lines"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    submission_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    submission_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("bid_submissions.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    material_id = Column(Integer, ForeignKey("materials.id"), nullable=True, index=True)
+    material_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("materials.id"), nullable=True, index=True)
 
-    raw_name = Column(String(500), nullable=False, default="")   # OCR 原始品名
-    standard_name = Column(String(200), nullable=False, default="")
-    category = Column(String(50), nullable=False, default="")
-    spec = Column(String(200), nullable=False, default="")
-    unit = Column(String(20), nullable=False, default="")
-    qty = Column(Float, nullable=True)
-    unit_price = Column(Float, nullable=True)
-    unit_price_excl_tax = Column(Float, nullable=True)
-    tax_rate = Column(Float, nullable=True)
-    total_price = Column(Float, nullable=True)
-    brand = Column(String(100), nullable=False, default="")
-    brand_tier = Column(String(20), nullable=False, default="")
-    remark = Column(Text, nullable=False, default="")
-    quote_date = Column(String(20), nullable=False, default="")
+    raw_name: Mapped[str] = mapped_column(String(500), nullable=False, default="")   # OCR 原始品名
+    standard_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    spec: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    unit: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit_price_excl_tax: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tax_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brand: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    brand_tier: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    remark: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    quote_date: Mapped[str] = mapped_column(String(20), nullable=False, default="")
 
     # 结构化键（valve_type/DN/PN 等），用于 material_id=NULL 时的项目内软对齐
-    canonical = Column(JSON, nullable=True)
+    canonical: Mapped[Any] = mapped_column(JSON, nullable=True)
     # 完整 OCR 证据（与 Quote.extraction_meta_json 格式相同）
-    extraction_meta = Column(JSON, nullable=True)
+    extraction_meta: Mapped[Any] = mapped_column(JSON, nullable=True)
 
-    deviation_pct = Column(Float, nullable=True)
-    alert_level = Column(String(10), nullable=False, default="")
+    deviation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    alert_level: Mapped[str] = mapped_column(String(10), nullable=False, default="")
 
     # 归档后回填，指向正式 Quote；NULL 表示未归档或 material_id=NULL 跳过
-    archived_quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=True)
+    archived_quote_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("quotes.id"), nullable=True)
 
-    created_at = Column(DateTime, default=_now)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now)
     # 行级审计时序（P1-3）：人工修正/重匹配等任意行变更自动刷新（ORM onupdate）。
     # 存量行由迁移回填为 created_at。
-    updated_at = Column(DateTime, default=_now, onupdate=_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now, onupdate=_now)
     # 确认时的行类型快照（P1-3）: quote_line|section_header|remark|invalid|subtotal|grand_total
     # 存量行由迁移回填为 'quote_line'（非 quote_line 行在 confirm 阶段被过滤不入库）。
-    row_type = Column(String(32), nullable=True, default="quote_line")
+    row_type: Mapped[str | None] = mapped_column(String(32), nullable=True, default="quote_line")
 
     submission = relationship("BidSubmission", back_populates="lines")
 

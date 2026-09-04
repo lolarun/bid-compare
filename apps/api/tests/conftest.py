@@ -11,12 +11,12 @@ the thread-pool path.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
 
 # Force inline extraction for the whole test session so legacy tests that
 # expect BackgroundTasks-style synchronous completion still work without
@@ -24,13 +24,70 @@ from sqlalchemy.orm import sessionmaker
 os.environ.setdefault("EXTRACTION_MODE", "inline")
 
 
-# Marker for end-to-end tests that need a real DASHSCOPE_API_KEY.
 def pytest_configure(config):  # pragma: no cover
     config.addinivalue_line("markers", "e2e: end-to-end tests using real Qwen-VL API")
+    config.addinivalue_line(
+        "markers", "real_gap_filler: test asserts on get_production_filler itself")
+
+
+def _opted_into_e2e(config) -> bool:
+    markexpr = config.getoption("markexpr", default="") or ""
+    return "e2e" in markexpr and "not e2e" not in markexpr
+
+
+@pytest.fixture(autouse=True)
+def _no_real_vision_calls(request, monkeypatch):
+    """未标 e2e 的用例一律关掉**空格子补位**（design/33）。
+
+    2026-09-03 实测一轮全量：23 次真实 mimo 视觉调用，单次最长 123 秒，整轮
+    2:32:27。全部来自 `gap_fill`——开发机的 `apps/api/.env` 被
+    `apps/api/__init__.py` 的 `load_dotenv()` 灌进 os.environ，于是只要本机有
+    key，跑一次 pytest 就在花钱打真实模型，而这些调用一条都没标 e2e。
+    这正是 CLAUDE.md「fresh E2E 与 replay 必须明确区分，不得互相冒充」要防的：
+    一份自称 replay 的测试，结果取决于当天模型怎么答。
+
+    关掉它是**恢复文档写明的默认态**，不是削弱测试：design/33 记着补位默认关闭、
+    `gap_filler=None` 时七份快照回放指标逐字节不变。
+
+    **embedding 不在此列**：mimo 没有 embedding 接口，对齐兜底
+    （`anchor_match._embed`）只能走 dashscope，那是硬约束；而且它是文本向量、
+    单次亚秒级，不是耗时来源。所以 DASHSCOPE_API_KEY 保持可用。
+    """
+    if _opted_into_e2e(request.config):
+        return
+    # 少数用例测的**就是这个工厂本身**（例如"补位跟随视觉开关而不是文本开关"），
+    # 它们得拿到真的 `get_production_filler`。标 `real_gap_filler` 显式豁免——
+    # 这些用例只检查工厂选了哪家 provider，不会真的发请求。
+    if request.node.get_closest_marker("real_gap_filler"):
+        return
+    from apps.api.intelligence import gap_fill
+
+    monkeypatch.setattr(gap_fill, "get_production_filler", lambda *a, **k: None)
+
+
+@pytest.fixture(scope="session")
+def _schema_template(tmp_path_factory):
+    """建一次库结构，之后每个用例**拷贝文件**而不是重跑 create_all。
+
+    `temp_db` 是函数级的（这一点没变，每个用例仍然拿到自己的库文件，隔离性
+    一点没减），但它原本每次都要为 21 张表跑一遍 DDL——1300+ 个用例就是
+    1300+ 遍。改成拷一个约百 KB 的空库文件，隔离性相同，代价近乎为零。
+
+    刻意**不**把 `temp_db` 改成 session 级共享：那会让用例之间共享数据，
+    出问题时是"某个用例先跑过"这种最难查的失败。省下的时间不值这个风险。
+    """
+    from apps.api import models  # noqa: F401 — 触发全部模型注册
+    from apps.api.core import database as db_mod
+
+    path = tmp_path_factory.mktemp("schema") / "template.db"
+    engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    db_mod.Base.metadata.create_all(bind=engine)
+    engine.dispose()
+    return path
 
 
 @pytest.fixture
-def temp_db(tmp_path, monkeypatch):
+def temp_db(tmp_path, monkeypatch, _schema_template):
     """Create a fresh SQLite DB per test, isolated under tmp_path.
 
     Yields (engine, SessionLocal) plus monkey-patches apps.api.core.database
@@ -38,6 +95,7 @@ def temp_db(tmp_path, monkeypatch):
     runs sees the temp one.
     """
     db_path = tmp_path / "test.db"
+    shutil.copyfile(_schema_template, db_path)   # 见 `_schema_template`
     engine = create_engine(
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False},
@@ -52,12 +110,18 @@ def temp_db(tmp_path, monkeypatch):
 
     # Re-bind Base so create_all uses the temp engine
     from apps.api.models import (  # noqa: F401 — ensure all models loaded
-        Material, Supplier, Project, Quote, AnalysisConfig, BrandTier,
-        ExtractionJob, TenderDocument, BidInvitation,
+        AnalysisConfig,
+        BidInvitation,
+        BrandTier,
+        ExtractionJob,
+        Material,
+        Project,
+        Quote,
+        Supplier,
+        TenderDocument,
     )
 
-    db_mod.Base.metadata.create_all(bind=engine)
-
+    # 结构已经随模板文件拷过来了，这里不再跑 create_all。
     yield engine, SessionLocal
 
     engine.dispose()
@@ -131,11 +195,12 @@ def legacy_client(auth_override, db_session):
     `test_update_config` 从"更新一行"变成"更新一个不存在的东西"，2026-08-28
     测试单根合并时踩过一次，这里补回来。
     """
-    from apps.api.core.database import get_db
+    from fastapi.testclient import TestClient
+
     from apps.api.core.config import DEFAULT_SCORING_WEIGHTS, DEFAULT_THRESHOLDS
+    from apps.api.core.database import get_db
     from apps.api.main import app
     from apps.api.models import AnalysisConfig
-    from fastapi.testclient import TestClient
 
     db_session.add(AnalysisConfig(key="scoring_weights", value=DEFAULT_SCORING_WEIGHTS, description="test"))
     db_session.add(AnalysisConfig(key="thresholds", value=DEFAULT_THRESHOLDS, description="test"))

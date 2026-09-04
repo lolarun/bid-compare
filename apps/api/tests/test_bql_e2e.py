@@ -4,24 +4,28 @@ Asserts the full new-path flow never creates a Quote until archive-prices is cal
 and that all review/matrix endpoints expose bid_quote_line_id in their responses.
 """
 
-import uuid
 import json
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.api.core.database import Base
+from apps.api.core.database import Base, get_db
 from apps.api.main import app
-from apps.api.core.database import get_db
-from apps.api.routes.auth import get_current_user
 from apps.api.models import (
-    Project, Supplier, Material, Quote, TenderListSession, ExtractionJob,
+    ExtractionJob,
+    Material,
+    Project,
+    Quote,
+    Supplier,
+    TenderListSession,
 )
-from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
-
+from apps.api.models.bid_alignment import BidAlignmentItem
+from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
+from apps.api.routes.auth import get_current_user
 
 # ─── Module-scoped in-memory DB ───────────────────────────────────────────────
 
@@ -312,7 +316,6 @@ class TestBqlE2E:
     def test_bid_matrix_cells_have_bql_id(self, client, db_session, seed):
         """bid_matrix cells built from BQL items must carry bid_quote_line_id, not source_quote_id."""
         from apps.api.services.matrix.bid_matrix import build_anchor_review_matrix
-        from apps.api.models.tender_list_session import TenderListSession
         from apps.api.services.tender.tender_list import TenderAnchor
 
         proj = seed["proj"]
@@ -437,7 +440,9 @@ class TestResolveActiveSubmissions:
 
     def test_excludes_rejected_submission(self, unit_session):
         """resolve_active_submissions must not return rejected submissions."""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         proj = Project(name="RAR-test", code="RAR-001")
         unit_session.add(proj)
@@ -465,7 +470,9 @@ class TestResolveActiveSubmissions:
 
     def test_requires_bql_rows_for_category(self, unit_session):
         """Supplier with BQL in wrong category must not appear."""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         proj = Project(name="RC-test", code="RC-001")
         unit_session.add(proj)
@@ -495,7 +502,9 @@ class TestResolveActiveSubmissions:
 
     def test_latest_wins_among_multiple_submissions(self, unit_session):
         """Among multiple valid submissions per supplier, latest id wins."""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         proj = Project(name="LW-test", code="LW-001")
         unit_session.add(proj)

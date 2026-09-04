@@ -19,11 +19,10 @@ import logging
 import time
 from typing import Any
 
-from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from apps.api.core.config import PROFESSION_MAP, ALL_CATEGORIES, get_settings
-from apps.api.services.llm_provider import get_dashscope_client
+from apps.api.core.config import ALL_CATEGORIES
 from apps.api.models import Material, Quote, Supplier
 
 log = logging.getLogger(__name__)
@@ -179,7 +178,6 @@ def enhance_ocr_items(
         }
         On failure: adds "error" key.
     """
-    settings = get_settings()
     # design/41：统一入口，供应商由 domain_config.TEXT_CLIENT_VENDOR 决定。
     from apps.api.services.llm_provider import get_text_client
 

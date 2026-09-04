@@ -11,7 +11,6 @@ Two top-level schemas:
 
 from typing import Any
 
-
 TENDER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["project_name", "items"],

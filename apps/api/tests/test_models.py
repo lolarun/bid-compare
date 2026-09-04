@@ -1,6 +1,6 @@
 """Tests for database models."""
 
-from apps.api.models import Material, Supplier, Project, Quote, PROFESSION_MAP, CATEGORY_ABBR
+from apps.api.models import CATEGORY_ABBR, PROFESSION_MAP, Material, Quote, Supplier
 
 
 def test_material_creation(db_session):

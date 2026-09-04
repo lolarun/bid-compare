@@ -33,7 +33,9 @@ import openai
 from openai import OpenAI
 
 from apps.api.intelligence.base import (
-    LLMProvider, ExtractionResponse, ProviderError,
+    ExtractionResponse,
+    LLMProvider,
+    ProviderError,
 )
 
 log = logging.getLogger(__name__)
@@ -393,7 +395,16 @@ class DashScopeOCRProvider(LLMProvider):
     def _get_client(self, key: str) -> OpenAI:
         with self._client_lock:
             if key not in self._llm_clients:
-                self._llm_clients[key] = OpenAI(api_key=key, base_url=self.base_url)
+                from apps.api.core.domain_config import LLM_TIMEOUT_S
+
+                # `max_retries=0` 是**有意的**，不是漏配：`_call_llm` 外面已经有一圈
+                # 手写的 `_MAX_RETRIES`(=5) 退避循环，SDK 再自带 2 次就变成 5×3=15
+                # 次尝试。叠加后最坏耗时能越过孤儿任务清扫线（30 分钟），而日志上
+                # 只会看到 5 次——真实次数藏在 SDK 的 debug 日志里。重试语义单独
+                # 留在外层一处，超时则必须补上（此前吃 SDK 默认的 600s）。
+                self._llm_clients[key] = OpenAI(
+                    api_key=key, base_url=self.base_url,
+                    max_retries=0, timeout=LLM_TIMEOUT_S)
             return self._llm_clients[key]
 
     # ─── public API (called per-page by pipeline) ─────────────────────────
@@ -468,7 +479,6 @@ class DashScopeOCRProvider(LLMProvider):
             }
 
         combined_html = "\n---\n".join(meta_htmls[:MAX_META_PAGES])
-        t0 = time.time()
         key = self._next_key()
         client = self._get_client(key)
         sem = self._per_key_sem[key]

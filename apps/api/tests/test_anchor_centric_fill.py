@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.services.alignment.anchor_match import attach_nearest_hints, QuoteCandidate
+from apps.api.services.alignment.anchor_match import (
+    attach_nearest_hints,
+)
 from apps.api.services.supplier.supplier_fill_llm import (
     AnchorView,
     SupplierQuoteRow,
     validate_anchor_fill,
 )
-
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 

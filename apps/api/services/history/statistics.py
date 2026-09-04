@@ -4,8 +4,8 @@ import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Quote, Supplier, Project
 from apps.api.core.config import PROFESSION_MAP
+from apps.api.models import Material, Project, Quote, Supplier
 from apps.api.services.history.comparison import compute_baseline
 from apps.api.services.history.quote_filters import valid_quote_filters
 

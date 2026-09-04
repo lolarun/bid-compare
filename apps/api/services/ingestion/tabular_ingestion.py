@@ -368,7 +368,11 @@ def extract_quote_tabular(file_path: str, ctx: dict) -> dict:
                     treated as a hard failure to prevent silent empty uploads.
     """
     import pandas as pd
-    from apps.api.intelligence.quote_fact import quote_fact_from_row, apply_arithmetic_validation
+
+    from apps.api.intelligence.quote_fact import (
+        apply_arithmetic_validation,
+        quote_fact_from_row,
+    )
 
     # ── 1. Load ───────────────────────────────────────────────────────────────
     df = _load_dataframe(file_path)

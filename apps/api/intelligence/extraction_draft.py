@@ -9,10 +9,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from apps.api.core.domain_config import (
-    MATCH_ARITHMETIC_PASS_THRESHOLD as _ARITHMETIC_PASS_THRESHOLD,
     EXTRACTION_ARITHMETIC_TOLERANCE,
 )
-
+from apps.api.core.domain_config import (
+    MATCH_ARITHMETIC_PASS_THRESHOLD as _ARITHMETIC_PASS_THRESHOLD,
+)
 
 # ─── Source evidence ─────────────────────────────────────────────────────────
 
@@ -271,7 +272,7 @@ class ExtractionDraft:
     # 仅供核对 UI 展示供用户人工裁决（§1.1 REVIEW：暴露难度、预填候选，不静默填值）。
     review_candidates: list = field(default_factory=list)  # list[DraftRow]
     # 行数守恒台账（doc/19 §L3）：应有 → 识别，逐页记录去向和原因。
-    ledger: "RowLedger | None" = None
+    ledger: RowLedger | None = None
 
 
 # ─── Quality gate logic (thresholds centralised here) ────────────────────────

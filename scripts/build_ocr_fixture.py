@@ -37,6 +37,7 @@ def main() -> int:
     args = ap.parse_args()
 
     import pypdfium2 as pdfium
+
     from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
 
     angles = args.angle or [0, 90, 180, 270]

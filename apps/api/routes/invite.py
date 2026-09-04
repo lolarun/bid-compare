@@ -24,10 +24,10 @@ from apps.api.schemas.invite import (
     BrandRecommendation,
     RecommendRequest,
     RecommendResponse,
-    SupplierRecommendation,
+    SavedInvitation,
     SaveInvitationsRequest,
     SaveInvitationsResponse,
-    SavedInvitation,
+    SupplierRecommendation,
 )
 from apps.api.services.supplier.invitation_recommendation import (
     MAX_SUPPLIER_RECOMMENDATIONS,

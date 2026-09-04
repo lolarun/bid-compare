@@ -7,7 +7,6 @@ Uses MockProvider so no LLM is called. Verifies:
 """
 
 import io
-import time
 
 import pytest
 from fastapi.testclient import TestClient

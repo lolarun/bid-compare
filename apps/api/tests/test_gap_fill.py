@@ -214,7 +214,11 @@ def _real_rows():
 
 
 def _golden():
-    from apps.api.tests.test_scenarios_e2e import DOCS, SNAPSHOT_REFERENCE, read_reference
+    from apps.api.tests.test_scenarios_e2e import (
+        DOCS,
+        SNAPSHOT_REFERENCE,
+        read_reference,
+    )
     return read_reference(DOCS / SNAPSHOT_REFERENCE[SLUG])
 
 

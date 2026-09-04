@@ -16,13 +16,11 @@ from __future__ import annotations
 import io
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import select
 
 from apps.api.models import BidQuoteLine, BidSubmission
-
 
 # 同时踩两道门：1/2 行完全重复（duplicate_amount_ratio 超阈值 → BLOCKED），
 # 3 行没有 total_price（missing_total_requires_review）。
@@ -56,9 +54,9 @@ def _png() -> bytes:
 
 
 def _mk_client(temp_db, monkeypatch, tmp_path, canned: dict):
+    from apps.api.intelligence.base import ExtractionResponse
     from apps.api.intelligence.pipeline import ExtractionPipeline
     from apps.api.intelligence.providers.mock import MockProvider
-    from apps.api.intelligence.base import ExtractionResponse
 
     class _Provider(MockProvider):
         def extract(self, images, schema, prompt, timeout=90, **kwargs):

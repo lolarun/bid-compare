@@ -26,18 +26,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.database import DB_PATH
-from apps.api.models.supplier import Supplier
-from apps.api.models.extraction_job import ExtractionJob
-from apps.api.models.supplier_alias import SupplierAlias, normalize_alias
 from apps.api.models import (  # noqa: F401  ← 触发所有 ORM 注册
-    Material, Project, Quote, BidAlignmentGroup, BidAlignmentItem,
-    BidSubmission, BidQuoteLine, TenderListSession,
+    BidAlignmentGroup,
+    BidAlignmentItem,
+    BidQuoteLine,
+    BidSubmission,
+    Material,
+    Project,
+    Quote,
+    TenderListSession,
 )
-from apps.api.core.database import Base
+from apps.api.models.extraction_job import ExtractionJob
+from apps.api.models.supplier import Supplier
+from apps.api.models.supplier_alias import SupplierAlias, normalize_alias
 
 
 def _make_alias(

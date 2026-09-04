@@ -4,8 +4,19 @@ Created by SupplierRecommendService when the user saves a recommendation set.
 One row per (tender, supplier) pair.
 """
 
-from sqlalchemy import Column, Integer, Float, String, DateTime, JSON, ForeignKey, UniqueConstraint
-from sqlalchemy.orm import relationship
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -14,18 +25,18 @@ from apps.api.models._base import _now
 class BidInvitation(Base):
     __tablename__ = "bid_invitations"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    tender_id = Column(Integer, ForeignKey("tender_documents.id"), nullable=False, index=True)
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tender_id: Mapped[int] = mapped_column(Integer, ForeignKey("tender_documents.id"), nullable=False, index=True)
+    supplier_id: Mapped[int] = mapped_column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
 
-    score = Column(Float, nullable=True)
-    rank = Column(Integer, nullable=True)
-    reason = Column(JSON, default=dict)  # {history_count, avg_deviation_pct, ...}
-    status = Column(String(16), default="pending", index=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[Any] = mapped_column(JSON, default=dict, nullable=True)  # {history_count, avg_deviation_pct, ...}
+    status: Mapped[str | None] = mapped_column(String(16), default="pending", index=True)
     # pending / sent / responded / declined
 
-    created_at = Column(DateTime, default=_now)
-    updated_at = Column(DateTime, default=_now, onupdate=_now)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now, onupdate=_now)
 
     tender = relationship("TenderDocument", back_populates="invitations")
     supplier = relationship("Supplier")

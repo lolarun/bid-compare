@@ -16,11 +16,11 @@ Tests the deterministic persistence layer (no real LLM / no network):
 import pytest
 from sqlalchemy import select
 
-from apps.api.models import Material, Supplier, Project, Quote
+from apps.api.models import Material, Project, Quote, Supplier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.tender_list_session import TenderListSession
-from apps.api.services.supplier.supplier_fill_llm import FillCell, SupplierFillResult
 from apps.api.routes.analysis import _persist_llm_fill
+from apps.api.services.supplier.supplier_fill_llm import FillCell, SupplierFillResult
 
 
 class _Anchor:

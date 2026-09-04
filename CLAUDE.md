@@ -37,6 +37,9 @@ page number, fixed row index, or single-sample layout to make a test pass.
 ## 2. Repository map
 
 ```text
+README.md            Human entry point; links current specs and commands
+PLANNING.md          Repository/workspace organization plan and pending data moves
+TODO.md              Frozen historical product/UI checklist; current TODOs live in the spec
 apps/api/            FastAPI backend (Python >=3.11), app object: apps.api.main:app
   routes/            HTTP layer: auth, params, transactions, response mapping only
   services/          Domain/business logic (the authoritative layer)

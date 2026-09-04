@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
 from apps.api.models import BidInvitation, Quote, Supplier
-from apps.api.schemas import SupplierCreate, SupplierUpdate, SupplierOut
+from apps.api.schemas import SupplierCreate, SupplierOut, SupplierUpdate
 
 router = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
 

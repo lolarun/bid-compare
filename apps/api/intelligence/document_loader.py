@@ -11,7 +11,6 @@ We render PDF pages at 2x scale for OCR quality, capped at MAX_PAGES.
 from __future__ import annotations
 
 import io
-import os
 import threading
 from pathlib import Path
 

@@ -1,6 +1,7 @@
 """QuoteRound Pydantic schemas (docs/design/42)."""
 
 from datetime import datetime
+
 from pydantic import BaseModel
 
 

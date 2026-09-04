@@ -45,11 +45,13 @@
 from __future__ import annotations
 
 import collections
+import copy
 import csv
+import functools
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -149,7 +151,8 @@ def _rows_of(path: Path) -> list[list[str]]:
     return [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
 
 
-def read_reference(path: Path) -> list[dict]:
+@functools.cache
+def _read_reference_cached(path: Path) -> list[dict]:
     """标准答案清单 → [{name, spec, qty, unit_price, total_price, not_quoted}]。
 
     **条目行的判据是"有数量"，不是"有合价"**——两个真实原因，都是写这份测试时
@@ -183,6 +186,13 @@ def read_reference(path: Path) -> list[dict]:
         out.append(rec)
     return out
 
+
+
+def read_reference(path: Path) -> list[dict]:
+    """缓存解析结果，但每次交出**新的行 dict**——理由同 `recognize_snapshot`：
+    调用方拿到的是可变对象，共享一份迟早会有人就地改，然后在别处炸。
+    行本身是扁平的标量 dict，逐行浅拷贝即可，不需要 deepcopy。"""
+    return [dict(r) for r in _read_reference_cached(path)]
 
 class TestReferenceLists:
     """标准答案本身先自证——参照数据不可信的话，后面所有准确率都没有意义。"""
@@ -337,8 +347,15 @@ def _total_of(fields: dict) -> float | None:
             or _num(fields, "total_price_incl_tax"))
 
 
-def recognize_snapshot(slug: str):
-    """回放一份 Paddle 快照，返回去重副本后的明细行（`DraftRow` 列表）。"""
+@functools.cache
+def _recognize_snapshot_cached(slug: str):
+    """回放一份 Paddle 快照，返回去重副本后的明细行（`DraftRow` 列表）。
+
+    **按 slug 记忆化**：本文件有 6 个断言方法各自 parametrize 全部 7 个 slug，
+    不缓存就是同一份文档被完整重解析 42 次（其中只有 7 次是不同输入）。这是
+    纯函数——输入只有 slug、快照 JSON 在磁盘上是只读的、解析确定性；调用方
+    只读返回的行，全文件没有一处写 `DraftRow`。所以缓存不改变任何断言语义，
+    只是不再重复算。"""
     from apps.api.intelligence.paddle_vl import recognize_quote_paddle
 
     doc = json.loads((SNAPS / f"{slug}.json").read_text(encoding="utf-8"))
@@ -353,6 +370,18 @@ def recognize_snapshot(slug: str):
     return rows
 
 
+def recognize_snapshot(slug: str):
+    """缓存解析结果，但**每次返回深拷贝**。
+
+    直接把缓存对象交出去是错的，实测踩过：`test_gap_fill.py::_real_rows()` 也调
+    这个函数，而 `gap_fill.fill_gaps(rows, ...)` 会**就地写** `DraftRow`——补位
+    本来就是往空格子里填值。共享同一份对象时，先跑的用例把格子填满，后跑的
+    `find_gaps` 就什么都找不到了，断言在一个跟自己无关的地方失败。
+
+    深拷贝相对整份文档重解析可以忽略不计，缓存的收益仍在。"""
+    return copy.deepcopy(_recognize_snapshot_cached(slug))
+
+
 def _audit_key(name, spec) -> str:
     """把品名+规格压成一个可比对的键。
 
@@ -364,6 +393,7 @@ def _audit_key(name, spec) -> str:
     return re.sub(r"[\s（）()]", "", s.replace("×", "*").replace("X", "*"))
 
 
+@functools.cache
 def value_audit(slug: str) -> dict:
     """逐行合价审计：识别出来的这一行，**值本身**对不对。
 
@@ -415,6 +445,7 @@ def value_audit(slug: str) -> dict:
     return out
 
 
+@pytest.mark.slow  # 7 份快照 × 6 条断言，每条都要把整份文档解析一遍
 @pytest.mark.parametrize("slug", sorted(UPLOAD_BASELINE), ids=sorted(UPLOAD_BASELINE))
 class TestUploadStage:
     """阶段一：每份报价文件识别出来的行，跟标准答案比对。"""
@@ -915,6 +946,7 @@ COMPLETENESS_BASELINE: dict[str, dict[str, tuple[int, int]]] = {
 }
 
 
+@pytest.mark.slow  # 预览链路要先把报价件识别出来
 class TestPreviewStage:
     """阶段二：预览。**预览永远不拦**是产品级不变式——本轮人工测试抓到的回归
     正是这里（一行列错位就让整份供应商连预览都进不去）。断言"每一家都进得了
@@ -974,6 +1006,7 @@ class TestPreviewStage:
         assert matrix.get("basis") == "preview", "预览结果必须标注 basis=preview"
 
 
+@pytest.mark.slow  # 整条比价链路走 TestClient 跑完
 class TestCompareStage:
     """阶段三：正式比价。这一层要验证的是 CLAUDE.md §4 的「行轴」不变式：
     `quote_derived` 只能进预览、绝不能进官方结果——不是靠约定，是靠

@@ -9,7 +9,17 @@ docs/design/23：missing 单元格没有任何 BidAlignmentItem（没人对它�
 着上一版的确认状态。
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint, Index
+from datetime import datetime
+
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -20,22 +30,22 @@ class AnchorMissingAck(Base):
 
     __tablename__ = "anchor_missing_acks"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
-    category = Column(String(50), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
     # 索引由 __table_args__ 里显式命名的 Index 提供（ix_ama_session/ix_ama_submission），
     # 与迁移脚本 0007_anchor_missing_ack 创建的索引名一致——这里不再重复用
     # index=True（会生成第二个自动命名的重复索引）。
-    tender_list_session_id = Column(
+    tender_list_session_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("tender_list_sessions.id"), nullable=False,
     )
-    anchor_seq = Column(String(20), nullable=False)
-    submission_id = Column(Integer, ForeignKey("bid_submissions.id"), nullable=False)
+    anchor_seq: Mapped[str] = mapped_column(String(20), nullable=False)
+    submission_id: Mapped[int] = mapped_column(Integer, ForeignKey("bid_submissions.id"), nullable=False)
 
-    reason = Column(String(500), default="")   # 预留：确认理由，本轮前端不填
-    acked_by = Column(String(100), default="")
+    reason: Mapped[str | None] = mapped_column(String(500), default="")   # 预留：确认理由，本轮前端不填
+    acked_by: Mapped[str | None] = mapped_column(String(100), default="")
 
-    created_at = Column(DateTime, default=_now)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now)
 
     __table_args__ = (
         UniqueConstraint(

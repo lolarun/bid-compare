@@ -9,7 +9,7 @@ Return type: dict[submission_id → BidSubmission]  (keyed by BidSubmission.id)
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission

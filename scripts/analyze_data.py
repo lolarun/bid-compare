@@ -2,8 +2,6 @@
 
 import json
 import re
-import sys
-from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -431,10 +429,10 @@ def assess_sufficiency(r: dict) -> dict:
         notes.append(f"供应商偏少({r['n_brands']}家)")
     elif r["n_brands"] == 1:
         score += 1
-        notes.append(f"仅单一供应商，无法横向比价")
+        notes.append("仅单一供应商，无法横向比价")
     else:
         score += 0
-        notes.append(f"无供应商/品牌数据，无法比价")
+        notes.append("无供应商/品牌数据，无法比价")
 
     # data volume
     if r["n_valid_price"] >= 100:
@@ -949,7 +947,9 @@ def run_analysis() -> list[dict]:
             print(f"  有效数据: {r['n_valid_price']}/{r['n_total']}, 子类: {len(r['subcat_counts'])}, 品牌: {r['n_brands']}")
         except Exception as e:
             print(f"[ERROR] {category}: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
 
     # 配电箱 special handling
     print("[分析] 配电箱 ...")
@@ -995,7 +995,9 @@ def run_analysis() -> list[dict]:
             print(f"  箱子总数: {len(df_pdx)}, 有效价格: {r['n_valid_price']}")
     except Exception as e:
         print(f"[ERROR] 配电箱: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
 
     # sort results by profession
     order = ["桥架", "母线槽", "配电箱", "阀门", "不锈钢管", "水箱", "潜水泵", "风口风阀", "风机盘管", "空调泵"]

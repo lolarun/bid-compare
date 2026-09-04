@@ -1,6 +1,8 @@
 #!/bin/sh
-# Pre-commit: run vue-tsc strict type check (same as Docker build).
-# Fails the commit if any TS error exists in apps/www.
+# Pre-commit gates, each scoped to whether that side has staged files:
+#   apps/www/            -> vue-tsc strict type check (same as Docker build)
+#   apps/api/, scripts/  -> ruff lint (same ruleset CI runs)
+# Fails the commit on any error.
 
 set -e
 
@@ -11,4 +13,16 @@ if git diff --cached --name-only | grep -q "^${FRONTEND}/"; then
   echo "[pre-commit] Running vue-tsc type check..."
   (cd "$FRONTEND" && npm run type-check)
   echo "[pre-commit] Type check passed."
+fi
+
+# 后端：ruff 与 CI 用同一份 pyproject.toml 配置，本地先挡一道。
+# uvx 不可用时**跳过而不是静默通过**——留一行提示，免得以为查过了。
+if git diff --cached --name-only | grep -qE "^(apps/api|scripts)/"; then
+  if command -v uvx >/dev/null 2>&1; then
+    echo "[pre-commit] Running ruff..."
+    uvx ruff check apps scripts
+    echo "[pre-commit] Ruff passed."
+  else
+    echo "[pre-commit] SKIPPED ruff: uvx not found (install uv to enable this gate)."
+  fi
 fi

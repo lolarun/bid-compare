@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 from fastapi import (
     APIRouter,
@@ -30,9 +29,12 @@ from apps.api.core.runtime import submit_extraction
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.schemas.intake import (
     ClassifyTier0Response,
-    JobListResponse, JobResponse,
-    EnhanceRequest, EnhanceResponse,
-    SummarizeFactsRequest, SummarizeFactsResponse,
+    EnhanceRequest,
+    EnhanceResponse,
+    JobListResponse,
+    JobResponse,
+    SummarizeFactsRequest,
+    SummarizeFactsResponse,
 )
 from apps.api.services.ingestion.document_ingestion import (
     DocumentIngestionService,
@@ -57,10 +59,10 @@ def get_pipeline(request: Request) -> ExtractionPipeline:
 def upload_document(
     file: UploadFile = File(...),
     type: str = Form(...),
-    project_id: Optional[int] = Form(None),
-    supplier_id: Optional[int] = Form(None),
-    category: Optional[str] = Form(None),
-    context_json: Optional[str] = Form(None),
+    project_id: int | None = Form(None),
+    supplier_id: int | None = Form(None),
+    category: str | None = Form(None),
+    context_json: str | None = Form(None),
     db: Session = Depends(get_db),
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> JobResponse:
@@ -134,10 +136,13 @@ def classify_tier0_upload(file: UploadFile = File(...)) -> ClassifyTier0Response
     from pathlib import Path as _Path
 
     from apps.api.intelligence.document_classify import (
-        ExcelClassification, PdfClassification, classify_tier0,
+        ExcelClassification,
+        PdfClassification,
+        classify_tier0,
     )
     from apps.api.intelligence.scanned_pdf_classify import (
-        classify_pdf_for_dispatch, get_scanned_classify_call,
+        classify_pdf_for_dispatch,
+        get_scanned_classify_call,
     )
 
     # `def` 而不是 `async def`：下面 classify_pdf_for_dispatch 会发一次**真实
@@ -247,8 +252,8 @@ def re_recognize_job(
 
 @router.get("/jobs", response_model=JobListResponse)
 def list_jobs(
-    type: Optional[str] = None,
-    status: Optional[str] = None,
+    type: str | None = None,
+    status: str | None = None,
     limit: int = 50,
     db: Session = Depends(get_db),
     pipeline: ExtractionPipeline = Depends(get_pipeline),

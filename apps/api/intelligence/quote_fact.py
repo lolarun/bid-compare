@@ -17,10 +17,9 @@ Optional extra key (ignored by batch-confirm, used by Tier3 LLM review later):
 """
 from __future__ import annotations
 
-from apps.api.core.domain_config import MATCH_PRICE_ARITHMETIC_TOLERANCE as _PRICE_TOL
 from dataclasses import dataclass, field
-from typing import Any
 
+from apps.api.core.domain_config import MATCH_PRICE_ARITHMETIC_TOLERANCE as _PRICE_TOL
 
 # ─── shared logic (called from both pipeline.py and tabular_ingestion.py) ────
 

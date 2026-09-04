@@ -39,9 +39,9 @@ from __future__ import annotations
 import io
 import logging
 import re
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -281,12 +281,20 @@ def get_production_classifier():
     key = (os.environ.get("MIMO_API_KEY") or "").strip()
     if not key:
         return None
-    from apps.api.core.domain_config import (
-        PAGE_FILTER_MODEL, PAGE_FILTER_BASE_URL, PAGE_FILTER_MAX_TOKENS,
-    )
     from openai import OpenAI
 
-    client = OpenAI(api_key=key, base_url=PAGE_FILTER_BASE_URL)
+    from apps.api.core.domain_config import (
+        LLM_MAX_RETRIES,
+        MIMO_VISION_TIMEOUT_S,
+        PAGE_FILTER_BASE_URL,
+        PAGE_FILTER_MAX_TOKENS,
+        PAGE_FILTER_MODEL,
+    )
+
+    # 这里既没显式重试也没超时，吃的是 openai SDK 的默认值（2 次 / 600s）。
+    # 600s 正是 `mimo_vision` 注释里记过的那个坑——只在那一处修了，这一处漏了。
+    client = OpenAI(api_key=key, base_url=PAGE_FILTER_BASE_URL,
+                    max_retries=LLM_MAX_RETRIES)
 
     def _call(images: list[bytes], prompt: str, *, labels: list[str] | None = None) -> str:
         import base64
@@ -302,6 +310,7 @@ def get_production_classifier():
         resp = client.chat.completions.create(
             model=PAGE_FILTER_MODEL, messages=[{"role": "user", "content": content}],
             temperature=0.0, max_tokens=PAGE_FILTER_MAX_TOKENS,
+            timeout=MIMO_VISION_TIMEOUT_S,
         )
         return resp.choices[0].message.content or ""
 

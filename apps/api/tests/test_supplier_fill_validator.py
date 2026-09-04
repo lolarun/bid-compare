@@ -14,9 +14,10 @@ honest is pinned here independent of model behavior:
   + price always sourced from the Quote row, never the LLM
 """
 from apps.api.services.supplier.supplier_fill_llm import (
-    AnchorView, SupplierQuoteRow, validate,
+    AnchorView,
+    SupplierQuoteRow,
+    validate,
 )
-
 
 # ─── fixtures ─────────────────────────────────────────────────────────────────
 

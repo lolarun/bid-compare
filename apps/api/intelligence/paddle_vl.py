@@ -47,14 +47,16 @@ import csv
 import io
 import logging
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from apps.api.core.utils import parse_num, parse_rate
 from apps.api.intelligence.copy_detect import detect_copies
 from apps.api.intelligence.extraction_draft import ExtractionDraft
 from apps.api.intelligence.vl_quote import build_draft, map_columns
 from apps.api.services.ingestion.draft_integrity import (
-    AMOUNT_NOT_QUOTED, AMOUNT_VALUE, classify_amount_cell,
+    AMOUNT_NOT_QUOTED,
+    AMOUNT_VALUE,
+    classify_amount_cell,
 )
 
 log = logging.getLogger(__name__)
@@ -786,7 +788,8 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
     `domain_config.PADDLE_PROGRESS_ESTIMATE_CAP`（不能在真正完成前显示100%）。
     """
     from apps.api.core.domain_config import (
-        PADDLE_EXPECTED_SECONDS_PER_PAGE, PADDLE_PROGRESS_ESTIMATE_CAP,
+        PADDLE_EXPECTED_SECONDS_PER_PAGE,
+        PADDLE_PROGRESS_ESTIMATE_CAP,
     )
 
     def _notify(stage: str, pct: int, *, stage_current: int | None = None,
@@ -816,7 +819,8 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
 
     if text_call is not None:
         from apps.api.intelligence.paddle_doc_meta import (
-            DEFAULT_QUOTE_REQUIREMENTS, extract_quote_meta_from_text,
+            DEFAULT_QUOTE_REQUIREMENTS,
+            extract_quote_meta_from_text,
             extract_requirements_from_text,
         )
         from apps.api.intelligence.vl_quote import QUOTE_META_PAGES
@@ -870,8 +874,8 @@ def recognize_quote_paddle(file_path: str, *, submit_and_parse: SubmitAndParse,
     # 没读到"，需要成型的 `DraftRow.fields` 和 `source_ref.page` 才能判，raw CSV
     # 阶段两者都还没有。
     if gap_filler is not None:
-        from apps.api.intelligence.gap_fill import fill_gaps
         from apps.api.intelligence.document_loader import DocumentLoader
+        from apps.api.intelligence.gap_fill import fill_gaps
 
         _notify("补读缺失金额", 98)
 

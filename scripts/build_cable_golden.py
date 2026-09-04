@@ -1,6 +1,7 @@
 """build_cable_golden.py — 把客户提供的参考 CSV 转成版本化 golden JSON。
 
-来源：docs/test1/prj1/<供应商>.csv（多模态模型逐页转录，客户提供）
+来源：tests/fixtures/documents/徐汇区华泾镇项目-<供应商>报价清单.csv
+（多模态模型逐页转录，客户提供并已登记在 MANIFEST.md）
 产物：data/golden/quote_cable_<slug>.json，schema 与既有 golden 保持一致。
 
 **标准答案先审计来源**（测试规则）：本脚本不盲信 CSV，落盘前强制核对
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import hashlib
 import json
 import sys
@@ -27,7 +27,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-SRC = REPO / "docs" / "test1" / "prj1"
+SRC = REPO / "tests" / "fixtures" / "documents"
 OUT = REPO / "data" / "golden"
 
 # 供应商 → (CSV 文件名去掉扩展, golden slug, 官方总价)
@@ -69,7 +69,7 @@ def _num(s: str | None) -> float | None:
 
 
 def build_one(name: str, slug: str, declared: float, *, check_only: bool) -> dict:
-    csv_path = next(SRC.glob(f"*{name}.csv"))
+    csv_path = next(SRC.glob(f"*{name}报价清单.csv"))
     raw = csv_path.read_bytes()
     records = list(csv.DictReader(csv_path.open(encoding="utf-8-sig")))
     items = [r for r in records if r["清单序号"] != "总价"]

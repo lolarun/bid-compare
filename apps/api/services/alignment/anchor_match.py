@@ -18,23 +18,27 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 仅供注解——运行时不导入 openai，保持模块的惰性导入约定
+    from openai import OpenAI
 
 log = logging.getLogger(__name__)
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.core.config import get_settings
-from apps.api.services.llm_provider import get_dashscope_client
 from apps.api.models import Material, Quote
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.models.supplier import Supplier
 from apps.api.services.ingestion.canonical import (
-    canonical_match_score, extract_valve_canonical, valve_type_compatible,
+    canonical_match_score,
+    extract_valve_canonical,
 )
-from apps.api.services.tender.tender_list import TenderAnchor, parse_tender_all_sheets
 from apps.api.services.ingestion.standardize import normalize_model_code
+from apps.api.services.llm_provider import get_dashscope_client
+from apps.api.services.tender.tender_list import TenderAnchor, parse_tender_all_sheets
 
 
 @dataclass
@@ -61,9 +65,9 @@ class _BQLMatProxy:
     extended_attrs: dict | None = None
 
 # 余弦低于此视为无可信锚点(与测量脚本一致)
-from apps.api.core.domain_config import MATCH_SEQUENTIAL_SIM_THRESHOLD as SIM_THRESHOLD
 # 低于此标记为低置信、建议复核(写入 reason,前端可高亮)
 from apps.api.core.domain_config import MATCH_LOW_CONFIDENCE_THRESHOLD as LOW_CONF
+from apps.api.core.domain_config import MATCH_SEQUENTIAL_SIM_THRESHOLD as SIM_THRESHOLD
 from apps.api.core.domain_config import (
     SEQ_EVIDENCE_CONSISTENCY_MIN,
     SEQ_EVIDENCE_COVERAGE_MIN,
@@ -72,6 +76,7 @@ from apps.api.core.domain_config import (
     SUBSEQ_MAX_WILDCARD_RATE,
     SUBSEQ_TIEBREAK_MARGIN,
 )
+
 EMBED_MODEL = "text-embedding-v4"
 _EMBED_BATCH = 10
 
@@ -279,7 +284,7 @@ def match_anchors_wide(
     k_safe: int = 5,
     k_risky: int = 5,
     anchor_vecs: list[list[float]] | None = None,
-    client: "OpenAI | None" = None,
+    client: OpenAI | None = None,
 ) -> list[list[AnchorCandidate]]:
     """Wide Top-(k_safe + k_risky) recall with safe/risky tier classification.
 
@@ -381,7 +386,7 @@ class QuoteCandidate:
 def attach_nearest_hints(
     anchors: list,
     rows: list,
-    client: "OpenAI | None" = None,
+    client: OpenAI | None = None,
     k: int = 5,
     anchor_vecs: list[list[float]] | None = None,
 ) -> dict[int, list[QuoteCandidate]]:
@@ -918,7 +923,9 @@ def import_and_match(
 
     # ── 分离：哪些供应商已提交 BidSubmission（新路径），哪些走旧 Quote 路径 ──────
     # resolve_active_submissions now returns {submission_id → BidSubmission}
-    from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
+    from apps.api.services.submission.bid_submission_resolve import (
+        resolve_active_submissions,
+    )
     _active_subs = resolve_active_submissions(
         db, project_id, category,
         supplier_ids=supplier_ids,

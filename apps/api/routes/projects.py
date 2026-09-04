@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from apps.api.core.database import get_db
 from apps.api.core.security import require_admin
 from apps.api.models import Project
-from apps.api.schemas import ProjectCreate, ProjectUpdate, ProjectOut
+from apps.api.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -188,7 +188,7 @@ def projects_overview(
 
 @router.get("/{project_id}/overview", response_model=dict)
 def project_overview(project_id: int, db: Session = Depends(get_db)):
-    """项目概述页的只读聚合（docs/design/45 §6）。
+    """项目概述页的只读聚合（archive/design/45 §6）。
 
     一次批量查询给出：项目标量 + 每品类的 清单 / 当前轮 / 各轮报价清单 /
     供应商 / 下一步动作。

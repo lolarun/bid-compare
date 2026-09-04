@@ -8,8 +8,10 @@ Run from repo root:
 """
 
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 import pypdfium2 as pdfium
 
 ROOT = Path(__file__).resolve().parent.parent

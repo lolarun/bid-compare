@@ -5,7 +5,7 @@ confirm time) is exercised end-to-end by scripts/test_e2e_*.py against the real
 backend; here we pin the model-level contract that the JSON column stores and
 returns the row-level evidence dict the LLM supplier-fill agent depends on.
 """
-from apps.api.models import Material, Supplier, Project, Quote
+from apps.api.models import Material, Project, Quote, Supplier
 
 
 def test_quote_extraction_meta_json_round_trips(db_session):

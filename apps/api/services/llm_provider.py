@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 
-def get_dashscope_client() -> "OpenAI | None":
+def get_dashscope_client() -> OpenAI | None:
     """Return a configured DashScope OpenAI-compat client.
 
     Returns None when no API key is configured, so callers can return a
@@ -31,10 +31,13 @@ def get_dashscope_client() -> "OpenAI | None":
             key = multi.split(",")[0].strip()
     if not key:
         return None
-    return OpenAI(api_key=key, base_url=s.DASHSCOPE_BASE_URL)
+    from apps.api.core.domain_config import LLM_MAX_RETRIES, LLM_TIMEOUT_S
+
+    return OpenAI(api_key=key, base_url=s.DASHSCOPE_BASE_URL,
+                  max_retries=LLM_MAX_RETRIES, timeout=LLM_TIMEOUT_S)
 
 
-def get_text_client() -> "tuple[OpenAI, str] | None":
+def get_text_client() -> tuple[OpenAI, str] | None:
     """文本类 LLM 调用的**唯一入口**：`(client, model)`，没配 key 时 None。
 
     本模块的文档一开始就写着"a single place to swap the provider"——这个函数
@@ -66,9 +69,14 @@ def get_text_client() -> "tuple[OpenAI, str] | None":
             from openai import OpenAI
 
             from apps.api.core.domain_config import (
-                PAGE_FILTER_BASE_URL, PAGE_FILTER_MODEL,
+                LLM_MAX_RETRIES,
+                LLM_TIMEOUT_S,
+                PAGE_FILTER_BASE_URL,
+                PAGE_FILTER_MODEL,
             )
-            return OpenAI(api_key=key, base_url=PAGE_FILTER_BASE_URL), PAGE_FILTER_MODEL
+            return OpenAI(api_key=key, base_url=PAGE_FILTER_BASE_URL,
+                          max_retries=LLM_MAX_RETRIES,
+                          timeout=LLM_TIMEOUT_S), PAGE_FILTER_MODEL
         log.warning("TEXT_CLIENT_VENDOR=mimo 但没有 MIMO_API_KEY，回落 dashscope")
 
     client = get_dashscope_client()

@@ -430,7 +430,7 @@ def attach_topk(
     复用 anchor_match.match_anchors_topk(embedding + DN + canonical 硬过滤)。已有
     topk 的行跳过(便于测试/预计算)。anchor_vecs 由路由层预算好以免重复 embed。
     """
-    from apps.api.services.alignment.anchor_match import match_anchors_topk, _dn_of
+    from apps.api.services.alignment.anchor_match import _dn_of, match_anchors_topk
 
     pending = [r for r in rows if not r.topk]
     if not pending:
@@ -465,7 +465,7 @@ def attach_wide_candidates(
     LLM (which then can only force them to pending). Safe candidates backfill row.topk
     for Tier-1 and hints in prompt.
     """
-    from apps.api.services.alignment.anchor_match import match_anchors_wide, _dn_of
+    from apps.api.services.alignment.anchor_match import _dn_of, match_anchors_wide
 
     # Tests and upstream callers may already supply a Top-K recall result.
     # It is sufficient for the prompt/Tier-1 path and must not trigger a new

@@ -120,10 +120,17 @@ def _find_summary_csv(raw_dir: Path, src_entry: dict) -> Path | None:
 
 def _parse_category(category: str, csv_path: Path) -> pd.DataFrame:
     from scripts.analyze_data import (
-        parse_桥架, parse_阀门, parse_风口风阀,
+        parse_不锈钢管,
+        parse_桥架,
+        parse_水箱,
+        parse_潜水泵,
+        parse_空调泵,
+        parse_阀门,
+        parse_风口风阀,
+        parse_风机盘管,
+    )
+    from scripts.analyze_data import (
         parse_母线 as parse_母线槽,
-        parse_不锈钢管, parse_水箱, parse_潜水泵,
-        parse_风机盘管, parse_空调泵,
     )
     parsers = {
         "桥架":    parse_桥架,
@@ -385,6 +392,7 @@ def wipe_historical_data():
       4. DELETE orphan projects (not referenced by bid_submissions)
     """
     from sqlalchemy import text
+
     from apps.api.core.database import SessionLocal
 
     db = SessionLocal()
@@ -546,7 +554,7 @@ def print_dry_run_report(records: list[dict]):
     print()
     print(f"  With brand field : {has_brand}")
     print(f"  No brand         : {no_brand}")
-    print(f"  supplier_id      : None (all — brand stored in Quote.brand only)")
+    print("  supplier_id      : None (all — brand stored in Quote.brand only)")
     print()
     print("Run with --commit to write.  Add --wipe to clear existing data first.")
 
@@ -558,7 +566,7 @@ def main():
     ap.add_argument("--raw-dir",  default=None,
                     help="Versioned raw directory (auto-detect latest if omitted)")
     ap.add_argument("--batch-id", default=None,
-                    help=f"Batch tag (default: hist-v1-<date>)")
+                    help="Batch tag (default: hist-v1-<date>)")
     ap.add_argument("--commit",   action="store_true",
                     help="Write to database (dry-run otherwise)")
     ap.add_argument("--wipe",     action="store_true",

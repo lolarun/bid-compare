@@ -176,7 +176,10 @@ def test_classify_tier0_dispatches_by_extension():
     pdf = DOCS / "金桥地体上盖项目-凯硕新正投标文件.pdf"
     _skip_if_missing(xlsx)
     _skip_if_missing(pdf)
-    from apps.api.intelligence.document_classify import ExcelClassification, PdfClassification
+    from apps.api.intelligence.document_classify import (
+        ExcelClassification,
+        PdfClassification,
+    )
     assert isinstance(classify_tier0(str(xlsx)), ExcelClassification)
     assert isinstance(classify_tier0(str(pdf)), PdfClassification)
 

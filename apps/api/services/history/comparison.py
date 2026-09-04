@@ -10,10 +10,20 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.models import Material, Quote, Project, Supplier, AnalysisConfig, DEFAULT_THRESHOLDS
-from apps.api.services.ingestion.canonical import extract_valve_canonical, normalize_valve_family
-from apps.api.services.history.quote_filters import valid_quote_filters
+from apps.api.models import (
+    DEFAULT_THRESHOLDS,
+    AnalysisConfig,
+    Material,
+    Project,
+    Quote,
+    Supplier,
+)
 from apps.api.services.history.comparison_profiles import get_comparison_profile
+from apps.api.services.history.quote_filters import valid_quote_filters
+from apps.api.services.ingestion.canonical import (
+    extract_valve_canonical,
+    normalize_valve_family,
+)
 
 # 同规格基准最小样本数（< 此值视为"无可靠同规格基准"，deviation=null，不计异常）
 SPEC_BASELINE_MIN_SAMPLES = 5

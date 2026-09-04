@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from apps.api.models.project import Project
-from apps.api.models.quote_round import QuoteRound
 from apps.api.services.tender import quote_round_service as svc
 
 

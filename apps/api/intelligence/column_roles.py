@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from apps.api.core.domain_config import (
     COLUMN_ROLE_ARITHMETIC_MIN_RATE,

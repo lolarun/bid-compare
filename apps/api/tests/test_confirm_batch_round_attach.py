@@ -8,9 +8,9 @@ Locks the wiring in quote_confirmation_service.confirm_batch:
 """
 from __future__ import annotations
 
+from apps.api.models.bid_submission import BidSubmission
 from apps.api.models.extraction_job import ExtractionJob
 from apps.api.models.project import Project
-from apps.api.models.bid_submission import BidSubmission
 from apps.api.routes.quotes import BatchConfirmRequest
 from apps.api.services.submission.quote_confirmation_service import confirm_batch
 from apps.api.services.tender import quote_round_service as svc

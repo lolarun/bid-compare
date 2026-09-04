@@ -28,14 +28,13 @@ import logging
 import mimetypes
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.intelligence.base import ProviderError
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.models import ExtractionJob
 
@@ -180,7 +179,7 @@ class DocumentIngestionService:
         ext = Path(filename).suffix.lower() or ".bin"
         if ext not in SUPPORTED_VISION_EXT and ext not in {".xlsx", ".xls", ".csv"}:
             raise ValueError(f"Unsupported file extension: {ext}")
-        date_dir = datetime.now(timezone.utc).strftime("%Y%m%d")
+        date_dir = datetime.now(UTC).strftime("%Y%m%d")
         save_dir = _get_upload_dir() / date_dir
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / f"{file_hash}{ext}"
@@ -250,7 +249,9 @@ class DocumentIngestionService:
                     # Tabular bypass: deterministic pandas extraction.
                     # Skips OCR/LLM; produces the same result shape as _postprocess_quote
                     # so that batch-confirm / anchor-match / 90-row matrix work unchanged.
-                    from apps.api.services.ingestion.tabular_ingestion import extract_quote_tabular
+                    from apps.api.services.ingestion.tabular_ingestion import (
+                        extract_quote_tabular,
+                    )
                     result = extract_quote_tabular(job.file_path, job.context or {})
                     update_progress("确定性解析完成", 90)
                 elif job.type == IngestionType.TENDER_BIDLIST.value:
@@ -344,7 +345,7 @@ class DocumentIngestionService:
           孤儿（非 failed）原样返回，用户重传也拿不到新识别（死循环卡在 20%）。
         - 周期清扫（默认仅 RUNNING + 年龄阈值）：清理运行中卡死的 job，不误伤刚入队的。
         """
-        threshold = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        threshold = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
         statuses = [JobStatus.RUNNING.value]
         if include_pending:
             statuses.append(JobStatus.PENDING.value)

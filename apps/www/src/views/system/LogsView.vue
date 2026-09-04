@@ -4,11 +4,14 @@ import { SearchOutlined, ExportOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
 import { logApi, exportApi } from '@/api'
 import { doExport } from '@/utils/download'
-import type { LogEntry } from '@/api/client'
+import type { LogEntry, LogModuleOption } from '@/api/client'
 
 const loading = ref(false)
 const data = ref<LogEntry[]>([])
 const total = ref(0)
+// Filter options come from the backend registry (GET /logs/modules) — never a
+// hand-written list here, which is how this filter drifted into matching no rows.
+const moduleOptions = ref<LogModuleOption[]>([])
 
 const query = reactive({
   user: undefined as string | undefined,
@@ -52,7 +55,24 @@ async function fetchData() {
   }
 }
 
-onMounted(fetchData)
+async function fetchModules() {
+  try {
+    const { data: resp } = await logApi.modules()
+    moduleOptions.value = resp
+  } catch {
+    // interceptor handles notification; the filter stays empty rather than
+    // offering values the backend cannot confirm
+  }
+}
+
+function moduleLabel(value: string) {
+  return moduleOptions.value.find((o) => o.value === value)?.label ?? value
+}
+
+onMounted(() => {
+  fetchModules()
+  fetchData()
+})
 
 function search() {
   query.page = 1
@@ -81,16 +101,13 @@ function search() {
           allow-clear
           style="width:140px"
         />
-        <a-select v-model:value="query.module" placeholder="模块" allow-clear style="width:160px">
-          <a-select-option value="招标比价分析">招标比价分析</a-select-option>
-          <a-select-option value="邀标建议">邀标建议</a-select-option>
-          <a-select-option value="物料主数据">物料主数据</a-select-option>
-          <a-select-option value="历史价格查询">历史价格查询</a-select-option>
-          <a-select-option value="供应商管理">供应商管理</a-select-option>
-          <a-select-option value="采购价格导入">采购价格导入</a-select-option>
-          <a-select-option value="系统设置">系统设置</a-select-option>
-          <a-select-option value="用户管理">用户管理</a-select-option>
-        </a-select>
+        <a-select
+          v-model:value="query.module"
+          placeholder="模块"
+          allow-clear
+          style="width:160px"
+          :options="moduleOptions"
+        />
         <a-select v-model:value="query.action" placeholder="操作类型" allow-clear style="width:140px">
           <a-select-option value="导入">导入</a-select-option>
           <a-select-option value="编辑">编辑</a-select-option>
@@ -123,7 +140,10 @@ function search() {
         size="middle"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'result'">
+          <template v-if="column.dataIndex === 'module'">
+            {{ moduleLabel((record as LogEntry).module) }}
+          </template>
+          <template v-else-if="column.dataIndex === 'result'">
             <a-tag :color="(record as LogEntry).result === '成功' ? 'green' : 'red'">
               {{ (record as LogEntry).result }}
             </a-tag>

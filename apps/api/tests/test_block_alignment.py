@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-import pytest
-
 from apps.api.services.alignment.block_alignment import (
     DETERMINISTIC,
     LLM_RESOLVED,
@@ -14,7 +12,6 @@ from apps.api.services.alignment.block_alignment import (
     Row,
     align_in_order,
     align_quote_to_anchors,
-    assign_blocks,
     drop_section_headers,
     qty_similarity,
     split_blocks,

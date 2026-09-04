@@ -78,7 +78,6 @@ def _build_policy_text(data: dict) -> str:
 def _build_matrix_text(data: dict) -> dict:
     """Compress evaluation context into readable text blocks for the LLM prompt."""
     suppliers = data.get("suppliers", [])
-    rows = data.get("rows", [])
     name_by = {s["id"]: s["name"] for s in suppliers}
 
     ranking = data.get("price_ranking") or []

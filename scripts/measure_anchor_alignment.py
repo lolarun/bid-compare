@@ -10,7 +10,11 @@
 这是"嵌入召回 + 规则核对",未接 LLM 复核(闸②)与缓存——先量化上限。
 对照:降级路径裸对齐 30%。
 """
-import os, re, sys, sqlite3
+import os
+import re
+import sqlite3
+import sys
+
 import numpy as np
 from openai import OpenAI
 

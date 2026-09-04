@@ -8,13 +8,11 @@ from __future__ import annotations
 import pytest
 
 from apps.api.services.ingestion.draft_integrity import (
-    ARITHMETIC_FLAG,
     BLOCKED,
     COLUMN_SHIFT_FLAG,
     DUPLICATE_FLAG,
     OK,
     REVIEW,
-    TRUNCATION_FLAG,
     annotate_items,
     arithmetic_deviation,
     check_arithmetic,
@@ -421,7 +419,9 @@ def test_clean_table_is_ok():
 # VL 路径的行数台账是同义反复——expected 与 extracted 同源，结构上报不出丢行。
 # 序号是文档自己印在纸上的，不由抽取质量决定，是目前唯一的独立判据。
 
-from apps.api.services.ingestion.draft_integrity import check_sequence_continuity  # noqa: E402
+from apps.api.services.ingestion.draft_integrity import (
+    check_sequence_continuity,  # noqa: E402
+)
 
 
 def _seq_items(seqs):

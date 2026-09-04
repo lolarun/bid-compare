@@ -8,17 +8,21 @@ Verifies:
   5. align cells DO contribute to totals; is_lowest is correct
   6. multi align item: lowest effective price is selected (not highest)
 """
+from dataclasses import dataclass, field
+
 import pytest
 from sqlalchemy import select
-from dataclasses import dataclass, field
-from typing import Any
 
-from apps.api.models import Material, Supplier, Project, Quote
+from apps.api.models import Material, Project, Quote, Supplier
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.tender_list_session import TenderListSession
 from apps.api.schemas.analysis import BidMatrixResult
-from apps.api.services.matrix.bid_matrix import build_anchor_matrix, CELL_MISSING, CELL_PENDING, CELL_QUOTED
-
+from apps.api.services.matrix.bid_matrix import (
+    CELL_MISSING,
+    CELL_PENDING,
+    CELL_QUOTED,
+    build_anchor_matrix,
+)
 
 # ─── Minimal TenderAnchor stub ────────────────────────────────────────────────
 

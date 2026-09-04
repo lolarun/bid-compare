@@ -25,7 +25,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-
 REPO = Path(__file__).resolve().parents[1]
 ENV_PATH = REPO / "apps" / "api" / ".env"
 OUTPUT_DIR = REPO / "outputs" / "baidu_unlimited_ocr"

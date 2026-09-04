@@ -116,7 +116,7 @@ def rebuild_anchors(session) -> list[TenderAnchor]:
     return anchors
 
 
-def anchor_to_json(anchor: "TenderAnchor", category: str | None = None) -> dict:
+def anchor_to_json(anchor: TenderAnchor, category: str | None = None) -> dict:
     """序列化 TenderAnchor → anchors_json 字典(rebuild_anchors 可还原)。
 
     category: 显式品类(classify 结果)；None 时即时识别。
@@ -145,7 +145,7 @@ def anchor_to_json(anchor: "TenderAnchor", category: str | None = None) -> dict:
 
 
 def group_anchors_by_category(
-    anchors: list["TenderAnchor"], default_category: str = "",
+    anchors: list[TenderAnchor], default_category: str = "",
 ) -> dict[str, list[dict]]:
     """按品类分组锚点并序列化。unknown(空品类)回退到 default_category。
 

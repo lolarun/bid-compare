@@ -11,7 +11,6 @@ from apps.api.intelligence.vl_quote import (
     build_draft,
     detect_rotations,
     map_columns,
-    parse_csv,
 )
 
 HEAD = "row_type,材料名称,规格型号,单位,数量,单价,合价,copy_no,page"
@@ -163,8 +162,8 @@ def test_recognizer_marked_on_draft():
 
 def test_render_stage_reports_page_progress_per_batch():
     """RENDER_BATCH=8，10 页应该分两批（8、10）上报，不是渲完才报一次。"""
-    from apps.api.intelligence.vl_quote import recognize_quote_vl, RENDER_BATCH
     import apps.api.intelligence.vl_quote as vd
+    from apps.api.intelligence.vl_quote import RENDER_BATCH, recognize_quote_vl
 
     assert RENDER_BATCH == 8, "本测试的批次断言依赖这个常量，改了常量要改期望值"
     n_pages = 10
@@ -201,8 +200,8 @@ def test_render_stage_reports_page_progress_per_batch():
 
 def test_render_stage_single_batch_still_reports_start_and_end():
     """页数不超过一个批次：至少有开始(0/N)和结束(N/N)两次上报，不是完全没有。"""
-    from apps.api.intelligence.vl_quote import recognize_quote_vl
     import apps.api.intelligence.vl_quote as vd
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
 
     calls = []
 
@@ -238,8 +237,8 @@ def test_plain_two_arg_progress_cb_still_works():
     """旧调用方若只接 (stage, pct) 两个位置参数——本模块内部改用关键字传递
     stage_current/stage_total，不能让这种签名炸掉（Python 允许函数签名比调用
     方需要的更宽松，只要调用方用的是关键字参数）。"""
-    from apps.api.intelligence.vl_quote import recognize_quote_vl
     import apps.api.intelligence.vl_quote as vd
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
 
     seen = []
 
@@ -273,8 +272,9 @@ def test_plain_two_arg_progress_cb_still_works():
 # ─── 方向预检 ────────────────────────────────────────────────────────────────
 
 def _img(_n):
-    from PIL import Image
     import io
+
+    from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (40, 30), "white").save(buf, "PNG")
     return buf.getvalue()
@@ -305,8 +305,9 @@ def test_no_consensus_is_not_treated_as_no_rotation():
 
 
 def _big_img(w=2400, h=1700):
-    from PIL import Image
     import io
+
+    from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (w, h), "white").save(buf, "PNG")
     return buf.getvalue()
@@ -316,8 +317,10 @@ def test_orientation_probes_are_downscaled_not_full_res():
     """方向预检的载荷是抽取的 12 倍（页 × 4 旋转 × 3 轮）。送全分辨率会让它
     占掉整条链路的绝大部分时间——实测 19 页要发 638MB，而抽取只要 53MB。
     离线验证基线用的就是缩略图（scale=0.30），这条必须保持。"""
-    from PIL import Image
     import io as _io
+
+    from PIL import Image
+
     from apps.api.intelligence.vl_quote import ORIENT_PROBE_MAX_EDGE_PX
 
     sizes = []
@@ -337,10 +340,12 @@ def test_orientation_probes_are_downscaled_not_full_res():
 
 def test_full_resolution_is_still_used_for_extraction():
     """缩略图只能用于方向判断。抽取必须拿全分辨率，否则认不出字。"""
-    from PIL import Image
     import io as _io
-    from apps.api.intelligence.vl_quote import recognize_quote_vl
+
+    from PIL import Image
+
     import apps.api.intelligence.vl_quote as vd
+    from apps.api.intelligence.vl_quote import recognize_quote_vl
 
     big = _big_img()
     seen = {}

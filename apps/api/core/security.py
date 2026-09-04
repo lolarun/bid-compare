@@ -5,18 +5,17 @@ Centralizes all auth primitives so routes and models import from one place.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import os
 import secrets
-import datetime
 from typing import Any
 
+import jwt as pyjwt
 from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from apps.api.core.enums import ROLE_ADMIN
-
-import jwt as pyjwt
 
 _SECRET = os.getenv("JWT_SECRET", "mempas-dev-secret-change-in-prod")
 _ALGORITHM = "HS256"
@@ -50,7 +49,7 @@ def create_access_token(payload: dict[str, Any], expires_hours: int = _DEFAULT_E
     """Create a signed JWT access token."""
     data = {
         **payload,
-        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=expires_hours),
+        "exp": datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=expires_hours),
     }
     return pyjwt.encode(data, _SECRET, algorithm=_ALGORITHM)
 

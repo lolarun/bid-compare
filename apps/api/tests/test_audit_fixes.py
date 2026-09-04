@@ -7,12 +7,11 @@ re-introducing the bug breaks CI.
 from __future__ import annotations
 
 import io
-import json
-from pathlib import Path
+from datetime import UTC
 
 import pytest
-from PIL import Image
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
@@ -21,10 +20,10 @@ from apps.api.services.ingestion.document_ingestion import (
     IngestionType,
     _hash_context,
 )
-from apps.api.services.ingestion.standardize import standardize_name, standard_key
+from apps.api.services.ingestion.standardize import standard_key, standardize_name
 from apps.api.services.supplier.supplier_recommend import (
-    infer_categories,
     _is_category_token_match,
+    infer_categories,
 )
 
 
@@ -470,7 +469,7 @@ class TestPeriodicStuckJobSweep:
         self, temp_db, monkeypatch, tmp_path
     ):
         import asyncio
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from apps.api.main import _periodic_stuck_job_sweep
         from apps.api.models import ExtractionJob
@@ -488,7 +487,7 @@ class TestPeriodicStuckJobSweep:
                     type="tender",
                     status=JobStatus.RUNNING.value,
                     file_path="/dev/null",
-                    updated_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+                    updated_at=datetime.now(UTC) - timedelta(minutes=10),
                 )
             )
             db.commit()
@@ -567,7 +566,7 @@ class TestSupplierDeletionGuard:
         sid = r.json()["id"]
 
         _, SessionLocal = temp_db
-        from apps.api.models import TenderDocument, BidInvitation
+        from apps.api.models import BidInvitation, TenderDocument
         db = SessionLocal()
         try:
             tender = TenderDocument(project_name="P", items=[])
@@ -672,8 +671,8 @@ class TestConcurrentInviteSave:
         4. Our IntegrityError handler must catch, rollback, re-fetch, and
            return the peer's row — NOT raise 500.
         """
-        from apps.api.models import BidInvitation, TenderDocument
         from apps.api.main import app
+        from apps.api.models import BidInvitation, TenderDocument
 
         _, SessionLocal = temp_db
         sid = setup_db_with_supplier
@@ -799,7 +798,8 @@ class TestThreadPoolExtraction:
         from apps.api.intelligence.providers.mock import MockProvider
         from apps.api.models import ExtractionJob
         from apps.api.services.ingestion.document_ingestion import (
-            DocumentIngestionService, IngestionType,
+            DocumentIngestionService,
+            IngestionType,
         )
 
         canned = {"supplier_name": "X", "items": [{"material": "Y"}]}

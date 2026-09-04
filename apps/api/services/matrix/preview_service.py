@@ -42,8 +42,9 @@ zero 新增对齐算法——那套判据本来就不要求 DN 存在）。两�
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from apps.api.services.matrix.preview_sandbox import preview_sandbox
 
@@ -139,7 +140,8 @@ def build_preview_matrix(
         axis_kind = "tender_anchor"
         if anchors is None:
             from apps.api.services.matrix.quote_derived_axis import (
-                NoUsableQuoteRows, build_quote_derived_axis,
+                NoUsableQuoteRows,
+                build_quote_derived_axis,
             )
             try:
                 derived = build_quote_derived_axis(db, category, submission_ids)
@@ -272,7 +274,9 @@ def build_confirmation_queue(matrix: dict[str, Any], db=None):
     `PreviewCell.unit_price` 单独表达（missing 同样没价，但它不是待办）。
     """
     from apps.api.services.matrix.preview_ordering import (
-        PreviewCell, PreviewRow, build_ordering,
+        PreviewCell,
+        PreviewRow,
+        build_ordering,
     )
 
     rows: list[PreviewRow] = []

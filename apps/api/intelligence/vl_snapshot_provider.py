@@ -53,7 +53,7 @@ class VLSnapshotProvider:
         self.calls: list[str] = []          # 记录调用序列，测试可断言"确实走了 VL"
 
     @classmethod
-    def from_slug(cls, slug: str, *, snapshot_dir: Path | None = None) -> "VLSnapshotProvider":
+    def from_slug(cls, slug: str, *, snapshot_dir: Path | None = None) -> VLSnapshotProvider:
         path = (snapshot_dir or SNAPSHOT_DIR) / f"{slug}.json"
         if not path.exists():
             raise FileNotFoundError(

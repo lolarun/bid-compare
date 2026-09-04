@@ -4,12 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from apps.api.core.config import (
+    DEFAULT_SCORING_WEIGHTS,
+    DEFAULT_THRESHOLDS,
+    EXTENDED_ATTR_SCHEMAS,
+)
 from apps.api.core.database import get_db
-from apps.api.core.config import DEFAULT_SCORING_WEIGHTS, DEFAULT_THRESHOLDS, EXTENDED_ATTR_SCHEMAS
 from apps.api.core.enums import ROLE_ADMIN
 from apps.api.core.security import require_role
 from apps.api.models import AnalysisConfig
-from apps.api.schemas import ConfigUpdate, ConfigOut
+from apps.api.schemas import ConfigOut, ConfigUpdate
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 

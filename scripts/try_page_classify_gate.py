@@ -372,8 +372,8 @@ def classify_doc(slug: str, *, downscale: bool, jobs: int = 1) -> DocReport:
 
 
 def _make_provider():
-    from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
     from apps.api.core.config import get_settings
+    from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
 
     s = get_settings()
     if not (s.DASHSCOPE_API_KEY or getattr(s, "DASHSCOPE_API_KEYS", "")):
@@ -435,6 +435,7 @@ class QianfanVLProvider:
 
 def _make_ernie_provider() -> QianfanVLProvider:
     import os
+
     from dotenv import load_dotenv
 
     load_dotenv(REPO / "apps" / "api" / ".env")
@@ -514,6 +515,7 @@ PACKY_MODELS: dict[str, int] = {
 
 def _make_gemini_provider() -> GeminiVLProvider:
     import os
+
     from dotenv import load_dotenv
 
     load_dotenv(REPO / "apps" / "api" / ".env")
@@ -546,6 +548,7 @@ class MimoDirectProvider(GeminiVLProvider):
 
 def _make_mimo_direct_provider(model: str = "mimo-v2.5") -> MimoDirectProvider:
     import os
+
     from dotenv import load_dotenv
 
     load_dotenv(REPO / "apps" / "api" / ".env")
@@ -561,6 +564,7 @@ def _make_mimo_direct_provider(model: str = "mimo-v2.5") -> MimoDirectProvider:
 def _make_packy_provider(model: str) -> GeminiVLProvider:
     """同一个网关、指定模型。`_make_gemini_provider` 是它的 gemini-3.6-flash 特例。"""
     import os
+
     from dotenv import load_dotenv
 
     load_dotenv(REPO / "apps" / "api" / ".env")
@@ -688,11 +692,13 @@ def reparse_with_paddle(slug: str, predicted_pages: set[int]) -> dict:
         return {"skipped": "招标文件本来就走文字层直抽、不进 Paddle 账单，没有可比的基线"}
 
     import pypdf
-    from apps.api.intelligence.providers import paddle_ocr
-    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+
     from apps.api.intelligence.document_loader import DocumentLoader
+    from apps.api.intelligence.paddle_vl import recognize_quote_paddle
+    from apps.api.intelligence.providers import paddle_ocr
     from apps.api.tests.test_scenarios_e2e import (
-        recognize_snapshot, SUPPLIER_SNAPSHOT_PAGE_COUNTS, _total_of,
+        _total_of,
+        recognize_snapshot,
     )
 
     slug_full = f"quote_{slug}"

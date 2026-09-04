@@ -1,6 +1,9 @@
 """User account model."""
 
-from sqlalchemy import Column, DateTime, Integer, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
 
 from apps.api.core.database import Base
 from apps.api.core.security import hash_password, verify_password
@@ -10,18 +13,18 @@ from apps.api.models._base import _now
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(64), unique=True, nullable=False, index=True)
-    password_hash = Column(String(128), nullable=False)
-    password_salt = Column(String(32), nullable=False)
-    nickname = Column(String(64), nullable=False, default="")
-    role = Column(String(16), nullable=False, default="比价员")  # 管理员/比价员/查看者
-    email = Column(String(128), default="")
-    phone = Column(String(32), default="")
-    status = Column(String(8), nullable=False, default="启用")  # 启用/停用
-    last_login = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=_now)
-    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    password_salt: Mapped[str] = mapped_column(String(32), nullable=False)
+    nickname: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="比价员")  # 管理员/比价员/查看者
+    email: Mapped[str | None] = mapped_column(String(128), default="")
+    phone: Mapped[str | None] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="启用")  # 启用/停用
+    last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     def verify_password(self, password: str) -> bool:
         return verify_password(password, self.password_salt, self.password_hash)

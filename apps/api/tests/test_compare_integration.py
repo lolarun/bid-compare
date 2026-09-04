@@ -16,13 +16,12 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, update
-from PIL import Image
 from fastapi.testclient import TestClient
+from PIL import Image
+from sqlalchemy import func, select, update
 
 from apps.api.intelligence.pipeline import ExtractionPipeline
 from apps.api.intelligence.providers.mock import MockProvider
-
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -772,8 +771,10 @@ class TestSubmissionResolver:
 
     def test_submission_ids_excludes_supplier_union(self, compare_client):
         """supplier_ids=[sid] 且 submission_ids=[sub_b] 时，不得返回 sub_a（同供应商）。"""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         state = _setup_two_subs_same_supplier(compare_client)
 
@@ -796,9 +797,11 @@ class TestSubmissionResolver:
 
     def test_superseded_submission_excluded(self, compare_client):
         """superseded 状态的 submission 永不参与 resolve，无论 supplier_ids 是否匹配。"""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidSubmission
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         state = _setup_two_subs_same_supplier(compare_client)
 
@@ -823,8 +826,10 @@ class TestSubmissionResolver:
 
     def test_explicit_sub_b_only_consumes_sub_b(self, compare_client):
         """同一 supplier 两份 submission，显式选择 sub_b 时结果集只含 sub_b。"""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         state = _setup_two_subs_same_supplier(compare_client)
 
@@ -845,8 +850,10 @@ class TestSubmissionResolver:
 
     def test_no_submission_ids_legacy_path(self, compare_client):
         """不传 submission_ids 时，supplier_ids 仍能正常查到全部 active submissions。"""
-        from apps.api.services.submission.bid_submission_resolve import resolve_active_submissions
         from apps.api.core.database import SessionLocal
+        from apps.api.services.submission.bid_submission_resolve import (
+            resolve_active_submissions,
+        )
 
         state = _setup_two_subs_same_supplier(compare_client)
 
@@ -1198,10 +1205,11 @@ class TestExtendedQualityGate:
         实则从未落盘。这不是猜测：直接复现过（mutation 后立即读到新值，换一个
         全新 session 读，读到的还是旧值）。
         """
+        from sqlalchemy.orm.attributes import flag_modified
+
         from apps.api.core.database import SessionLocal
         from apps.api.models.bid_submission import BidQuoteLine
         from apps.api.models.extraction_job import ExtractionJob
-        from sqlalchemy.orm.attributes import flag_modified
 
         state = self._base_setup(compare_client, "声明总价供应商", "声明总价测试")
         sub_id = state["sub_id"]
@@ -1243,10 +1251,11 @@ class TestExtendedQualityGate:
 
         flag_modified 的必要性同 test_declared_total_mismatch_blocked 上方注释。
         """
-        from apps.api.core.database import SessionLocal
-        from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
-        from apps.api.models.extraction_job import ExtractionJob
         from sqlalchemy.orm.attributes import flag_modified
+
+        from apps.api.core.database import SessionLocal
+        from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
+        from apps.api.models.extraction_job import ExtractionJob
 
         state = self._base_setup(compare_client, "超限行供应商", "超限行测试")
         sub_id = state["sub_id"]
@@ -1380,7 +1389,7 @@ class TestBatchConfirmRevive:
 
     def test_superseded_prior_is_revived_not_returned(self, compare_client):
         from apps.api.core.database import SessionLocal
-        from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
+        from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 
         job_id, supplier_id, first = self._upload_confirm(compare_client)
         sub_id = first["submission_id"]
@@ -1456,9 +1465,13 @@ import time as _time
 import uuid as _uuid
 
 from apps.api.intelligence.extraction_draft import (
-    ExtractionDraft, DraftRow, SourceRef, QualityReport,
+    DraftRow,
+    ExtractionDraft,
+    QualityReport,
+    SourceRef,
 )
 from apps.api.intelligence.pipeline import ExtractionPipeline
+
 
 def _draft_from_rows(field_rows: list[dict], flags_per_row: dict | None = None) -> ExtractionDraft:
     """构造一个最小合成 ExtractionDraft（全部 quote_line），供桥接契约测试。"""

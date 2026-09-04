@@ -339,11 +339,11 @@ def build_sheet1(ws, matrix: dict, anchors: dict[str, dict], quotes: dict[int, d
         n_q = sum(1 for c in cells if c.get("cell_status") in ("quoted", "aggregated"))
         n_a = sum(1 for c in cells if c.get("cell_status") in ("quoted", "aggregated", "pending"))
         if n_q >= 3:
-            cmp_txt = f"三家可比"
+            cmp_txt = "三家可比"
         elif n_q >= 2:
             cmp_txt = f"可比（{n_q}家）"
         elif n_a >= 2:
-            cmp_txt = f"参考（含待确认）"
+            cmp_txt = "参考（含待确认）"
         else:
             cmp_txt = "不可比"
 
@@ -677,7 +677,6 @@ def build_sheet5(ws, matrix: dict, anchors: dict, quotes: dict) -> None:
             if not _is_risk(flags):
                 continue
             qid      = cell.get("source_quote_id")
-            qdet     = quotes.get(qid) if qid else None
             sup_name = next((s.get("name", "") for s in matrix["suppliers"]
                              if s["id"] == (cell.get("submission_id") or cell.get("id"))), "")
 

@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 
 from apps.api.services.submission.quote_confirmation_service import _dedupe_copies
 
-
 # ── A. 纯函数单测 ────────────────────────────────────────────────────────────
 
 def _row(seq: str, total: float, copy_no: str = "") -> dict:
@@ -125,9 +124,9 @@ DUPLICATED_QUOTE = {
 
 @pytest.fixture
 def copy_dedup_client(temp_db, monkeypatch, tmp_path, auth_override):
+    from apps.api.intelligence.base import ExtractionResponse
     from apps.api.intelligence.pipeline import ExtractionPipeline
     from apps.api.intelligence.providers.mock import MockProvider
-    from apps.api.intelligence.base import ExtractionResponse
 
     class _DupProvider(MockProvider):
         def extract(self, images, schema, prompt, timeout=90, **kwargs):
@@ -153,6 +152,7 @@ def copy_dedup_client(temp_db, monkeypatch, tmp_path, auth_override):
 
 def _png() -> bytes:
     import io
+
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (16, 16), "white").save(buf, format="PNG")
@@ -203,9 +203,9 @@ class TestCopyDedupIntegration:
 
     def test_single_copy_document_unaffected(self, copy_dedup_client, monkeypatch):
         """没有重复副本的正常文档：行为与改动前完全一致，copy_dedup=None。"""
+        from apps.api.intelligence.base import ExtractionResponse
         from apps.api.intelligence.pipeline import ExtractionPipeline
         from apps.api.intelligence.providers.mock import MockProvider
-        from apps.api.intelligence.base import ExtractionResponse
 
         single = {
             "supplier_name": "亨通电缆",

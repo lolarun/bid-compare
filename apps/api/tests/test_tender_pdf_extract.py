@@ -22,8 +22,12 @@ from pathlib import Path
 import pytest
 
 from apps.api.services.supplier.brand_match import build_brand_context, check_brand
-from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json, rebuild_anchors
 from apps.api.services.tender.source_reconcile import reconcile_anchors
+from apps.api.services.tender.tender_list import (
+    TenderAnchor,
+    anchor_to_json,
+    rebuild_anchors,
+)
 
 REPO = Path(__file__).parent.parent.parent.parent
 TENDER_PDF = REPO / "tests" / "fixtures" / "documents" / "金桥地体上盖项目-招标文件.pdf"
@@ -163,7 +167,7 @@ def test_reconcile_ignores_empty_values():
 
 def _seed_pdf_session(db):
     """3 锚点(含材质) × 3 供应商，PDF 来源 + 品牌映射。"""
-    from apps.api.models import Project, Supplier, Material, Quote, TenderListSession
+    from apps.api.models import Material, Project, Quote, Supplier, TenderListSession
     from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 
     proj = Project(name="PdfTest", code="PDF-1")
@@ -285,13 +289,13 @@ def test_extract_bidlist_real_pdf():
     print("═" * 60)
 
     # 1. 页定位
-    print(f"\n[页定位]")
+    print("\n[页定位]")
     print(f"  brand_page : {result['detected_pages']['brand']}")
     print(f"  bidlist_pages : {result['detected_pages']['bidlist']}")
     print(f"  source_type : {result['source_type']}")
 
     # 2. TableGrid 使用率
-    print(f"\n[TableGrid 使用率]")
+    print("\n[TableGrid 使用率]")
     diag = result["page_diagnostics"]
     tg = qm["table_grid_pages"]
     fb = qm["html_fallback_pages"]
@@ -307,7 +311,7 @@ def test_extract_bidlist_real_pdf():
         )
 
     # 3. 行数 & seq 范围
-    print(f"\n[行数 & seq]")
+    print("\n[行数 & seq]")
     numeric = sorted(int(s) for s in qm["seq_missing"] or [] if s.isdigit())
     all_seqs = [str(it.get("seq", "")).strip() for it in result["items"] if it.get("seq")]
     numeric_seqs = sorted(int(s) for s in all_seqs if s.isdigit())
@@ -319,19 +323,19 @@ def test_extract_bidlist_real_pdf():
     print(f"  row_count_by_page: {qm['row_count_by_page']}")
 
     # 4. 字段覆盖率
-    print(f"\n[字段覆盖率]")
+    print("\n[字段覆盖率]")
     print(f"  material_columns_filled_rate : {qm['material_columns_filled_rate']:.1%}")
     print(f"  brand_filled_rate            : {qm['brand_filled_rate']:.1%}")
     print(f"  source_ref_coverage          : {qm['source_ref_coverage']:.1%}")
     print(f"  qty_parse_success_rate       : {qm['qty_parse_success_rate']:.1%}")
 
     # 5. 品牌表
-    print(f"\n[品牌表]")
+    print("\n[品牌表]")
     print(f"  brand_requirement : {[b['brand_en'] + '/' + b['brand_cn'] for b in result['brand_requirement']]}")
     print(f"  supplier_brands   : {[(s['supplier_name'][:6], s['brand']) for s in result['supplier_brands']]}")
 
     # 6. Excel vs PDF 对账
-    print(f"\n[Excel vs PDF 对账]")
+    print("\n[Excel vs PDF 对账]")
     if recon:
         print(f"  xlsx_count         : {recon.get('xlsx_count')}")
         print(f"  pdf_count          : {recon.get('pdf_count')}")

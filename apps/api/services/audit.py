@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from apps.api.core.enums import LOG_MODULE_BID_COMPARE
 from apps.api.models.operation_log import OperationLog
 
 # Canonical event type identifiers
@@ -99,7 +100,7 @@ def write_domain_event(
     }
     entry = OperationLog(
         user=user or "system",
-        module="bid-compare",
+        module=LOG_MODULE_BID_COMPARE,
         action=event_type,
         target=_identity_label(identity),
         result=result,

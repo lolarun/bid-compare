@@ -12,6 +12,29 @@
 > `uncertain` branch is still covered, by a synthetic half-priced sheet in
 > `test_document_classify`, because a judgement boundary is the right thing to
 > guard with a synthetic sample — only business facts need real corpus.
+
+## Corpus-wide acceptance contract
+
+The former `docs/test/E2E_FIXTURES.md` and
+`docs/test/BID_E2E_TEST_PLAN.md` were retired on 2026-09-02. Their surviving
+corpus facts are consolidated here so this file is the only active fixture
+inventory:
+
+- A fresh run must account for every source page; truncation or a replay-cache
+  miss fails closed rather than silently skipping evidence.
+- Confirmed quote lines require traceable `source_ref` coordinates. Generated
+  OCR or reconciliation outputs are observations, never ground truth.
+- Subtotal, total, heading, and remark rows must not enter product rows.
+- Declared totals must close against line totals within the centralized
+  tolerance or carry an explicit human-review record.
+- `BidQuoteLine` count must equal confirmed item count; matrix columns must use
+  the exact `submission_id` set; pending rows stay out of official totals.
+- UI and export must consume the same business result and agree cell-for-cell.
+- Regression fixtures must not create or contaminate production suppliers,
+  materials, quotes, or historical-price evidence.
+
+The original Jinqiao subset notes and the June 2026 test proposal are preserved
+under `archive/design/` for provenance, not as current requirements.
 >
 > Scenario grouping (A/B/C) is recorded here, not in filenames — this is what
 > lets the E2E suite (design/28 §7 cut 7) run each scenario independently.
@@ -71,9 +94,8 @@
 
 Per design/28 §6, unrelated material stays under `docs/` — not part of this
 corpus: 询标疑问 (query documents), 合同/投标书样式 (contract/bid-format
-templates), `docs/test1/prj1/_cmp.py`, intermediate `.csv`/`.doc` files,
-`docs/test/BID_E2E_TEST_PLAN.md`, `docs/test/E2E_FIXTURES.md`,
+templates), intermediate `.doc` files,
 `docs/test/徐汇区华泾镇D5B一期桥架...` (a different material category, not
-part of the cable scenario), `docs/test/材料采购招标文件审批表.pdf` (an
-approval form, not a recognition fixture), and the `.zip`/`.7z` archives
-under `docs/test1/`.
+part of the cable scenario), and the `.zip`/`.7z` archives under
+`docs/test1/`. Their presence does not make them fixture inputs; adding a
+corpus file requires an explicit row in this manifest.

@@ -33,7 +33,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from e2e_diff import diff_doc  # noqa: E402
-from try_paddleocr_vl import DOCS, SEVEN_QUOTE_DOCS, OUT_DIR, _git_sha  # noqa: E402
+from try_paddleocr_vl import DOCS, OUT_DIR, SEVEN_QUOTE_DOCS, _git_sha  # noqa: E402
 
 # design/26 §3.3：本脚本的列位置映射有已知未解决的缺陷——同一张表不同行对
 # "空单元格"的处理方式不一致，导致固定表头位置的映射会在部分行上错位

@@ -29,8 +29,8 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
 
 from apps.api.core.domain_config import (
     BLOCK_ASSIGN_AMBIGUITY_MARGIN,

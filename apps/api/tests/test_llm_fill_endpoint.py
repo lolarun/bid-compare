@@ -9,11 +9,10 @@ import json
 import pytest
 
 import apps.api.services.alignment.anchor_match as am
-from apps.api.models import Material, Supplier, Project, Quote
-from apps.api.models.tender_list_session import TenderListSession
+from apps.api.models import Material, Project, Quote, Supplier
 from apps.api.models.alignment_finalization import AlignmentFinalization
-from apps.api.routes.analysis import tender_list_llm_fill, _LlmFillBody
-
+from apps.api.models.tender_list_session import TenderListSession
+from apps.api.routes.analysis import _LlmFillBody, tender_list_llm_fill
 
 # ─── fake embedding + LLM ─────────────────────────────────────────────────────
 

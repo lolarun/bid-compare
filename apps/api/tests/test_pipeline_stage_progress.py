@@ -12,7 +12,6 @@ from __future__ import annotations
 from apps.api.intelligence.base import LLMProvider
 from apps.api.intelligence.pipeline import ExtractionPipeline
 
-
 HEAD = ("row_type,seq,name,spec,unit,qty,brand,remark,unit_price_excl_tax,"
        "total_price_excl_tax,tax_rate,tax_amount,unit_price_incl_tax,"
        "total_price_incl_tax,unit_price,total_price,copy_no,page")

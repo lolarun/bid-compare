@@ -5,13 +5,12 @@ price statistics for each inferred category.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-import math
 
 from apps.api.models import Material, Quote
 from apps.api.models.brand_tier import BrandTier

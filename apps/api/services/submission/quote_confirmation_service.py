@@ -16,25 +16,24 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.config import PROFESSION_MAP
-from apps.api.core.domain_config import CHECKSUM_BLOCK_DELTA_RATIO
+from apps.api.core.domain_config import (
+    CHECKSUM_BLOCK_DELTA_RATIO,
+)
 from apps.api.core.errors import NotFoundError, ReviewRequiredError, ValidationError
+from apps.api.intelligence.price_basis import derive_price_basis
 from apps.api.models import (
+    BidQuoteLine,
+    BidSubmission,
     BrandTier,
     ExtractionJob,
     Material,
     Project,
     Supplier,
-    BidSubmission,
-    BidQuoteLine,
 )
-from apps.api.services.ingestion.list_rows import classify_quote_row
-from apps.api.services.ingestion.standardize import standardize_name
-from apps.api.intelligence.price_basis import derive_price_basis
-from apps.api.services.audit import normalize_row_type, write_domain_event, EVENT_BQL_CONFIRM
-from apps.api.services.submission import dry_run_cache
-from apps.api.core.domain_config import (
-    INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT,
-    INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO,
+from apps.api.services.audit import (
+    EVENT_BQL_CONFIRM,
+    normalize_row_type,
+    write_domain_event,
 )
 from apps.api.services.ingestion.draft_integrity import (
     AMOUNT_NOT_QUOTED,
@@ -50,6 +49,9 @@ from apps.api.services.ingestion.draft_integrity import (
     detect_truncated_numbers,
     find_duplicate_rows,
 )
+from apps.api.services.ingestion.list_rows import classify_quote_row
+from apps.api.services.ingestion.standardize import standardize_name
+from apps.api.services.submission import dry_run_cache
 
 log = logging.getLogger(__name__)
 
@@ -649,7 +651,10 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
     integrity = _gate_integrity(db, items, dry_run=dry_run, gates_advisory=gates_advisory)
 
     # ── 逐行处理 → BidQuoteLine ────────────────────────────────────────────────
-    from apps.api.services.history.comparison import get_category_thresholds, determine_alert
+    from apps.api.services.history.comparison import (
+        determine_alert,
+        get_category_thresholds,
+    )
 
     thresholds_cache: dict[str, dict] = {}
     line_count = 0
@@ -747,7 +752,6 @@ def confirm_batch(db: Session, body, dry_run: bool = False,
             #   missing — 原文没有、也没人工补写 → 权威值保持 None，仅留候选
             # 2026-08-09 教训：静默派生既凭空造钱（亨通单行虚增约 2000 万），
             # 又让算术校验 |qty×price − total| 恒成立，把列错位行洗白。
-            raw_total = _num_or_none(item.get("total_price"))
             raw_total_any = next(
                 (v for k in ("total_price", "total_price_incl_tax", "total_price_excl_tax")
                  if (v := _num_or_none(item.get(k))) is not None), None)

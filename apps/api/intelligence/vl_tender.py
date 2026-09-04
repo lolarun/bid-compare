@@ -42,15 +42,13 @@ import csv
 import io
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from apps.api.core.config import get_settings
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.extraction_draft import ExtractionDraft
 from apps.api.intelligence.vl_quote import (
-    ORIENT_PROBE_MAX_EDGE_PX,
-    PROMPT_ORIENT,
     RENDER_BATCH,
     OrientCall,
     VLCall,
@@ -164,7 +162,7 @@ def parse_tender_document(file_path: str, *, vl_call: VLCall,
                           progress_cb=None, votes: int | None = None,
                           target_pages: list[int] | None = None,
                           with_meta: bool = True,
-                          requirements: Sequence["TenderRequirement"] | None = None,
+                          requirements: Sequence[TenderRequirement] | None = None,
                           ) -> TenderParseResult:
     """招标 PDF → 采购清单 + 封面标量。**渲染只做一次**，两项共用同一批图像。
 

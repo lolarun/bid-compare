@@ -1,9 +1,9 @@
 """JWT auth — login, token validation, and current-user info."""
 
-import os
 import datetime
+import os
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from apps.api.core.database import get_db
 from apps.api.core.enums import ROLE_ADMIN
 from apps.api.core.security import (
-    get_current_user,
     create_access_token,
+    get_current_user,
 )
 from apps.api.models.user import User
 
@@ -52,7 +52,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if user.status != "启用":
         raise HTTPException(403, "账号已停用，请联系管理员")
 
-    user.last_login = datetime.datetime.now(datetime.timezone.utc)
+    user.last_login = datetime.datetime.now(datetime.UTC)
     db.commit()
 
     payload = {
@@ -62,8 +62,9 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     }
     token = create_access_token(payload)
 
+    from apps.api.core.enums import LOG_MODULE_SYSTEM
     from apps.api.routes.logs import write_log
-    write_log(db, user=user.username, module="系统", action="登录", target=user.username)
+    write_log(db, user=user.username, module=LOG_MODULE_SYSTEM, action="登录", target=user.username)
 
     return {
         "access_token": token,

@@ -10,24 +10,21 @@ Covers:
 """
 from __future__ import annotations
 
-import json
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.database import Base
-from apps.api.models.operation_log import OperationLog
-from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
-from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
 from apps.api.models.alignment_finalization import AlignmentFinalization
+from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
+from apps.api.models.operation_log import OperationLog
 from apps.api.services.audit import (
-    write_domain_event,
-    normalize_row_type,
-    EVENT_BQL_CONFIRM,
-    EVENT_ALIGNMENT_ITEM_CONFIRM,
     EVENT_ALIGNMENT_FINALIZE,
+    EVENT_ALIGNMENT_ITEM_CONFIRM,
+    EVENT_BQL_CONFIRM,
+    normalize_row_type,
+    write_domain_event,
 )
-
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────────
 

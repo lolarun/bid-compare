@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
-from apps.api.core.enums import ROLE_ADMIN
+from apps.api.core.enums import LOG_MODULE_LABELS, ROLE_ADMIN
 from apps.api.core.security import require_role
 from apps.api.models.operation_log import OperationLog
 
@@ -57,6 +57,24 @@ def list_logs(
             for log in items
         ],
     }
+
+
+@router.get("/modules", response_model=list)
+def list_log_modules(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_role(ROLE_ADMIN)),
+):
+    """Module filter vocabulary: the canonical registry plus whatever is stored.
+
+    The UI must not carry its own hand-written option list — that is how the
+    filter drifted out of sync with the values the code actually writes. Any
+    module present in the table but missing from the registry is returned with
+    its raw value as the label, so an unregistered writer is visible rather
+    than silently unfilterable.
+    """
+    stored = set(db.scalars(select(OperationLog.module).distinct()).all())
+    values = list(LOG_MODULE_LABELS) + sorted(stored - set(LOG_MODULE_LABELS))
+    return [{"value": v, "label": LOG_MODULE_LABELS.get(v, v)} for v in values]
 
 
 def write_log(

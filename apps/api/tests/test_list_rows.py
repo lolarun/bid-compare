@@ -8,7 +8,9 @@ from __future__ import annotations
 import pytest
 
 from apps.api.services.ingestion.list_rows import (
-    FOOTER_MARKERS, classify_quote_row, text_hits_footer_marker,
+    FOOTER_MARKERS,
+    classify_quote_row,
+    text_hits_footer_marker,
 )
 
 

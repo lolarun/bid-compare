@@ -9,11 +9,12 @@ Covers attach_topk → Tier-1 pre-pass → build_prompt → call_llm → validat
 """
 import json
 
-import pytest
-
-import apps.api.services.supplier.supplier_fill_llm as sfl
 from apps.api.services.supplier.supplier_fill_llm import (
-    AnchorView, SupplierQuoteRow, fill_one_supplier, build_prompt, _pick_model,
+    AnchorView,
+    SupplierQuoteRow,
+    _pick_model,
+    build_prompt,
+    fill_one_supplier,
 )
 
 

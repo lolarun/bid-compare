@@ -26,8 +26,9 @@ pypdfium2 读法，本模块自己实现，那个模块本身只负责表格结�
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Literal
 
 from apps.api.intelligence.document_loader import DocumentLoader
 from apps.api.intelligence.tender_text_layer import has_usable_text_layer
@@ -69,11 +70,14 @@ def get_scanned_classify_call() -> ScannedClassifyCall | None:
     DASHSCOPE_API_KEY 时返回 None，调用方按"判不出来"处理，不抛异常
     （跟 `paddle_doc_meta.get_text_client_call` 同一个失败不拖垮主线约定）。"""
     from apps.api.core.config import get_settings
-    from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider, ProviderError
 
     # design/41：视觉供应商由 `VISION_CLIENT_VENDOR` 决定，默认 dashscope。
     # 配 mimo 但没 key 时**明确回落并记日志**，不静默降级。
     from apps.api.core.domain_config import VISION_CLIENT_VENDOR
+    from apps.api.intelligence.providers.dashscope_ocr import (
+        DashScopeOCRProvider,
+        ProviderError,
+    )
 
     if VISION_CLIENT_VENDOR == "mimo":
         from apps.api.intelligence.providers.mimo_vision import get_mimo_vision_provider

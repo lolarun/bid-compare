@@ -32,15 +32,15 @@ import atexit
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # avoid runtime import cycle
     from apps.api.intelligence.pipeline import ExtractionPipeline
 
 log = logging.getLogger(__name__)
 
-_pipeline: "Optional[ExtractionPipeline]" = None
-_executor: Optional[ThreadPoolExecutor] = None
+_pipeline: ExtractionPipeline | None = None
+_executor: ThreadPoolExecutor | None = None
 
 
 def _pool_size() -> int:
@@ -51,12 +51,12 @@ def _pool_size() -> int:
         return 8
 
 
-def set_runtime_pipeline(pipeline: "ExtractionPipeline | None") -> None:
+def set_runtime_pipeline(pipeline: ExtractionPipeline | None) -> None:
     global _pipeline
     _pipeline = pipeline
 
 
-def get_runtime_pipeline() -> "Optional[ExtractionPipeline]":
+def get_runtime_pipeline() -> ExtractionPipeline | None:
     return _pipeline
 
 

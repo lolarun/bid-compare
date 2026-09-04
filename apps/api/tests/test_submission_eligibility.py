@@ -6,8 +6,6 @@ match 门有自己的 6 项检查却完全不看 checksum。**同一个问题在
 """
 from __future__ import annotations
 
-import pytest
-
 from apps.api.services.ingestion.draft_integrity import BLOCKED, OK, REVIEW
 from apps.api.services.submission.submission_eligibility import (
     blocking_summary,

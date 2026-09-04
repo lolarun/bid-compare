@@ -44,7 +44,7 @@ class PaddleSnapshotReplay:
 
     @classmethod
     def from_slugs(cls, keyword_to_slug: dict[str, str],
-                   *, snapshot_dir: Path | None = None) -> "PaddleSnapshotReplay":
+                   *, snapshot_dir: Path | None = None) -> PaddleSnapshotReplay:
         d = snapshot_dir or SNAPSHOT_DIR
         for kw, slug in keyword_to_slug.items():
             path = d / f"{slug}.json"

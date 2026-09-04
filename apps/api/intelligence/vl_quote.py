@@ -51,8 +51,8 @@ import csv
 import io
 import logging
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
 
 from apps.api.core.config import get_settings
 from apps.api.core.utils import parse_num
@@ -353,7 +353,7 @@ def _num(x):
 
 def parse_csv(text: str, page_count: int, *,
               slots: dict[str, list[tuple[str, ...]]] | None = None,
-              field_builder: "FieldBuilder | None" = None,
+              field_builder: FieldBuilder | None = None,
               parser_mode: str = "vl_direct",
               ) -> tuple[list[_ParsedRow], list[str], dict]:
     """CSV 文本 → 结构化行 + 表头 + 诊断。

@@ -63,6 +63,7 @@ def test_build_anchor_csv_covers_all_89_rows_across_5_pages():
     """89 行分布在 14-18 共 5 页，只有第 14 页有表头行——15-18 页续表沿用。"""
     _require_fixture(TENDER_PDF)
     import pdfplumber
+
     from apps.api.intelligence.tender_text_layer import build_anchor_csv
 
     with pdfplumber.open(str(TENDER_PDF)) as pdf:
@@ -80,6 +81,7 @@ def test_build_anchor_csv_covers_all_89_rows_across_5_pages():
 def test_build_anchor_csv_none_when_no_anchor_table():
     _require_fixture(TEXT_LAYER_NO_TABLE_PDF)
     import pdfplumber
+
     from apps.api.intelligence.tender_text_layer import build_anchor_csv
 
     with pdfplumber.open(str(TEXT_LAYER_NO_TABLE_PDF)) as pdf:
@@ -116,6 +118,7 @@ def test_continuation_requires_consecutive_pages():
 def test_build_brand_requirements_matches_known_shape():
     _require_fixture(TENDER_PDF)
     import pdfplumber
+
     from apps.api.intelligence.tender_text_layer import build_brand_requirements
 
     with pdfplumber.open(str(TENDER_PDF)) as pdf:
@@ -130,6 +133,7 @@ def test_build_brand_requirements_matches_known_shape():
 def test_build_brand_requirements_empty_when_absent():
     _require_fixture(TEXT_LAYER_NO_TABLE_PDF)
     import pdfplumber
+
     from apps.api.intelligence.tender_text_layer import build_brand_requirements
 
     with pdfplumber.open(str(TEXT_LAYER_NO_TABLE_PDF)) as pdf:
@@ -163,8 +167,8 @@ def test_build_tender_draft_honors_parser_mode():
 def test_text_layer_matches_vl_direct_field_for_field():
     _require_fixture(TENDER_PDF)
     from apps.api.core.config import get_settings
-    from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
     from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE
+    from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
     from apps.api.intelligence.tender_text_layer import parse_tender_document_text_layer
     from apps.api.intelligence.vl_tender import parse_tender_document
     from apps.api.services.tender.tender_pdf import _draft_row_to_anchor

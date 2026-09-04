@@ -20,7 +20,6 @@ import pytest
 
 from apps.api.intelligence.scanned_pdf_classify import (
     SCANNED_CLASSIFY_PAGES,
-    Tier15Result,
     classify_native_pdf,
     classify_pdf_for_dispatch,
     classify_scanned_pdf,

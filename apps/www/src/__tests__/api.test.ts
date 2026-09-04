@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import api from '../api/client'
-import { materialApi, supplierApi, projectApi, quoteApi, analysisApi, configApi } from '../api'
+import { materialApi, supplierApi, projectApi, quoteApi, analysisApi, configApi, logApi } from '../api'
 
 vi.mock('../api/client', () => {
   const mockApi = {
@@ -183,5 +183,20 @@ describe('configApi', () => {
     mockApi.put.mockResolvedValue({ data: {} })
     await configApi.update('scoring_weights', payload)
     expect(mockApi.put).toHaveBeenCalledWith('/config/scoring_weights', payload)
+  })
+})
+
+describe('logApi', () => {
+  it('list calls GET /logs', async () => {
+    mockApi.get.mockResolvedValue({ data: { total: 0, items: [] } })
+    await logApi.list({ module: 'bid-compare' })
+    expect(mockApi.get).toHaveBeenCalledWith('/logs', { params: { module: 'bid-compare' } })
+  })
+
+  it('modules calls GET /logs/modules — the filter vocabulary comes from the backend', async () => {
+    mockApi.get.mockResolvedValue({ data: [{ value: 'bid-compare', label: '招标比价分析' }] })
+    const { data } = await logApi.modules()
+    expect(mockApi.get).toHaveBeenCalledWith('/logs/modules')
+    expect(data[0].value).toBe('bid-compare')
   })
 })

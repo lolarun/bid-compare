@@ -12,7 +12,8 @@ import pytest
 from apps.api.models import Project
 from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.services.matrix.quote_derived_axis import (
-    NoUsableQuoteRows, build_quote_derived_axis,
+    NoUsableQuoteRows,
+    build_quote_derived_axis,
 )
 
 

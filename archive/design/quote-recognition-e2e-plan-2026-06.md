@@ -1,5 +1,9 @@
 # 报价识别 E2E 完整测试方案
 
+> **Archived 2026-09-02.** This is a June 2026 implementation proposal, not
+> the current test contract. Use `.claude/rules/tests.md`, implemented tests,
+> and `tests/fixtures/documents/MANIFEST.md` for current behavior.
+
 目标:把招标侧已验证的「真实 OCR → 抽取 → 与标准答案 Excel 对账 + 质量门」模式,**完整搬到报价侧**,让报价识别的准确率从"凭感觉"变成"可测量、可回归、可验收"。基准文档见 [E2E_FIXTURES.md](E2E_FIXTURES.md)。
 
 本方案不替代、不降低 CLAUDE.md §6/§13/§14 的任何要求;它是把那些要求在报价侧**变成可执行的断言**。

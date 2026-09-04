@@ -35,7 +35,6 @@ from sqlalchemy import func, select, text
 from apps.api.models import Project
 from apps.api.services.matrix.preview_sandbox import preview_sandbox
 from apps.api.services.matrix.preview_service import build_preview_matrix
-
 from apps.api.tests.test_compare_integration import compare_client  # noqa: F401
 from apps.api.tests.test_preview_service import _setup_unconfirmed  # noqa: F401
 

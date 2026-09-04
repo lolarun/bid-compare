@@ -13,7 +13,6 @@ canonical string before further rules run. This is what makes
 import re
 import unicodedata
 
-
 # ─── Stable canonical form (run first, before all other rules) ────────────
 
 

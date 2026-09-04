@@ -37,9 +37,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from apps.api.core.config import get_settings                    # noqa: E402
-from apps.api.intelligence import vl_quote as vd                # noqa: E402
-from apps.api.intelligence.document_loader import DocumentLoader  # noqa: E402
+from apps.api.core.config import get_settings  # noqa: E402
+from apps.api.intelligence import vl_quote as vd  # noqa: E402
 
 OUT_DIR = REPO / "tests" / "fixtures" / "vl_snapshots"
 
@@ -67,8 +66,9 @@ def derive_expected(snap: dict) -> dict:
     包含当前的缺陷。它的作用不是"证明结果正确"，而是"结果一旦变化必须有人知道"。
     确定性链路改了 → 这里红 → 要么是改坏了，要么是有意改进、需显式刷新基线。
     """
-    from apps.api.intelligence.vl_quote import build_draft
     import collections
+
+    from apps.api.intelligence.vl_quote import build_draft
 
     d = build_draft(
         snap["csv"], file_path=snap["pdf"], page_count=snap["page_count"],

@@ -15,6 +15,8 @@ qwen 在生产里担着四项职责，**失败后果各不相同**，所以是�
 """
 from __future__ import annotations
 
+import pytest
+
 import apps.api.core.domain_config as dc
 from apps.api.intelligence import paddle_doc_meta as pdm
 
@@ -34,9 +36,10 @@ def test_mimo_selected_when_configured(monkeypatch):
     captured = {}
 
     class _FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, **kw):
             captured["base_url"] = base_url
             captured["key"] = api_key
+            captured["kw"] = kw
         chat = None
 
     import openai
@@ -45,6 +48,11 @@ def test_mimo_selected_when_configured(monkeypatch):
     assert call is not None
     assert "xiaomimimo" in captured["base_url"], captured
     assert captured["key"] == "tp-fake-for-test"
+    # 重试次数必须是本项目显式声明的值，不是 openai SDK 的默认（2）。断言的是
+    # 「有没有被说出来」，不是具体数字——数字改了这里跟着 domain_config 走。
+    # 超时在这条路径上是**逐次调用**传的（`paddle_doc_meta._mimo_call`），
+    # 不在构造参数里，所以这里只断言重试。
+    assert captured["kw"]["max_retries"] == dc.LLM_MAX_RETRIES, captured
 
 
 def test_mimo_without_key_falls_back_loudly(monkeypatch, caplog):
@@ -90,14 +98,16 @@ def test_vision_mimo_selected_when_configured(monkeypatch):
     captured = {}
 
     class _FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, **kw):
             captured["base_url"] = base_url
+            captured["kw"] = kw
 
     import openai
     monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
     call = spc.get_scanned_classify_call()
     assert call is not None
     assert "xiaomimimo" in captured.get("base_url", ""), captured
+    assert captured["kw"]["max_retries"] == dc.LLM_MAX_RETRIES, captured
 
 
 def test_vision_mimo_without_key_falls_back_loudly(monkeypatch, caplog):
@@ -112,6 +122,7 @@ def test_vision_mimo_without_key_falls_back_loudly(monkeypatch, caplog):
         "回落了却没有日志——正是被禁止的静默降级"
 
 
+@pytest.mark.real_gap_filler
 def test_gap_fill_follows_the_vision_switch_not_the_text_one(monkeypatch):
     """补位是**视觉**调用，必须跟视觉开关走。
 
@@ -125,7 +136,7 @@ def test_gap_fill_follows_the_vision_switch_not_the_text_one(monkeypatch):
     monkeypatch.setenv("MIMO_API_KEY", "tp-fake")
 
     class _FakeOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, **kw):
             pass
 
     import openai

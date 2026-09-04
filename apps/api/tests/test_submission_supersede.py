@@ -14,10 +14,10 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.core.database import Base, get_db
 from apps.api.main import app
-from apps.api.routes.auth import get_current_user
 from apps.api.models import Project
 from apps.api.models.bid_submission import BidSubmission
 from apps.api.models.extraction_job import ExtractionJob
+from apps.api.routes.auth import get_current_user
 
 
 @pytest.fixture(scope="module")

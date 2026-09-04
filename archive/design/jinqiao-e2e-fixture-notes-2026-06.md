@@ -1,5 +1,9 @@
 # 比价 E2E 测试文档清单（金桥地铁上盖 J9A-03 阀门项目）
 
+> **Archived 2026-09-02.** Unique validation facts from this subset were
+> consolidated into `tests/fixtures/documents/MANIFEST.md`; this file is kept
+> only as a point-in-time audit record.
+
 > **2026-08-26（design/43）**：本文件已被 `tests/fixtures/documents/MANIFEST.md`
 > 取代为当前权威语料清单（18 文件、A/B/C 三场景、design/28 起维护）。本文件保留
 > 作为该 3-供应商子集当初的详细核对记录（页数/文字层类型/已知风险），下表路径

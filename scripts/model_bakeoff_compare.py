@@ -18,8 +18,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from scripts.cable_diff_report import (            # noqa: E402
-    DOCS, align, close, load_golden, load_vl, norm_spec, select_copy, split_rows,
+from scripts.cable_diff_report import (  # noqa: E402
+    DOCS,
+    align,
+    close,
+    load_golden,
+    load_vl,
+    select_copy,
+    split_rows,
 )
 
 

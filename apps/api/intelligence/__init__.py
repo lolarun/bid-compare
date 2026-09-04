@@ -13,14 +13,14 @@ chain it served — see vl_quote.py / vl_tender.py for the live VL-direct prompt
 """
 
 from apps.api.intelligence.base import (
-    LLMProvider,
     ExtractionResponse,
+    LLMProvider,
     ProviderError,
 )
-from apps.api.intelligence.schemas import TENDER_SCHEMA, QUOTE_SCHEMA
 from apps.api.intelligence.pipeline import ExtractionPipeline
-from apps.api.intelligence.providers.mock import MockProvider
 from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider
+from apps.api.intelligence.providers.mock import MockProvider
+from apps.api.intelligence.schemas import QUOTE_SCHEMA, TENDER_SCHEMA
 
 __all__ = [
     "LLMProvider",

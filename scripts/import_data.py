@@ -14,17 +14,35 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
-
-from server.database import get_engine, Base, SessionLocal
+from server.database import Base, SessionLocal, get_engine
 from server.models import (
-    Material, Supplier, Project, Quote, AnalysisConfig,
-    PROFESSION_MAP, PROFESSION_ABBR, CATEGORY_ABBR,
-    DEFAULT_SCORING_WEIGHTS, DEFAULT_THRESHOLDS,
+    CATEGORY_ABBR,
+    DEFAULT_SCORING_WEIGHTS,
+    DEFAULT_THRESHOLDS,
+    PROFESSION_ABBR,
+    PROFESSION_MAP,
+    AnalysisConfig,
+    Material,
+    Project,
+    Quote,
+    Supplier,
+)
+
+from scripts.analyze_data import (
+    _to_float,
+    classify_subcat,
+    parse_不锈钢管,
+    parse_桥架,
+    parse_水箱,
+    parse_潜水泵,
+    parse_空调泵,
+    parse_配电箱_all,
+    parse_阀门,
+    parse_风口风阀,
+    parse_风机盘管,
 )
 from scripts.analyze_data import (
-    parse_桥架, parse_阀门, parse_风口风阀, parse_母线 as parse_母线槽,
-    parse_不锈钢管, parse_水箱, parse_潜水泵, parse_风机盘管, parse_空调泵,
-    parse_配电箱_all, classify_subcat, _to_float,
+    parse_母线 as parse_母线槽,
 )
 
 DATA_DIR = PROJECT_ROOT / "docs" / "data"

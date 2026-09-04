@@ -9,21 +9,22 @@ These tests verify:
   - BidAlignmentGroup scoped to current TenderListSession
 """
 
-import json
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from apps.api.core.database import Base
+from apps.api.core.database import Base, get_db
 from apps.api.main import app
-from apps.api.core.database import get_db
-from apps.api.routes.auth import get_current_user
 from apps.api.models import (
-    Project, Supplier, Material, Quote, TenderListSession,
+    Material,
+    Project,
+    Quote,
+    Supplier,
+    TenderListSession,
 )
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-
+from apps.api.routes.auth import get_current_user
 
 # ─── In-memory SQLite fixture ─────────────────────────────────────────────────
 

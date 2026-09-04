@@ -28,8 +28,8 @@ import logging
 from collections import Counter
 
 from apps.api.intelligence.extraction_draft import DETAIL_ROW_TYPE, DraftRow
-from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json
 from apps.api.services.ingestion.canonical import extract_valve_canonical
+from apps.api.services.tender.tender_list import TenderAnchor, anchor_to_json
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +195,8 @@ def extract_bidlist(
     parsed = None
     if bidlist_pages is None and brand_page is None:
         from apps.api.intelligence.tender_text_layer import (
-            has_usable_text_layer, parse_tender_document_text_layer,
+            has_usable_text_layer,
+            parse_tender_document_text_layer,
         )
         if has_usable_text_layer(file_path):
             try:

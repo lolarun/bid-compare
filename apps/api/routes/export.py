@@ -6,7 +6,7 @@ from urllib.parse import quote as url_quote
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,9 +16,9 @@ from apps.api.core.enums import ROLE_ADMIN, ROLE_BUYER
 from apps.api.core.security import require_role
 from apps.api.core.utils import parse_id_csv
 from apps.api.models.material import Material
-from apps.api.models.supplier import Supplier
-from apps.api.models.quote import Quote
 from apps.api.models.project import Project
+from apps.api.models.quote import Quote
+from apps.api.models.supplier import Supplier
 
 router = APIRouter(
     prefix="/api/export",
@@ -290,7 +290,7 @@ def export_bid_matrix(
             ["── 关键指标 ──", "数量", "占比", "含义"],
             ["可比价锚点（quoted ≥2家）", q_ge2, _pct(q_ge2, anchors_total), "至少2家供应商有明确报价，可自动横向比价"],
             [f"{N_val}家完整 quoted", q_full, _pct(q_full, anchors_total), "全部供应商均有明确报价，比价最可靠"],
-            [f"覆盖 ≥2家（含待确认）", c_ge2, _pct(c_ge2, anchors_total), "含 pending（待人工复核），复核后可比价潜力"],
+            ["覆盖 ≥2家（含待确认）", c_ge2, _pct(c_ge2, anchors_total), "含 pending（待人工复核），复核后可比价潜力"],
             [f"{N_val}家完整覆盖（含待确认）", c_full, _pct(c_full, anchors_total), "含 pending，人工复核后有机会达到完整比价"],
             [],
             ["── quoted 分布（已报价家数）──", "锚点数", "占比"],

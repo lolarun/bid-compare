@@ -40,13 +40,18 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from apps.api.core.config import get_settings                              # noqa: E402
-from apps.api.intelligence.document_loader import DocumentLoader            # noqa: E402
-from apps.api.intelligence.vl_quote import (                               # noqa: E402
-    PROMPT_QUOTE_CSV, build_draft, detect_rotations,
+from e2e_diff import diff_doc  # noqa: E402
+
+from apps.api.core.config import get_settings  # noqa: E402
+from apps.api.intelligence.document_loader import DocumentLoader  # noqa: E402
+from apps.api.intelligence.providers.dashscope_ocr import (
+    DashScopeOCRProvider,  # noqa: E402
 )
-from apps.api.intelligence.providers.dashscope_ocr import DashScopeOCRProvider  # noqa: E402
-from e2e_diff import diff_doc                                              # noqa: E402
+from apps.api.intelligence.vl_quote import (  # noqa: E402
+    PROMPT_QUOTE_CSV,
+    build_draft,
+    detect_rotations,
+)
 
 DOCS = {
     "kaishuo": {"pdf": "tests/fixtures/documents/金桥地体上盖项目-凯硕新正投标文件.pdf",

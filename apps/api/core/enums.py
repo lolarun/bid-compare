@@ -46,3 +46,19 @@ ROLE_ADMIN = "管理员"
 ROLE_BUYER = "比价员"
 ROLE_VIEWER = "查看者"
 ALL_ROLES = frozenset({ROLE_ADMIN, ROLE_BUYER, ROLE_VIEWER})
+
+# ── Operation-log module (audit trail) ───────────────────────────────────────
+# `OperationLog.module` is a machine identity used for filtering, not display
+# copy — it is a lowercase slug like the other axes above, and the UI label is
+# derived from LOG_MODULE_LABELS so renaming a screen never orphans old rows.
+# Migration 0013 normalised the legacy Chinese values ("系统" / "用户管理")
+# that predate this registry.
+LOG_MODULE_BID_COMPARE = "bid-compare"
+LOG_MODULE_USER = "user-management"
+LOG_MODULE_SYSTEM = "system"
+
+LOG_MODULE_LABELS: dict[str, str] = {
+    LOG_MODULE_BID_COMPARE: "招标比价分析",
+    LOG_MODULE_USER: "用户管理",
+    LOG_MODULE_SYSTEM: "系统",
+}

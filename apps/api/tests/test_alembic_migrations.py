@@ -6,8 +6,6 @@ no structural changes beyond adding the alembic_version table.
 """
 from __future__ import annotations
 
-import shutil
-
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
@@ -37,9 +35,10 @@ def _point_engine(monkeypatch, db_path):
 
 
 def _head_revision():
+    from pathlib import Path
+
     from alembic.config import Config
     from alembic.script import ScriptDirectory
-    from pathlib import Path
 
     migrations_dir = Path(db_mod.__file__).resolve().parent.parent / "migrations"
     cfg = Config()

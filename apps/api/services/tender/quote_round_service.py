@@ -21,12 +21,18 @@ than guessing.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from apps.api.models.quote_round import QuoteRound, STAGE_FORMAL, STAGES, STATUS_CLOSED, STATUS_OPEN
+from apps.api.models.quote_round import (
+    STAGE_FORMAL,
+    STAGES,
+    STATUS_CLOSED,
+    STATUS_OPEN,
+    QuoteRound,
+)
 
 
 def get_open_round(db: Session, project_id: int, category: str) -> QuoteRound | None:
@@ -80,7 +86,7 @@ def create_round(
     if stage not in STAGES:
         raise ValueError(f"Unknown round stage: {stage!r}")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     db.execute(update(QuoteRound).where(
         QuoteRound.project_id == project_id,
         QuoteRound.category == category,
@@ -128,7 +134,7 @@ def close_round(db: Session, round_id: int) -> QuoteRound | None:
     if round_ is None:
         return None
     round_.status = STATUS_CLOSED
-    round_.closed_at = datetime.now(timezone.utc)
+    round_.closed_at = datetime.now(UTC)
     db.commit()
     return round_
 
@@ -145,7 +151,7 @@ def reopen_round(db: Session, round_id: int) -> QuoteRound | None:
         QuoteRound.category == round_.category,
         QuoteRound.status == STATUS_OPEN,
         QuoteRound.id != round_.id,
-    ).values(status=STATUS_CLOSED, closed_at=datetime.now(timezone.utc)))
+    ).values(status=STATUS_CLOSED, closed_at=datetime.now(UTC)))
     round_.status = STATUS_OPEN
     round_.closed_at = None
     db.commit()

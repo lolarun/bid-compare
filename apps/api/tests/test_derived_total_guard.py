@@ -13,8 +13,6 @@
 """
 from __future__ import annotations
 
-import pytest
-
 from apps.api.core.domain_config import MATCH_DERIVED_TOTAL_MAX_RATE
 
 

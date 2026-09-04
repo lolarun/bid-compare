@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-from apps.api.models.bid_submission import BidSubmission, BidQuoteLine
+from apps.api.models.bid_submission import BidQuoteLine, BidSubmission
 from apps.api.models.extraction_job import ExtractionJob
 from apps.api.services.matrix.bid_matrix import build_anchor_matrix
 from apps.api.services.tender.tender_list import TenderAnchor

@@ -375,6 +375,7 @@ def _page_arith_score(csv_text: str) -> tuple[int, int]:
     判据完全确定性，不依赖某次调用的手气。
     """
     import csv as _csv
+
     from apps.api.services.ingestion.draft_integrity import check_row_arithmetic
 
     lines = [l for l in csv_text.splitlines() if l.strip()]

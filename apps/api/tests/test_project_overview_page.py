@@ -1,4 +1,4 @@
-"""docs/design/45 §6 — GET /api/projects/{id}/overview（项目概述页聚合）。
+"""archive/design/45 §6 — GET /api/projects/{id}/overview（项目概述页聚合）。
 
 这份用例守的是概述页最容易说谎的四件事：
 

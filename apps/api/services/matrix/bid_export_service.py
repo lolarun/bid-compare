@@ -31,8 +31,8 @@ def get_bid_matrix_for_export(
     Returns the raw matrix dict from build_anchor_matrix — the caller
     (export route) is responsible for Excel serialization.
     """
-    from apps.api.services.tender.tender_list import rebuild_anchors
     from apps.api.models.bid_submission import BidSubmission as _BS
+    from apps.api.services.tender.tender_list import rebuild_anchors
 
     session = get_current_confirmed_session(db, project_id, category)
     if not session or not session.anchors_json:

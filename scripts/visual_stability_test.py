@@ -43,13 +43,17 @@ def _build_provider():
 
 
 def render_thumbnails(pdf_path: Path) -> list[bytes]:
-    from apps.api.intelligence.document_loader import DocumentLoader, MAX_PAGES_UNLIMITED
+    from apps.api.intelligence.document_loader import (
+        MAX_PAGES_UNLIMITED,
+        DocumentLoader,
+    )
     return DocumentLoader.to_thumbnails(str(pdf_path), max_pages=MAX_PAGES_UNLIMITED)
 
 
 def run_flash_once(provider, thumbnails: list[bytes], doc_type: str) -> list[dict]:
     from apps.api.intelligence.providers.dashscope_ocr import (
-        _VISUAL_FLASH_MODEL, _VISUAL_PROMPT_VERSION,
+        _VISUAL_FLASH_MODEL,
+        _VISUAL_PROMPT_VERSION,
     )
     pages, _failures = provider.classify_pages_visual(
         thumbnails, doc_type,
@@ -96,7 +100,7 @@ def main():
             inconsistent.append((p, roles))
 
     n_consistent = len(all_pages) - len(inconsistent)
-    print(f"\n=== 一致性统计 ===")
+    print("\n=== 一致性统计 ===")
     print(f"  总页数: {len(all_pages)}")
     print(f"  一致页: {n_consistent}/{len(all_pages)} = {n_consistent/len(all_pages):.0%}")
     print(f"  不一致页: {len(inconsistent)}")
@@ -114,7 +118,6 @@ def main():
         g = json.loads(golden_path.read_text(encoding="utf-8"))
         gold_roles = {p["page"]: p["role"] for p in g["pages"]}
         # Only count extraction target roles (what actually goes to OCR)
-        doc_type_local = args.doc.split("_")[0] if "_" in args.doc else doc_type
         if "tender" in g.get("doc_type", doc_type):
             tgt_pattern = "tender_table"
         else:

@@ -3,7 +3,9 @@
 import pytest
 
 from apps.api.services.ingestion.category_classify import (
-    classify_category, classify_breakdown, ALL_CATEGORIES,
+    ALL_CATEGORIES,
+    classify_breakdown,
+    classify_category,
 )
 
 

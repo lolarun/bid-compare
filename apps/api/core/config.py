@@ -1,10 +1,8 @@
 """Application constants and default configuration."""
 
-import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # ─── Runtime settings (loaded from env / .env) ──────────────────────────────
 

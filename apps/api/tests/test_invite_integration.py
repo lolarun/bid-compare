@@ -15,16 +15,16 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from sqlalchemy import select
-from PIL import Image
 from fastapi.testclient import TestClient
+from PIL import Image
+from sqlalchemy import select
 
 from apps.api.models import (
+    PROFESSION_MAP,
     Material,
     Project,
     Quote,
     Supplier,
-    PROFESSION_MAP,
 )
 from apps.api.models.brand_tier import BrandTier
 
@@ -33,6 +33,7 @@ DATA_DIR   = REPO_ROOT / "docs" / "data"
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 import math as _math
+
 _W_TIER, _W_DATA, _MAX_S = 0.30, 0.70, 50
 
 def _brand_score(rec: dict) -> float:

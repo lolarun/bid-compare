@@ -11,14 +11,14 @@ Design: docs/design/13-alembic-migration-introduction.md (Plan B).
 """
 from logging.config import fileConfig
 
+from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from alembic import context
+import apps.api.models  # noqa: F401 — side-effect: register all models
 
 # Import the app metadata + URL. Importing apps.api.models registers every
 # ORM table on Base.metadata (required for autogenerate / full-schema view).
-from apps.api.core.database import Base, DATABASE_URL
-import apps.api.models  # noqa: F401 — side-effect: register all models
+from apps.api.core.database import DATABASE_URL, Base
 
 config = context.config
 

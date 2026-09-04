@@ -1,10 +1,12 @@
 """Tests for Excel/CSV import service."""
 
-import pytest
+from apps.api.models import Material, Project, Quote, Supplier
 from apps.api.services.ingestion.import_service import (
-    import_csv_data, _detect_columns, _to_float, _gen_code,
+    _detect_columns,
+    _gen_code,
+    _to_float,
+    import_csv_data,
 )
-from apps.api.models import Material, Quote, Supplier, Project
 
 
 class TestToFloat:

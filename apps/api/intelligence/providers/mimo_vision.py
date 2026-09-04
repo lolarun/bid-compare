@@ -39,7 +39,14 @@ class MimoVisionProvider:
     def __init__(self, api_key: str, base_url: str, model: str, max_tokens: int = 4000):
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        from apps.api.core.domain_config import LLM_MAX_RETRIES
+
+        # 重试次数显式声明，不吃 openai SDK 的默认值（2）：这一侧是
+        # VISION_CLIENT_VENDOR 的默认路径，而 dashscope 那侧有手写的 5 次退避——
+        # 不写出来，就没人看得出默认路径的重试反而更弱。SDK 自带的退避覆盖
+        # 超时/连接错误/408/409/429/5xx，够用，不需要在这里再套一圈手写循环。
+        self._client = OpenAI(api_key=api_key, base_url=base_url,
+                              max_retries=LLM_MAX_RETRIES)
         self._model = model
         self._max_tokens = max_tokens
 
@@ -113,7 +120,9 @@ class MimoVisionProvider:
 
         **判不出来就答 uncertain，不抛异常**——跟 dashscope 那版、跟 design/28
         Tier 0/1 同一条"失败不拖垮主线"约定。"""
-        from apps.api.intelligence.providers.dashscope_ocr import _CLASSIFY_DOC_KIND_PROMPT
+        from apps.api.intelligence.providers.dashscope_ocr import (
+            _CLASSIFY_DOC_KIND_PROMPT,
+        )
 
         try:
             raw = self._call(page_images, _CLASSIFY_DOC_KIND_PROMPT, model=model)
@@ -148,7 +157,9 @@ def get_mimo_vision_provider() -> MimoVisionProvider | None:
     if not key:
         return None
     from apps.api.core.domain_config import (
-        PAGE_FILTER_BASE_URL, PAGE_FILTER_MAX_TOKENS, PAGE_FILTER_MODEL,
+        PAGE_FILTER_BASE_URL,
+        PAGE_FILTER_MAX_TOKENS,
+        PAGE_FILTER_MODEL,
     )
     return MimoVisionProvider(key, PAGE_FILTER_BASE_URL, PAGE_FILTER_MODEL,
                               max_tokens=PAGE_FILTER_MAX_TOKENS)

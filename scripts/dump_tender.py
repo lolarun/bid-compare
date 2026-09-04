@@ -4,7 +4,7 @@
 从仓库根运行:  python scripts/dump_tender.py
 """
 from __future__ import annotations
-import os
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +17,7 @@ PDF = DOCS / "tender" / "金桥地体上盖招标文件.pdf"
 
 # ---- 1. dump Excel ----
 import openpyxl
+
 wb = openpyxl.load_workbook(str(XLSX), data_only=True)
 lines = []
 for ws in wb.worksheets:
@@ -30,6 +31,7 @@ print(f"excel_dump.txt written: {len(lines)} lines")
 
 # ---- 2. dump PDF text per page ----
 import pypdfium2 as pdfium
+
 doc = pdfium.PdfDocument(str(PDF))
 plines = []
 for i in range(len(doc)):

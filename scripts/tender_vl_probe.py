@@ -5,8 +5,12 @@
 名称/规格属文本维度，Excel 与 PDF 是两个产物，不作准确率基准（同 C 层的口径）。
 """
 from __future__ import annotations
-import sys, json, time, re
+
+import json
+import sys
+import time
 from pathlib import Path
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 

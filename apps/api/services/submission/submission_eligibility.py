@@ -28,12 +28,17 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from apps.api.models import BidQuoteLine, BidSubmission, ExtractionJob
 from apps.api.core.domain_config import (
     INTEGRITY_COLUMN_SHIFT_BLOCKED_COUNT,
     INTEGRITY_COLUMN_SHIFT_BLOCKED_RATIO,
 )
-from apps.api.services.ingestion.draft_integrity import BLOCKED, COLUMN_SHIFT_FLAG, OK, REVIEW
+from apps.api.models import BidQuoteLine, BidSubmission, ExtractionJob
+from apps.api.services.ingestion.draft_integrity import (
+    BLOCKED,
+    COLUMN_SHIFT_FLAG,
+    OK,
+    REVIEW,
+)
 
 log = logging.getLogger(__name__)
 

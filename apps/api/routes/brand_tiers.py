@@ -1,11 +1,11 @@
 """Brand tier CRUD API endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.database import get_db
 from apps.api.models import BrandTier, Quote
-from apps.api.schemas import BrandTierCreate, BrandTierUpdate, BrandTierOut
+from apps.api.schemas import BrandTierCreate, BrandTierOut, BrandTierUpdate
 
 router = APIRouter(prefix="/api/brand-tiers", tags=["brand-tiers"])
 

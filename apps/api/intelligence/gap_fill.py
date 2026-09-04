@@ -45,12 +45,14 @@ from __future__ import annotations
 
 import io
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
 
 from apps.api.core.utils import parse_num
 from apps.api.services.ingestion.draft_integrity import (
-    AMOUNT_EMPTY, classify_amount_cell, row_identities_hold,
+    AMOUNT_EMPTY,
+    classify_amount_cell,
+    row_identities_hold,
 )
 
 log = logging.getLogger(__name__)
@@ -228,7 +230,7 @@ def _parse_fill_csv(text: str) -> dict[str, dict[str, str]]:
     try:
         reader = _csv.DictReader(io.StringIO((text or "").strip()))
         for rec in reader:
-            seq = str((rec.get("seq") or "")).strip()
+            seq = str(rec.get("seq") or "").strip()
             if not seq:
                 continue
             vals = {k: str(v).strip() for k, v in rec.items()

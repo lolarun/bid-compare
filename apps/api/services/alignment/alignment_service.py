@@ -8,15 +8,16 @@ The route (anchor_review_finalize) delegates here and handles HTTP mapping only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import func as _func, select
+from sqlalchemy import func as _func
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apps.api.core.errors import ConflictError, ValidationError
 from apps.api.models.alignment_finalization import AlignmentFinalization
 from apps.api.models.bid_alignment import BidAlignmentGroup, BidAlignmentItem
-from apps.api.services.audit import write_domain_event, EVENT_ALIGNMENT_FINALIZE
+from apps.api.services.audit import EVENT_ALIGNMENT_FINALIZE, write_domain_event
 
 
 @dataclass
@@ -97,7 +98,7 @@ def finalize_alignment(
         status="finalized",
         pending_at_finalize=pending_count,
         finalized_by=finalized_by or None,
-        finalized_at=datetime.now(timezone.utc),
+        finalized_at=datetime.now(UTC),
         forced=force,
         force_reason=reason if force else None,
     )

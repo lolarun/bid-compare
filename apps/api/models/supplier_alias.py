@@ -23,9 +23,18 @@ normalized_alias 生成规则（见 _normalize_alias()）：
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
-from sqlalchemy import Column, Integer, Float, String, DateTime, ForeignKey, Index, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from apps.api.core.database import Base
 from apps.api.models._base import _now
@@ -61,19 +70,19 @@ class SupplierAlias(Base):
 
     __tablename__ = "supplier_aliases"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    supplier_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    supplier_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("suppliers.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
-    alias = Column(String(300), nullable=False, default="")       # 原始文本，保留供展示/溯源
-    normalized_alias = Column(String(300), nullable=False)         # 规范化文本，用于查找
-    alias_type = Column(String(20), nullable=False, default="historical")
-    active = Column(Integer, nullable=False, default=1)            # 1=启用，0=禁用
-    confidence = Column(Float, nullable=False, default=1.0)        # 0~1
-    created_by = Column(String(100), nullable=False, default="")   # 'system_init'/'user:xxx'/'ocr_auto'
-    source_reference = Column(String(500), nullable=False, default="")  # 来源说明
-    created_at = Column(DateTime, default=_now)
+    alias: Mapped[str] = mapped_column(String(300), nullable=False, default="")       # 原始文本，保留供展示/溯源
+    normalized_alias: Mapped[str] = mapped_column(String(300), nullable=False)         # 规范化文本，用于查找
+    alias_type: Mapped[str] = mapped_column(String(20), nullable=False, default="historical")
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)            # 1=启用，0=禁用
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)        # 0~1
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False, default="")   # 'system_init'/'user:xxx'/'ocr_auto'
+    source_reference: Mapped[str] = mapped_column(String(500), nullable=False, default="")  # 来源说明
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=_now)
 
     supplier = relationship("Supplier", back_populates="aliases")
 

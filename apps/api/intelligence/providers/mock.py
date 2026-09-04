@@ -12,12 +12,12 @@ end-to-end without consuming LLM quota.
 from __future__ import annotations
 
 import json
-import time
 import re
+import time
 from pathlib import Path
 from typing import Any
 
-from apps.api.intelligence.base import LLMProvider, ExtractionResponse
+from apps.api.intelligence.base import ExtractionResponse, LLMProvider
 
 
 class MockProvider(LLMProvider):

@@ -12,7 +12,13 @@ Usage:
 Needs DASHSCOPE_API_KEY (read from apps/api/.env).
 """
 from __future__ import annotations
-import argparse, base64, io, os, sys, time
+
+import argparse
+import base64
+import io
+import os
+import sys
+import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -31,6 +37,7 @@ if env_file.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 import dashscope
+
 dashscope.api_key = os.environ.get("DASHSCOPE_API_KEY", "")
 
 # Suspect terms: (canonical correct form, [OCR error variants seen]). We count
